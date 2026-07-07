@@ -1,0 +1,36 @@
+{
+  "n_points": 300,
+  "n_frames": 20,
+  "chunk_start": 5,
+  "chunk_count": 4,
+  "categories": [
+    "alpha",
+    "beta",
+    "gamma"
+  ],
+  "type_0": "anchor",
+  "group_id_150": 1,
+  "subgroup_id_150": 6,
+  "category_42": 1,
+  "n_edges": 288,
+  "edge_0": [
+    0,
+    1
+  ],
+  "polyline_0_first": 0,
+  "polyline_0_last": 275,
+  "mass_3": 2.183870315551758,
+  "time_19": 0.6333333333333333,
+  "position_f6_p7": [
+    12.855260848999023,
+    -0.8886737823486328,
+    -1.785304069519043
+  ],
+  "position_f8_p299": [
+    -5.646173000335693,
+    -11.865521430969238,
+    4.574338436126709
+  ],
+  "energy_f8_p123": 0.045315586030483246,
+  "envelope_bytes": 19372
+}

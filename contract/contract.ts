@@ -1,0 +1,416 @@
+/**
+ * Point-series data contract — TypeScript side.
+ *
+ * Implements SPEC.md v0.1.0: Header / Channel / FrameChunk types, parsing,
+ * binary envelope decoding, and validation. Zero dependencies; no knowledge
+ * of rendering or of any data source.
+ */
+
+export const VERSION = "0.1.0";
+export const ENVELOPE_VERSION = 1;
+export const MAGIC = "PCFC";
+
+export type ChannelScope = "per_point" | "per_frame" | "per_point_per_frame";
+export const SCOPES: readonly ChannelScope[] = [
+  "per_point",
+  "per_frame",
+  "per_point_per_frame",
+];
+
+export interface Channel {
+  name: string;
+  scope: ChannelScope;
+  dtype: "float32";
+  min?: number;
+  max?: number;
+  /** Present for per_point (length N) and per_frame (length T); absent otherwise. */
+  data?: number[];
+}
+
+export interface BBox {
+  min: [number, number, number];
+  max: [number, number, number];
+}
+
+/** Columnar per-point attributes; every array has length n_points. */
+export interface Points {
+  type: string[];
+  group_id: number[];
+  subgroup_id: number[];
+  category: number[]; // indices into Header.categories
+}
+
+export interface Header {
+  version: string;
+  name: string;
+  n_points: number;
+  n_frames: number;
+  units: string;
+  bbox: BBox | null;
+  points: Points;
+  categories: string[];
+  groups: Record<string, string>; // group_id (decimal string) -> label
+  subgroups: Record<string, string>; // subgroup_id (decimal string) -> label
+  edges: [number, number][];
+  polylines: number[][];
+  channels: Channel[];
+}
+
+/**
+ * Frames [start, start+count). Typed views over the received buffer (no copy):
+ * positions is count*N*3 float32, frame-major; each channel is count*N float32.
+ */
+export interface FrameChunk {
+  start: number;
+  count: number;
+  positions: Float32Array;
+  channels: Map<string, Float32Array>;
+}
+
+export interface HeaderRequest {}
+
+export interface FrameChunkRequest {
+  start: number;
+  count: number;
+}
+
+export class ContractError extends Error {}
+
+function fail(msg: string): never {
+  throw new ContractError(msg);
+}
+
+// ---------------------------------------------------------------------------
+// Header parsing
+// ---------------------------------------------------------------------------
+
+/** Parse and validate a Header from its JSON text. */
+export function parseHeader(text: string): Header {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (e) {
+    fail(`header: invalid JSON: ${e}`);
+  }
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    fail("header: expected a JSON object");
+  }
+  const o = raw as Record<string, unknown>;
+  const header: Header = {
+    version: o.version as string,
+    name: o.name as string,
+    n_points: o.n_points as number,
+    n_frames: o.n_frames as number,
+    units: o.units as string,
+    bbox: (o.bbox ?? null) as BBox | null,
+    points: o.points as Points,
+    categories: o.categories as string[],
+    groups: (o.groups ?? {}) as Record<string, string>,
+    subgroups: (o.subgroups ?? {}) as Record<string, string>,
+    edges: o.edges as [number, number][],
+    polylines: o.polylines as number[][],
+    channels: o.channels as Channel[],
+  };
+  validateHeader(header);
+  return header;
+}
+
+export function perPointPerFrameChannels(header: Header): Channel[] {
+  return header.channels.filter((c) => c.scope === "per_point_per_frame");
+}
+
+// ---------------------------------------------------------------------------
+// FrameChunk binary envelope decoding
+// ---------------------------------------------------------------------------
+
+interface BlockDescriptor {
+  kind: "positions" | "channel";
+  name?: string;
+  byte_length: number;
+}
+
+/**
+ * Decode the binary envelope (SPEC.md). Structural checks only; call
+ * validateFrameChunk(chunk, header) to check against a Header.
+ *
+ * The returned Float32Arrays are zero-copy views into `data`'s buffer
+ * (the 4-byte alignment of every block is guaranteed by the spec).
+ */
+// Blocks are consumed as zero-copy Float32Array views, which use platform byte
+// order; the wire format is little-endian, so refuse to run on BE platforms.
+const PLATFORM_IS_LE = new Uint8Array(new Uint32Array([1]).buffer)[0] === 1;
+
+export function decodeFrameChunk(data: Uint8Array): FrameChunk {
+  if (!PLATFORM_IS_LE) {
+    fail("frame chunk: platform is big-endian; zero-copy float32 views would misread LE data");
+  }
+  if (data.byteLength < 12) fail("frame chunk: envelope shorter than 12 bytes");
+  if (data.byteOffset % 4 !== 0) {
+    // Float32Array views need 4-byte alignment within the underlying buffer;
+    // re-copy the rare unaligned input (e.g. a slice of Node's Buffer pool).
+    data = new Uint8Array(data);
+  }
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const magic = String.fromCharCode(data[0], data[1], data[2], data[3]);
+  if (magic !== MAGIC) fail("frame chunk: bad magic, expected 'PCFC'");
+  const envVersion = view.getUint32(4, true);
+  if (envVersion !== ENVELOPE_VERSION) {
+    fail(`frame chunk: unsupported envelope version ${envVersion}`);
+  }
+  const descLen = view.getUint32(8, true);
+  if (descLen % 4 !== 0) fail("frame chunk: descriptor length not a multiple of 4");
+  if (data.byteLength < 12 + descLen) fail("frame chunk: truncated descriptor");
+
+  let desc: {
+    start?: unknown;
+    count?: unknown;
+    n_points?: unknown;
+    blocks?: BlockDescriptor[];
+  };
+  try {
+    desc = JSON.parse(new TextDecoder().decode(data.subarray(12, 12 + descLen)));
+  } catch (e) {
+    fail(`frame chunk: bad descriptor JSON: ${e}`);
+  }
+  const blocks = desc.blocks;
+  if (!Array.isArray(blocks) || blocks.length === 0) {
+    fail("frame chunk: descriptor has no blocks");
+  }
+  if (!Number.isInteger(desc.start)) fail("frame chunk: descriptor field 'start' must be an integer");
+  if (!Number.isInteger(desc.count)) fail("frame chunk: descriptor field 'count' must be an integer");
+
+  let offset = data.byteOffset + 12 + descLen;
+  let positions: Float32Array | null = null;
+  const channels = new Map<string, Float32Array>();
+  for (let i = 0; i < blocks.length; i++) {
+    const block = blocks[i];
+    const length = block.byte_length;
+    if (!Number.isInteger(length) || length < 0 || length % 4 !== 0) {
+      fail(`frame chunk: block ${i} has bad byte_length ${length}`);
+    }
+    if (offset + length > data.byteOffset + data.byteLength) {
+      fail(`frame chunk: block ${i} overruns the envelope`);
+    }
+    // Alignment: 12 + descLen is a multiple of 4 and so is every block length,
+    // so this offset is 4-byte aligned relative to a 4-byte-aligned data view.
+    const payload = new Float32Array(data.buffer, offset, length / 4);
+    offset += length;
+    if (block.kind === "positions") {
+      if (i !== 0 || positions !== null) {
+        fail("frame chunk: positions must be the single first block");
+      }
+      positions = payload;
+    } else if (block.kind === "channel") {
+      if (typeof block.name !== "string") fail(`frame chunk: channel block ${i} missing name`);
+      if (channels.has(block.name)) fail(`frame chunk: duplicate channel block '${block.name}'`);
+      channels.set(block.name, payload);
+    } else {
+      fail(`frame chunk: unknown block kind '${(block as { kind: string }).kind}'`);
+    }
+  }
+  if (positions === null) fail("frame chunk: missing positions block");
+  if (offset !== data.byteOffset + data.byteLength) {
+    fail("frame chunk: trailing bytes after last block");
+  }
+  return {
+    start: desc.start as number,
+    count: desc.count as number,
+    positions,
+    channels,
+  };
+}
+
+/**
+ * Total byte size the envelope claims for itself (12 + descriptor + blocks),
+ * or null if `data` does not start like a FrameChunk envelope. Lets a
+ * transport cheaply cross-check its outer message length against the
+ * envelope's self-described size to detect stream desync.
+ */
+export function frameChunkEnvelopeSize(data: Uint8Array): number | null {
+  if (data.byteLength < 12) return null;
+  if (String.fromCharCode(data[0], data[1], data[2], data[3]) !== MAGIC) return null;
+  const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+  const descLen = view.getUint32(8, true);
+  if (descLen % 4 !== 0 || data.byteLength < 12 + descLen) return null;
+  try {
+    const desc = JSON.parse(new TextDecoder().decode(data.subarray(12, 12 + descLen)));
+    if (!Array.isArray(desc.blocks)) return null;
+    let size = 12 + descLen;
+    for (const block of desc.blocks) {
+      if (!Number.isInteger(block?.byte_length) || block.byte_length < 0) return null;
+      size += block.byte_length;
+    }
+    return size;
+  } catch {
+    return null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Validation (SPEC.md "Validation rules")
+// ---------------------------------------------------------------------------
+
+function isInt(v: unknown): v is number {
+  return Number.isInteger(v);
+}
+
+export function validateHeader(h: Header): void {
+  for (const [name, value] of [
+    ["version", h.version],
+    ["name", h.name],
+    ["units", h.units],
+  ] as const) {
+    if (typeof value !== "string") fail(`header: ${name} must be a string`);
+  }
+  for (const [name, value] of [
+    ["n_points", h.n_points],
+    ["n_frames", h.n_frames],
+  ] as const) {
+    if (!isInt(value) || value < 0) {
+      fail(`header: ${name} must be a non-negative integer`);
+    }
+  }
+
+  const n = h.n_points;
+  if (typeof h.points !== "object" || h.points === null) fail("header: points must be an object");
+  const cols: [string, unknown[]][] = [
+    ["type", h.points.type],
+    ["group_id", h.points.group_id],
+    ["subgroup_id", h.points.subgroup_id],
+    ["category", h.points.category],
+  ];
+  for (const [name, col] of cols) {
+    if (!Array.isArray(col) || col.length !== n) {
+      fail(`header: points.${name} must be a list of length n_points (${n})`);
+    }
+  }
+  if (!h.points.type.every((t) => typeof t === "string")) {
+    fail("header: points.type entries must be strings");
+  }
+  for (const name of ["group_id", "subgroup_id", "category"] as const) {
+    if (!h.points[name].every(isInt)) fail(`header: points.${name} entries must be integers`);
+  }
+  if (!Array.isArray(h.categories) || !h.categories.every((c) => typeof c === "string")) {
+    fail("header: categories must be a list of strings");
+  }
+  const nCat = h.categories.length;
+  for (let p = 0; p < n; p++) {
+    const c = h.points.category[p];
+    if (c < 0 || c >= nCat) {
+      fail(`header: points.category[${p}] = ${c} out of range [0, ${nCat})`);
+    }
+  }
+
+  const subgroupOwner = new Map<number, number>();
+  for (let p = 0; p < n; p++) {
+    const sg = h.points.subgroup_id[p];
+    const g = h.points.group_id[p];
+    const owner = subgroupOwner.get(sg);
+    if (owner === undefined) subgroupOwner.set(sg, g);
+    else if (owner !== g) fail(`header: subgroup ${sg} belongs to multiple groups`);
+  }
+
+  if (!Array.isArray(h.edges)) fail("header: edges must be a list");
+  h.edges.forEach((e, i) => {
+    if (!Array.isArray(e) || e.length !== 2) fail(`header: edges[${i}] must be a pair`);
+    for (const idx of e) {
+      if (!isInt(idx) || idx < 0 || idx >= n) {
+        fail(`header: edges[${i}] index ${idx} out of range [0, ${n})`);
+      }
+    }
+  });
+  if (!Array.isArray(h.polylines)) fail("header: polylines must be a list");
+  h.polylines.forEach((poly, i) => {
+    if (!Array.isArray(poly) || poly.length < 2) {
+      fail(`header: polylines[${i}] must have at least 2 indices`);
+    }
+    for (const idx of poly) {
+      if (!isInt(idx) || idx < 0 || idx >= n) {
+        fail(`header: polylines[${i}] index ${idx} out of range [0, ${n})`);
+      }
+    }
+  });
+
+  if (h.bbox !== null && h.bbox !== undefined) {
+    if (
+      !Array.isArray(h.bbox.min) ||
+      !Array.isArray(h.bbox.max) ||
+      h.bbox.min.length !== 3 ||
+      h.bbox.max.length !== 3
+    ) {
+      fail("header: bbox min/max must have 3 components");
+    }
+    for (let k = 0; k < 3; k++) {
+      if (h.bbox.min[k] > h.bbox.max[k]) fail(`header: bbox.min[${k}] > bbox.max[${k}]`);
+    }
+  }
+
+  if (!Array.isArray(h.channels)) fail("header: channels must be a list");
+  const seen = new Set<string>();
+  for (const ch of h.channels) {
+    if (typeof ch.name !== "string" || ch.name === "") {
+      fail("header: channel name must be a non-empty string");
+    }
+    if (seen.has(ch.name)) fail(`header: duplicate channel name '${ch.name}'`);
+    seen.add(ch.name);
+    if (!SCOPES.includes(ch.scope)) fail(`header: channel '${ch.name}': unknown scope '${ch.scope}'`);
+    if (ch.dtype !== "float32") fail(`header: channel '${ch.name}': unsupported dtype '${ch.dtype}'`);
+    if (ch.min !== undefined && ch.max !== undefined && ch.min > ch.max) {
+      fail(`header: channel '${ch.name}': min > max`);
+    }
+    if (ch.scope === "per_point_per_frame") {
+      if (ch.data !== undefined) {
+        fail(`header: channel '${ch.name}': per_point_per_frame must not carry data in the header`);
+      }
+    } else {
+      const expected = ch.scope === "per_point" ? n : h.n_frames;
+      if (!Array.isArray(ch.data) || ch.data.length !== expected) {
+        fail(`header: channel '${ch.name}': data must have length ${expected}`);
+      }
+    }
+  }
+}
+
+export function validateFrameChunk(chunk: FrameChunk, header: Header): void {
+  if (!isInt(chunk.count) || chunk.count < 1) fail("frame chunk: count must be >= 1");
+  if (!isInt(chunk.start) || chunk.start < 0 || chunk.start + chunk.count > header.n_frames) {
+    fail(
+      `frame chunk: frame range [${chunk.start}, ${chunk.start + chunk.count}) ` +
+        `outside [0, ${header.n_frames})`,
+    );
+  }
+  const expectedPos = chunk.count * header.n_points * 3;
+  if (chunk.positions.length !== expectedPos) {
+    fail(
+      `frame chunk: positions block has ${chunk.positions.length} floats, expected ${expectedPos}`,
+    );
+  }
+  const declared = perPointPerFrameChannels(header).map((c) => c.name);
+  const got = [...chunk.channels.keys()].sort();
+  const want = [...declared].sort();
+  if (got.length !== want.length || got.some((name, i) => name !== want[i])) {
+    fail(
+      `frame chunk: channel blocks [${got}] do not match declared ` +
+        `per_point_per_frame channels [${want}]`,
+    );
+  }
+  const expectedCh = chunk.count * header.n_points;
+  for (const name of declared) {
+    const arr = chunk.channels.get(name) as Float32Array;
+    if (arr.length !== expectedCh) {
+      fail(`frame chunk: channel '${name}' block has ${arr.length} floats, expected ${expectedCh}`);
+    }
+  }
+}
+
+/**
+ * Index helpers for the frame-major layouts (SPEC.md "Block payloads").
+ * `f` is an absolute frame index within [chunk.start, chunk.start + chunk.count).
+ */
+export function positionIndex(chunk: FrameChunk, nPoints: number, f: number, p: number): number {
+  return ((f - chunk.start) * nPoints + p) * 3;
+}
+
+export function channelIndex(chunk: FrameChunk, nPoints: number, f: number, p: number): number {
+  return (f - chunk.start) * nPoints + p;
+}

@@ -1,0 +1,36 @@
+{
+  "name": "viewer",
+  "displayName": "Point Viewer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Time-series 3D point dataset viewer. Increment 1: render frame 0 of a synthetic dataset in a CSP-safe webview.",
+  "engines": {
+    "vscode": "^1.100.0"
+  },
+  "main": "./dist/extension.cjs",
+  "contributes": {
+    "commands": [
+      {
+        "command": "viewer.open",
+        "title": "Point Viewer: Open"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "npm run build:extension && npm run build:webview",
+    "build:extension": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.cjs",
+    "build:webview": "esbuild webview/main.ts --bundle --format=iife --minify --outfile=dist/webview/main.js",
+    "typecheck": "tsc --noEmit",
+    "fixtures": "python3 -m tests.make_fixtures && python3 tests/make_webview_fixture.py",
+    "test": "node --test tests/contract.test.ts tests/geometry.test.ts tests/framing.test.ts tests/playback.test.ts tests/producer_protocol.test.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.0",
+    "@types/three": "^0.185.0",
+    "@types/vscode": "^1.125.0",
+    "esbuild": "^0.28.1",
+    "three": "^0.185.1",
+    "typescript": "^6.0.3"
+  }
+}
