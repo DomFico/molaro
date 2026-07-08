@@ -6,7 +6,11 @@
   "type": "module",
   "description": "Time-series 3D point dataset viewer. Increment 1: render frame 0 of a synthetic dataset in a CSP-safe webview.",
   "engines": {
-    "vscode": "^1.100.0"
+    "vscode": "^1.125.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DomFico/molaro.git"
   },
   "main": "./dist/extension.cjs",
   "contributes": {

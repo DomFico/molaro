@@ -8,9 +8,14 @@ MdtrajSource need to read it?
 - A **standalone structure** file (carries its own topology + coordinates, e.g.
   ``.pdb``/``.gro``) opens on its own — topology = the file, no trajectory.
 - A **trajectory** file (coordinates only, e.g. ``.xtc``/``.dcd``) needs a
-  companion topology. We resolve it with a **thin sibling-by-basename match**:
-  the same stem beside it with an expected topology extension. If none is found
-  we raise a clear error naming what is missing — never crash or render garbage.
+  companion topology. We resolve it in three cheap steps, most specific first:
+    1. **same basename** beside it (``run.xtc`` -> ``run.pdb``);
+    2. else, if the folder holds exactly **one** topology file, use it (the
+       common ``system.pdb`` + ``traj.xtc`` layout);
+    3. else, disambiguate multiple candidates by **atom count** — the topology
+       whose atom count matches the trajectory's (reads a single frame, cheap).
+  If nothing resolves we raise a clear error naming what was tried — never crash
+  or render garbage.
 
 Whether the result is presented as a static single frame or an animated
 trajectory is decided downstream by the frame count, not here.
@@ -58,15 +63,7 @@ def resolve_open_target(path: str) -> Dict[str, Optional[str]]:
     if ext in TRAJECTORY_EXTS:
         companion = _find_companion(path)
         if companion is None:
-            stem, _ = _stem_ext(path)
-            where = os.path.dirname(os.path.abspath(path)) or "."
-            tried = "|".join(e.lstrip(".") for e in TOPOLOGY_EXTS)
-            raise FileNotFoundError(
-                f"trajectory {os.path.basename(path)!r} needs a companion topology "
-                f"to read, but none was found beside it. Looked for "
-                f"'{stem}.({tried})' in {where}. Rename the topology to match the "
-                f"trajectory's basename, or open the topology file directly."
-            )
+            raise FileNotFoundError(_no_companion_message(path))
         return {"topology": companion, "trajectory": path}
 
     # Structure formats (and unknown extensions) open standalone. If an unknown
@@ -77,8 +74,81 @@ def resolve_open_target(path: str) -> Dict[str, Optional[str]]:
 def _find_companion(traj_path: str) -> Optional[str]:
     directory = os.path.dirname(os.path.abspath(traj_path))
     stem, _ = _stem_ext(traj_path)
+
+    # 1. exact same-basename sibling (priority by TOPOLOGY_EXTS order).
     for ext in TOPOLOGY_EXTS:
         candidate = os.path.join(directory, stem + ext)
         if os.path.exists(candidate):
             return candidate
-    return None
+
+    # 2/3. other topology files in the folder: one is unambiguous; several are
+    # disambiguated by matching the trajectory's atom count.
+    candidates = _topology_candidates(directory, traj_path)
+    if not candidates:
+        return None
+    if len(candidates) == 1:
+        return candidates[0]
+    return _match_by_atom_count(traj_path, candidates)
+
+
+def _topology_candidates(directory: str, traj_path: str) -> List[str]:
+    """Topology files in `directory` (excluding the trajectory), ordered by
+    TOPOLOGY_EXTS priority then name for determinism."""
+    traj_abs = os.path.abspath(traj_path)
+    found: List[str] = []
+    try:
+        entries = sorted(os.listdir(directory))
+    except OSError:
+        return []
+    for name in entries:
+        full = os.path.join(directory, name)
+        if os.path.abspath(full) == traj_abs or not os.path.isfile(full):
+            continue
+        _, ext = _stem_ext(name)
+        if ext in TOPOLOGY_EXTS:
+            found.append(full)
+    found.sort(key=lambda p: (TOPOLOGY_EXTS.index(_stem_ext(p)[1]), p))
+    return found
+
+
+def _match_by_atom_count(traj_path: str, candidates: List[str]) -> Optional[str]:
+    """Pick the candidate topology whose atom count matches the trajectory's.
+    Reads a single trajectory frame (cheap even for huge trajectories)."""
+    import mdtraj as md  # lazy: only when we must disambiguate
+
+    try:
+        with md.open(traj_path) as f:
+            result = f.read(n_frames=1)
+        xyz = result[0] if isinstance(result, tuple) else result
+        n_traj = int(xyz.shape[1])
+    except Exception:
+        return None  # can't read atom count -> fall through to a clear error
+
+    matches: List[str] = []
+    for cand in candidates:
+        try:
+            if md.load_topology(cand).n_atoms == n_traj:
+                matches.append(cand)
+        except Exception:
+            continue
+    return matches[0] if matches else None  # candidates already priority-ordered
+
+
+def _no_companion_message(traj_path: str) -> str:
+    directory = os.path.dirname(os.path.abspath(traj_path)) or "."
+    stem, _ = _stem_ext(traj_path)
+    candidates = _topology_candidates(directory, traj_path)
+    base = os.path.basename(traj_path)
+    if candidates:
+        names = ", ".join(os.path.basename(c) for c in candidates)
+        return (
+            f"trajectory {base!r} needs a companion topology, and topology files "
+            f"were found beside it ({names}) but none matched by basename or by "
+            f"atom count. Open the correct topology file directly instead."
+        )
+    tried = "|".join(e.lstrip(".") for e in TOPOLOGY_EXTS)
+    return (
+        f"trajectory {base!r} needs a companion topology to read, but none was "
+        f"found beside it. Looked for '{stem}.({tried})' in {directory}. Put a "
+        f"topology file next to it, or open the topology file directly."
+    )
