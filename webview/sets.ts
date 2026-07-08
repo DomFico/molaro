@@ -1,20 +1,24 @@
 /**
- * Persistent selection & hidden sets — the first-class, addressable state the
- * whole interaction model (and a future agent-driven layer) points at.
+ * Selection state — the first-class, addressable substrate the whole
+ * interaction model points at.
  *
- * Two independent `NodeSet`s (a selection set and a hidden set) each hold
- * ENTRIES. An entry references a node at ANY level of the hierarchy — a
- * `category`, `group`, `subgroup`, or individual `point`. Entries are what the
- * user sees and removes at the granularity they clicked (hiding a whole category
- * is ONE entry, not thousands). Each set also resolves to a POINT set — the union
- * of points its entries cover — which is what rendering (and later the agent)
- * consumes.
+ * The model (interaction redesign): there is ONE **pending selection** being
+ * built at a time (the "target"). Gestures in the tree and the 3D view add
+ * entries to it; "Create selection" **commits** it as a named
+ * `CommittedSelection` (a `NodeSet` + unique name + `hidden` flag + bracket
+ * lane). Hiding is a flag on committed selections — the invisible points are
+ * the union of all hidden committed selections; there is no standalone hidden
+ * set. A committed selection can be re-opened as the target (**edit mode**).
+ * Every state change (build edits, commit, hide/unhide, rename, delete,
+ * bracket moves) is undoable via one system-wide stack; camera moves are not.
  *
- * Resolution is reference-counted and INCREMENTAL: `count[p]` is how many entries
- * cover point p, so adding/removing an entry only touches that entry's points and
- * a point is covered iff `count[p] > 0`. Mutators return the affected point
- * indices so the renderer can flip just those bits (smooth at N≈250k). The sets
- * are pure state — no DOM, no Three.js — and unit-tested directly.
+ * Entries reference nodes at ANY level of the hierarchy — a `category`,
+ * `group`, `subgroup`, or individual `point` — at the granularity the user
+ * clicked (a whole category is ONE entry). Each `NodeSet` resolves its entries
+ * to a POINT set via reference counting: `count[p]` is how many entries cover
+ * point p, so mutations touch only that entry's points, and mutators return
+ * the affected point indices so the renderer can flip just those bits (smooth
+ * at N≈250k). Pure state — no DOM, no Three.js — unit-tested directly.
  */
 import type { Header } from "../contract/contract.ts";
 
@@ -61,7 +65,7 @@ export class Hierarchy {
     return this.subOfPoint[point];
   }
 
-  /** The category + group a subgroup sits under (for scroll-to-selection). */
+  /** The category + group a subgroup sits under. */
   ancestorsOfSubgroup(subgroupId: number): { category: number; group: number } | undefined {
     return this.ancestorOfSub.get(subgroupId);
   }
@@ -71,7 +75,7 @@ export class Hierarchy {
     return this.catOfGroup.get(groupId);
   }
 
-  /** category → group → subgroup path of an entry (for the active-sets tree). */
+  /** category → group → subgroup path of an entry (self included, last). */
   pathOf(e: Entry): Entry[] {
     switch (e.level) {
       case "category":
@@ -142,24 +146,20 @@ export class Hierarchy {
   }
 }
 
-export type SetKind = "selection" | "hidden";
-
 /**
  * One persistent set of entries with a reference-counted resolved point set.
  * Mutators return the point indices they touched (or null when a no-op) so the
  * caller can update render buffers incrementally; `onChange` fires for UI.
  */
 export class NodeSet {
-  readonly kind: SetKind;
   private readonly hierarchy: Hierarchy;
   private readonly countArr: Uint32Array; // per-point entry coverage count
   private covered = 0; // number of points with count > 0
   private readonly entries = new Map<string, Entry>(); // insertion-ordered
   private readonly listeners = new Set<() => void>();
 
-  constructor(hierarchy: Hierarchy, kind: SetKind) {
+  constructor(hierarchy: Hierarchy) {
     this.hierarchy = hierarchy;
-    this.kind = kind;
     this.countArr = new Uint32Array(hierarchy.n);
   }
 
@@ -236,27 +236,13 @@ export class NodeSet {
     this.emit();
     return affected;
   }
-  /** Replace the whole set with `list` (single event); returns union of removed+added points. */
-  replaceWith(list: Entry[]): number[] {
-    const affected = this.clearSilent();
-    for (const e of list) {
-      const pts = this.addSilent(e);
-      if (pts) affected.push(...pts);
-    }
-    this.emit();
-    return affected;
-  }
   clear(): number[] {
-    const affected = this.clearSilent();
-    this.emit();
-    return affected;
-  }
-  private clearSilent(): number[] {
     const affected: number[] = [];
     for (let p = 0; p < this.countArr.length; p++) if (this.countArr[p] > 0) affected.push(p);
     this.countArr.fill(0);
     this.covered = 0;
     this.entries.clear();
+    this.emit();
     return affected;
   }
 
@@ -270,140 +256,344 @@ export class NodeSet {
 }
 
 /**
- * A single named selection group (`selection_1`, …). Each wraps a `NodeSet`, so
- * a group holds hierarchical entries and resolves to points exactly like the
- * hidden set does.
+ * A committed selection — the named object the top section operates on.
+ * `hidden` makes its resolved points invisible; `lane` is the horizontal
+ * bracket lane its bracket occupies in the bottom tree (movable).
  */
-export interface SelectionGroup {
+export interface CommittedSelection {
   id: number;
   name: string;
   set: NodeSet;
+  hidden: boolean;
+  lane: number;
+}
+
+export const MAX_BRACKET_LANES = 4;
+
+/** One undoable state change: `undo()` reverts it and returns affected points. */
+interface UndoOp {
+  undo(): number[];
 }
 
 /**
- * The named-group selection model (Increment 4.8) — the addressable substrate a
- * future agent-driven layer points at ("analyze selection_2"). Selection is
- * organized into multiple named groups; exactly one is ACTIVE and every select
- * action toggles in the active group only. An entry may live in several groups
- * (overlap is allowed). Rendering consumes the UNION of all groups (all green);
- * groups are distinguished in the panel, not by color.
+ * The pending-target + committed-selections model with a system-wide undo
+ * stack. All build gestures mutate the TARGET — the pending set, or, in edit
+ * mode, the committed selection being edited. Rendering consumes:
+ *   - `targetContains(p)`  → the green (pending) footprint
+ *   - `isPointHidden(p)`   → union of hidden committed selections
+ * Undo covers state changes only (never camera): build edits, clear-pending,
+ * commit, hide/unhide, rename, delete, bracket-lane moves — each `undo()`
+ * returns the affected point indices so the renderer can flip just those bits.
  */
 export class SelectionModel {
   private readonly hierarchy: Hierarchy;
-  private readonly groups: SelectionGroup[] = [];
-  private activeId = -1;
+  private pendingSet: NodeSet;
+  private readonly committedList: CommittedSelection[] = [];
+  private editingId: number | null = null;
   private nextId = 1;
   private autoCounter = 0;
+  private readonly undoStack: UndoOp[] = [];
+  /** When non-null, undoable ops coalesce here (one paint stroke = one undo). */
+  private strokeOps: UndoOp[] | null = null;
   private readonly listeners = new Set<() => void>();
 
   constructor(hierarchy: Hierarchy) {
     this.hierarchy = hierarchy;
-    this.newGroup(); // always start with selection_1 active
+    this.pendingSet = new NodeSet(hierarchy);
   }
 
-  list(): readonly SelectionGroup[] {
-    return this.groups;
+  // -- queries ----------------------------------------------------------------
+
+  /** The set build gestures currently write into. */
+  get target(): NodeSet {
+    return this.editing?.set ?? this.pendingSet;
   }
-  get active(): SelectionGroup {
-    return this.byId(this.activeId)!;
+  /** The raw pending (uncommitted) set. */
+  get pending(): NodeSet {
+    return this.pendingSet;
   }
-  get activeId_(): number {
-    return this.activeId;
+  get editing(): CommittedSelection | null {
+    return this.editingId === null ? null : (this.byId(this.editingId) ?? null);
   }
-  private byId(id: number): SelectionGroup | undefined {
-    return this.groups.find((g) => g.id === id);
+  committed(): readonly CommittedSelection[] {
+    return this.committedList;
+  }
+  byId(id: number): CommittedSelection | undefined {
+    return this.committedList.find((c) => c.id === id);
+  }
+  get canUndo(): boolean {
+    return this.undoStack.length > 0;
+  }
+  get undoDepth(): number {
+    return this.undoStack.length;
   }
 
-  /** Create a new group, auto-named, and make it active. */
-  newGroup(): SelectionGroup {
-    const g: SelectionGroup = {
-      id: this.nextId++,
-      name: `selection_${++this.autoCounter}`,
-      set: new NodeSet(this.hierarchy, "selection"),
-    };
-    this.groups.push(g);
-    this.activeId = g.id;
+  /** Green footprint: is p covered by the current target? */
+  targetContains(point: number): boolean {
+    return this.target.contains(point);
+  }
+  /** Invisible footprint: is p covered by any hidden committed selection? */
+  isPointHidden(point: number): boolean {
+    for (const c of this.committedList) {
+      if (c.hidden && c.set.contains(point)) return true;
+    }
+    return false;
+  }
+  /** Entry (or one of its ancestors) is in `set` — its row is fully covered. */
+  coversEntry(set: NodeSet, e: Entry): boolean {
+    for (const seg of this.hierarchy.pathOf(e)) if (set.has(seg)) return true;
+    return false;
+  }
+  targetCoversEntry(e: Entry): boolean {
+    return this.coversEntry(this.target, e);
+  }
+  /** Keys of every entry AND its ancestors in `set` — rows on the path to an
+   * entry (used for partial row marks and bracket spans). */
+  touchKeys(set: NodeSet): Set<string> {
+    const keys = new Set<string>();
+    for (const e of set.listEntries()) {
+      for (const seg of this.hierarchy.pathOf(e)) keys.add(entryKey(seg));
+    }
+    return keys;
+  }
+
+  // -- build gestures (undoable; write to the TARGET) --------------------------
+
+  toggleInTarget(e: Entry): number[] {
+    const set = this.target;
+    const had = set.has(e);
+    const pts = set.toggle(e);
+    this.pushUndo({ undo: () => (had ? (set.add(e) ?? []) : (set.remove(e) ?? [])) });
     this.emit();
-    return g;
+    return pts;
   }
-  rename(id: number, name: string): void {
-    const g = this.byId(id);
-    if (g) {
-      g.name = name.trim() || g.name;
-      this.emit();
-    }
+  /** Idempotent add (paint forward). */
+  addToTarget(e: Entry): number[] {
+    const set = this.target;
+    const pts = set.add(e);
+    if (!pts) return [];
+    this.pushUndo({ undo: () => set.remove(e) ?? [] });
+    this.emit();
+    return pts;
   }
-  /** Delete a group (always keeps ≥1); returns its resolved points so the caller
-   * can re-flip the union for those points. */
-  delete(id: number): number[] {
-    const idx = this.groups.findIndex((g) => g.id === id);
+  /** Idempotent remove (paint backtrack). */
+  removeFromTarget(e: Entry): number[] {
+    const set = this.target;
+    const pts = set.remove(e);
+    if (!pts) return [];
+    this.pushUndo({ undo: () => set.add(e) ?? [] });
+    this.emit();
+    return pts;
+  }
+  /** Escape: discard the pending selection (undoable). */
+  clearPending(): number[] {
+    if (this.pendingSet.entryCount === 0) return [];
+    const set = this.pendingSet;
+    const entries = set.listEntries();
+    const pts = set.clear();
+    this.pushUndo({ undo: () => set.addMany(entries) });
+    this.emit();
+    return pts;
+  }
+
+  /** Coalesce subsequent undoable ops into ONE undo entry (a paint stroke). */
+  beginStroke(): void {
+    if (this.strokeOps === null) this.strokeOps = [];
+  }
+  endStroke(): void {
+    const ops = this.strokeOps;
+    this.strokeOps = null;
+    if (!ops || ops.length === 0) return;
+    this.undoStack.push({
+      undo: () => {
+        const affected: number[] = [];
+        for (let i = ops.length - 1; i >= 0; i--) affected.push(...ops[i].undo());
+        return affected;
+      },
+    });
+  }
+
+  // -- lifecycle ----------------------------------------------------------------
+
+  /** Commit the pending selection as a named committed selection (undoable).
+   * Returns it, or null when pending is empty or we're in edit mode. */
+  commit(): CommittedSelection | null {
+    if (this.editingId !== null) return null;
+    if (this.pendingSet.entryCount === 0) return null;
+    const set = this.pendingSet;
+    const name = this.uniqueName(`selection_${++this.autoCounter}`);
+    const sel: CommittedSelection = {
+      id: this.nextId++,
+      name,
+      set,
+      hidden: false,
+      lane: this.freeLane(),
+    };
+    this.committedList.push(sel);
+    this.pendingSet = new NodeSet(this.hierarchy);
+    this.pushUndo({
+      undo: () => {
+        const i = this.committedList.indexOf(sel);
+        if (i >= 0) this.committedList.splice(i, 1);
+        if (this.editingId === sel.id) this.editingId = null;
+        if (sel.name === `selection_${this.autoCounter}`) this.autoCounter--;
+        // Swap the ORIGINAL set back in as pending (LIFO undo has already
+        // reverted anything done to the interim pending set), so earlier undo
+        // ops — which captured this set object — still apply to it.
+        const affected = this.pendingSet.resolvedPoints();
+        this.pendingSet = set;
+        return affected.concat(set.resolvedPoints());
+      },
+    });
+    this.emit();
+    return sel;
+  }
+
+  /** Make a committed selection the target (edit mode). Returns the points
+   * whose green state changes (old target ∪ new target). Not undoable (a mode,
+   * not a state change); the edits made inside it are individually undoable. */
+  beginEdit(id: number): number[] {
+    const sel = this.byId(id);
+    if (!sel || this.editingId === id) return [];
+    const before = this.target.resolvedPoints();
+    this.editingId = id;
+    const after = sel.set.resolvedPoints();
+    this.emit();
+    return before.concat(after);
+  }
+  /** Exit edit mode ("Done" / Escape). Returns green-affected points. */
+  endEdit(): number[] {
+    if (this.editingId === null) return [];
+    const before = this.target.resolvedPoints();
+    this.editingId = null;
+    const after = this.pendingSet.resolvedPoints();
+    this.emit();
+    return before.concat(after);
+  }
+
+  // -- operate (undoable) -------------------------------------------------------
+
+  setHidden(id: number, hidden: boolean): number[] {
+    const sel = this.byId(id);
+    if (!sel || sel.hidden === hidden) return [];
+    sel.hidden = hidden;
+    this.pushUndo({
+      undo: () => {
+        sel.hidden = !hidden;
+        return sel.set.resolvedPoints();
+      },
+    });
+    this.emit();
+    return sel.set.resolvedPoints();
+  }
+  toggleHidden(id: number): number[] {
+    const sel = this.byId(id);
+    return sel ? this.setHidden(id, !sel.hidden) : [];
+  }
+
+  /** Rename (unique names enforced). Returns false if rejected. */
+  rename(id: number, name: string): boolean {
+    const sel = this.byId(id);
+    const next = name.trim();
+    if (!sel || !next || next === sel.name) return false;
+    if (this.committedList.some((c) => c.id !== id && c.name === next)) return false;
+    const prev = sel.name;
+    sel.name = next;
+    this.pushUndo({
+      undo: () => {
+        sel.name = prev;
+        return [];
+      },
+    });
+    this.emit();
+    return true;
+  }
+
+  deleteSelection(id: number): number[] {
+    const idx = this.committedList.findIndex((c) => c.id === id);
     if (idx < 0) return [];
-    const affected = this.groups[idx].set.resolvedPoints();
-    this.groups.splice(idx, 1);
-    if (this.groups.length === 0) {
-      this.newGroup(); // emits
-      return affected;
-    }
-    if (this.activeId === id) this.activeId = this.groups[Math.min(idx, this.groups.length - 1)].id;
+    const sel = this.committedList[idx];
+    this.committedList.splice(idx, 1);
+    if (this.editingId === id) this.editingId = null;
+    const affected = sel.hidden ? sel.set.resolvedPoints() : [];
+    this.pushUndo({
+      undo: () => {
+        this.committedList.splice(Math.min(idx, this.committedList.length), 0, sel);
+        return sel.hidden ? sel.set.resolvedPoints() : [];
+      },
+    });
     this.emit();
     return affected;
   }
-  setActive(id: number): void {
-    if (this.byId(id) && id !== this.activeId) {
-      this.activeId = id;
-      this.emit();
-    }
+
+  /** Move a committed selection's bracket to another lane (undoable). */
+  setLane(id: number, lane: number): void {
+    const sel = this.byId(id);
+    const next = Math.max(0, Math.min(MAX_BRACKET_LANES - 1, Math.round(lane)));
+    if (!sel || sel.lane === next) return;
+    const prev = sel.lane;
+    sel.lane = next;
+    this.pushUndo({
+      undo: () => {
+        sel.lane = prev;
+        return [];
+      },
+    });
+    this.emit();
   }
 
-  /** Toggle an entry in the ACTIVE group; returns affected points. */
-  toggle(e: Entry): number[] {
-    const pts = this.active.set.toggle(e);
+  /** Startup prefab: a pre-made hidden committed selection (NOT undoable —
+   * it is the initial state, e.g. one per bulk category). */
+  seedHidden(name: string, entries: Entry[]): CommittedSelection {
+    const set = new NodeSet(this.hierarchy);
+    set.addMany(entries);
+    const sel: CommittedSelection = {
+      id: this.nextId++,
+      name: this.uniqueName(name),
+      set,
+      hidden: true,
+      lane: this.freeLane(),
+    };
+    this.committedList.push(sel);
     this.emit();
-    return pts;
-  }
-  /** Add an entry to the ACTIVE group (idempotent; for drag-paint). */
-  addToActive(e: Entry): number[] {
-    const pts = this.active.set.add(e) ?? [];
-    this.emit();
-    return pts;
-  }
-  /** Remove one entry from a specific group; returns affected points. */
-  removeEntryFrom(groupId: number, e: Entry): number[] {
-    const g = this.byId(groupId);
-    if (!g) return [];
-    const pts = g.set.remove(e) ?? [];
-    this.emit();
-    return pts;
-  }
-  /** Clear one group's entries; returns affected points. */
-  clearGroup(groupId: number): number[] {
-    const g = this.byId(groupId);
-    if (!g) return [];
-    const pts = g.set.clear();
-    this.emit();
-    return pts;
+    return sel;
   }
 
-  /** Union membership across ALL groups (what the green overlay draws). */
-  containsPoint(point: number): boolean {
-    for (const g of this.groups) if (g.set.contains(point)) return true;
-    return false;
-  }
-  /** Whether ANY group holds this exact entry (drives the tree row's green). */
-  anyHas(e: Entry): boolean {
-    for (const g of this.groups) if (g.set.has(e)) return true;
-    return false;
-  }
-  /** Union of resolved points across all groups (for zoom-to-selection). */
-  resolvedPoints(): number[] {
-    const out: number[] = [];
-    for (let p = 0; p < this.hierarchy.n; p++) if (this.containsPoint(p)) out.push(p);
-    return out;
+  // -- undo ---------------------------------------------------------------------
+
+  /** Undo the most recent state change; returns affected points (null if none). */
+  undo(): number[] | null {
+    // A stroke in progress is undone as a unit.
+    if (this.strokeOps && this.strokeOps.length > 0) this.endStroke();
+    const op = this.undoStack.pop();
+    if (!op) return null;
+    const pts = op.undo();
+    this.emit();
+    return pts;
   }
 
   onChange(fn: () => void): () => void {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
+  }
+
+  // -- internals ------------------------------------------------------------------
+
+  private pushUndo(op: UndoOp): void {
+    if (this.strokeOps) this.strokeOps.push(op);
+    else this.undoStack.push(op);
+  }
+  private uniqueName(base: string): string {
+    if (!this.committedList.some((c) => c.name === base)) return base;
+    let k = 2;
+    while (this.committedList.some((c) => c.name === `${base} (${k})`)) k++;
+    return `${base} (${k})`;
+  }
+  /** Lowest lane not used yet (cycling when all are taken). */
+  private freeLane(): number {
+    const used = new Set(this.committedList.map((c) => c.lane));
+    for (let l = 0; l < MAX_BRACKET_LANES; l++) if (!used.has(l)) return l;
+    return this.committedList.length % MAX_BRACKET_LANES;
   }
   private emit(): void {
     for (const fn of this.listeners) fn();

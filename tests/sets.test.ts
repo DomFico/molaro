@@ -1,6 +1,7 @@
 /**
- * Unit tests for the selection/hidden set store (webview/sets.ts). Pure — no DOM.
- * Run from viewer/:  node --test tests/sets.test.ts
+ * Unit tests for the selection state model (webview/sets.ts) — the pending
+ * target + committed selections + hidden flags + system-wide undo. Pure, no
+ * DOM. Run from viewer/:  node --test tests/sets.test.ts
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -26,6 +27,12 @@ const grp = (id: number): Entry => ({ level: "group", id });
 const sub = (id: number): Entry => ({ level: "subgroup", id });
 const pt = (id: number): Entry => ({ level: "point", id });
 
+function model(): SelectionModel {
+  return new SelectionModel(new Hierarchy(makeHeader()));
+}
+
+// -- Hierarchy / NodeSet substrate (unchanged semantics) ----------------------
+
 test("Hierarchy resolves entries to points at each level", () => {
   const h = new Hierarchy(makeHeader());
   assert.deepEqual(h.pointsOf(cat(0)).sort(), [0, 1, 2]);
@@ -35,170 +42,233 @@ test("Hierarchy resolves entries to points at each level", () => {
   assert.deepEqual(h.subgroupPoints(0).sort(), [0, 1]);
 });
 
-test("add/contains/resolve union across mixed-level entries", () => {
+test("NodeSet union across mixed-level entries, ref-counted removal", () => {
   const h = new Hierarchy(makeHeader());
-  const s = new NodeSet(h, "selection");
+  const s = new NodeSet(h);
   s.add(sub(0)); // {0,1}
-  s.add(pt(4)); // {4}
-  assert.equal(s.entryCount, 2);
-  assert.equal(s.pointCount, 3);
-  assert.deepEqual(s.resolvedPoints().sort(), [0, 1, 4]);
-  assert.ok(s.contains(0) && s.contains(1) && s.contains(4));
-  assert.ok(!s.contains(2) && !s.contains(3) && !s.contains(5));
-});
-
-test("entry-granularity removal un-covers exactly that entry's points", () => {
-  const h = new Hierarchy(makeHeader());
-  const s = new NodeSet(h, "hidden");
-  s.add(cat(0)); // {0,1,2}
-  assert.equal(s.pointCount, 3);
-  // Removing the ONE category entry un-hides all its points.
-  s.remove(cat(0));
-  assert.equal(s.entryCount, 0);
-  assert.equal(s.pointCount, 0);
-  assert.ok(!s.contains(0) && !s.contains(1) && !s.contains(2));
-});
-
-test("overlapping entries are reference-counted (removal keeps still-covered points)", () => {
-  const h = new Hierarchy(makeHeader());
-  const s = new NodeSet(h, "selection");
-  s.add(cat(0)); // {0,1,2}
-  s.add(sub(0)); // {0,1} — overlaps
-  assert.equal(s.pointCount, 3); // union unchanged: {0,1,2}
+  s.add(pt(4));
+  s.add(cat(0)); // {0,1,2} — overlaps sub(0)
+  assert.equal(s.pointCount, 4);
   s.remove(sub(0)); // 0,1 still covered by cat(0)
-  assert.ok(s.contains(0) && s.contains(1) && s.contains(2));
-  assert.equal(s.pointCount, 3);
+  assert.ok(s.contains(0) && s.contains(1));
   s.remove(cat(0));
-  assert.equal(s.pointCount, 0);
+  assert.deepEqual(s.resolvedPoints(), [4]);
 });
 
-test("toggle adds then removes; returns affected points", () => {
-  const h = new Hierarchy(makeHeader());
-  const s = new NodeSet(h, "selection");
-  const a = s.toggle(sub(2)); // add {3,4,5}
-  assert.deepEqual(a.sort(), [3, 4, 5]);
-  assert.ok(s.has(sub(2)));
-  const b = s.toggle(sub(2)); // remove
-  assert.deepEqual(b.sort(), [3, 4, 5]);
-  assert.ok(!s.has(sub(2)));
-  assert.equal(s.pointCount, 0);
+// -- pending target: build gestures --------------------------------------------
+
+test("toggle/add/remove act on the pending target; green = target footprint", () => {
+  const m = model();
+  m.toggleInTarget(sub(0));
+  assert.ok(m.targetContains(0) && m.targetContains(1) && !m.targetContains(2));
+  m.addToTarget(pt(2));
+  assert.ok(m.targetContains(2));
+  m.removeFromTarget(pt(2));
+  assert.ok(!m.targetContains(2));
+  m.toggleInTarget(sub(0)); // toggle off
+  assert.equal(m.pending.pointCount, 0);
 });
 
-test("replaceWith swaps entries in one shot", () => {
-  const h = new Hierarchy(makeHeader());
-  const s = new NodeSet(h, "selection");
-  s.add(sub(0));
-  const affected = s.replaceWith([grp(1)]);
-  assert.deepEqual(s.listEntries().map(entryKey), ["group:1"]);
-  assert.deepEqual(s.resolvedPoints().sort(), [3, 4, 5]);
-  // affected covers both the removed (0,1) and added (3,4,5) points
-  assert.ok([0, 1, 3, 4, 5].every((p) => affected.includes(p)));
+test("coversEntry / touchKeys give row semantics (ancestor-covered + path-partial)", () => {
+  const m = model();
+  m.addToTarget(grp(1));
+  // descendants of an entry are covered
+  assert.ok(m.targetCoversEntry(sub(2)));
+  assert.ok(m.targetCoversEntry(pt(3)));
+  assert.ok(!m.targetCoversEntry(cat(0)));
+  // ancestors of an entry are "touched" (partial)
+  const keys = m.touchKeys(m.target);
+  assert.ok(keys.has(entryKey(cat(1))));
+  assert.ok(keys.has(entryKey(grp(1))));
+  assert.ok(!keys.has(entryKey(cat(0))));
 });
 
-test("addMany (range) unions and de-dupes; clear empties", () => {
-  const h = new Hierarchy(makeHeader());
-  const s = new NodeSet(h, "selection");
-  s.addMany([sub(0), sub(1), sub(0)]); // {0,1} ∪ {2}, dup ignored
-  assert.equal(s.entryCount, 2);
-  assert.deepEqual(s.resolvedPoints().sort(), [0, 1, 2]);
-  s.clear();
-  assert.equal(s.entryCount, 0);
-  assert.equal(s.pointCount, 0);
+// -- commit ---------------------------------------------------------------------
+
+test("commit names uniquely, clears pending, returns the committed selection", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  const sel = m.commit()!;
+  assert.equal(sel.name, "selection_1");
+  assert.equal(sel.set.pointCount, 2);
+  assert.equal(m.pending.entryCount, 0);
+  assert.equal(m.committed().length, 1);
+  assert.ok(!m.targetContains(0), "green cleared after commit");
+  // empty pending → no commit
+  assert.equal(m.commit(), null);
 });
 
-test("onChange fires on mutation, unsubscribes cleanly", () => {
-  const h = new Hierarchy(makeHeader());
-  const s = new NodeSet(h, "hidden");
-  let n = 0;
-  const off = s.onChange(() => n++);
-  s.add(sub(0));
-  s.toggle(pt(3));
-  assert.equal(n, 2);
-  off();
-  s.clear();
-  assert.equal(n, 2);
+test("committed selections do not affect target or hidden until flagged", () => {
+  const m = model();
+  m.addToTarget(cat(1));
+  const sel = m.commit()!;
+  assert.ok(!m.isPointHidden(3));
+  m.setHidden(sel.id, true);
+  assert.ok(m.isPointHidden(3) && m.isPointHidden(5) && !m.isPointHidden(0));
+  m.toggleHidden(sel.id);
+  assert.ok(!m.isPointHidden(3));
 });
 
-test("Hierarchy exposes ancestors + subgroup-of-point", () => {
-  const h = new Hierarchy(makeHeader());
-  assert.equal(h.subgroupOfPoint(4), 2);
-  assert.deepEqual(h.ancestorsOfSubgroup(2), { category: 1, group: 1 });
-  assert.deepEqual(h.ancestorsOfSubgroup(0), { category: 0, group: 0 });
+test("hidden is the union of hidden committed selections", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  const a = m.commit()!;
+  m.addToTarget(sub(1));
+  const b = m.commit()!;
+  m.setHidden(a.id, true);
+  m.setHidden(b.id, true);
+  assert.deepEqual([0, 1, 2].map((p) => m.isPointHidden(p)), [true, true, true]);
+  m.setHidden(a.id, false);
+  assert.deepEqual([0, 1, 2].map((p) => m.isPointHidden(p)), [false, false, true]);
 });
 
-// ---- SelectionModel (named groups) ----------------------------------------
+// -- edit mode --------------------------------------------------------------------
 
-test("SelectionModel starts with one active group, auto-named", () => {
-  const m = new SelectionModel(new Hierarchy(makeHeader()));
-  assert.equal(m.list().length, 1);
-  assert.equal(m.list()[0].name, "selection_1");
-  assert.equal(m.active.id, m.list()[0].id);
+test("edit mode redirects the target to the committed set; Done restores pending", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  const sel = m.commit()!;
+  m.addToTarget(pt(5)); // new pending content
+  m.beginEdit(sel.id);
+  assert.equal(m.editing?.id, sel.id);
+  assert.ok(m.targetContains(0) && !m.targetContains(5), "target = edited set");
+  m.toggleInTarget(sub(1)); // add to the committed selection
+  assert.equal(sel.set.pointCount, 3);
+  m.removeFromTarget(sub(0)); // members removable in edit mode
+  assert.equal(sel.set.pointCount, 1);
+  m.endEdit();
+  assert.equal(m.editing, null);
+  assert.ok(m.targetContains(5) && !m.targetContains(2), "pending kept aside and restored");
+  // commit is a no-op while editing
+  m.beginEdit(sel.id);
+  assert.equal(m.commit(), null);
 });
 
-test("newGroup creates + activates; setActive switches", () => {
-  const m = new SelectionModel(new Hierarchy(makeHeader()));
-  const g2 = m.newGroup();
-  assert.equal(m.list().length, 2);
-  assert.equal(m.active.id, g2.id);
-  assert.equal(g2.name, "selection_2");
-  m.setActive(m.list()[0].id);
-  assert.equal(m.active.id, m.list()[0].id);
+// -- rename / delete / lanes --------------------------------------------------------
+
+test("rename enforces unique non-empty names and is undoable", () => {
+  const m = model();
+  m.addToTarget(pt(0));
+  const a = m.commit()!;
+  m.addToTarget(pt(1));
+  const b = m.commit()!;
+  assert.ok(m.rename(a.id, "core"));
+  assert.equal(a.name, "core");
+  assert.ok(!m.rename(b.id, "core"), "duplicate rejected");
+  assert.ok(!m.rename(b.id, "   "), "blank rejected");
+  m.undo();
+  assert.equal(a.name, "selection_1");
 });
 
-test("rename changes the group name", () => {
-  const m = new SelectionModel(new Hierarchy(makeHeader()));
-  m.rename(m.active.id, "waters");
-  assert.equal(m.list()[0].name, "waters");
+test("delete removes the selection, un-hides its points, exits its edit mode", () => {
+  const m = model();
+  m.addToTarget(cat(0));
+  const sel = m.commit()!;
+  m.setHidden(sel.id, true);
+  m.beginEdit(sel.id);
+  const affected = m.deleteSelection(sel.id);
+  assert.deepEqual(affected.sort(), [0, 1, 2], "hidden points reported for un-hide");
+  assert.equal(m.committed().length, 0);
+  assert.equal(m.editing, null);
+  assert.ok(!m.isPointHidden(0));
 });
 
-test("toggle affects only the ACTIVE group; other groups untouched", () => {
-  const m = new SelectionModel(new Hierarchy(makeHeader()));
-  const g1 = m.active;
-  m.toggle(sub(0)); // into g1
-  const g2 = m.newGroup(); // now active
-  m.toggle(sub(2)); // into g2
-  assert.ok(g1.set.has(sub(0)) && !g1.set.has(sub(2)));
-  assert.ok(g2.set.has(sub(2)) && !g2.set.has(sub(0)));
-  // union covers both groups' points
-  assert.ok(m.containsPoint(0) && m.containsPoint(3));
-  assert.deepEqual(m.resolvedPoints().sort((a, b) => a - b), [0, 1, 3, 4, 5]);
+test("seedHidden creates a pre-hidden committed selection outside the undo stack", () => {
+  const m = model();
+  const sel = m.seedHidden("alpha", [cat(0)]);
+  assert.equal(sel.name, "alpha");
+  assert.ok(sel.hidden && m.isPointHidden(0));
+  assert.equal(m.canUndo, false, "seeding is initial state, not undoable");
 });
 
-test("toggle add then toggle remove leaves siblings intact (no replace)", () => {
-  const m = new SelectionModel(new Hierarchy(makeHeader()));
-  m.toggle(sub(0)); // {0,1}
-  m.toggle(pt(4)); // add, not replace -> {0,1,4}
-  assert.deepEqual(m.resolvedPoints().sort((a, b) => a - b), [0, 1, 4]);
-  m.toggle(sub(0)); // remove just sub(0) -> {4}
-  assert.deepEqual(m.resolvedPoints(), [4]);
-  assert.ok(m.anyHas(pt(4)) && !m.anyHas(sub(0)));
+test("lanes: commit picks a free lane; setLane clamps and is undoable", () => {
+  const m = model();
+  m.addToTarget(pt(0));
+  const a = m.commit()!;
+  m.addToTarget(pt(1));
+  const b = m.commit()!;
+  assert.notEqual(a.lane, b.lane);
+  m.setLane(a.id, 99);
+  assert.equal(a.lane, 3, "clamped to max lane");
+  m.undo();
+  assert.equal(a.lane, 0);
 });
 
-test("an entry can live in two groups (overlap); union stays until both gone", () => {
-  const m = new SelectionModel(new Hierarchy(makeHeader()));
-  m.toggle(sub(2)); // g1: {3,4,5}
-  const g2 = m.newGroup();
-  m.toggle(sub(2)); // g2 also: {3,4,5}
-  assert.ok(m.containsPoint(3));
-  m.setActive(m.list()[0].id);
-  m.toggle(sub(2)); // remove from g1; still in g2
-  assert.ok(m.containsPoint(3));
-  m.setActive(g2.id);
-  m.toggle(sub(2)); // remove from g2
-  assert.ok(!m.containsPoint(3));
+// -- undo -------------------------------------------------------------------------
+
+test("undo walks back build edits, commit, hide, in order", () => {
+  const m = model();
+  m.toggleInTarget(sub(0)); // 1: add
+  const sel = m.commit()!; // 2: commit
+  m.setHidden(sel.id, true); // 3: hide
+  assert.ok(m.isPointHidden(0));
+
+  const pts = m.undo()!; // undo hide
+  assert.ok(!m.isPointHidden(0));
+  assert.deepEqual(pts.sort(), [0, 1]);
+
+  m.undo(); // undo commit — pending restored, committed gone
+  assert.equal(m.committed().length, 0);
+  assert.ok(m.targetContains(0), "pending selection restored green");
+
+  m.undo(); // undo the original toggle
+  assert.equal(m.pending.entryCount, 0);
+  assert.equal(m.undo(), null, "stack exhausted");
 });
 
-test("delete removes a group (keeps >=1) and un-covers only its points", () => {
-  const m = new SelectionModel(new Hierarchy(makeHeader()));
-  m.toggle(sub(0)); // g1 {0,1}
-  const g2 = m.newGroup();
-  m.toggle(sub(2)); // g2 {3,4,5}
-  const affected = m.delete(g2.id);
-  assert.deepEqual(affected.sort((a, b) => a - b), [3, 4, 5]);
-  assert.ok(m.containsPoint(0) && !m.containsPoint(3));
-  assert.equal(m.list().length, 1);
-  // deleting the last remaining group keeps at least one (fresh, empty)
-  m.delete(m.list()[0].id);
-  assert.equal(m.list().length, 1);
-  assert.equal(m.resolvedPoints().length, 0);
+test("undo after commit-undo reuses the auto-name (no counter bleed)", () => {
+  const m = model();
+  m.addToTarget(pt(0));
+  m.commit();
+  m.undo(); // back to pending
+  const again = m.commit()!;
+  assert.equal(again.name, "selection_1", "auto counter rewinds with undo");
+});
+
+test("a paint stroke undoes as one unit", () => {
+  const m = model();
+  m.beginStroke();
+  m.addToTarget(pt(0));
+  m.addToTarget(pt(1));
+  m.addToTarget(pt(2));
+  m.endStroke();
+  assert.equal(m.pending.entryCount, 3);
+  const pts = m.undo()!;
+  assert.equal(m.pending.entryCount, 0, "whole stroke reverted at once");
+  assert.deepEqual(pts.sort(), [0, 1, 2]);
+});
+
+test("clearPending (Escape) is undoable", () => {
+  const m = model();
+  m.addToTarget(sub(2));
+  m.clearPending();
+  assert.equal(m.pending.entryCount, 0);
+  m.undo();
+  assert.equal(m.pending.entryCount, 1);
+  assert.ok(m.targetContains(4));
+});
+
+test("edit-mode edits are undoable after leaving edit mode", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  const sel = m.commit()!;
+  m.beginEdit(sel.id);
+  m.toggleInTarget(pt(5));
+  m.endEdit();
+  assert.ok(sel.set.contains(5));
+  m.undo(); // undoes the edit inside the committed set
+  assert.ok(!sel.set.contains(5));
+  assert.equal(m.committed().length, 1, "commit itself not undone yet");
+});
+
+test("undo of delete restores the selection with its hidden flag", () => {
+  const m = model();
+  m.addToTarget(sub(1));
+  const sel = m.commit()!;
+  m.setHidden(sel.id, true);
+  m.deleteSelection(sel.id);
+  assert.ok(!m.isPointHidden(2));
+  m.undo();
+  assert.equal(m.committed().length, 1);
+  assert.ok(m.isPointHidden(2), "restored still hidden");
 });

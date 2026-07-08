@@ -216,22 +216,31 @@ export class E2EDriver {
     type: "mousePressed" | "mouseReleased" | "mouseMoved",
     x: number,
     y: number,
-    opts: { buttons?: number; clickCount?: number } = {},
+    opts: { buttons?: number; clickCount?: number; button?: "left" | "right" | "none"; modifiers?: number } = {},
   ): Promise<void> {
+    const button = opts.button ?? (type === "mouseMoved" && !opts.buttons ? "none" : "left");
+    const defaultButtons = button === "right" ? 2 : 1;
     await this.send("Input.dispatchMouseEvent", {
       type,
       x,
       y,
-      button: type === "mouseMoved" && !opts.buttons ? "none" : "left",
-      buttons: opts.buttons ?? (type === "mouseReleased" ? 0 : 1),
+      button,
+      buttons: opts.buttons ?? (type === "mouseReleased" ? 0 : defaultButtons),
       clickCount: opts.clickCount ?? (type === "mouseMoved" ? 0 : 1),
+      modifiers: opts.modifiers ?? 0,
     });
   }
 
-  /** A click: down then up at the same spot (no movement). */
-  async click(x: number, y: number, clickCount = 1): Promise<void> {
-    await this.mouse("mousePressed", x, y, { clickCount });
-    await this.mouse("mouseReleased", x, y, { clickCount });
+  /** A click: down then up at the same spot (no movement). CTRL = modifiers: 2. */
+  async click(x: number, y: number, clickCount = 1, modifiers = 0): Promise<void> {
+    await this.mouse("mousePressed", x, y, { clickCount, modifiers });
+    await this.mouse("mouseReleased", x, y, { clickCount, modifiers });
+  }
+
+  /** A right-click: right-button down/up (fires contextmenu). */
+  async rightClick(x: number, y: number, modifiers = 0): Promise<void> {
+    await this.mouse("mousePressed", x, y, { button: "right", modifiers });
+    await this.mouse("mouseReleased", x, y, { button: "right", modifiers });
   }
 
   /** A double-click: two down/up pairs back-to-back (well under the recognizer's
@@ -243,14 +252,61 @@ export class E2EDriver {
     await this.mouse("mouseReleased", x, y, { clickCount: 2 });
   }
 
-  /** A drag: down, several moves, up — a real orbit gesture. */
-  async drag(x0: number, y0: number, x1: number, y1: number, steps = 8): Promise<void> {
-    await this.mouse("mousePressed", x0, y0, { clickCount: 1 });
+  /** A drag: down, several moves, up. `modifiers: 2` = Ctrl (paint gestures);
+   * `button: "right"` drags with the right button. */
+  async drag(
+    x0: number,
+    y0: number,
+    x1: number,
+    y1: number,
+    steps = 8,
+    opts: { button?: "left" | "right"; modifiers?: number } = {},
+  ): Promise<void> {
+    const button = opts.button ?? "left";
+    const buttons = button === "right" ? 2 : 1;
+    const modifiers = opts.modifiers ?? 0;
+    await this.mouse("mousePressed", x0, y0, { clickCount: 1, button, buttons, modifiers });
     for (let i = 1; i <= steps; i++) {
       const t = i / steps;
-      await this.mouse("mouseMoved", x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, { buttons: 1 });
+      await this.mouse("mouseMoved", x0 + (x1 - x0) * t, y0 + (y1 - y0) * t, {
+        buttons,
+        modifiers,
+      });
     }
-    await this.mouse("mouseReleased", x1, y1, { clickCount: 1 });
+    await this.mouse("mouseReleased", x1, y1, { clickCount: 1, button, modifiers });
+  }
+
+  /** A key tap (keydown+keyup). `modifiers: 2` = Ctrl. */
+  async key(key: string, code: string, keyCode: number, modifiers = 0): Promise<void> {
+    await this.send("Input.dispatchKeyEvent", {
+      type: "keyDown",
+      key,
+      code,
+      windowsVirtualKeyCode: keyCode,
+      nativeVirtualKeyCode: keyCode,
+      modifiers,
+    });
+    await this.send("Input.dispatchKeyEvent", {
+      type: "keyUp",
+      key,
+      code,
+      windowsVirtualKeyCode: keyCode,
+      nativeVirtualKeyCode: keyCode,
+      modifiers,
+    });
+  }
+
+  async escape(): Promise<void> {
+    await this.key("Escape", "Escape", 27);
+  }
+
+  async ctrlZ(): Promise<void> {
+    await this.key("z", "KeyZ", 90, 2);
+  }
+
+  /** Type text into the focused element (for inline rename inputs). */
+  async insertText(text: string): Promise<void> {
+    await this.send("Input.insertText", { text });
   }
 
   async resize(width: number, height: number): Promise<void> {

@@ -49,7 +49,7 @@ const broker = new ProducerBroker(
 
       // Exercise selection on the first non-bulk group with subgroups, if any.
       const hierarchy = new Hierarchy(header);
-      const sel = new NodeSet(hierarchy, "selection");
+      const sel = new NodeSet(hierarchy);
       const target = tree.categories.find((c) => !c.bulk && c.groups.some((g) => g.subgroups.length > 0));
       if (target) {
         const g = target.groups.find((gg) => gg.subgroups.length > 0)!;

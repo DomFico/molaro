@@ -1,15 +1,20 @@
 /**
  * Shared HUD template — the webview's DOM skeleton and layout CSS, used by BOTH
  * hosts (the VS Code extension in src/extension.ts and the headless test harness
- * in tests/bridge.ts) so the two never drift. Structure only — no beautification.
+ * in tests/bridge.ts) so the two never drift.
  *
- * Layout: a top bar (dataset header), a middle row (classification panel + drag
- * divider + canvas), and a bottom control bar. The panel is DOCKABLE by DRAGGING
- * its grip onto an edge drop-zone (left/right/top/bottom), resizable via the
- * divider, and COLLAPSIBLE (collapsing leaves a reopen tab at the panel's last
- * dock edge). Docked top/bottom, the tree flows its categories horizontally and
- * scrolls left/right. The panel holds the active-sets surface (#active-sets) over
- * the tree (#tree-host). Default dock is the right edge.
+ * Layout: a top bar (dataset header), a middle row (panel + drag divider +
+ * canvas), and a bottom control bar. The panel is DOCKABLE by DRAGGING its grip
+ * onto an edge drop-zone (left/right/top/bottom), resizable via the divider,
+ * and COLLAPSIBLE (collapsing leaves a reopen tab at the panel's last dock
+ * edge). Docked top/bottom, the content flows horizontally.
+ *
+ * The panel holds TWO sections built from ONE tree component:
+ *   - #selections (top): the committed selections — the "operate" surface
+ *   - #tree-host (bottom): the full classification tree — the "build" surface,
+ *     with the bracket overlay (pending green + committed neutral/purple)
+ * The viewer corner carries the commit button (#commit-btn,
+ * "Create selection" / "Done").
  */
 
 export const HUD_CSS = /* css */ `
@@ -51,6 +56,17 @@ export const HUD_CSS = /* css */ `
   #app { flex: 1 1 auto; min-width: 0; min-height: 0; position: relative; overflow: hidden; }
   #app canvas { display: block; }
 
+  /* commit button — the single "Create selection" / "Done" control (viewer corner) */
+  #commit-btn { position: absolute; top: 10px; right: 10px; z-index: 15;
+    padding: 5px 12px; font: inherit; font-weight: bold; letter-spacing: 0.2px;
+    color: #06251d; background: #33ffcc; border: 1px solid #1fae8c; border-radius: 4px;
+    cursor: pointer; box-shadow: 0 0 12px rgba(51,255,204,0.25); }
+  #commit-btn:hover:not(:disabled) { background: #5cffd9; }
+  #commit-btn:disabled { background: #2e3a37; color: #71817c; border-color: #47524e;
+    box-shadow: none; cursor: default; }
+  #commit-btn.editing { background: #ffd54a; border-color: #c0992a; color: #3a2f10;
+    box-shadow: 0 0 12px rgba(255,213,74,0.25); }
+
   /* collapsed: hide the panel + divider; a reopen tab sits at the last dock edge */
   #root.panel-collapsed #sidebar, #root.panel-collapsed #divider { display: none; }
   #panel-reopen { display: none; position: absolute; z-index: 20; padding: 3px 7px;
@@ -61,8 +77,7 @@ export const HUD_CSS = /* css */ `
   #root.panel-collapsed[data-dock="top"]    #panel-reopen { top: 26px; left: 50%; transform: translateX(-50%); border-radius: 0 0 3px 3px; }
   #root.panel-collapsed[data-dock="bottom"] #panel-reopen { bottom: 40px; left: 50%; transform: translateX(-50%); border-radius: 3px 3px 0 0; }
 
-  /* drag-to-dock overlay: a soft translucent fill on the target dock region
-     (no hard outline) — only the nearest-edge zone shows while dragging (A2). */
+  /* drag-to-dock overlay: a soft translucent fill on the target dock region */
   #dock-overlay { display: none; position: absolute; inset: 0; z-index: 50; pointer-events: none; }
   #dock-overlay.active { display: block; }
   .dock-zone { position: absolute; background: transparent; border-radius: 6px;
@@ -81,54 +96,85 @@ export const HUD_CSS = /* css */ `
   #controls input[type="range"] { flex: 1; }
   #controls .readout { min-width: 240px; text-align: right; white-space: pre; }
 
-  /* active-sets surface (Selections / Hidden) */
-  #active-sets { border-bottom: 1px solid #3a3a3a; margin-bottom: 6px; padding-bottom: 4px; }
-  .set-section { margin: 2px 0; }
-  .set-head { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 2px 4px; }
-  .set-head .set-caret { width: 10px; color: #888; }
-  .set-title { flex: 1 1 auto; }
-  .set-title.sel { color: #33ffcc; }
-  .set-title.hid { color: #d0a0ff; }
-  .set-mini-btn { font: inherit; color: #ccc; background: #3a3a3a; border: 1px solid #555;
-    border-radius: 3px; cursor: pointer; padding: 0 6px; }
-  .set-entries { display: none; }
-  .set-section.open .set-entries { display: block; }
-  .sel-group { margin: 2px 0 4px; }
-  .sel-group.active > .sel-group-head { color: #7fffe6; }
-  .sel-group-head { display: flex; align-items: center; gap: 5px; padding: 1px 4px; }
-  .sel-dot { width: 10px; color: #33ffcc; }
-  .sel-group-name { flex: 1 1 auto; cursor: pointer; overflow: hidden; text-overflow: ellipsis; }
-  .entry-tree { }
-  .entry-row { display: flex; align-items: center; gap: 6px; padding: 1px 4px; white-space: nowrap; }
-  .entry-row.structural { color: #8a8a8a; }
-  .entry-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
-  .entry-remove { cursor: pointer; color: #888; }
+  /* ---- top section: committed selections (operate) ------------------------- */
+  #selections { border-bottom: 1px solid #3a3a3a; margin-bottom: 6px; padding-bottom: 4px; }
+  .sel-section-head { color: #9a9a9a; padding: 2px 4px 6px; }
+  .sel-empty { color: #6a6a6a; padding: 0 4px 6px; font-style: italic; }
+  .sel-block { margin: 2px 0 5px; border-left: 2px solid #5a5a5a; padding-left: 3px; }
+  .sel-block.hidden-sel { border-left-color: #b98be0; }
+  .sel-block.editing { border-left-color: #33ffcc; background: rgba(51,255,204,0.05); }
+  .sel-head { display: flex; align-items: center; gap: 6px; padding: 1px 4px; }
+  .sel-name { flex: 1 1 auto; min-width: 0; cursor: pointer;
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .hidden-sel .sel-name { color: #c9a6ec; }
+  .sel-count { color: #8a8a8a; white-space: nowrap; }
+  .sel-ctl { flex: none; font: inherit; font-size: 10px; color: #ccc; background: #3a3a3a;
+    border: 1px solid #555; border-radius: 3px; cursor: pointer; padding: 0 5px; line-height: 15px; }
+  .sel-ctl:hover { background: #4a4a4a; }
+  .sel-body { max-height: 38vh; overflow-y: auto; }
+  .hidden-sel .sel-body { opacity: 0.72; }
+  .rename-input { flex: 1 1 auto; min-width: 0; font: inherit; background: #1e1e1e;
+    color: #eee; border: 1px solid #33ffcc; border-radius: 2px; padding: 0 3px; }
+  .rename-input.rename-bad { border-color: #ff6060; }
+  .entry-remove { flex: none; cursor: pointer; color: #888; padding: 0 4px; }
   .entry-remove:hover { color: #fff; }
 
-  /* classification tree (fixed-height rows so long lists can virtualize) */
-  .sidebar-hint { color: #7a7a7a; padding: 0 4px 8px; }
+  /* ---- bottom section: build tree + bracket overlay ------------------------- */
+  #tree-hint { color: #7a7a7a; padding: 0 4px 8px; line-height: 1.5; }
+  #tree-host { position: relative; }
   .vlist { position: relative; }
   .tree-row { display: flex; align-items: center; gap: 4px; height: 18px; padding: 0 4px;
     border-radius: 3px; white-space: nowrap; }
   .tree-row.selectable { cursor: pointer; }
   .tree-row.selectable:hover { background: #2f3a42; }
-  .tree-row.selected { background: #10493f; color: #7fffe6; }
-  .tree-row.hidden-entry .tree-label { color: #b98be0; text-decoration: line-through; }
+  /* pending target: covered rows pulse green; partial (path-to-entry) rows get
+     a green edge tick */
+  .tree-row.sel-covered { color: #7fffe6; animation: rowPulse 1.6s ease-in-out infinite; }
+  @keyframes rowPulse {
+    0%, 100% { background-color: rgba(20, 92, 74, 0.55); }
+    50%      { background-color: rgba(35, 158, 126, 0.75); }
+  }
+  .tree-row.sel-partial { box-shadow: inset 2px 0 0 rgba(51, 255, 204, 0.55); }
+  /* focus feedback: one soft yellow swell */
+  .tree-row.row-flash { animation: rowFlash 900ms ease-out 1; }
+  @keyframes rowFlash {
+    0%   { background-color: rgba(255, 213, 74, 0); }
+    22%  { background-color: rgba(255, 213, 74, 0.5); }
+    100% { background-color: rgba(255, 213, 74, 0); }
+  }
   .caret { width: 10px; display: inline-block; color: #888; cursor: pointer; }
   .tree-label { overflow: hidden; text-overflow: ellipsis; }
 
-  /* top/bottom dock: the whole content flows LEFT-TO-RIGHT (A3). #sidebar-content
-     becomes a row: active-sets is a fixed left column, the tree host takes the
-     rest and scrolls horizontally with its categories laid out as columns. */
+  /* brackets: vertical spans in the tree gutter; scroll with the content */
+  .bracket-layer { position: absolute; left: 0; top: 0; right: 0; pointer-events: none; z-index: 5; }
+  .bracket { position: absolute; width: 7px; pointer-events: auto; cursor: grab;
+    border-left: 2px solid #8f8f8f; border-top: 2px solid #8f8f8f; border-bottom: 2px solid #8f8f8f;
+    border-radius: 2px 0 0 2px; }
+  .bracket:active { cursor: grabbing; }
+  .bracket.dragging { opacity: 0.7; }
+  .bracket.hidden { border-color: #b98be0; }
+  .bracket.pending { border-color: #33ffcc; pointer-events: none;
+    box-shadow: -1px 0 6px rgba(51,255,204,0.35); animation: bracketPulse 1.6s ease-in-out infinite; }
+  @keyframes bracketPulse { 0%, 100% { opacity: 0.95; } 50% { opacity: 0.5; } }
+  /* the name may run past a short bracket (down the gutter) so it stays
+     readable and grabbable even for a single-row span */
+  .bracket-name { position: absolute; left: -1px; top: 1px; max-height: 96px;
+    writing-mode: vertical-rl; transform: rotate(180deg); font-size: 9px; line-height: 8px;
+    color: #a5a5a5; overflow: hidden; white-space: nowrap; user-select: none; }
+  .bracket.hidden .bracket-name { color: #c9a6ec; }
+
+  /* top/bottom dock: the whole content flows LEFT-TO-RIGHT. #sidebar-content
+     becomes a row: the selections section is a fixed left column, the tree host
+     takes the rest and scrolls horizontally with its categories as columns. */
   #root[data-dock="top"] #sidebar-content, #root[data-dock="bottom"] #sidebar-content {
     display: flex; flex-direction: row; align-items: stretch; gap: 12px;
     overflow-x: auto; overflow-y: hidden; }
-  #root[data-dock="top"] #active-sets, #root[data-dock="bottom"] #active-sets {
+  #root[data-dock="top"] #selections, #root[data-dock="bottom"] #selections {
     flex: none; width: 240px; overflow-y: auto; border-bottom: none;
     border-right: 1px solid #3a3a3a; margin-bottom: 0; padding-right: 8px; }
   #root[data-dock="top"] #tree-host, #root[data-dock="bottom"] #tree-host {
     flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; }
-  #root[data-dock="top"] .sidebar-hint, #root[data-dock="bottom"] .sidebar-hint { display: none; }
+  #root[data-dock="top"] #tree-hint, #root[data-dock="bottom"] #tree-hint { display: none; }
   #root[data-dock="top"] .tree, #root[data-dock="bottom"] .tree {
     display: flex; flex-direction: row; align-items: flex-start; gap: 18px; height: 100%; }
   #root[data-dock="top"] .cat-block, #root[data-dock="bottom"] .cat-block {
@@ -147,12 +193,15 @@ export const HUD_BODY = /* html */ `
           <button id="panel-collapse" title="Collapse panel">▾</button>
         </div>
         <div id="sidebar-content">
-          <div id="active-sets"></div>
+          <div id="selections"></div>
+          <div id="tree-hint">left-click: build selection · drag: paint · right-click: focus<br>3D: Ctrl+left-click = subgroups · Ctrl+right-click = points</div>
           <div id="tree-host"></div>
         </div>
       </div>
       <div id="divider" title="drag to resize the panel"></div>
-      <div id="app"></div>
+      <div id="app">
+        <button id="commit-btn" disabled>Create selection</button>
+      </div>
     </div>
     <div id="controls">
       <button id="playpause" disabled>play</button>

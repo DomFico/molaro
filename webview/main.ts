@@ -1,19 +1,21 @@
 /**
- * Webview renderer — Increment 4.7: persistent selection & hidden sets.
+ * Webview renderer — the interaction-redesign model:
  *
- * Builds on the streaming+playback stack. Interaction is now driven by two
- * persistent, first-class sets (see sets.ts) that a future agent-driven layer
- * will point at:
+ *   bottom section = BUILD · top section = OPERATE · 3D = NAVIGATE + BUILD
  *
- *  - representation.ts owns the per-point base look (color/size/visible). The
- *    base points are drawn with a shader reading those buffers. VISIBILITY is
- *    driven by the HIDDEN set (its resolved points → visible=0); there is no
- *    dimmed middle state.
- *  - the SELECTION set is drawn as a green highlight OVERLAY on VISIBLE points
- *    only — a second Points pass reading per-point `aSel` + shared `aVisible`.
- *  - edges/polylines are drawn only between two visible endpoints (so hiding a
- *    category also removes its edge hairball).
- *  - camera is pure view navigation, plus zoom-to-selection / zoom-out.
+ *  - ONE pending selection (the target, sets.ts SelectionModel) is built from
+ *    the bottom tree AND the 3D view; its footprint pulses GREEN in both. The
+ *    corner button commits it as a named committed selection (top section);
+ *    committed selections are neutral — no persistent viewport color.
+ *  - HIDDEN is a flag on committed selections; the invisible points are the
+ *    union of hidden ones. The base-points shader discards `aVisible < 0.5`,
+ *    lines drop segments with a hidden endpoint, and hidden wins over any
+ *    highlight (the overlays are gated on `aVisible`).
+ *  - camera-focus actions (3D left-click, bottom right-click, top left-click)
+ *    play a brief YELLOW pulse over the focused region and orient the camera.
+ *    Camera moves are never on the undo stack; Ctrl+Z undoes state changes.
+ *  - 3D selection granularity is EXPLICIT: Ctrl+left = subgroup entries,
+ *    Ctrl+right = point entries (drag = paint). Plain left-click just focuses.
  *
  * Set changes flip only the affected points' bits (incremental; smooth at
  * N≈250k). Positions still stream zero-copy into the one shared attribute.
@@ -34,9 +36,10 @@ import { StreamingPlayer } from "./playback.ts";
 import { Transport, rejectIfErrorPayload } from "./transport.ts";
 import { RepresentationLayer } from "./representation.ts";
 import { bulkCategories, buildTree } from "./classification.ts";
-import { mountSidebar, type SidebarActions, type SidebarHandle } from "./sidebar.ts";
-import { mountActiveSets } from "./activesets.ts";
-import { Hierarchy, NodeSet, SelectionModel, type Entry } from "./sets.ts";
+import { mountTree, type TreeHandle } from "./tree.ts";
+import { mountCommitted, type CommittedActions } from "./committed.ts";
+import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
+import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
 import { pickPoint, selectionBounds } from "./picking.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
@@ -49,9 +52,12 @@ const MAX_CACHE_BYTES = 256 * 1024 * 1024;
 const EDGE_COLOR = 0x5a7a9a;
 const POLYLINE_COLOR = 0x9a7a5a;
 const BACKGROUND = 0x1e1e1e;
-const SELECTION_COLOR = 0x33ffcc; // selection highlight overlay
+const SELECTION_COLOR = 0x33ffcc; // pending-target (green) overlay
+const FOCUS_COLOR = 0xffd54a; // camera-focus (yellow) pulse
 
 const PICK_PIXEL_THRESHOLD = 12;
+const GREEN_PULSE_PERIOD_MS = 1600;
+const FOCUS_FLASH_MS = 900;
 
 declare function acquireVsCodeApi(): {
   postMessage(msg: unknown): void;
@@ -91,10 +97,15 @@ interface SceneParts {
   drawables: THREE.Object3D[];
   /** color/size/visible attributes to re-upload when the representation changes. */
   repAttrs: THREE.BufferAttribute[];
-  /** per-point selection flag (0/1) drawn by the highlight overlay. */
+  /** per-point pending-target flag (0/1) drawn by the green overlay. */
   selAttr: THREE.BufferAttribute;
-  /** shared visibility attribute (also the overlay's), re-uploaded on hide/show. */
+  /** per-point focus-flash flag (0/1) drawn by the yellow pulse pass. */
+  flashAttr: THREE.BufferAttribute;
+  /** shared visibility attribute (also the overlays'), re-uploaded on hide/show. */
   visibleAttr: THREE.BufferAttribute;
+  /** the overlays' materials (uStrength driven per-frame by the render loop). */
+  selMat: THREE.ShaderMaterial;
+  flashMat: THREE.ShaderMaterial;
   /** rebuild edge + polyline draw ranges from current visibility. */
   rebuildLines: () => void;
 }
@@ -118,28 +129,55 @@ function basePointsMaterial(pixelRatio: number): THREE.ShaderMaterial {
   });
 }
 
-/** Selection highlight overlay: green dots on points that are BOTH selected and
- * visible, drawn on top (depthTest off). Reads per-point aSel + shared aVisible. */
-function selectionOverlayMaterial(pixelRatio: number, size: number): THREE.ShaderMaterial {
+/**
+ * Soft glow overlay: a Points pass drawing a smooth "pulse of light" sprite
+ * (bright core + soft additive halo, no hard edges) on points whose `aFlag`
+ * is set AND that are visible (hidden wins). `uStrength` (0..1) animates the
+ * pulse per frame on the CPU (no time-precision issues in the shader);
+ * `uFloor` is the brightness floor — the pending overlay breathes but never
+ * disappears (floor ≈ 0.45), the focus flash fades fully out (floor 0).
+ */
+function glowMaterial(
+  pixelRatio: number,
+  size: number,
+  color: number,
+  floor: number,
+): THREE.ShaderMaterial {
   return new THREE.ShaderMaterial({
     transparent: true,
     depthTest: false,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
     uniforms: {
       uPixelRatio: { value: pixelRatio },
       uSize: { value: size },
-      uColor: { value: new THREE.Color(SELECTION_COLOR) },
+      uColor: { value: new THREE.Color(color) },
+      uStrength: { value: 0 },
+      uFloor: { value: floor },
     },
     vertexShader: `
-      attribute float aVisible; attribute float aSel;
-      uniform float uPixelRatio; uniform float uSize; varying float vShow;
+      attribute float aVisible; attribute float aFlag;
+      uniform float uPixelRatio; uniform float uSize; uniform float uStrength; uniform float uFloor;
+      varying float vShow; varying float vK;
       void main() {
-        vShow = (aSel > 0.5 && aVisible > 0.5) ? 1.0 : 0.0;
+        vK = uFloor + (1.0 - uFloor) * uStrength;
+        vShow = (aFlag > 0.5 && aVisible > 0.5 && vK > 0.01) ? 1.0 : 0.0;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = vShow > 0.5 ? uSize * uPixelRatio : 0.0;
+        gl_PointSize = vShow > 0.5 ? uSize * uPixelRatio * (0.78 + 0.35 * vK) : 0.0;
       }`,
     fragmentShader: `
-      uniform vec3 uColor; varying float vShow;
-      void main() { if (vShow < 0.5) discard; gl_FragColor = vec4(uColor, 1.0); }`,
+      uniform vec3 uColor; varying float vShow; varying float vK;
+      void main() {
+        if (vShow < 0.5) discard;
+        vec2 pc = gl_PointCoord * 2.0 - 1.0;
+        float d = length(pc);
+        if (d > 1.0) discard;
+        float core = smoothstep(0.55, 0.0, d);
+        float halo = smoothstep(1.0, 0.2, d);
+        float a = (0.30 * halo + 0.55 * core) * vK;
+        if (a < 0.015) discard;
+        gl_FragColor = vec4(uColor * (0.7 + 0.5 * core), a);
+      }`,
   });
 }
 
@@ -154,6 +192,7 @@ function buildScene(
   header: Header,
   rep: RepresentationLayer,
   selArray: Float32Array,
+  flashArray: Float32Array,
   pixelRatio: number,
 ): SceneParts {
   const scene = new THREE.Scene();
@@ -166,7 +205,8 @@ function buildScene(
   const sizeAttr = new THREE.BufferAttribute(rep.state.size, 1);
   const visibleAttr = new THREE.BufferAttribute(rep.state.visible, 1);
   const selAttr = new THREE.BufferAttribute(selArray, 1);
-  for (const a of [colorAttr, sizeAttr, visibleAttr, selAttr]) a.setUsage(THREE.DynamicDrawUsage);
+  const flashAttr = new THREE.BufferAttribute(flashArray, 1);
+  for (const a of [colorAttr, sizeAttr, visibleAttr, selAttr, flashAttr]) a.setUsage(THREE.DynamicDrawUsage);
 
   const drawables: THREE.Object3D[] = [];
 
@@ -210,22 +250,44 @@ function buildScene(
     rebuildPoly();
   };
 
-  // Selection highlight overlay: a second Points pass over all N, green where
-  // selected & visible.
+  // Pending-target overlay: a second Points pass over all N, a breathing green
+  // glow where targeted & visible.
+  const selMat = glowMaterial(pixelRatio, 13, SELECTION_COLOR, 0.45);
   const overlayGeo = new THREE.BufferGeometry();
   overlayGeo.setAttribute("position", positionAttr);
   overlayGeo.setAttribute("aVisible", visibleAttr);
-  overlayGeo.setAttribute("aSel", selAttr);
-  const overlay = new THREE.Points(overlayGeo, selectionOverlayMaterial(pixelRatio, 9));
+  overlayGeo.setAttribute("aFlag", selAttr);
+  const overlay = new THREE.Points(overlayGeo, selMat);
   overlay.renderOrder = 11;
   drawables.push(overlay);
+
+  // Focus flash: a transient yellow pulse over the last-focused region.
+  const flashMat = glowMaterial(pixelRatio, 15, FOCUS_COLOR, 0);
+  const flashGeo = new THREE.BufferGeometry();
+  flashGeo.setAttribute("position", positionAttr);
+  flashGeo.setAttribute("aVisible", visibleAttr);
+  flashGeo.setAttribute("aFlag", flashAttr);
+  const flash = new THREE.Points(flashGeo, flashMat);
+  flash.renderOrder = 12;
+  drawables.push(flash);
 
   for (const obj of drawables) {
     obj.frustumCulled = false;
     obj.visible = false; // until the first frame is displayed
     scene.add(obj);
   }
-  return { scene, positionAttr, drawables, repAttrs: [colorAttr, sizeAttr, visibleAttr], selAttr, visibleAttr, rebuildLines };
+  return {
+    scene,
+    positionAttr,
+    drawables,
+    repAttrs: [colorAttr, sizeAttr, visibleAttr],
+    selAttr,
+    flashAttr,
+    visibleAttr,
+    selMat,
+    flashMat,
+    rebuildLines,
+  };
 }
 
 function frameCamera(header: Header, aspect: number) {
@@ -277,11 +339,11 @@ async function main(): Promise<void> {
   // -- interaction state layers ------------------------------------------------
   const rep = new RepresentationLayer(header.n_points);
   const hierarchy = new Hierarchy(header);
-  const selectionModel = new SelectionModel(hierarchy); // multiple named groups
-  const hiddenSet = new NodeSet(hierarchy, "hidden"); // one global hidden set
-  const selArray = new Float32Array(header.n_points); // per-point selection flag (union of all groups)
+  const model = new SelectionModel(hierarchy); // pending target + committed selections
+  const selArray = new Float32Array(header.n_points); // per-point target flag (green)
+  const flashArray = new Float32Array(header.n_points); // per-point focus-flash flag
 
-  const parts = buildScene(header, rep, selArray, renderer.getPixelRatio());
+  const parts = buildScene(header, rep, selArray, flashArray, renderer.getPixelRatio());
   const { scene, positionAttr, drawables, repAttrs } = parts;
   const { camera, target, size: sceneSize } = frameCamera(
     header,
@@ -387,21 +449,33 @@ async function main(): Promise<void> {
       : undefined;
   const panel = setupPanelDocking(scheduleResize, applyResize, persist);
 
-  // -- selection/hidden → render bit flips (incremental) -----------------------
+  // -- state → render bit flips (incremental) -----------------------------------
   const visible = rep.state.visible;
   let selDirty = false;
-  // Selection is the UNION of all named groups; flip only the touched points.
-  const flipSelectionBits = (points: number[]): void => {
-    for (const p of points) selArray[p] = selectionModel.containsPoint(p) ? 1 : 0;
-    selDirty = true;
-  };
-  const flipHiddenBits = (points: number[]): void => {
-    for (const p of points) visible[p] = hiddenSet.contains(p) ? 0 : 1;
-    rep.dirty = true; // re-upload visible; overlay shares it. Edges rebuilt below.
-    parts.rebuildLines();
+  /** Recompute the green (target) + visible (hidden-union) bits for exactly
+   * these points — the ONE place model state becomes pixels. */
+  const refreshPoints = (points: number[] | null): void => {
+    if (!points || points.length === 0) return;
+    let visChanged = false;
+    for (const p of points) {
+      const s = model.targetContains(p) ? 1 : 0;
+      if (selArray[p] !== s) {
+        selArray[p] = s;
+        selDirty = true;
+      }
+      const v = model.isPointHidden(p) ? 0 : 1;
+      if (visible[p] !== v) {
+        visible[p] = v;
+        visChanged = true;
+      }
+    }
+    if (visChanged) {
+      rep.dirty = true; // re-upload visible; the overlays share it
+      parts.rebuildLines();
+    }
   };
 
-  // -- zoom-to helpers ---------------------------------------------------------
+  // -- camera focus (yellow pulse + orient; never on the undo stack) -----------
   const zoomToPoints = (indices: number[]): void => {
     const b = selectionBounds(positionAttr.array as Float32Array, indices);
     if (!b) return;
@@ -411,44 +485,119 @@ async function main(): Promise<void> {
     const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
     animateCameraTo(center.clone().addScaledVector(dir, dist), center);
   };
-  const zoomToSelection = (): void => zoomToPoints(selectionModel.resolvedPoints());
+  let flashStart = -1;
+  let flashPts: number[] = [];
+  const focusPoints = (indices: number[]): void => {
+    if (indices.length === 0) return;
+    zoomToPoints(indices);
+    for (const p of flashPts) flashArray[p] = 0;
+    for (const p of indices) flashArray[p] = 1;
+    flashPts = indices;
+    flashStart = performance.now();
+    parts.flashAttr.needsUpdate = true;
+  };
+  const focusEntry = (e: Entry): void => focusPoints(hierarchy.pointsOf(e));
 
-  // -- gesture actions (toggle-only; select acts on the ACTIVE group) ----------
-  const toggleSelect = (e: Entry): void => flipSelectionBits(selectionModel.toggle(e));
-  const addSelect = (e: Entry): void => flipSelectionBits(selectionModel.addToActive(e)); // drag-paint
-  const toggleHide = (e: Entry): void => flipHiddenBits(hiddenSet.toggle(e));
-  const clearActiveGroup = (): void => flipSelectionBits(selectionModel.clearGroup(selectionModel.active.id));
+  // -- commit button ("Create selection" / "Done", viewer corner) ---------------
+  const commitBtn = document.getElementById("commit-btn") as HTMLButtonElement | null;
+  const updateCommitBtn = (): void => {
+    if (!commitBtn) return;
+    const editing = model.editing !== null;
+    commitBtn.textContent = editing ? "Done" : "Create selection";
+    commitBtn.classList.toggle("editing", editing);
+    commitBtn.disabled = !editing && model.pending.entryCount === 0;
+  };
+  commitBtn?.addEventListener("click", () => {
+    if (model.editing) {
+      refreshPoints(model.endEdit());
+    } else {
+      const sel = model.commit();
+      if (sel) refreshPoints(sel.set.resolvedPoints()); // green clears
+    }
+  });
 
-  // -- named-group + hidden actions (active-sets surface) ----------------------
-  const activeSetsActions = {
-    newGroup: () => selectionModel.newGroup(),
-    renameGroup: (id: number, name: string) => selectionModel.rename(id, name),
-    deleteGroup: (id: number) => flipSelectionBits(selectionModel.delete(id)),
-    setActiveGroup: (id: number) => selectionModel.setActive(id),
-    removeSelectionEntry: (gid: number, e: Entry) => flipSelectionBits(selectionModel.removeEntryFrom(gid, e)),
-    removeHiddenEntry: (e: Entry) => {
-      const pts = hiddenSet.remove(e);
-      if (pts) flipHiddenBits(pts);
-    },
-    clearHidden: () => flipHiddenBits(hiddenSet.clear()),
+  // -- the two panel sections, both through the ONE tree component --------------
+  const fullTree = buildTree(header);
+  let targetTouch = model.touchKeys(model.target);
+  const decorateBottom = (e: Entry, row: HTMLElement): void => {
+    const covered = model.targetCoversEntry(e);
+    row.classList.toggle("sel-covered", covered);
+    row.classList.toggle("sel-partial", !covered && targetTouch.has(`${e.level}:${e.id}`));
   };
 
-  // -- classification tree + active-sets surface -------------------------------
-  const sidebarActions: SidebarActions = { toggleSelect, addSelect, toggleHide };
-  let sidebar: SidebarHandle | null = null;
+  let bottomTree: TreeHandle | null = null;
+  let brackets: { schedule(): void } | null = null;
+  const strokeAdded = new Set<string>(); // entries added by the current paint stroke
   const treeHost = document.getElementById("tree-host");
   if (treeHost) {
-    sidebar = mountSidebar(treeHost, buildTree(header), hierarchy, selectionModel, hiddenSet, sidebarActions);
-  }
-  const activeSetsHost = document.getElementById("active-sets");
-  if (activeSetsHost) {
-    mountActiveSets(activeSetsHost, selectionModel, hiddenSet, hierarchy, activeSetsActions);
+    bottomTree = mountTree(
+      treeHost,
+      fullTree,
+      hierarchy,
+      {
+        // bottom = BUILD: left click/drag edits the pending target,
+        // right click FOCUSES (light pulse), camera otherwise untouched.
+        // Backtracking un-paints only what THIS stroke added — a paint passing
+        // over an already-selected row never destroys the earlier selection.
+        primaryClick: (e) => refreshPoints(model.toggleInTarget(e)),
+        trailStart: () => {
+          strokeAdded.clear();
+          model.beginStroke();
+        },
+        trailAdd: (e) => {
+          const pts = model.addToTarget(e);
+          if (pts.length > 0) {
+            strokeAdded.add(`${e.level}:${e.id}`);
+            refreshPoints(pts);
+          }
+        },
+        trailRemove: (e) => {
+          const key = `${e.level}:${e.id}`;
+          if (strokeAdded.delete(key)) refreshPoints(model.removeFromTarget(e));
+        },
+        trailEnd: () => model.endStroke(),
+        secondaryClick: (e) => focusEntry(e),
+      },
+      {
+        gutter: BRACKET_GUTTER_PX,
+        decorate: decorateBottom,
+        onLayout: () => brackets?.schedule(),
+        flashOnSecondary: true,
+      },
+    );
+    brackets = mountBrackets(treeHost, bottomTree, model);
   }
 
-  // -- bulk pre-hidden by default (one hidden entry per bulk category) ---------
-  const bulkPre = bulkCategories(header);
-  if (bulkPre.size > 0) {
-    flipHiddenBits(hiddenSet.addMany([...bulkPre].map((c) => ({ level: "category", id: c }) as Entry)));
+  const committedActions: CommittedActions = {
+    focusEntry,
+    focusPoints,
+    toggleHidden: (id) => refreshPoints(model.toggleHidden(id)),
+    beginEdit: (id) => refreshPoints(model.beginEdit(id)),
+    endEdit: () => refreshPoints(model.endEdit()),
+    rename: (id, name) => model.rename(id, name),
+    deleteSelection: (id) => refreshPoints(model.deleteSelection(id)),
+    removeEntry: (e) => refreshPoints(model.removeFromTarget(e)),
+  };
+  const selectionsHost = document.getElementById("selections");
+  const committedSection = selectionsHost
+    ? mountCommitted(selectionsHost, model, hierarchy, fullTree, committedActions)
+    : null;
+
+  model.onChange(() => {
+    targetTouch = model.touchKeys(model.target);
+    bottomTree?.refresh();
+    committedSection?.render();
+    updateCommitBtn();
+  });
+  updateCommitBtn();
+
+  // -- sensible default: one PRE-MADE HIDDEN committed selection per bulk
+  // category (neutral name = the category's label; initial state, not undoable) --
+  for (const c of bulkCategories(header)) {
+    const seeded = model.seedHidden(header.categories[c] ?? `category ${c}`, [
+      { level: "category", id: c },
+    ]);
+    refreshPoints(seeded.set.resolvedPoints());
   }
   parts.rebuildLines();
 
@@ -473,59 +622,111 @@ async function main(): Promise<void> {
     );
     return r.index;
   };
-  // 3D gestures (toggle-only, no modifiers). Left = toggle-select, right =
-  // toggle-hide; a drag (past the threshold) stays camera orbit and never
-  // selects. Resolution is COARSE when oriented and FINE when zoomed in (B5): a
-  // click resolves to the point's SUBGROUP by default, or to the individual POINT
-  // once the camera is closer than ZOOM_POINT_FACTOR·sceneSize. Selecting scrolls
-  // the panel to that subgroup. Double-click a point zooms to it (net-zero
-  // selection); double-click empty backs the camera out.
+  // 3D gestures — navigate by default, build only with Ctrl:
+  //   left-drag = orbit, right-drag = pan (TrackballControls, unchanged)
+  //   left-click = FOCUS the clicked point's subgroup (yellow pulse; no selection)
+  //   Ctrl+left  = select at SUBGROUP level → pending target (click toggles,
+  //   Ctrl+right = select at POINT level      drag paints/adds)
+  // Granularity is EXPLICIT via the button — the old invisible zoom-dependent
+  // switch is gone. The movement threshold keeps click and drag apart.
   const CLICK_MOVE_THRESHOLD = 5;
-  const DOUBLE_CLICK_MS = 300;
-  const ZOOM_POINT_FACTOR = 0.7;
-  const resolve3D = (idx: number): Entry => {
-    const dist = camera.position.distanceTo(controls.target);
-    return dist < sceneSize * ZOOM_POINT_FACTOR
+  renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+
+  interface CtrlPaint {
+    level: "subgroup" | "point";
+    button: number;
+    x: number;
+    y: number;
+    moved: boolean;
+    painted: Set<string>;
+  }
+  let ctrlPaint: CtrlPaint | null = null;
+  let navDown: { x: number; y: number; button: number } | null = null;
+
+  const resolveAt = (idx: number, level: "subgroup" | "point"): Entry =>
+    level === "point"
       ? { level: "point", id: idx }
       : { level: "subgroup", id: hierarchy.subgroupOfPoint(idx) };
+  const paintAt = (clientX: number, clientY: number): void => {
+    if (!ctrlPaint) return;
+    const idx = pickAt(clientX, clientY);
+    if (idx < 0) return;
+    const entry = resolveAt(idx, ctrlPaint.level);
+    const key = `${entry.level}:${entry.id}`;
+    if (ctrlPaint.painted.has(key)) return;
+    ctrlPaint.painted.add(key);
+    refreshPoints(model.addToTarget(entry));
   };
-  renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
-  let pointerDown: { x: number; y: number; button: number } | null = null;
-  let lastClick = { t: 0, x: 0, y: 0 };
-  renderer.domElement.addEventListener("pointerdown", (e) => {
-    pointerDown =
-      e.button === 0 || e.button === 2 ? { x: e.clientX, y: e.clientY, button: e.button } : null;
+
+  // Capture-phase on the canvas CONTAINER so a Ctrl-press disables
+  // TrackballControls BEFORE the controls' own pointerdown handler runs.
+  container.addEventListener(
+    "pointerdown",
+    (e) => {
+      if (e.target !== renderer.domElement) return;
+      if ((e.button === 0 || e.button === 2) && e.ctrlKey) {
+        controls.enabled = false;
+        ctrlPaint = {
+          level: e.button === 0 ? "subgroup" : "point",
+          button: e.button,
+          x: e.clientX,
+          y: e.clientY,
+          moved: false,
+          painted: new Set(),
+        };
+        model.beginStroke();
+        e.preventDefault();
+      } else if (e.button === 0 || e.button === 2) {
+        navDown = { x: e.clientX, y: e.clientY, button: e.button };
+      }
+    },
+    true,
+  );
+  window.addEventListener("pointermove", (e) => {
+    if (!ctrlPaint) return;
+    if (!ctrlPaint.moved) {
+      if (Math.hypot(e.clientX - ctrlPaint.x, e.clientY - ctrlPaint.y) <= CLICK_MOVE_THRESHOLD) {
+        return;
+      }
+      ctrlPaint.moved = true;
+      paintAt(ctrlPaint.x, ctrlPaint.y); // the press point joins the paint
+    }
+    paintAt(e.clientX, e.clientY);
   });
   window.addEventListener("pointerup", (e) => {
-    const down = pointerDown;
-    pointerDown = null;
-    if (!down || e.button !== down.button) return;
-    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_MOVE_THRESHOLD) return; // drag = camera
-    const idx = pickAt(e.clientX, e.clientY);
-    if (down.button === 2) {
-      if (idx >= 0) toggleHide(resolve3D(idx)); // right-click toggles hide
+    if (ctrlPaint && e.button === ctrlPaint.button) {
+      const cp = ctrlPaint;
+      ctrlPaint = null;
+      if (!cp.moved) {
+        const idx = pickAt(e.clientX, e.clientY);
+        if (idx >= 0) refreshPoints(model.toggleInTarget(resolveAt(idx, cp.level)));
+      }
+      model.endStroke();
+      if (!camTween) controls.enabled = true;
       return;
     }
-    const now = performance.now();
-    const isDouble =
-      now - lastClick.t < DOUBLE_CLICK_MS &&
-      Math.hypot(e.clientX - lastClick.x, e.clientY - lastClick.y) < 8;
-    lastClick = { t: now, x: e.clientX, y: e.clientY };
-    if (idx < 0) {
-      if (isDouble) resetCamera(); // double-click empty → whole-scene framing
-      return; // a single click on empty space does nothing (toggle model)
-    }
-    const entry = resolve3D(idx);
-    if (isDouble) {
-      toggleSelect(entry); // undo the single-click toggle from the first click
-      zoomToPoints(hierarchy.pointsOf(entry));
-    } else {
-      toggleSelect(entry);
-      sidebar?.revealSubgroup(entry.level === "subgroup" ? entry.id : hierarchy.subgroupOfPoint(idx));
-    }
+    const down = navDown;
+    navDown = null;
+    if (!down || e.button !== down.button) return;
+    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_MOVE_THRESHOLD) return; // drag = camera
+    if (down.button !== 0) return; // plain right-click: nothing (pan is the drag)
+    const idx = pickAt(e.clientX, e.clientY);
+    if (idx < 0) return; // click on empty space: nothing
+    // focus the clicked point's subgroup — orient + yellow pulse, no selection
+    focusPoints(hierarchy.subgroupPoints(hierarchy.subgroupOfPoint(idx)));
   });
+
+  // -- keys: Escape cancels; Ctrl+Z = system-wide undo (state, never camera) ----
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") clearActiveGroup();
+    const t = e.target as HTMLElement | null;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+    if (e.key === "Escape") {
+      // exit edit mode without committing, else discard the pending target
+      refreshPoints(model.editing ? model.endEdit() : model.clearPending());
+    } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
+      e.preventDefault();
+      refreshPoints(model.undo());
+    }
   });
 
   // -- streaming player --------------------------------------------------------
@@ -630,6 +831,22 @@ async function main(): Promise<void> {
       parts.selAttr.needsUpdate = true;
       selDirty = false;
     }
+    // Pulse strengths are CPU-computed each frame (shaders stay time-free):
+    // the pending green breathes; the yellow focus flash swells and fades once.
+    parts.selMat.uniforms.uStrength.value =
+      0.5 + 0.5 * Math.sin((now / GREEN_PULSE_PERIOD_MS) * Math.PI * 2);
+    if (flashStart >= 0) {
+      const k = (now - flashStart) / FOCUS_FLASH_MS;
+      if (k >= 1) {
+        flashStart = -1;
+        parts.flashMat.uniforms.uStrength.value = 0;
+        for (const p of flashPts) flashArray[p] = 0;
+        flashPts = [];
+        parts.flashAttr.needsUpdate = true;
+      } else {
+        parts.flashMat.uniforms.uStrength.value = Math.pow(Math.sin(Math.PI * k), 1.35);
+      }
+    }
     if (!isStatic && now - fpsMarkMs >= 1000) {
       displayFps = (shownSinceMark * 1000) / (now - fpsMarkMs);
       shownSinceMark = 0;
@@ -666,28 +883,57 @@ async function main(): Promise<void> {
 
   if (cfg.test) {
     // Test seam (harness only; production sets no `test` flag): lets the E2E
-    // driver read camera/selection/player state and drive controls directly.
+    // driver read model/camera/player state and drive actions directly.
     (window as unknown as { __viewer?: unknown }).__viewer = {
       camera,
       controls,
       player,
       rep,
       hierarchy,
-      selection: selectionModel,
-      hidden: hiddenSet,
-      sidebar,
-      actions: {
-        toggleSelect,
-        addSelect,
-        toggleHide,
-        clearActiveGroup,
-        ...activeSetsActions,
-      },
+      model,
+      actions: committedActions,
+      refreshPoints,
+      focusPoints,
+      focusEntry,
+      zoomToPoints,
+      resetCamera,
       applyResize,
       setPlaying,
-      zoomToSelection,
-      resetCamera,
       panel,
+      debug: {
+        /** number of points currently green (pending-target footprint). */
+        selCount: (): number => {
+          let s = 0;
+          for (let i = 0; i < selArray.length; i++) if (selArray[i] > 0.5) s++;
+          return s;
+        },
+        /** number of points currently visible. */
+        visibleCount: (): number => {
+          let s = 0;
+          for (let i = 0; i < visible.length; i++) if (visible[i] > 0.5) s++;
+          return s;
+        },
+        /** number of points in the active focus flash. */
+        flashCount: (): number => flashPts.length,
+        /** current overlay pulse strengths (green target, yellow flash). */
+        pulse: (): { sel: number; flash: number } => ({
+          sel: parts.selMat.uniforms.uStrength.value as number,
+          flash: parts.flashMat.uniforms.uStrength.value as number,
+        }),
+        /** project point `idx` (current frame) to client px — for E2E clicks. */
+        projectPoint: (idx: number): { x: number; y: number; front: boolean } => {
+          const arr = positionAttr.array as Float32Array;
+          const v = new THREE.Vector3(arr[idx * 3], arr[idx * 3 + 1], arr[idx * 3 + 2]).project(
+            camera,
+          );
+          const rect = renderer.domElement.getBoundingClientRect();
+          return {
+            x: rect.left + ((v.x + 1) / 2) * rect.width,
+            y: rect.top + ((1 - v.y) / 2) * rect.height,
+            front: v.z < 1 && v.z > -1,
+          };
+        },
+      },
     };
   }
 
