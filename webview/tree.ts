@@ -1,26 +1,24 @@
 /**
- * Shared hierarchy tree — the ONE tree component both panel sections render
- * through (the bottom "build" tree and each committed selection's member tree
- * in the top section), so expandability, names, and row styling never drift.
+ * Shared hierarchy tree — the ONE row/gesture substrate both panel sections
+ * render through, so names, row styling, and gesture feel never drift.
  *
- * Renders category → group → subgroup → point with lazy expansion; the
- * subgroup/point lists (the only ones that get huge) are VIRTUALIZED over a
- * flat fixed-height item model (see virtuallist.ts). What a gesture MEANS is
- * injected per mount (`TreeGestures`) — the component only recognizes:
+ * Two mounts share the row factory and the gesture engine:
+ *   - `mountTree`      — the full classification tree (bottom section):
+ *                        category → group → subgroup → point, lazy expansion,
+ *                        the huge subgroup/point lists virtualized.
+ *   - `mountEntryList` — a FLAT list of entries at their own level (the top
+ *                        section's member view): a selection made of subgroups
+ *                        shows exactly those subgroup rows — no ancestors, no
+ *                        expansion.
  *
- *   - primary click     (left down+up, movement under the threshold)
- *   - primary hold      (left press, no movement, HOLD_MS)
- *   - primary trail     (left drag past the threshold: paints forward over
- *                        rows, and UN-paints when dragged back over the trail)
- *   - secondary click   (right click / right-drag release on a row)
- *
- * The movement threshold means a jittery click can never misfire as a paint.
- * `induceTree` builds the filtered TreeModel a committed selection shows: the
- * subtree its entries cover (full counts under covered nodes, member points
- * only under partially-covered subgroups).
+ * The engine recognizes, for BOTH buttons (movement threshold keeps a jittery
+ * click from misfiring as a drag):
+ *   - primary click / hold / drag-trail (paint; trail reports enter/backtrack)
+ *   - secondary click / drag-trail (region gestures)
+ * What a gesture MEANS is injected per mount (`TreeGestures`).
  */
 import type { CategoryNode, GroupNode, SubgroupNode, TreeModel } from "./classification.ts";
-import { entryKey, type Entry, type Hierarchy, type NodeSet } from "./sets.ts";
+import { entryKey, type Entry, type Hierarchy } from "./sets.ts";
 import { VirtualList } from "./virtuallist.ts";
 
 const ROW_H = 18;
@@ -33,27 +31,29 @@ export interface TreeGestures {
   /** Left press-and-hold without movement (optional). */
   primaryHold?(e: Entry): void;
   /** A left drag-trail begins (movement passed the threshold). */
-  trailStart?(): void;
+  trailStart?(startEntry: Entry): void;
   /** Trail moved forward onto a row not in the trail. */
   trailAdd?(e: Entry): void;
-  /** Trail backtracked off a row (dragging back un-paints). */
+  /** Trail backtracked off a row (dragging back reverts it). */
   trailRemove?(e: Entry): void;
   /** Trail released; `entries` is the surviving trail in order. */
   trailEnd?(entries: Entry[]): void;
   /** Right click on a row. */
   secondaryClick(e: Entry): void;
+  /** Right drag released over rows — a region gesture (optional). */
+  secondaryTrailEnd?(entries: Entry[]): void;
 }
 
 export interface TreeOptions {
   /** Left px reserved in every row for the bracket gutter (bottom tree). */
   gutter?: number;
-  /** Which points a subgroup drills into (filtered mounts restrict this). */
+  /** Which points a subgroup drills into. */
   pointsOfSubgroup?: (subgroupId: number) => number[];
   /** Apply state classes to a row (called on build and on refresh()). */
   decorate?: (e: Entry, row: HTMLElement) => void;
   /** Fired when row layout may have changed (expand/collapse/drill). */
   onLayout?: () => void;
-  /** Flash a row briefly when it is secondary-clicked (focus feedback). */
+  /** Flash rows touched by secondary gestures (focus feedback). */
   flashOnSecondary?: boolean;
 }
 
@@ -66,58 +66,81 @@ export interface TreeHandle {
   dispose(): void;
 }
 
-export function mountTree(
+// ---------------------------------------------------------------------------
+// Row factory + gesture engine (shared by both mounts)
+// ---------------------------------------------------------------------------
+
+interface RowEngine {
+  makeRow(
+    depth: number,
+    text: string,
+    rowOpts?: { entry?: Entry; expandable?: boolean },
+  ): { row: HTMLElement; caret: HTMLElement };
+  dispose(): void;
+}
+
+function entryOf(row: HTMLElement): Entry {
+  return { level: row.dataset.level as Entry["level"], id: Number(row.dataset.id) };
+}
+
+function flashRow(row: HTMLElement): void {
+  row.classList.remove("row-flash");
+  void row.offsetWidth; // restart the animation
+  row.classList.add("row-flash");
+  row.addEventListener("animationend", () => row.classList.remove("row-flash"), { once: true });
+}
+
+function createRowEngine(
   container: HTMLElement,
-  tree: TreeModel,
-  hierarchy: Hierarchy,
+  treeRoot: HTMLElement,
   gestures: TreeGestures,
-  opts: TreeOptions = {},
-): TreeHandle {
-  container.innerHTML = "";
+  opts: TreeOptions,
+): RowEngine {
   const gutter = opts.gutter ?? 0;
-  const pointsOf = opts.pointsOfSubgroup ?? ((s: number) => hierarchy.subgroupPoints(s));
-  const scrollRoot = (container.closest("#sidebar-content") as HTMLElement) ?? container;
 
-  const treeRoot = document.createElement("div");
-  treeRoot.className = "tree";
-  container.appendChild(treeRoot);
-
-  const entryOf = (row: HTMLElement): Entry => ({
-    level: row.dataset.level as Entry["level"],
-    id: Number(row.dataset.id),
-  });
   const rowUnder = (x: number, y: number): HTMLElement | null => {
     const el = document.elementFromPoint(x, y);
     const row = el?.closest?.(".tree-row.selectable") as HTMLElement | null;
     return row && treeRoot.contains(row) ? row : null;
   };
-  const flashRow = (row: HTMLElement): void => {
-    row.classList.remove("row-flash");
-    void row.offsetWidth; // restart the animation
-    row.classList.add("row-flash");
-    row.addEventListener("animationend", () => row.classList.remove("row-flash"), { once: true });
-  };
 
-  // -- gesture recognizer (per mount; move/up delegated on window) -------------
   interface Arm {
     entry: Entry;
     x: number;
     y: number;
+    lastX: number;
+    lastY: number;
     moved: boolean;
     holdFired: boolean;
     holdTimer: number;
     trail: { key: string; entry: Entry }[];
   }
-  let arm: Arm | null = null;
+  let left: Arm | null = null;
+  let right: Arm | null = null;
 
-  const enterRow = (entry: Entry): void => {
-    if (!arm) return;
+  /** Visit every row along the segment from the arm's last position to
+   * (x1,y1) — pointermove samples are sparse, so a fast drag would otherwise
+   * skip rows between events. Steps at half a row height. */
+  const walkRows = (arm: Arm, x1: number, y1: number, visit: (row: HTMLElement) => void): void => {
+    const dist = Math.hypot(x1 - arm.lastX, y1 - arm.lastY);
+    const steps = Math.max(1, Math.ceil(dist / (ROW_H / 2)));
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      const row = rowUnder(arm.lastX + (x1 - arm.lastX) * t, arm.lastY + (y1 - arm.lastY) * t);
+      if (row) visit(row);
+    }
+    arm.lastX = x1;
+    arm.lastY = y1;
+  };
+
+  const enterLeft = (entry: Entry): void => {
+    if (!left) return;
     const key = entryKey(entry);
-    const t = arm.trail;
-    if (t.length > 0 && t[t.length - 1].key === key) return; // still on the same row
+    const t = left.trail;
+    if (t.length > 0 && t[t.length - 1].key === key) return;
     const at = t.findIndex((it) => it.key === key);
     if (at >= 0) {
-      // dragged back onto an earlier trail row: un-paint everything after it
+      // dragged back onto an earlier trail row: revert everything after it
       while (t.length - 1 > at) {
         const popped = t.pop()!;
         gestures.trailRemove?.(popped.entry);
@@ -127,41 +150,67 @@ export function mountTree(
       gestures.trailAdd?.(entry);
     }
   };
+  const enterRight = (entry: Entry, row: HTMLElement): void => {
+    if (!right) return;
+    const key = entryKey(entry);
+    if (right.trail.some((it) => it.key === key)) return;
+    right.trail.push({ key, entry });
+    if (opts.flashOnSecondary) flashRow(row);
+  };
 
   const onMove = (e: PointerEvent): void => {
-    if (!arm) return;
-    if (!arm.moved) {
-      if (Math.hypot(e.clientX - arm.x, e.clientY - arm.y) <= DRAG_THRESHOLD_PX) return;
-      arm.moved = true;
-      clearTimeout(arm.holdTimer);
-      gestures.trailStart?.();
-      enterRow(arm.entry); // the start row is part of the trail
+    if (left) {
+      if (!left.moved) {
+        if (Math.hypot(e.clientX - left.x, e.clientY - left.y) <= DRAG_THRESHOLD_PX) return;
+        left.moved = true;
+        clearTimeout(left.holdTimer);
+        gestures.trailStart?.(left.entry);
+        enterLeft(left.entry); // the start row is part of the trail
+      }
+      walkRows(left, e.clientX, e.clientY, (row) => enterLeft(entryOf(row)));
+    } else if (right) {
+      if (!right.moved) {
+        if (Math.hypot(e.clientX - right.x, e.clientY - right.y) <= DRAG_THRESHOLD_PX) return;
+        right.moved = true;
+        const startRow = rowUnder(right.x, right.y);
+        if (startRow) enterRight(right.entry, startRow);
+      }
+      walkRows(right, e.clientX, e.clientY, (row) => enterRight(entryOf(row), row));
     }
-    const row = rowUnder(e.clientX, e.clientY);
-    if (row) enterRow(entryOf(row));
   };
   const onUp = (e: PointerEvent): void => {
-    if (!arm || e.button !== 0) return;
-    const a = arm;
-    arm = null;
-    clearTimeout(a.holdTimer);
-    if (a.moved) gestures.trailEnd?.(a.trail.map((t) => t.entry));
-    else if (!a.holdFired) gestures.primaryClick(a.entry);
+    if (e.button === 0 && left) {
+      const a = left;
+      left = null;
+      clearTimeout(a.holdTimer);
+      if (a.moved) gestures.trailEnd?.(a.trail.map((t) => t.entry));
+      else if (!a.holdFired) gestures.primaryClick(a.entry);
+    } else if (e.button === 2 && right) {
+      const a = right;
+      right = null;
+      if (a.moved && a.trail.length > 0) {
+        (gestures.secondaryTrailEnd ?? ((entries: Entry[]) => gestures.secondaryClick(entries[0])))(
+          a.trail.map((t) => t.entry),
+        );
+      } else {
+        if (opts.flashOnSecondary) {
+          const row = rowUnder(e.clientX, e.clientY);
+          if (row) flashRow(row);
+        }
+        gestures.secondaryClick(a.entry);
+      }
+    }
+  };
+  const onContext = (e: MouseEvent): void => {
+    // secondary actions run on pointerup (so right-DRAG can be a gesture);
+    // the native menu is suppressed for the whole mount.
+    e.preventDefault();
+    e.stopPropagation();
   };
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
-
-  const onContext = (e: MouseEvent): void => {
-    e.preventDefault();
-    const row = (e.target as HTMLElement).closest?.(".tree-row.selectable") as HTMLElement | null;
-    if (!row || !treeRoot.contains(row)) return;
-    e.stopPropagation();
-    if (opts.flashOnSecondary) flashRow(row);
-    gestures.secondaryClick(entryOf(row));
-  };
   container.addEventListener("contextmenu", onContext);
 
-  // -- rows ---------------------------------------------------------------------
   const makeRow = (
     depth: number,
     text: string,
@@ -187,29 +236,75 @@ export function mountTree(
       row.dataset.level = entry.level;
       row.dataset.id = String(entry.id);
       row.addEventListener("pointerdown", (e) => {
-        if (e.button !== 0 || (e.target as HTMLElement).closest(".row-ctl")) return;
-        e.preventDefault();
-        arm = {
-          entry,
-          x: e.clientX,
-          y: e.clientY,
-          moved: false,
-          holdFired: false,
-          trail: [],
-          holdTimer: gestures.primaryHold
-            ? window.setTimeout(() => {
-                if (arm && !arm.moved) {
-                  arm.holdFired = true;
-                  gestures.primaryHold!(entry);
-                }
-              }, HOLD_MS)
-            : 0,
-        };
+        if ((e.target as HTMLElement).closest(".row-ctl")) return;
+        if (e.button === 0) {
+          e.preventDefault();
+          left = {
+            entry,
+            x: e.clientX,
+            y: e.clientY,
+            lastX: e.clientX,
+            lastY: e.clientY,
+            moved: false,
+            holdFired: false,
+            trail: [],
+            holdTimer: gestures.primaryHold
+              ? window.setTimeout(() => {
+                  if (left && !left.moved) {
+                    left.holdFired = true;
+                    gestures.primaryHold!(entry);
+                  }
+                }, HOLD_MS)
+              : 0,
+          };
+        } else if (e.button === 2) {
+          right = {
+            entry,
+            x: e.clientX,
+            y: e.clientY,
+            lastX: e.clientX,
+            lastY: e.clientY,
+            moved: false,
+            holdFired: false,
+            holdTimer: 0,
+            trail: [],
+          };
+        }
       });
       opts.decorate?.(entry, row);
     }
     return { row, caret };
   };
+
+  return {
+    makeRow,
+    dispose: () => {
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      container.removeEventListener("contextmenu", onContext);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// The full classification tree (bottom section)
+// ---------------------------------------------------------------------------
+
+export function mountTree(
+  container: HTMLElement,
+  tree: TreeModel,
+  hierarchy: Hierarchy,
+  gestures: TreeGestures,
+  opts: TreeOptions = {},
+): TreeHandle {
+  container.innerHTML = "";
+  const pointsOf = opts.pointsOfSubgroup ?? ((s: number) => hierarchy.subgroupPoints(s));
+  const scrollRoot = (container.closest("#sidebar-content") as HTMLElement) ?? container;
+
+  const treeRoot = document.createElement("div");
+  treeRoot.className = "tree";
+  container.appendChild(treeRoot);
+  const engine = createRowEngine(container, treeRoot, gestures, opts);
 
   const attachExpander = (caret: HTMLElement, childHost: HTMLElement, build: () => void): void => {
     let built = false;
@@ -237,11 +332,11 @@ export function mountTree(
       const item = flat[i];
       if (item.kind === "point") {
         const entry: Entry = { level: "point", id: item.id };
-        return makeRow(3, hierarchy.label(entry), { entry }).row;
+        return engine.makeRow(3, hierarchy.label(entry), { entry }).row;
       }
       const s = item.node;
       const entry: Entry = { level: "subgroup", id: s.subgroupId };
-      const { row, caret } = makeRow(2, `${s.label} — ${fmt(s.pointCount)} pts`, {
+      const { row, caret } = engine.makeRow(2, `${s.label} — ${fmt(s.pointCount)} pts`, {
         entry,
         expandable: s.pointCount > 0,
       });
@@ -271,7 +366,7 @@ export function mountTree(
   };
 
   const buildGroup = (host: HTMLElement, group: GroupNode): void => {
-    const { row, caret } = makeRow(
+    const { row, caret } = engine.makeRow(
       1,
       `${group.label} — ${fmt(group.pointCount)} pts, ${fmt(group.subgroups.length)} sub`,
       { entry: { level: "group", id: group.groupId }, expandable: group.subgroups.length > 0 },
@@ -286,7 +381,7 @@ export function mountTree(
   };
 
   const buildCategory = (cat: CategoryNode): void => {
-    const { row, caret } = makeRow(0, `${cat.label} — ${fmt(cat.pointCount)} pts`, {
+    const { row, caret } = engine.makeRow(0, `${cat.label} — ${fmt(cat.pointCount)} pts`, {
       entry: { level: "category", id: cat.categoryIndex },
       expandable: cat.groups.length > 0,
     });
@@ -320,9 +415,7 @@ export function mountTree(
       }
     },
     dispose: () => {
-      window.removeEventListener("pointermove", onMove);
-      window.removeEventListener("pointerup", onUp);
-      container.removeEventListener("contextmenu", onContext);
+      engine.dispose();
       for (const v of vlists) v.dispose();
       container.innerHTML = "";
     },
@@ -330,78 +423,47 @@ export function mountTree(
 }
 
 // ---------------------------------------------------------------------------
-// Induced (filtered) tree — the subtree a committed selection's entries cover.
+// Flat entry list (top section) — entries at their OWN level, no expansion.
 // ---------------------------------------------------------------------------
 
-export interface InducedTree {
-  model: TreeModel;
-  /** Drill resolver: all points under fully-covered subgroups, member points
-   * only under partially-covered ones. */
-  pointsOfSubgroup: (subgroupId: number) => number[];
+export interface EntryListHandle {
+  root: HTMLElement;
+  refresh(): void;
+  dispose(): void;
 }
 
-export function induceTree(full: TreeModel, hierarchy: Hierarchy, set: NodeSet): InducedTree {
-  const covered = (e: Entry): boolean => {
-    for (const seg of hierarchy.pathOf(e)) if (set.has(seg)) return true;
-    return false;
-  };
-  const touch = new Set<string>();
-  const memberPtsBySub = new Map<number, number[]>();
-  for (const e of set.listEntries()) {
-    for (const seg of hierarchy.pathOf(e)) touch.add(entryKey(seg));
-    if (e.level === "point") {
-      const s = hierarchy.subgroupOfPoint(e.id);
-      const arr = memberPtsBySub.get(s);
-      if (arr) arr.push(e.id);
-      else memberPtsBySub.set(s, [e.id]);
-    }
+export function mountEntryList(
+  container: HTMLElement,
+  hierarchy: Hierarchy,
+  entries: Entry[],
+  gestures: TreeGestures,
+  opts: TreeOptions = {},
+): EntryListHandle {
+  container.innerHTML = "";
+  const treeRoot = document.createElement("div");
+  treeRoot.className = "tree";
+  container.appendChild(treeRoot);
+  const engine = createRowEngine(container, treeRoot, gestures, opts);
+
+  for (const e of entries) {
+    const { row } = engine.makeRow(0, `${hierarchy.label(e)} — ${fmt(hierarchy.pointCount(e))} pts`, {
+      entry: e,
+    });
+    treeRoot.appendChild(row);
   }
 
-  const categories: CategoryNode[] = [];
-  for (const cat of full.categories) {
-    const cEntry: Entry = { level: "category", id: cat.categoryIndex };
-    if (!covered(cEntry) && !touch.has(entryKey(cEntry))) continue;
-    const groups: GroupNode[] = [];
-    let subgroupCount = 0;
-    for (const g of cat.groups) {
-      const gEntry: Entry = { level: "group", id: g.groupId };
-      const gTouched = covered(gEntry) || touch.has(entryKey(gEntry));
-      if (!gTouched) continue;
-      const subs: SubgroupNode[] = [];
-      for (const s of g.subgroups) {
-        const sEntry: Entry = { level: "subgroup", id: s.subgroupId };
-        const pts = covered(sEntry)
-          ? s.pointCount
-          : (memberPtsBySub.get(s.subgroupId)?.length ?? 0);
-        if (pts === 0 && !touch.has(entryKey(sEntry))) continue;
-        subs.push({ subgroupId: s.subgroupId, label: s.label, pointCount: pts });
-      }
-      if (subs.length === 0) continue;
-      subgroupCount += subs.length;
-      groups.push({
-        groupId: g.groupId,
-        label: g.label,
-        pointCount: subs.reduce((a, s) => a + s.pointCount, 0),
-        subgroups: subs,
-      });
-    }
-    if (groups.length === 0) continue;
-    categories.push({
-      categoryIndex: cat.categoryIndex,
-      label: cat.label,
-      pointCount: groups.reduce((a, g) => a + g.pointCount, 0),
-      subgroupCount,
-      groupCount: groups.length,
-      bulk: cat.bulk,
-      groups,
-    });
-  }
   return {
-    model: { categories },
-    pointsOfSubgroup: (subId) =>
-      covered({ level: "subgroup", id: subId })
-        ? hierarchy.subgroupPoints(subId)
-        : (memberPtsBySub.get(subId) ?? []),
+    root: treeRoot,
+    refresh: () => {
+      if (!opts.decorate) return;
+      for (const row of treeRoot.querySelectorAll<HTMLElement>(".tree-row.selectable")) {
+        opts.decorate(entryOf(row), row);
+      }
+    },
+    dispose: () => {
+      engine.dispose();
+      container.innerHTML = "";
+    },
   };
 }
 

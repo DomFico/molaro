@@ -52,8 +52,8 @@ const MAX_CACHE_BYTES = 256 * 1024 * 1024;
 const EDGE_COLOR = 0x5a7a9a;
 const POLYLINE_COLOR = 0x9a7a5a;
 const BACKGROUND = 0x1e1e1e;
-const SELECTION_COLOR = 0x33ffcc; // pending-target (green) overlay
-const FOCUS_COLOR = 0xffd54a; // camera-focus (yellow) pulse
+const SELECTION_COLOR = 0xbfffe4; // pending-target tint (light green)
+const FOCUS_COLOR = 0xffe9a8; // camera-focus tint (light yellow)
 
 const PICK_PIXEL_THRESHOLD = 12;
 const GREEN_PULSE_PERIOD_MS = 1600;
@@ -130,14 +130,14 @@ function basePointsMaterial(pixelRatio: number): THREE.ShaderMaterial {
 }
 
 /**
- * Soft glow overlay: a Points pass drawing a smooth "pulse of light" sprite
- * (bright core + soft additive halo, no hard edges) on points whose `aFlag`
- * is set AND that are visible (hidden wins). `uStrength` (0..1) animates the
- * pulse per frame on the CPU (no time-precision issues in the shader);
- * `uFloor` is the brightness floor — the pending overlay breathes but never
- * disappears (floor ≈ 0.45), the focus flash fades fully out (floor 0).
+ * Highlight overlay: a Points pass tinting points whose `aFlag` is set AND
+ * that are visible (hidden wins) toward a light highlight color. No glow, no
+ * halo, no size change — the point simply pulses to the new color and back.
+ * `uStrength` (0..1) animates the tint per frame on the CPU; `uFloor` is the
+ * tint floor — the pending overlay breathes but never disappears
+ * (floor ≈ 0.45), the focus flash fades fully out (floor 0).
  */
-function glowMaterial(
+function highlightMaterial(
   pixelRatio: number,
   size: number,
   color: number,
@@ -147,7 +147,6 @@ function glowMaterial(
     transparent: true,
     depthTest: false,
     depthWrite: false,
-    blending: THREE.AdditiveBlending,
     uniforms: {
       uPixelRatio: { value: pixelRatio },
       uSize: { value: size },
@@ -163,7 +162,7 @@ function glowMaterial(
         vK = uFloor + (1.0 - uFloor) * uStrength;
         vShow = (aFlag > 0.5 && aVisible > 0.5 && vK > 0.01) ? 1.0 : 0.0;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = vShow > 0.5 ? uSize * uPixelRatio * (0.78 + 0.35 * vK) : 0.0;
+        gl_PointSize = vShow > 0.5 ? uSize * uPixelRatio : 0.0;
       }`,
     fragmentShader: `
       uniform vec3 uColor; varying float vShow; varying float vK;
@@ -172,11 +171,9 @@ function glowMaterial(
         vec2 pc = gl_PointCoord * 2.0 - 1.0;
         float d = length(pc);
         if (d > 1.0) discard;
-        float core = smoothstep(0.55, 0.0, d);
-        float halo = smoothstep(1.0, 0.2, d);
-        float a = (0.30 * halo + 0.55 * core) * vK;
-        if (a < 0.015) discard;
-        gl_FragColor = vec4(uColor * (0.7 + 0.5 * core), a);
+        float a = 0.88 * vK * smoothstep(1.0, 0.82, d);
+        if (a < 0.02) discard;
+        gl_FragColor = vec4(uColor, a);
       }`,
   });
 }
@@ -250,9 +247,9 @@ function buildScene(
     rebuildPoly();
   };
 
-  // Pending-target overlay: a second Points pass over all N, a breathing green
-  // glow where targeted & visible.
-  const selMat = glowMaterial(pixelRatio, 13, SELECTION_COLOR, 0.45);
+  // Pending-target overlay: a second Points pass over all N, gently pulsing
+  // targeted & visible points to a light green.
+  const selMat = highlightMaterial(pixelRatio, 6, SELECTION_COLOR, 0.45);
   const overlayGeo = new THREE.BufferGeometry();
   overlayGeo.setAttribute("position", positionAttr);
   overlayGeo.setAttribute("aVisible", visibleAttr);
@@ -261,8 +258,8 @@ function buildScene(
   overlay.renderOrder = 11;
   drawables.push(overlay);
 
-  // Focus flash: a transient yellow pulse over the last-focused region.
-  const flashMat = glowMaterial(pixelRatio, 15, FOCUS_COLOR, 0);
+  // Focus flash: a brief light-yellow tint over the last-focused region.
+  const flashMat = highlightMaterial(pixelRatio, 7, FOCUS_COLOR, 0);
   const flashGeo = new THREE.BufferGeometry();
   flashGeo.setAttribute("position", positionAttr);
   flashGeo.setAttribute("aVisible", visibleAttr);
@@ -523,11 +520,17 @@ async function main(): Promise<void> {
     const covered = model.targetCoversEntry(e);
     row.classList.toggle("sel-covered", covered);
     row.classList.toggle("sel-partial", !covered && targetTouch.has(`${e.level}:${e.id}`));
+    // phase-lock the row pulse to the global clock so every covered row (and
+    // the 3D tint, same period) pulses in unison — never sequentially
+    row.style.animationDelay = covered ? `-${performance.now() % GREEN_PULSE_PERIOD_MS}ms` : "";
   };
 
   let bottomTree: TreeHandle | null = null;
   let brackets: { schedule(): void } | null = null;
-  const strokeAdded = new Set<string>(); // entries added by the current paint stroke
+  // entries changed by the current paint stroke, and the stroke's direction:
+  // a stroke STARTING on an already-selected row removes; otherwise it adds.
+  const strokeTouched = new Set<string>();
+  let strokeRemoves = false;
   const treeHost = document.getElementById("tree-host");
   if (treeHost) {
     bottomTree = mountTree(
@@ -535,28 +538,36 @@ async function main(): Promise<void> {
       fullTree,
       hierarchy,
       {
-        // bottom = BUILD: left click/drag edits the pending target,
-        // right click FOCUSES (light pulse), camera otherwise untouched.
-        // Backtracking un-paints only what THIS stroke added — a paint passing
-        // over an already-selected row never destroys the earlier selection.
+        // bottom = BUILD: left click/drag edits the pending target — drag
+        // paints, and a drag STARTING on a selected row un-paints the same
+        // way. Right click/drag FOCUSES a row or a region (light pulse);
+        // camera otherwise untouched. Backtracking reverts only what THIS
+        // stroke changed.
         primaryClick: (e) => refreshPoints(model.toggleInTarget(e)),
-        trailStart: () => {
-          strokeAdded.clear();
+        trailStart: (start) => {
+          strokeTouched.clear();
+          strokeRemoves = model.target.has(start);
           model.beginStroke();
         },
         trailAdd: (e) => {
-          const pts = model.addToTarget(e);
+          const pts = strokeRemoves ? model.removeFromTarget(e) : model.addToTarget(e);
           if (pts.length > 0) {
-            strokeAdded.add(`${e.level}:${e.id}`);
+            strokeTouched.add(`${e.level}:${e.id}`);
             refreshPoints(pts);
           }
         },
         trailRemove: (e) => {
           const key = `${e.level}:${e.id}`;
-          if (strokeAdded.delete(key)) refreshPoints(model.removeFromTarget(e));
+          if (!strokeTouched.delete(key)) return;
+          refreshPoints(strokeRemoves ? model.addToTarget(e) : model.removeFromTarget(e));
         },
         trailEnd: () => model.endStroke(),
         secondaryClick: (e) => focusEntry(e),
+        secondaryTrailEnd: (entries) => {
+          const pts: number[] = [];
+          for (const e of entries) pts.push(...hierarchy.pointsOf(e));
+          focusPoints(pts); // right-drag = view the dragged region
+        },
       },
       {
         gutter: BRACKET_GUTTER_PX,
@@ -580,7 +591,7 @@ async function main(): Promise<void> {
   };
   const selectionsHost = document.getElementById("selections");
   const committedSection = selectionsHost
-    ? mountCommitted(selectionsHost, model, hierarchy, fullTree, committedActions)
+    ? mountCommitted(selectionsHost, model, hierarchy, committedActions)
     : null;
 
   model.onChange(() => {
@@ -711,7 +722,10 @@ async function main(): Promise<void> {
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_MOVE_THRESHOLD) return; // drag = camera
     if (down.button !== 0) return; // plain right-click: nothing (pan is the drag)
     const idx = pickAt(e.clientX, e.clientY);
-    if (idx < 0) return; // click on empty space: nothing
+    if (idx < 0) {
+      resetCamera(); // click on empty space: zoom back out to the whole scene
+      return;
+    }
     // focus the clicked point's subgroup — orient + yellow pulse, no selection
     focusPoints(hierarchy.subgroupPoints(hierarchy.subgroupOfPoint(idx)));
   });
@@ -915,6 +929,8 @@ async function main(): Promise<void> {
         },
         /** number of points in the active focus flash. */
         flashCount: (): number => flashPts.length,
+        /** what a click at client (x,y) would pick (-1 = empty space). */
+        pick: (x: number, y: number): number => pickAt(x, y),
         /** current overlay pulse strengths (green target, yellow flash). */
         pulse: (): { sel: number; flash: number } => ({
           sel: parts.selMat.uniforms.uStrength.value as number,

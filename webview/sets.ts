@@ -291,7 +291,6 @@ export class SelectionModel {
   private readonly committedList: CommittedSelection[] = [];
   private editingId: number | null = null;
   private nextId = 1;
-  private autoCounter = 0;
   private readonly undoStack: UndoOp[] = [];
   /** When non-null, undoable ops coalesce here (one paint stroke = one undo). */
   private strokeOps: UndoOp[] | null = null;
@@ -421,10 +420,9 @@ export class SelectionModel {
     if (this.editingId !== null) return null;
     if (this.pendingSet.entryCount === 0) return null;
     const set = this.pendingSet;
-    const name = this.uniqueName(`selection_${++this.autoCounter}`);
     const sel: CommittedSelection = {
       id: this.nextId++,
-      name,
+      name: this.autoName(),
       set,
       hidden: false,
       lane: this.freeLane(),
@@ -436,7 +434,6 @@ export class SelectionModel {
         const i = this.committedList.indexOf(sel);
         if (i >= 0) this.committedList.splice(i, 1);
         if (this.editingId === sel.id) this.editingId = null;
-        if (sel.name === `selection_${this.autoCounter}`) this.autoCounter--;
         // Swap the ORIGINAL set back in as pending (LIFO undo has already
         // reverted anything done to the interim pending set), so earlier undo
         // ops — which captured this set object — still apply to it.
@@ -582,6 +579,15 @@ export class SelectionModel {
   private pushUndo(op: UndoOp): void {
     if (this.strokeOps) this.strokeOps.push(op);
     else this.undoStack.push(op);
+  }
+  /** Default name for a new commit: the numbering RESTARTS — the smallest
+   * `selection_N` not currently in use (deleting selection_1 frees the name
+   * for the next commit; counts stay relative to the list, never bleeding
+   * upward forever). */
+  private autoName(): string {
+    let n = 1;
+    while (this.committedList.some((c) => c.name === `selection_${n}`)) n++;
+    return `selection_${n}`;
   }
   private uniqueName(base: string): string {
     if (!this.committedList.some((c) => c.name === base)) return base;

@@ -98,7 +98,7 @@ const greenCount = (d: E2EDriver, b64: string) =>
       Math.round(app.width), Math.round(app.height) - 60).data;
     let n = 0;
     for (let i = 0; i < px.length; i += 4) {
-      if (px[i+1] > px[i] + 40 && px[i+1] > px[i+2] + 20) n++;
+      if (px[i+1] > px[i] + 25 && px[i+1] >= px[i+2]) n++;
     }
     return n;
   })()`);
@@ -135,7 +135,7 @@ async function S0(): Promise<void> {
     check("S0: commit button disabled while pending is empty",
       await d.evaluate<boolean>(`document.getElementById('commit-btn').disabled`));
 
-    // top section mirrors the hierarchy through the SAME tree component
+    // top section stores entries FLAT at their own level — no hierarchy
     const head = await selHead(d, "/solvent/");
     check("S0: top section shows the hidden selection (purple class)",
       head !== null && /hidden-sel/.test(head.cls), head?.cls ?? "missing");
@@ -144,27 +144,14 @@ async function S0(): Promise<void> {
       b.querySelector('.caret').click();
     })()`);
     await sleep(150);
-    const topRows = await d.evaluate<number>(
-      `document.querySelectorAll('#selections .tree-row.selectable').length`);
-    check("S0: expanding it renders shared tree rows in the top section", topRows > 0, `${topRows} rows`);
-    // drill to the huge subgroup list: category → group; must be virtualized
-    await d.evaluate(`(()=>{
-      const rows=[...document.querySelectorAll('#selections .tree-row.selectable')];
-      const cat=rows.find(r=>/solvent/.test(r.textContent)); cat?.querySelector('.caret')?.click();
-    })()`);
-    await sleep(120);
-    await d.evaluate(`(()=>{
-      const rows=[...document.querySelectorAll('#selections .tree-row.selectable')];
-      const grp=rows.find(r=>r.dataset.level==='group'); grp?.querySelector('.caret')?.click();
-    })()`);
-    await sleep(250);
-    const stats = await d.evaluate<{ rendered: number; total: number }>(`(()=>{
-      const v=document.querySelector('#selections .vlist');
-      if(!v) return {rendered:-1,total:-1};
-      return {rendered:v.children.length, total:Math.round(v.getBoundingClientRect().height/18)};
-    })()`);
-    check("S0: top-section subgroup list is virtualized (windowed, no truncation)",
-      stats.total > 800 && stats.rendered > 0 && stats.rendered < 300, JSON.stringify(stats));
+    const topRows = await d.evaluate<{ level: string; caret: string; label: string }[]>(`
+      [...document.querySelectorAll('#selections .tree-row.selectable')].map(r=>({
+        level: r.dataset.level, caret: r.querySelector('.caret').textContent,
+        label: r.querySelector('.tree-label').textContent }))`);
+    check("S0: members listed FLAT at their own level (one category entry)",
+      topRows.length === 1 && topRows[0].level === "category" && /solvent/.test(topRows[0].label),
+      JSON.stringify(topRows));
+    check("S0: member rows have no expansion", topRows[0]?.caret === "", JSON.stringify(topRows[0]));
     await d.screenshot(`${REPORT}/S0_startup.png`);
   });
 }
@@ -194,6 +181,7 @@ async function S1(): Promise<void> {
     // paint alpha→beta→gamma, then drag BACK to beta: gamma un-paints
     const beta = (await bottomRow(d, "/beta/"))!;
     const gamma = (await bottomRow(d, "/gamma/"))!;
+    const solvent = (await bottomRow(d, "/solvent/"))!;
     await d.mouse("mousePressed", alpha.x, alpha.y, { clickCount: 1 });
     await d.mouse("mouseMoved", beta.x, beta.y, { buttons: 1 });
     await d.mouse("mouseMoved", gamma.x, gamma.y, { buttons: 1 });
@@ -212,12 +200,26 @@ async function S1(): Promise<void> {
     check("S1: backtrack only un-paints what THIS stroke added",
       (await pendingEntries(d)) === 3, `entries=${await pendingEntries(d)}`);
 
-    // one Ctrl+Z per stroke
+    // REMOVE by painting: a drag STARTING on a selected row un-paints what it
+    // crosses — and a FAST drag (one jump straight to the last row) must not
+    // skip the rows in between (path interpolation).
+    await d.mouse("mousePressed", alpha.x, alpha.y, { clickCount: 1 });
+    await d.mouse("mouseMoved", solvent.x, solvent.y, { buttons: 1 }); // one fast jump
+    await d.mouse("mouseReleased", solvent.x, solvent.y, { clickCount: 1 });
+    await sleep(120);
+    check("S1: drag from a selected row REMOVES along the path (fast drag skips nothing)",
+      (await pendingEntries(d)) === 0, `entries=${await pendingEntries(d)}`);
+
+    // one Ctrl+Z per stroke (the remove-stroke restores all three at once)
+    await d.ctrlZ();
+    await sleep(100);
+    check("S1: the remove stroke undoes as one unit", (await pendingEntries(d)) === 3,
+      `entries=${await pendingEntries(d)}`);
     await d.ctrlZ();
     await sleep(100);
     await d.ctrlZ();
     await sleep(100);
-    check("S1: each paint stroke undoes as one unit", (await pendingEntries(d)) === 0,
+    check("S1: each add stroke undoes as one unit", (await pendingEntries(d)) === 0,
       `entries=${await pendingEntries(d)}`);
 
     // right-click = focus (camera moves, light pulse, NO selection change)
@@ -228,6 +230,15 @@ async function S1(): Promise<void> {
     check("S1: right-click never changes the selection", (await pendingEntries(d)) === 0);
     check("S1: focus plays a pulse over the region", (await flashCount(d)) > 0);
     await d.screenshot(`${REPORT}/S1_focus_flash.png`);
+
+    // right-DRAG = view a region: focuses the union of the dragged rows
+    const before2 = await camPos(d);
+    await d.drag(beta.x, beta.y, gamma.x, gamma.y, 4, { button: "right" });
+    await sleep(600);
+    check("S1: right-drag focuses the dragged region", camMoved(before2, await camPos(d)));
+    check("S1: region focus pulses BOTH rows' points", (await flashCount(d)) >= 800,
+      `flash=${await flashCount(d)}`);
+    check("S1: right-drag changes no selection", (await pendingEntries(d)) === 0);
   });
 }
 
@@ -350,6 +361,9 @@ async function S3(): Promise<void> {
     check("S3: probe point projects on-screen", proj.front, JSON.stringify(proj));
 
     // plain left-click = focus only (yellow pulse), never a selection
+    const dist = () =>
+      d.evaluate<number>(`${V}.camera.position.distanceTo(${V}.controls.target)`);
+    const d0 = await dist(); // home framing distance
     const scrollBefore = await scrollTop(d);
     const camBefore = await camPos(d);
     await d.click(proj.x, proj.y);
@@ -358,7 +372,26 @@ async function S3(): Promise<void> {
     check("S3: plain click selects nothing", (await pendingEntries(d)) === 0);
     check("S3: focus pulse covers the subgroup", (await flashCount(d)) > 1);
     check("S3: no auto-scroll of the panel from 3D actions", (await scrollTop(d)) === scrollBefore);
+    const d1 = await dist();
+    check("S3: focus zoomed in", d1 < d0 * 0.8, `${d1.toFixed(1)} vs home ${d0.toFixed(1)}`);
     await d.screenshot(`${REPORT}/S3_click_focus.png`);
+
+    // plain click on EMPTY space zooms back out to the whole scene
+    const empty = await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const r=document.getElementById('app').getBoundingClientRect();
+      const spots=[[r.left+20,r.bottom-20],[r.left+20,r.top+80],[r.right-20,r.bottom-20]];
+      for (const [x,y] of spots) if (${V}.debug.pick(x,y) < 0) return {x,y};
+      return null;
+    })()`);
+    check("S3: found an empty pixel to click", empty !== null);
+    if (empty) {
+      await d.click(empty.x, empty.y);
+      await sleep(700);
+      const d2 = await dist();
+      check("S3: empty click zooms back out (whole-scene framing)",
+        d2 > d0 * 0.85, `${d2.toFixed(1)} vs home ${d0.toFixed(1)}`);
+      check("S3: empty click selects nothing", (await pendingEntries(d)) === 0);
+    }
 
     // Ctrl+left-click = subgroup-level select into the pending target
     const proj2 = await d.evaluate<{ x: number; y: number }>(`${V}.debug.projectPoint(${pIdx})`);
@@ -551,6 +584,83 @@ async function S5(): Promise<void> {
         `${V}.model.committed()[1].lane`)) === br.lane);
     }
     await d.screenshot(`${REPORT}/S5_brackets.png`);
+
+    // a bracket shows only once the view is EXPANDED to its entries' level:
+    // a subgroup-level pending selection has no bracket while collapsed
+    await d.evaluate(`${V}.resetCamera()`);
+    await sleep(700);
+    const pIdx = await d.evaluate<number>(`${V}.hierarchy.pointsOf({level:'category',id:0})[0]`);
+    const proj = await d.evaluate<{ x: number; y: number }>(`${V}.debug.projectPoint(${pIdx})`);
+    await d.click(proj.x, proj.y, 1, 2 /* Ctrl: subgroup-level select */);
+    await sleep(200);
+    check("S5: subgroup entry selected via 3D",
+      (await d.evaluate<string>(`${V}.model.pending.listEntries()[0]?.level ?? ''`)) === "subgroup");
+    const collapsed = await d.evaluate<boolean>(`!!document.querySelector('.bracket.pending')`);
+    check("S5: NO bracket while the tree is collapsed above the entry level", !collapsed);
+    await expandBottomCategory(d, "/alpha/");
+    await sleep(150);
+    const midLevel = await d.evaluate<boolean>(`!!document.querySelector('.bracket.pending')`);
+    check("S5: still no bracket at group level (subgroups not yet visible)", !midLevel);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const grp=rows.find(r=>r.dataset.level==='group');
+      grp?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(300);
+    const expanded = await d.evaluate<boolean>(`!!document.querySelector('.bracket.pending')`);
+    check("S5: bracket appears once expanded down to the subgroup level", expanded);
+    await d.screenshot(`${REPORT}/S5_bracket_on_expand.png`);
+  });
+}
+
+// ============================ S7: sticky ancestors ============================
+async function S7(): Promise<void> {
+  console.log("S7 — ancestor rows pin while scrolling (collapse always reachable)");
+  await withDriver(async (d) => {
+    // expand the bulk category → its group → the 1,600-subgroup list
+    await expandBottomCategory(d, "/solvent/");
+    await sleep(150);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const grp=rows.find(r=>r.dataset.level==='group');
+      grp?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(300);
+    await d.evaluate(`document.getElementById('sidebar-content').scrollTop = 900`);
+    await sleep(300);
+    const pin = await d.evaluate<{ scroll: number; catTop: number; grpTop: number } | null>(`(()=>{
+      const sc=document.getElementById('sidebar-content');
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const cat=rows.find(r=>r.dataset.level==='category' && /solvent/.test(r.textContent));
+      const grp=rows.find(r=>r.dataset.level==='group');
+      if(!cat||!grp) return null;
+      const scTop=sc.getBoundingClientRect().top;
+      return { scroll: sc.scrollTop,
+        catTop: cat.getBoundingClientRect().top - scTop,
+        grpTop: grp.getBoundingClientRect().top - scTop };
+    })()`);
+    check("S7: scrolled deep into the expanded subtree", pin !== null && pin.scroll > 700,
+      JSON.stringify(pin));
+    check("S7: category row stays pinned at the top", pin !== null && pin.catTop >= -1 && pin.catTop < 14,
+      `catTop=${pin?.catTop}`);
+    check("S7: group row pinned right below it", pin !== null && pin.grpTop >= 14 && pin.grpTop < 34,
+      `grpTop=${pin?.grpTop}`);
+    await d.screenshot(`${REPORT}/S7_sticky_scrolled.png`);
+    // the pinned caret still collapses the whole category
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const cat=rows.find(r=>r.dataset.level==='category' && /solvent/.test(r.textContent));
+      cat.querySelector('.caret').click();
+    })()`);
+    await sleep(200);
+    const rowsAfter = await d.evaluate<number>(`
+      [...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0).length`);
+    check("S7: pinned caret collapses the subtree", rowsAfter <= 6, `${rowsAfter} rows visible`);
   });
 }
 
@@ -579,7 +689,7 @@ async function S6(): Promise<void> {
 
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

@@ -1,14 +1,15 @@
 /**
  * Top section — the committed selections (the "operate" surface).
  *
- * Lists every `CommittedSelection` as a named block whose body is the SAME
- * tree component the bottom section uses (see tree.ts), induced to the
- * selection's members — full expandability, same names, same row styling.
+ * Lists every `CommittedSelection` as a named block whose body is a FLAT list
+ * of its member entries AT THEIR OWN LEVEL (a selection made of subgroups
+ * shows exactly those subgroup rows — no ancestor hierarchy, no expansion),
+ * rendered through the same row substrate as the bottom tree (tree.ts).
  *
  * Gestures (operate, never build):
  *   - left-click a row / the name  → focus the camera on it (yellow pulse)
  *   - left-hold                    → frame the whole selection
- *   - left-drag over rows          → frame the dragged range (back = shrink)
+ *   - left-drag over rows          → frame the dragged range
  *   - right-click anywhere in a block → toggle HIDDEN (purple label,
  *     points invisible); camera does not move
  *   - Edit  → the selection becomes the current TARGET (edit mode); member
@@ -19,9 +20,8 @@
  * Pure view: renders and dispatches intent through `CommittedActions`; all
  * state lives in SelectionModel and all render-buffer flips happen in main.ts.
  */
-import type { TreeModel } from "./classification.ts";
 import type { CommittedSelection, Entry, Hierarchy, SelectionModel } from "./sets.ts";
-import { induceTree, mountTree, type TreeHandle } from "./tree.ts";
+import { mountEntryList, type EntryListHandle } from "./tree.ts";
 
 export interface CommittedActions {
   focusEntry(e: Entry): void;
@@ -44,11 +44,10 @@ export function mountCommitted(
   container: HTMLElement,
   model: SelectionModel,
   hierarchy: Hierarchy,
-  fullTree: TreeModel,
   actions: CommittedActions,
 ): CommittedHandle {
   const openState = new Map<number, boolean>();
-  const mounted: TreeHandle[] = [];
+  const mounted: EntryListHandle[] = [];
   let lastSig = "";
 
   const signature = (): string => {
@@ -137,11 +136,11 @@ export function mountCommitted(
     const buildBody = (): void => {
       if (built) return;
       built = true;
-      const induced = induceTree(fullTree, hierarchy, sel.set);
-      const tree = mountTree(
+      // flat member list: exactly the stored entries, at their own level
+      const list = mountEntryList(
         body,
-        induced.model,
         hierarchy,
+        sel.set.listEntries(),
         {
           primaryClick: (e) => actions.focusEntry(e),
           primaryHold: () => actions.focusPoints(sel.set.resolvedPoints()),
@@ -151,13 +150,13 @@ export function mountCommitted(
             actions.focusPoints(pts);
           },
           secondaryClick: () => actions.toggleHidden(sel.id),
+          secondaryTrailEnd: () => actions.toggleHidden(sel.id),
         },
         {
-          pointsOfSubgroup: induced.pointsOfSubgroup,
           flashOnSecondary: false,
           decorate: (e, row) => {
             row.querySelector(".entry-remove")?.remove();
-            if (editingThis && sel.set.has(e)) {
+            if (editingThis) {
               const rm = document.createElement("span");
               rm.className = "entry-remove row-ctl";
               rm.textContent = "✕";
@@ -172,7 +171,7 @@ export function mountCommitted(
           },
         },
       );
-      mounted.push(tree);
+      mounted.push(list);
     };
     if (openState.get(sel.id)) buildBody();
 

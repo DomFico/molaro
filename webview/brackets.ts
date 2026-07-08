@@ -1,11 +1,13 @@
 /**
  * Bracket overlay for the bottom tree — the in-tree face of selections.
  *
- * A bracket is a vertical span in the tree's left gutter covering the rows a
- * selection touches (its entries, their visible descendants, and the ancestor
- * rows on the path to them — so a collapsed tree still shows where a selection
- * lives). One GREEN bracket tracks the pending target; each committed
- * selection gets a NEUTRAL bracket (PURPLE while hidden) carrying its name.
+ * A bracket is a vertical span in the tree's left gutter covering the visible
+ * rows AT OR BELOW a selection's entries (an entry row or its descendants).
+ * Ancestor rows do NOT carry a bracket: if the tree is collapsed above the
+ * level the entries live at, the bracket simply isn't shown — it appears once
+ * the view is expanded down to that level. One GREEN bracket tracks the
+ * pending target; each committed selection gets a NEUTRAL bracket (PURPLE
+ * while hidden) carrying its name.
  *
  * Brackets live INSIDE the tree host, positioned against its content, so they
  * scroll with the rows rather than floating over the viewport. A committed
@@ -14,7 +16,7 @@
  * `SelectionModel.setLane`). Layout is recomputed rAF-debounced on model
  * change, scroll, resize, and tree expand/collapse.
  */
-import { entryKey, type Entry, type SelectionModel } from "./sets.ts";
+import type { Entry, NodeSet, SelectionModel } from "./sets.ts";
 import type { TreeHandle } from "./tree.ts";
 
 export const BRACKET_GUTTER_PX = 36;
@@ -42,13 +44,15 @@ export function mountBrackets(
     bottom: number;
   }
 
-  /** Rows the given key-set/cover-predicate touches, in layer coordinates. */
-  const spanFor = (covers: (e: Entry) => boolean, touch: Set<string>): Span | null => {
+  /** Span of the visible rows covered by `set` (entry rows or descendants —
+   * never ancestors), in layer coordinates. Null while none are expanded
+   * into view. */
+  const spanFor = (set: NodeSet): Span | null => {
     const layerTop = layer.getBoundingClientRect().top;
     let top = Infinity;
     let bottom = -Infinity;
-    tree.forEachVisibleRow((e, el) => {
-      if (!covers(e) && !touch.has(entryKey(e))) return;
+    tree.forEachVisibleRow((e: Entry, el) => {
+      if (!model.coversEntry(set, e)) return;
       const r = el.getBoundingClientRect();
       if (r.top - layerTop < top) top = r.top - layerTop;
       if (r.bottom - layerTop > bottom) bottom = r.bottom - layerTop;
@@ -107,8 +111,7 @@ export function mountBrackets(
     // committed brackets (neutral; purple when hidden)
     for (const sel of model.committed()) {
       if (sel.set.entryCount === 0) continue;
-      const touch = model.touchKeys(sel.set);
-      const span = spanFor((e) => model.coversEntry(sel.set, e), touch);
+      const span = spanFor(sel.set);
       if (!span) continue;
       const cls = sel.hidden ? "committed hidden" : "committed";
       layer.appendChild(
@@ -118,12 +121,16 @@ export function mountBrackets(
       );
     }
 
-    // pending bracket (green, innermost lane, unnamed, not draggable)
+    // pending bracket (green, innermost lane, unnamed, not draggable);
+    // its pulse is phase-locked to the global clock (unison with the rows)
     const target = model.target;
     if (target.entryCount > 0) {
-      const touch = model.touchKeys(target);
-      const span = spanFor((e) => model.targetCoversEntry(e), touch);
-      if (span) layer.appendChild(bracketEl(PENDING_X, span, "pending", null, null));
+      const span = spanFor(target);
+      if (span) {
+        const b = bracketEl(PENDING_X, span, "pending", null, null);
+        b.style.animationDelay = `-${performance.now() % 1600}ms`;
+        layer.appendChild(b);
+      }
     }
   };
 

@@ -225,6 +225,19 @@ test("undo after commit-undo reuses the auto-name (no counter bleed)", () => {
   assert.equal(again.name, "selection_1", "auto counter rewinds with undo");
 });
 
+test("auto-numbering restarts: freed names are reused (relative to the list)", () => {
+  const m = model();
+  m.addToTarget(pt(0));
+  const a = m.commit()!; // selection_1
+  m.addToTarget(pt(1));
+  m.commit(); // selection_2
+  m.deleteSelection(a.id);
+  m.addToTarget(pt(2));
+  assert.equal(m.commit()!.name, "selection_1", "freed number reused");
+  m.addToTarget(pt(3));
+  assert.equal(m.commit()!.name, "selection_3", "then the next free number");
+});
+
 test("a paint stroke undoes as one unit", () => {
   const m = model();
   m.beginStroke();

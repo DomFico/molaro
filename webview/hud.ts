@@ -59,13 +59,12 @@ export const HUD_CSS = /* css */ `
   /* commit button — the single "Create selection" / "Done" control (viewer corner) */
   #commit-btn { position: absolute; top: 10px; right: 10px; z-index: 15;
     padding: 5px 12px; font: inherit; font-weight: bold; letter-spacing: 0.2px;
-    color: #06251d; background: #33ffcc; border: 1px solid #1fae8c; border-radius: 4px;
-    cursor: pointer; box-shadow: 0 0 12px rgba(51,255,204,0.25); }
-  #commit-btn:hover:not(:disabled) { background: #5cffd9; }
+    color: #0b3529; background: #9fe8cd; border: 1px solid #5cb99a; border-radius: 4px;
+    cursor: pointer; }
+  #commit-btn:hover:not(:disabled) { background: #b8f2dd; }
   #commit-btn:disabled { background: #2e3a37; color: #71817c; border-color: #47524e;
-    box-shadow: none; cursor: default; }
-  #commit-btn.editing { background: #ffd54a; border-color: #c0992a; color: #3a2f10;
-    box-shadow: 0 0 12px rgba(255,213,74,0.25); }
+    cursor: default; }
+  #commit-btn.editing { background: #f2dc9b; border-color: #bfa35c; color: #3a2f10; }
 
   /* collapsed: hide the panel + divider; a reopen tab sits at the last dock edge */
   #root.panel-collapsed #sidebar, #root.panel-collapsed #divider { display: none; }
@@ -102,7 +101,7 @@ export const HUD_CSS = /* css */ `
   .sel-empty { color: #6a6a6a; padding: 0 4px 6px; font-style: italic; }
   .sel-block { margin: 2px 0 5px; border-left: 2px solid #5a5a5a; padding-left: 3px; }
   .sel-block.hidden-sel { border-left-color: #b98be0; }
-  .sel-block.editing { border-left-color: #33ffcc; background: rgba(51,255,204,0.05); }
+  .sel-block.editing { border-left-color: #9fe8cd; background: rgba(159,232,205,0.06); }
   .sel-head { display: flex; align-items: center; gap: 6px; padding: 1px 4px; }
   .sel-name { flex: 1 1 auto; min-width: 0; cursor: pointer;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -114,7 +113,7 @@ export const HUD_CSS = /* css */ `
   .sel-body { max-height: 38vh; overflow-y: auto; }
   .hidden-sel .sel-body { opacity: 0.72; }
   .rename-input { flex: 1 1 auto; min-width: 0; font: inherit; background: #1e1e1e;
-    color: #eee; border: 1px solid #33ffcc; border-radius: 2px; padding: 0 3px; }
+    color: #eee; border: 1px solid #9fe8cd; border-radius: 2px; padding: 0 3px; }
   .rename-input.rename-bad { border-color: #ff6060; }
   .entry-remove { flex: none; cursor: pointer; color: #888; padding: 0 4px; }
   .entry-remove:hover { color: #fff; }
@@ -125,22 +124,27 @@ export const HUD_CSS = /* css */ `
   .vlist { position: relative; }
   .tree-row { display: flex; align-items: center; gap: 4px; height: 18px; padding: 0 4px;
     border-radius: 3px; white-space: nowrap; }
+  /* ancestor rows pin to the top while scrolling an expanded subtree, so a
+     collapse caret is always reachable (category tier, then group tier) */
+  .cat-block > .tree-row { position: sticky; top: 0; z-index: 4; background: #252526; }
+  .cat-block > div > .tree-row { position: sticky; top: 18px; z-index: 3; background: #252526; }
   .tree-row.selectable { cursor: pointer; }
   .tree-row.selectable:hover { background: #2f3a42; }
-  /* pending target: covered rows pulse green; partial (path-to-entry) rows get
-     a green edge tick */
-  .tree-row.sel-covered { color: #7fffe6; animation: rowPulse 1.6s ease-in-out infinite; }
+  /* pending target: covered rows pulse — in UNISON — to a light green (the
+     phase is locked to the global clock via an inline animation-delay);
+     partial (path-to-entry) rows get a subtle edge tick */
+  .tree-row.sel-covered { animation: rowPulse 1.6s ease-in-out infinite; }
   @keyframes rowPulse {
-    0%, 100% { background-color: rgba(20, 92, 74, 0.55); }
-    50%      { background-color: rgba(35, 158, 126, 0.75); }
+    0%, 100% { background-color: rgba(191, 255, 228, 0.09); }
+    50%      { background-color: rgba(191, 255, 228, 0.30); }
   }
-  .tree-row.sel-partial { box-shadow: inset 2px 0 0 rgba(51, 255, 204, 0.55); }
-  /* focus feedback: one soft yellow swell */
+  .tree-row.sel-partial { box-shadow: inset 2px 0 0 rgba(191, 255, 228, 0.45); }
+  /* focus feedback: one soft light-yellow swell */
   .tree-row.row-flash { animation: rowFlash 900ms ease-out 1; }
   @keyframes rowFlash {
-    0%   { background-color: rgba(255, 213, 74, 0); }
-    22%  { background-color: rgba(255, 213, 74, 0.5); }
-    100% { background-color: rgba(255, 213, 74, 0); }
+    0%   { background-color: rgba(255, 233, 168, 0); }
+    22%  { background-color: rgba(255, 233, 168, 0.35); }
+    100% { background-color: rgba(255, 233, 168, 0); }
   }
   .caret { width: 10px; display: inline-block; color: #888; cursor: pointer; }
   .tree-label { overflow: hidden; text-overflow: ellipsis; }
@@ -153,9 +157,9 @@ export const HUD_CSS = /* css */ `
   .bracket:active { cursor: grabbing; }
   .bracket.dragging { opacity: 0.7; }
   .bracket.hidden { border-color: #b98be0; }
-  .bracket.pending { border-color: #33ffcc; pointer-events: none;
-    box-shadow: -1px 0 6px rgba(51,255,204,0.35); animation: bracketPulse 1.6s ease-in-out infinite; }
-  @keyframes bracketPulse { 0%, 100% { opacity: 0.95; } 50% { opacity: 0.5; } }
+  .bracket.pending { border-color: #9fe8cd; pointer-events: none;
+    animation: bracketPulse 1.6s ease-in-out infinite; }
+  @keyframes bracketPulse { 0%, 100% { opacity: 0.9; } 50% { opacity: 0.45; } }
   /* the name may run past a short bracket (down the gutter) so it stays
      readable and grabbable even for a single-row span */
   .bracket-name { position: absolute; left: -1px; top: 1px; max-height: 96px;
@@ -194,7 +198,7 @@ export const HUD_BODY = /* html */ `
         </div>
         <div id="sidebar-content">
           <div id="selections"></div>
-          <div id="tree-hint">left-click: build selection · drag: paint · right-click: focus<br>3D: Ctrl+left-click = subgroups · Ctrl+right-click = points</div>
+          <div id="tree-hint">left-click/drag: build (drag from a selected row removes) · right-click/drag: focus a region<br>3D: Ctrl+left = subgroups · Ctrl+right = points · click empty space: zoom out</div>
           <div id="tree-host"></div>
         </div>
       </div>
