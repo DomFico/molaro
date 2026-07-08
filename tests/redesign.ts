@@ -356,11 +356,24 @@ async function S2(): Promise<void> {
     check("S2: editing redirects the target", (await editingName(d)) === "selection_1");
     check("S2: commit button reads Done", (await btnText(d)) === "Done");
     check("S2: edited selection's footprint shows green", (await selCount(d)) > 0);
+    // while editing, the member list has a FIXED height so adds/removes never
+    // shift the tree below (no more mid-drag row jumping)
+    const editBody = await d.evaluate<{ h: number; of: string }>(`(()=>{
+      const b=document.querySelector('.sel-block.editing .sel-body');
+      const s=getComputedStyle(b);
+      return {h: b.getBoundingClientRect().height, of: s.overflowY};
+    })()`);
+    check("S2: editing member list is fixed-height and scrollable",
+      Math.abs(editBody.h - 160) < 2 && editBody.of === "auto", JSON.stringify(editBody));
     const beta = (await bottomRow(d, "/beta/"))!;
+    const gammaYBefore = (await bottomRow(d, "/gamma/"))!.y;
     await d.click(beta.x, beta.y);
-    await sleep(120);
+    await sleep(150);
     check("S2: bottom clicks now add to the edited selection",
       (await committed(d))[1].entries === 2);
+    const gammaYAfter = (await bottomRow(d, "/gamma/"))!.y;
+    check("S2: adding a member does NOT shift the tree rows below",
+      gammaYAfter === gammaYBefore, `y ${gammaYBefore}→${gammaYAfter}`);
     // camera is PARKED while editing: focus actions pulse but never move it
     const camEdit = await camPos(d);
     const memberEdit = (await topRow(d, "/beta/"))!;

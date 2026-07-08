@@ -117,6 +117,9 @@ export const HUD_CSS = /* css */ `
     border: 1px solid #555; border-radius: 3px; cursor: pointer; padding: 0 5px; line-height: 15px; }
   .sel-ctl:hover { background: #4a4a4a; }
   .sel-body { max-height: 38vh; overflow-y: auto; }
+  /* while EDITING, the member list keeps a FIXED height so adds/removes never
+     shift the tree below it mid-gesture (the list scrolls instead) */
+  .sel-block.editing .sel-body { height: 160px; max-height: 160px; overflow-y: auto; }
   .hidden-sel .sel-body { opacity: 0.72; }
   .rename-input { flex: 1 1 auto; min-width: 0; font: inherit; background: #1e1e1e;
     color: #eee; border: 1px solid #9fe8cd; border-radius: 2px; padding: 0 3px; }

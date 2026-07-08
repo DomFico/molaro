@@ -55,6 +55,7 @@ export function mountCommitted(
   interface BlockRefs {
     block: HTMLElement;
     count: HTMLElement;
+    body: HTMLElement;
     list: EntryListHandle | null;
   }
   const blockRefs = new Map<number, BlockRefs>();
@@ -92,6 +93,11 @@ export function mountCommitted(
     }
     lastSig = sig;
 
+    // keep each open member list's scroll position across the rebuild (adds
+    // during edit mode would otherwise reset it every click)
+    const scrolls = new Map<number, number>();
+    for (const [id, refs] of blockRefs) scrolls.set(id, refs.body.scrollTop);
+
     for (const t of mounted) t.dispose();
     mounted.length = 0;
     blockRefs.clear();
@@ -115,6 +121,10 @@ export function mountCommitted(
     }
 
     for (const sel of list) container.appendChild(block(sel));
+    for (const [id, refs] of blockRefs) {
+      const st = scrolls.get(id);
+      if (st) refs.body.scrollTop = st;
+    }
   };
 
   const block = (sel: CommittedSelection): HTMLElement => {
@@ -166,7 +176,7 @@ export function mountCommitted(
     body.style.display = openState.get(sel.id) ? "" : "none";
     el.appendChild(body);
 
-    const refs: BlockRefs = { block: el, count, list: null };
+    const refs: BlockRefs = { block: el, count, body, list: null };
     blockRefs.set(sel.id, refs);
 
     let built = false;
