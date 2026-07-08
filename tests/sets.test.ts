@@ -83,6 +83,30 @@ test("coversEntry / touchKeys give row semantics (ancestor-covered + path-partia
   assert.ok(!keys.has(entryKey(cat(0))));
 });
 
+test("carving: unselecting a covered descendant splits the coarse entry", () => {
+  const m = model();
+  m.addToTarget(cat(0)); // {0,1,2} via one category entry
+  // clicking a covered subgroup toggles it OFF by carving a hole
+  const pts = m.toggleInTarget(sub(1)); // sub1 = {2}
+  assert.ok(!m.targetCoversEntry(sub(1)), "clicked node no longer covered");
+  assert.ok(m.targetCoversEntry(sub(0)), "siblings stay selected");
+  assert.deepEqual(m.pending.resolvedPoints(), [0, 1]);
+  assert.ok(pts.includes(2), "affected points include the carved hole");
+  // one undo restores the original coarse entry exactly
+  m.undo();
+  assert.ok(m.pending.has(cat(0)) && !m.pending.has(sub(0)));
+  assert.deepEqual(m.pending.resolvedPoints(), [0, 1, 2]);
+});
+
+test("carving a point out of a subgroup entry keeps the sibling points", () => {
+  const m = model();
+  m.addToTarget(sub(2)); // {3,4,5}
+  m.toggleInTarget(pt(4));
+  assert.deepEqual(m.pending.resolvedPoints().sort(), [3, 5]);
+  m.undo();
+  assert.deepEqual(m.pending.resolvedPoints().sort(), [3, 4, 5]);
+});
+
 // -- commit ---------------------------------------------------------------------
 
 test("commit names uniquely, clears pending, returns the committed selection", () => {
@@ -184,17 +208,13 @@ test("seed creates a VISIBLE pre-made selection outside the undo stack", () => {
   assert.ok(m.isPointHidden(0));
 });
 
-test("lanes: commit picks a free lane; setLane clamps and is undoable", () => {
+test("lanes: each commit auto-picks a free bracket lane", () => {
   const m = model();
   m.addToTarget(pt(0));
   const a = m.commit()!;
   m.addToTarget(pt(1));
   const b = m.commit()!;
   assert.notEqual(a.lane, b.lane);
-  m.setLane(a.id, 99);
-  assert.equal(a.lane, 3, "clamped to max lane");
-  m.undo();
-  assert.equal(a.lane, 0);
 });
 
 // -- undo -------------------------------------------------------------------------

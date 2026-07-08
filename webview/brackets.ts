@@ -7,21 +7,20 @@
  * level the entries live at, the bracket simply isn't shown — it appears once
  * the view is expanded down to that level. One GREEN bracket tracks the
  * pending target; each committed selection gets a NEUTRAL bracket (PURPLE
- * while hidden) carrying its name.
+ * while hidden), auto-assigned a free lane so overlapping selections don't
+ * collide (brackets are not interactive — the name shows on hover).
  *
  * Brackets live INSIDE the tree host, positioned against its content, so they
- * scroll with the rows rather than floating over the viewport. A committed
- * bracket is MOVABLE: drag its name sideways to a different lane so
- * overlapping selections don't collide (persisted + undoable via
- * `SelectionModel.setLane`). Layout is recomputed rAF-debounced on model
- * change, scroll, resize, and tree expand/collapse.
+ * scroll with the rows rather than floating over the viewport. Layout is
+ * recomputed rAF-debounced on model change, scroll, resize, and tree
+ * expand/collapse.
  */
 import type { Entry, NodeSet, SelectionModel } from "./sets.ts";
 import type { TreeHandle } from "./tree.ts";
 
-export const BRACKET_GUTTER_PX = 36;
-const LANE_W = 7;
-const LANE_X0 = 3;
+export const BRACKET_GUTTER_PX = 30;
+const LANE_W = 5;
+const LANE_X0 = 2;
 const PENDING_X = LANE_X0 + 4 * LANE_W + 2; // pending lane sits nearest the rows
 
 export interface BracketsHandle {
@@ -67,43 +66,15 @@ export function mountBrackets(
     return spans;
   };
 
-  const bracketEl = (
-    x: number,
-    span: Span,
-    cls: string,
-    name: string | null,
-    onDragLane: ((laneDx: number) => void) | null,
-  ): HTMLElement => {
+  const bracketEl = (x: number, span: Span, cls: string, name: string | null): HTMLElement => {
     const b = document.createElement("div");
     b.className = `bracket ${cls}`;
     b.style.left = `${x}px`;
     b.style.top = `${span.top}px`;
     b.style.height = `${Math.max(span.bottom - span.top, 6)}px`;
     // the NAME is not rendered in the tree (it lives in the top section);
-    // it stays discoverable on hover, and the whole bracket is the drag handle
-    if (name !== null) b.title = `${name} — drag sideways to move this bracket`;
-    if (onDragLane) {
-      b.addEventListener("pointerdown", (e) => {
-        if (e.button !== 0) return;
-        e.preventDefault();
-        e.stopPropagation();
-        b.setPointerCapture(e.pointerId);
-        const startX = e.clientX;
-        b.classList.add("dragging");
-        const move = (ev: PointerEvent): void => {
-          b.style.transform = `translateX(${ev.clientX - startX}px)`;
-        };
-        const up = (ev: PointerEvent): void => {
-          b.removeEventListener("pointermove", move);
-          b.removeEventListener("pointerup", up);
-          b.classList.remove("dragging");
-          b.style.transform = "";
-          onDragLane(Math.round((ev.clientX - startX) / LANE_W));
-        };
-        b.addEventListener("pointermove", move);
-        b.addEventListener("pointerup", up);
-      });
-    }
+    // it stays discoverable on hover
+    if (name !== null) b.title = name;
     return b;
   };
 
@@ -116,25 +87,21 @@ export function mountBrackets(
     layer.style.height = `${host.scrollHeight}px`;
 
     // committed brackets (neutral; purple when hidden) — one bracket PER
-    // CONTIGUOUS covered run; the name rides the first segment
+    // CONTIGUOUS covered run
     for (const sel of model.committed()) {
       if (sel.set.entryCount === 0) continue;
       const cls = sel.hidden ? "committed hidden" : "committed";
-      spansFor(sel.set).forEach((span, i) => {
-        layer.appendChild(
-          bracketEl(LANE_X0 + sel.lane * LANE_W, span, cls, i === 0 ? sel.name : null, (laneDx) => {
-            if (laneDx !== 0) model.setLane(sel.id, sel.lane + laneDx);
-          }),
-        );
-      });
+      for (const span of spansFor(sel.set)) {
+        layer.appendChild(bracketEl(LANE_X0 + sel.lane * LANE_W, span, cls, sel.name));
+      }
     }
 
-    // pending brackets (green, innermost lane, unnamed, not draggable);
+    // pending brackets (green, innermost lane, unnamed);
     // pulse phase-locked to the global clock (unison with the rows)
     const target = model.target;
     if (target.entryCount > 0) {
       for (const span of spansFor(target)) {
-        const b = bracketEl(PENDING_X, span, "pending", null, null);
+        const b = bracketEl(PENDING_X, span, "pending", null);
         b.style.animationDelay = `-${performance.now() % 1600}ms`;
         layer.appendChild(b);
       }

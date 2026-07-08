@@ -227,6 +227,52 @@ async function S1(): Promise<void> {
     check("S1: each add stroke undoes as one unit", (await pendingEntries(d)) === 0,
       `entries=${await pendingEntries(d)}`);
 
+    // CARVE: select coarse (alpha), drill deeper, unselect a covered subgroup
+    // — the green and the bracket must visibly break around the hole
+    await d.click(alpha.x, alpha.y); // pending = category alpha (400 pts)
+    await sleep(100);
+    await expandBottomCategory(d, "/alpha/");
+    await sleep(120);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const grp=rows.find(r=>r.dataset.level==='group');
+      grp?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(250);
+    const covSub = await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const el=rows.find(r=>r.dataset.level==='subgroup' && r.classList.contains('sel-covered'));
+      if(!el) return null; const r=el.getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2};
+    })()`);
+    check("S1: drilled to a covered subgroup row", covSub !== null);
+    await d.click(covSub!.x, covSub!.y); // unselect INSIDE the coarse selection
+    await sleep(200);
+    check("S1: carving removes exactly the clicked subgroup's points",
+      (await selCount(d)) === 300, `selCount=${await selCount(d)}`);
+    const hole = await d.evaluate<{ covered: boolean; bracketOverlaps: boolean }>(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const el=rows.find(r=>Math.abs(r.getBoundingClientRect().top+9-(${covSub!.y}))<3);
+      const cy=${covSub!.y};
+      const bracketOverlaps=[...document.querySelectorAll('.bracket.pending')]
+        .some(b=>{const br=b.getBoundingClientRect(); return br.top<cy && br.bottom>cy;});
+      return {covered: el ? el.classList.contains('sel-covered') : true, bracketOverlaps};
+    })()`);
+    check("S1: the carved row loses its green highlight", !hole.covered);
+    check("S1: the bracket breaks around the carved hole", !hole.bracketOverlaps);
+    await d.screenshot(`${REPORT}/S1_carved_hole.png`);
+    await d.ctrlZ(); // one undo restores the coarse entry exactly
+    await sleep(150);
+    check("S1: carve undoes as one unit", (await selCount(d)) === 400 &&
+      (await pendingEntries(d)) === 1, `selCount=${await selCount(d)}`);
+    await d.escape();
+    await sleep(100);
+    await expandBottomCategory(d, "/alpha/"); // collapse back for stable row rects
+    await sleep(150);
+
     // right-click = focus (camera moves, light pulse, NO selection change)
     const before = await camPos(d);
     await d.rightClick(gamma.x, gamma.y);
@@ -480,9 +526,20 @@ async function S3(): Promise<void> {
     const subPts = await selCount(d);
     check("S3: whole subgroup turns green", subPts > 1, `selCount=${subPts}`);
 
-    // Ctrl+right-click = POINT-level select (a distinct entry in the SAME
-    // pending set, even though its subgroup entry already covers the point)
-    await d.rightClick(proj2.x, proj2.y, 2 /* Ctrl */);
+    // Ctrl+right-click = POINT-level select into the SAME pending set — on an
+    // UNCOVERED point (a covered one would correctly carve instead); the probe
+    // verifies the pick lands exactly on the intended point
+    const q = await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const pts=${V}.hierarchy.pointsOf({level:'category',id:1});
+      for (const p of pts) {
+        const pr=${V}.debug.projectPoint(p);
+        if (!pr.front) continue;
+        if (${V}.debug.pick(pr.x, pr.y) === p) return {x:pr.x, y:pr.y};
+      }
+      return null;
+    })()`);
+    check("S3: found a pickable uncovered point", q !== null);
+    await d.rightClick(q!.x, q!.y, 2 /* Ctrl */);
     await sleep(150);
     entries = await d.evaluate<{ level: string; id: number }[]>(`${V}.model.pending.listEntries()`);
     check("S3: Ctrl+right adds a POINT-level entry to the SAME pending set",
@@ -648,23 +705,15 @@ async function S5(): Promise<void> {
     })()`);
     await d.click(btn.x, btn.y);
     await sleep(200);
-    const br = await d.evaluate<{ x: number; y: number; lane: number } | null>(`(()=>{
-      const b=[...document.querySelectorAll('.bracket')].find(x=>/selection_1/.test(x.title));
-      if(!b) return null; const r=b.getBoundingClientRect();
-      return {x:r.left+3, y:r.top+r.height/2, lane:${V}.model.committed()[1].lane};
+    const brackets = await d.evaluate<{ titles: string; lanes: number[] }>(`(()=>{
+      const bs=[...document.querySelectorAll('.bracket')];
+      return { titles: bs.map(b=>b.title).join(','),
+               lanes: ${V}.model.committed().map(c=>c.lane) };
     })()`);
-    check("S5: committed bracket rendered in the gutter", br !== null);
-    if (br) {
-      await d.drag(br.x, br.y, br.x + 14, br.y, 5);
-      await sleep(200);
-      const lane = await d.evaluate<number>(`${V}.model.committed()[1].lane`);
-      check("S5: dragging the bracket moves its lane (undoable)", lane === br.lane + 2,
-        `lane ${br.lane}→${lane}`);
-      await d.ctrlZ();
-      await sleep(120);
-      check("S5: bracket move undoes", (await d.evaluate<number>(
-        `${V}.model.committed()[1].lane`)) === br.lane);
-    }
+    check("S5: committed bracket rendered in the gutter (name on hover)",
+      /selection_1/.test(brackets.titles), brackets.titles);
+    check("S5: overlapping selections auto-take distinct lanes",
+      new Set(brackets.lanes).size === brackets.lanes.length, JSON.stringify(brackets.lanes));
     await d.screenshot(`${REPORT}/S5_brackets.png`);
 
     // a bracket shows only once the view is EXPANDED to its entries' level:
@@ -838,11 +887,13 @@ async function S8(): Promise<void> {
     await sleep(150);
     check("S8: member right-click hides only that member",
       (await visibleCount(d)) === visAll - 400, `${visAll}→${await visibleCount(d)}`);
-    const purple = await d.evaluate<boolean>(`(()=>{
+    const purple = await d.evaluate<{ state: boolean; sweep: boolean }>(`(()=>{
       const rows=[...document.querySelectorAll('#selections .tree-row.selectable')];
-      return rows.some(r=>r.classList.contains('hidden-entry-row'));
+      return { state: rows.some(r=>r.classList.contains('hidden-entry-row')),
+               sweep: rows.some(r=>r.classList.contains('row-flash-purple')) };
     })()`);
-    check("S8: hidden member is marked purple", purple);
+    check("S8: hidden member is marked purple", purple.state);
+    check("S8: hide plays the purple right-to-left sweep", purple.sweep);
     const countLabel = await d.evaluate<string>(`(()=>{
       const blocks=[...document.querySelectorAll('#selections .sel-block')];
       const b=blocks.find(x=>/selection_1/.test(x.querySelector('.sel-name').textContent));
@@ -865,12 +916,16 @@ async function S8(): Promise<void> {
     await sleep(150);
     check("S8: the drag-hide undoes as one unit", (await visibleCount(d)) === visAll);
 
-    // whole-selection hide via the header still works
+    // whole-selection hide via the header still works (with the same sweep)
     const head = (await selHead(d, "/selection_1/"))!;
     await d.rightClick(head.x, head.y);
     await sleep(150);
     check("S8: header right-click still hides the whole selection",
       (await committed(d))[1].hidden === true);
+    check("S8: header hide sweeps purple too", await d.evaluate<boolean>(`(()=>{
+      const heads=[...document.querySelectorAll('#selections .sel-head')];
+      return heads.some(h=>h.classList.contains('row-flash-purple'));
+    })()`));
     await d.rightClick(head.x, head.y);
     await sleep(150);
 

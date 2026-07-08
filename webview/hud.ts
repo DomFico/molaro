@@ -107,7 +107,8 @@ export const HUD_CSS = /* css */ `
   .sel-block { margin: 2px 0 5px; border-left: 2px solid #5a5a5a; padding-left: 3px; }
   .sel-block.hidden-sel { border-left-color: #b98be0; }
   .sel-block.editing { border-left-color: #9fe8cd; background: rgba(159,232,205,0.06); }
-  .sel-head { display: flex; align-items: center; gap: 6px; padding: 1px 4px; }
+  .sel-head { display: flex; align-items: center; gap: 6px; padding: 1px 4px;
+    position: relative; border-radius: 3px; }
   .sel-name { flex: 1 1 auto; min-width: 0; cursor: pointer;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .hidden-sel .sel-name { color: #c9a6ec; }
@@ -131,7 +132,7 @@ export const HUD_CSS = /* css */ `
   #tree-host { position: relative; }
   .vlist { position: relative; }
   .tree-row { display: flex; align-items: center; gap: 4px; height: 18px; padding: 0 4px;
-    border-radius: 3px; white-space: nowrap; }
+    border-radius: 3px; white-space: nowrap; position: relative; }
   /* ancestor rows pin to the top while scrolling an expanded subtree, so a
      collapse caret is always reachable (category tier, then group tier) */
   .cat-block > .tree-row { position: sticky; top: 0; z-index: 4; background: #252526; }
@@ -154,6 +155,19 @@ export const HUD_CSS = /* css */ `
     22%  { background-color: rgba(255, 233, 168, 0.35); }
     100% { background-color: rgba(255, 233, 168, 0); }
   }
+  /* hide feedback: a PURPLE sweep that runs right-to-left, then fades */
+  .row-flash-purple { overflow: hidden; }
+  .row-flash-purple::after {
+    content: ""; position: absolute; inset: 0; border-radius: 3px;
+    background: rgba(185, 139, 224, 0.4); pointer-events: none;
+    transform-origin: right center;
+    animation: sweepLeft 520ms cubic-bezier(0.25, 0.7, 0.3, 1) 1 both;
+  }
+  @keyframes sweepLeft {
+    0%   { transform: scaleX(0); opacity: 0.95; }
+    55%  { transform: scaleX(1); opacity: 0.85; }
+    100% { transform: scaleX(1); opacity: 0; }
+  }
   .caret { width: 10px; flex: none; display: inline-block; color: #888; cursor: pointer; }
   /* expandable carets get a big forgiving hit box (reaches left into the
      indent) so a near-miss expands instead of selecting */
@@ -164,19 +178,16 @@ export const HUD_CSS = /* css */ `
      ✕) sit at the right edge, never under a mid-row click */
   .tree-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
-  /* brackets: vertical spans in the tree gutter; scroll with the content */
+  /* brackets: flush vertical spans in the tree gutter; scroll with the
+     content; not interactive (hover shows the name via the title tooltip) */
   .bracket-layer { position: absolute; left: 0; top: 0; right: 0; pointer-events: none; z-index: 5; }
-  .bracket { position: absolute; width: 7px; pointer-events: auto; cursor: grab;
+  .bracket { position: absolute; width: 5px; pointer-events: auto; cursor: default;
     border-left: 2px solid #8f8f8f; border-top: 2px solid #8f8f8f; border-bottom: 2px solid #8f8f8f;
     border-radius: 2px 0 0 2px; }
-  .bracket:active { cursor: grabbing; }
-  .bracket.dragging { opacity: 0.7; }
   .bracket.hidden { border-color: #b98be0; }
   .bracket.pending { border-color: #9fe8cd; pointer-events: none;
     animation: bracketPulse 1.6s ease-in-out infinite; }
   @keyframes bracketPulse { 0%, 100% { opacity: 0.9; } 50% { opacity: 0.45; } }
-  /* bracket names are not rendered in the tree (they live in the top
-     section); hovering a bracket shows its name via the title tooltip */
 
   /* top/bottom dock: the whole content flows LEFT-TO-RIGHT. #sidebar-content
      becomes a row: the selections section is a fixed left column, the tree host

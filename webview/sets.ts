@@ -44,6 +44,9 @@ export class Hierarchy {
   private readonly catOfGroup = new Map<number, number>();
   private readonly header: Header;
 
+  private readonly groupsOfCat = new Map<number, number[]>();
+  private readonly subsOfGrp = new Map<number, number[]>();
+
   constructor(header: Header) {
     this.header = header;
     this.n = header.n_points;
@@ -55,8 +58,26 @@ export class Hierarchy {
       push(this.bySubgroup, subgroup_id[p], p);
       if (!this.ancestorOfSub.has(subgroup_id[p])) {
         this.ancestorOfSub.set(subgroup_id[p], { category: category[p], group: group_id[p] });
+        push(this.subsOfGrp, group_id[p], subgroup_id[p]);
       }
-      if (!this.catOfGroup.has(group_id[p])) this.catOfGroup.set(group_id[p], category[p]);
+      if (!this.catOfGroup.has(group_id[p])) {
+        this.catOfGroup.set(group_id[p], category[p]);
+        push(this.groupsOfCat, category[p], group_id[p]);
+      }
+    }
+  }
+
+  /** Direct children of a node (for carving finer holes out of coarse entries). */
+  childrenOf(e: Entry): Entry[] {
+    switch (e.level) {
+      case "category":
+        return (this.groupsOfCat.get(e.id) ?? []).map((id) => ({ level: "group", id }));
+      case "group":
+        return (this.subsOfGrp.get(e.id) ?? []).map((id) => ({ level: "subgroup", id }));
+      case "subgroup":
+        return (this.bySubgroup.get(e.id) ?? []).map((id) => ({ level: "point", id }));
+      case "point":
+        return [];
     }
   }
 
@@ -367,8 +388,13 @@ export class SelectionModel {
 
   // -- build gestures (undoable; write to the TARGET) --------------------------
 
+  /** Click semantics: a row that is selected — as an entry OR covered by a
+   * coarser ancestor entry — toggles OFF (carving a hole if needed);
+   * everything else toggles ON. */
   toggleInTarget(e: Entry): number[] {
-    return this.target.has(e) ? this.removeFromTarget(e) : this.addToTarget(e);
+    return this.target.has(e) || this.coversEntry(this.target, e)
+      ? this.removeFromTarget(e)
+      : this.addToTarget(e);
   }
   /** Idempotent add (paint forward). */
   addToTarget(e: Entry): number[] {
@@ -380,11 +406,14 @@ export class SelectionModel {
     return pts;
   }
   /** Idempotent remove (paint backtrack / remove-paint). Removing a member
-   * from an EDITED selection also drops its individual-hide (one undo op). */
+   * from an EDITED selection also drops its individual-hide (one undo op).
+   * Removing a node covered only by a COARSER ancestor entry CARVES it out:
+   * the ancestor is replaced by its complement at the clicked level, so the
+   * green footprint and the brackets visibly break around the hole. */
   removeFromTarget(e: Entry): number[] {
     const set = this.target;
-    const pts = set.remove(e);
-    if (!pts) return [];
+    if (!set.has(e)) return this.carveFromTarget(e);
+    const pts = set.remove(e) ?? [];
     const sel = this.editing;
     const droppedHide = sel && sel.hiddenPart.has(e) ? sel : null;
     const hpPts = droppedHide ? (droppedHide.hiddenPart.remove(e) ?? []) : [];
@@ -397,6 +426,50 @@ export class SelectionModel {
     });
     this.emit();
     return hpPts.length ? pts.concat(hpPts) : pts;
+  }
+  /** Replace every ancestor entry covering `e` with its complement down to
+   * `e`'s level (one undo op). No-op when nothing covers `e`. */
+  private carveFromTarget(e: Entry): number[] {
+    const set = this.target;
+    const sel = this.editing;
+    const path = this.hierarchy.pathOf(e); // ancestors …, e (last)
+    const affected: number[] = [];
+    const removed: { entry: Entry; hpDropped: boolean }[] = [];
+    const added: Entry[] = [];
+    for (let i = 0; i < path.length - 1; i++) {
+      const a = path[i];
+      if (!set.has(a)) continue;
+      const hpDropped = (sel?.hiddenPart.has(a) ?? false) as boolean;
+      affected.push(...(set.remove(a) ?? []));
+      if (hpDropped) affected.push(...(sel!.hiddenPart.remove(a) ?? []));
+      removed.push({ entry: a, hpDropped });
+      // walk the path from a toward e, adding every sibling of the next step
+      for (let l = i; l < path.length - 1; l++) {
+        const excludeKey = entryKey(path[l + 1]);
+        for (const child of this.hierarchy.childrenOf(path[l])) {
+          if (entryKey(child) === excludeKey) continue;
+          const pts = set.add(child);
+          if (pts) {
+            affected.push(...pts);
+            added.push(child);
+          }
+        }
+      }
+    }
+    if (removed.length === 0) return [];
+    this.pushUndo({
+      undo: () => {
+        const a: number[] = [];
+        for (const c of added) a.push(...(set.remove(c) ?? []));
+        for (const r of removed) {
+          a.push(...(set.add(r.entry) ?? []));
+          if (r.hpDropped) a.push(...(sel!.hiddenPart.add(r.entry) ?? []));
+        }
+        return a;
+      },
+    });
+    this.emit();
+    return affected;
   }
   /** Escape: discard the pending selection (undoable). */
   clearPending(): number[] {
@@ -583,22 +656,6 @@ export class SelectionModel {
     });
     this.emit();
     return affected;
-  }
-
-  /** Move a committed selection's bracket to another lane (undoable). */
-  setLane(id: number, lane: number): void {
-    const sel = this.byId(id);
-    const next = Math.max(0, Math.min(MAX_BRACKET_LANES - 1, Math.round(lane)));
-    if (!sel || sel.lane === next) return;
-    const prev = sel.lane;
-    sel.lane = next;
-    this.pushUndo({
-      undo: () => {
-        sel.lane = prev;
-        return [];
-      },
-    });
-    this.emit();
   }
 
   /** Startup prefab: a pre-made VISIBLE committed selection (NOT undoable —

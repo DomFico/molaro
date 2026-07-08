@@ -55,6 +55,9 @@ export interface TreeOptions {
   onLayout?: () => void;
   /** Flash rows touched by secondary gestures (focus feedback). */
   flashOnSecondary?: boolean;
+  /** CSS class the secondary flash uses (default "row-flash" — the yellow
+   * swell; the top section passes the purple right-to-left sweep). */
+  secondaryFlashClass?: string;
   /** Flash rows touched by primary click/trail (focus feedback, top section). */
   flashOnPrimary?: boolean;
 }
@@ -85,11 +88,11 @@ function entryOf(row: HTMLElement): Entry {
   return { level: row.dataset.level as Entry["level"], id: Number(row.dataset.id) };
 }
 
-function flashRow(row: HTMLElement): void {
-  row.classList.remove("row-flash");
+function flashRow(row: HTMLElement, cls = "row-flash"): void {
+  row.classList.remove(cls);
   void row.offsetWidth; // restart the animation
-  row.classList.add("row-flash");
-  row.addEventListener("animationend", () => row.classList.remove("row-flash"), { once: true });
+  row.classList.add(cls);
+  row.addEventListener("animationend", () => row.classList.remove(cls), { once: true });
 }
 
 function createRowEngine(
@@ -158,7 +161,7 @@ function createRowEngine(
     const key = entryKey(entry);
     if (right.trail.some((it) => it.key === key)) return;
     right.trail.push({ key, entry });
-    if (opts.flashOnSecondary) flashRow(row);
+    if (opts.flashOnSecondary) flashRow(row, opts.secondaryFlashClass);
   };
 
   const onMove = (e: PointerEvent): void => {
@@ -204,7 +207,7 @@ function createRowEngine(
       } else {
         if (opts.flashOnSecondary) {
           const row = rowUnder(e.clientX, e.clientY);
-          if (row) flashRow(row);
+          if (row) flashRow(row, opts.secondaryFlashClass);
         }
         gestures.secondaryClick(a.entry);
       }

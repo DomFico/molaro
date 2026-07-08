@@ -582,7 +582,9 @@ async function main(): Promise<void> {
         primaryClick: (e) => refreshPoints(model.toggleInTarget(e)),
         trailStart: (start) => {
           strokeTouched.clear();
-          strokeRemoves = model.target.has(start);
+          // a stroke starting on any SELECTED row (entry or covered by a
+          // coarser entry) removes/carves; otherwise it adds
+          strokeRemoves = model.targetCoversEntry(start);
           model.beginStroke();
         },
         trailAdd: (e) => {

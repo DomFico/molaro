@@ -52,22 +52,49 @@ export function mountCommitted(
 ): CommittedHandle {
   const openState = new Map<number, boolean>();
   const mounted: EntryListHandle[] = [];
+  interface BlockRefs {
+    block: HTMLElement;
+    count: HTMLElement;
+    list: EntryListHandle | null;
+  }
+  const blockRefs = new Map<number, BlockRefs>();
   let lastSig = "";
 
+  // Structure (ids/names/members/edit mode) forces a rebuild; hidden state is
+  // updated IN PLACE so hide/unhide feedback animations survive the render.
   const signature = (): string => {
-    const parts = model
-      .committed()
-      .map((c) => `${c.id}:${c.name}:${c.hidden ? 1 : 0}:${c.set.entryCount}:${c.hiddenPart.entryCount}`);
+    const parts = model.committed().map((c) => `${c.id}:${c.name}:${c.set.entryCount}`);
     return `${model.editing?.id ?? -1}|${parts.join("|")}`;
+  };
+  const countText = (sel: CommittedSelection): string =>
+    `${fmt(sel.set.pointCount)} pts${
+      sel.hidden
+        ? " · hidden"
+        : sel.hiddenPart.entryCount > 0
+          ? ` · ${sel.hiddenPart.entryCount} hidden`
+          : ""
+    }`;
+  const softUpdate = (): void => {
+    for (const sel of model.committed()) {
+      const refs = blockRefs.get(sel.id);
+      if (!refs) continue;
+      refs.block.classList.toggle("hidden-sel", sel.hidden);
+      refs.count.textContent = countText(sel);
+      refs.list?.refresh(); // purple member state + target pulse classes
+    }
   };
 
   const render = (): void => {
     const sig = signature();
-    if (sig === lastSig) return;
+    if (sig === lastSig) {
+      softUpdate();
+      return;
+    }
     lastSig = sig;
 
     for (const t of mounted) t.dispose();
     mounted.length = 0;
+    blockRefs.clear();
     container.innerHTML = "";
     // section height may change (blocks added/removed): let virtual lists and
     // brackets below re-window against the shifted layout
@@ -111,13 +138,7 @@ export function mountCommitted(
 
     const count = document.createElement("span");
     count.className = "sel-count";
-    count.textContent = `${fmt(sel.set.pointCount)} pts${
-      sel.hidden
-        ? " · hidden"
-        : sel.hiddenPart.entryCount > 0
-          ? ` · ${sel.hiddenPart.entryCount} hidden`
-          : ""
-    }`;
+    count.textContent = countText(sel);
 
     const editBtn = document.createElement("button");
     editBtn.className = "sel-ctl row-ctl";
@@ -144,6 +165,9 @@ export function mountCommitted(
     body.className = "sel-body";
     body.style.display = openState.get(sel.id) ? "" : "none";
     el.appendChild(body);
+
+    const refs: BlockRefs = { block: el, count, list: null };
+    blockRefs.set(sel.id, refs);
 
     let built = false;
     const buildBody = (): void => {
@@ -174,7 +198,8 @@ export function mountCommitted(
         },
         {
           flashOnPrimary: true,
-          flashOnSecondary: false,
+          flashOnSecondary: true,
+          secondaryFlashClass: "row-flash-purple", // hide feedback: purple sweep
           decorate: (e, row) => {
             row.classList.toggle("hidden-entry-row", model.entryHidden(sel.id, e));
             // the shared target pulse: edited members breathe in unison
@@ -198,6 +223,7 @@ export function mountCommitted(
         },
       );
       mounted.push(list);
+      refs.list = list;
     };
     if (openState.get(sel.id)) buildBody();
 
@@ -230,10 +256,19 @@ export function mountCommitted(
       e.stopPropagation();
       actions.deleteSelection(sel.id);
     });
-    // right-click anywhere in the block toggles hidden (the "operate" hide)
+    // right-click anywhere in the block toggles hidden (the "operate" hide),
+    // with the same purple right-to-left sweep on the header
     el.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
+      head.classList.remove("row-flash-purple");
+      void head.offsetWidth;
+      head.classList.add("row-flash-purple");
+      head.addEventListener(
+        "animationend",
+        () => head.classList.remove("row-flash-purple"),
+        { once: true },
+      );
       actions.toggleHidden(sel.id);
     });
 
