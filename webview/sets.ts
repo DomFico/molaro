@@ -257,7 +257,9 @@ export class NodeSet {
 
 /**
  * A committed selection — the named object the top section operates on.
- * `hidden` makes its resolved points invisible; `lane` is the horizontal
+ * `hidden` makes ALL its resolved points invisible; `hiddenPart` holds the
+ * individually hidden member entries (a subset of `set`) so a few members can
+ * be hidden without hiding the whole selection. `lane` is the horizontal
  * bracket lane its bracket occupies in the bottom tree (movable).
  */
 export interface CommittedSelection {
@@ -265,6 +267,7 @@ export interface CommittedSelection {
   name: string;
   set: NodeSet;
   hidden: boolean;
+  hiddenPart: NodeSet;
   lane: number;
 }
 
@@ -331,12 +334,18 @@ export class SelectionModel {
   targetContains(point: number): boolean {
     return this.target.contains(point);
   }
-  /** Invisible footprint: is p covered by any hidden committed selection? */
+  /** Invisible footprint: is p covered by any fully hidden committed
+   * selection, or by an individually hidden member entry? */
   isPointHidden(point: number): boolean {
     for (const c of this.committedList) {
       if (c.hidden && c.set.contains(point)) return true;
+      if (c.hiddenPart.contains(point)) return true;
     }
     return false;
+  }
+  /** Is this member entry individually hidden within its selection? */
+  entryHidden(id: number, e: Entry): boolean {
+    return this.byId(id)?.hiddenPart.has(e) ?? false;
   }
   /** Entry (or one of its ancestors) is in `set` — its row is fully covered. */
   coversEntry(set: NodeSet, e: Entry): boolean {
@@ -359,12 +368,7 @@ export class SelectionModel {
   // -- build gestures (undoable; write to the TARGET) --------------------------
 
   toggleInTarget(e: Entry): number[] {
-    const set = this.target;
-    const had = set.has(e);
-    const pts = set.toggle(e);
-    this.pushUndo({ undo: () => (had ? (set.add(e) ?? []) : (set.remove(e) ?? [])) });
-    this.emit();
-    return pts;
+    return this.target.has(e) ? this.removeFromTarget(e) : this.addToTarget(e);
   }
   /** Idempotent add (paint forward). */
   addToTarget(e: Entry): number[] {
@@ -375,14 +379,24 @@ export class SelectionModel {
     this.emit();
     return pts;
   }
-  /** Idempotent remove (paint backtrack). */
+  /** Idempotent remove (paint backtrack / remove-paint). Removing a member
+   * from an EDITED selection also drops its individual-hide (one undo op). */
   removeFromTarget(e: Entry): number[] {
     const set = this.target;
     const pts = set.remove(e);
     if (!pts) return [];
-    this.pushUndo({ undo: () => set.add(e) ?? [] });
+    const sel = this.editing;
+    const droppedHide = sel && sel.hiddenPart.has(e) ? sel : null;
+    const hpPts = droppedHide ? (droppedHide.hiddenPart.remove(e) ?? []) : [];
+    this.pushUndo({
+      undo: () => {
+        const a = set.add(e) ?? [];
+        if (droppedHide) a.push(...(droppedHide.hiddenPart.add(e) ?? []));
+        return a;
+      },
+    });
     this.emit();
-    return pts;
+    return hpPts.length ? pts.concat(hpPts) : pts;
   }
   /** Escape: discard the pending selection (undoable). */
   clearPending(): number[] {
@@ -393,6 +407,26 @@ export class SelectionModel {
     this.pushUndo({ undo: () => set.addMany(entries) });
     this.emit();
     return pts;
+  }
+  /** Clear the CURRENT target — the pending set, or, in edit mode, the edited
+   * selection's entries (with their individual hides). One undo op. */
+  clearTarget(): number[] {
+    const set = this.target;
+    if (set.entryCount === 0) return [];
+    const sel = this.editing;
+    const entries = set.listEntries();
+    const hpEntries = sel ? sel.hiddenPart.listEntries() : [];
+    const pts = set.clear();
+    const hpPts = sel ? sel.hiddenPart.clear() : [];
+    this.pushUndo({
+      undo: () => {
+        const a = set.addMany(entries);
+        if (sel) a.push(...sel.hiddenPart.addMany(hpEntries));
+        return a;
+      },
+    });
+    this.emit();
+    return pts.concat(hpPts);
   }
 
   /** Coalesce subsequent undoable ops into ONE undo entry (a paint stroke). */
@@ -425,6 +459,7 @@ export class SelectionModel {
       name: this.autoName(),
       set,
       hidden: false,
+      hiddenPart: new NodeSet(this.hierarchy),
       lane: this.freeLane(),
     };
     this.committedList.push(sel);
@@ -488,6 +523,31 @@ export class SelectionModel {
     return sel ? this.setHidden(id, !sel.hidden) : [];
   }
 
+  /** Hide/show ONE member entry of a committed selection (undoable). */
+  setEntryHidden(id: number, e: Entry, hidden: boolean): number[] {
+    const sel = this.byId(id);
+    if (!sel) return [];
+    if (hidden && !sel.set.has(e)) return []; // only members can be part-hidden
+    if (sel.hiddenPart.has(e) === hidden) return [];
+    const pts = (hidden ? sel.hiddenPart.add(e) : sel.hiddenPart.remove(e)) ?? [];
+    this.pushUndo({
+      undo: () => (hidden ? (sel.hiddenPart.remove(e) ?? []) : (sel.hiddenPart.add(e) ?? [])),
+    });
+    this.emit();
+    return pts;
+  }
+  toggleEntryHidden(id: number, e: Entry): number[] {
+    return this.setEntryHidden(id, e, !this.entryHidden(id, e));
+  }
+  /** Hide/show several member entries at once (one undo unit — a drag). */
+  setEntriesHidden(id: number, entries: Entry[], hidden: boolean): number[] {
+    this.beginStroke();
+    const affected: number[] = [];
+    for (const e of entries) affected.push(...this.setEntryHidden(id, e, hidden));
+    this.endStroke();
+    return affected;
+  }
+
   /** Rename (unique names enforced). Returns false if rejected. */
   rename(id: number, name: string): boolean {
     const sel = this.byId(id);
@@ -512,11 +572,13 @@ export class SelectionModel {
     const sel = this.committedList[idx];
     this.committedList.splice(idx, 1);
     if (this.editingId === id) this.editingId = null;
-    const affected = sel.hidden ? sel.set.resolvedPoints() : [];
+    const hiddenPts = (): number[] =>
+      sel.hidden ? sel.set.resolvedPoints() : sel.hiddenPart.resolvedPoints();
+    const affected = hiddenPts();
     this.pushUndo({
       undo: () => {
         this.committedList.splice(Math.min(idx, this.committedList.length), 0, sel);
-        return sel.hidden ? sel.set.resolvedPoints() : [];
+        return hiddenPts();
       },
     });
     this.emit();
@@ -539,16 +601,18 @@ export class SelectionModel {
     this.emit();
   }
 
-  /** Startup prefab: a pre-made hidden committed selection (NOT undoable —
-   * it is the initial state, e.g. one per bulk category). */
-  seedHidden(name: string, entries: Entry[]): CommittedSelection {
+  /** Startup prefab: a pre-made VISIBLE committed selection (NOT undoable —
+   * it is initial state, e.g. one per bulk category so the user can hide the
+   * environment with one right-click; nothing is hidden by default). */
+  seed(name: string, entries: Entry[]): CommittedSelection {
     const set = new NodeSet(this.hierarchy);
     set.addMany(entries);
     const sel: CommittedSelection = {
       id: this.nextId++,
       name: this.uniqueName(name),
       set,
-      hidden: true,
+      hidden: false,
+      hiddenPart: new NodeSet(this.hierarchy),
       lane: this.freeLane(),
     };
     this.committedList.push(sel);

@@ -55,6 +55,8 @@ export interface TreeOptions {
   onLayout?: () => void;
   /** Flash rows touched by secondary gestures (focus feedback). */
   flashOnSecondary?: boolean;
+  /** Flash rows touched by primary click/trail (focus feedback, top section). */
+  flashOnPrimary?: boolean;
 }
 
 export interface TreeHandle {
@@ -133,7 +135,7 @@ function createRowEngine(
     arm.lastY = y1;
   };
 
-  const enterLeft = (entry: Entry): void => {
+  const enterLeft = (entry: Entry, row?: HTMLElement | null): void => {
     if (!left) return;
     const key = entryKey(entry);
     const t = left.trail;
@@ -147,6 +149,7 @@ function createRowEngine(
       }
     } else {
       t.push({ key, entry });
+      if (opts.flashOnPrimary && row) flashRow(row);
       gestures.trailAdd?.(entry);
     }
   };
@@ -165,9 +168,9 @@ function createRowEngine(
         left.moved = true;
         clearTimeout(left.holdTimer);
         gestures.trailStart?.(left.entry);
-        enterLeft(left.entry); // the start row is part of the trail
+        enterLeft(left.entry, rowUnder(left.x, left.y)); // the start row joins the trail
       }
-      walkRows(left, e.clientX, e.clientY, (row) => enterLeft(entryOf(row)));
+      walkRows(left, e.clientX, e.clientY, (row) => enterLeft(entryOf(row), row));
     } else if (right) {
       if (!right.moved) {
         if (Math.hypot(e.clientX - right.x, e.clientY - right.y) <= DRAG_THRESHOLD_PX) return;
@@ -184,7 +187,13 @@ function createRowEngine(
       left = null;
       clearTimeout(a.holdTimer);
       if (a.moved) gestures.trailEnd?.(a.trail.map((t) => t.entry));
-      else if (!a.holdFired) gestures.primaryClick(a.entry);
+      else if (!a.holdFired) {
+        if (opts.flashOnPrimary) {
+          const row = rowUnder(e.clientX, e.clientY);
+          if (row) flashRow(row);
+        }
+        gestures.primaryClick(a.entry);
+      }
     } else if (e.button === 2 && right) {
       const a = right;
       right = null;
@@ -221,7 +230,9 @@ function createRowEngine(
     row.style.paddingLeft = `${6 + gutter + depth * 14}px`;
 
     const caret = document.createElement("span");
-    caret.className = "caret row-ctl";
+    // expandable carets get a generous hit box (class .exp) so aiming at the
+    // arrow can't accidentally land a selection on the row
+    caret.className = rowOpts.expandable ? "caret row-ctl exp" : "caret row-ctl";
     caret.textContent = rowOpts.expandable ? "▸" : "";
     row.appendChild(caret);
 

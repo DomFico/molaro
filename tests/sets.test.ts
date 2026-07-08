@@ -173,12 +173,15 @@ test("delete removes the selection, un-hides its points, exits its edit mode", (
   assert.ok(!m.isPointHidden(0));
 });
 
-test("seedHidden creates a pre-hidden committed selection outside the undo stack", () => {
+test("seed creates a VISIBLE pre-made selection outside the undo stack", () => {
   const m = model();
-  const sel = m.seedHidden("alpha", [cat(0)]);
+  const sel = m.seed("alpha", [cat(0)]);
   assert.equal(sel.name, "alpha");
-  assert.ok(sel.hidden && m.isPointHidden(0));
+  assert.ok(!sel.hidden, "nothing hidden by default");
+  assert.ok(!m.isPointHidden(0));
   assert.equal(m.canUndo, false, "seeding is initial state, not undoable");
+  m.setHidden(sel.id, true); // one action hides the environment
+  assert.ok(m.isPointHidden(0));
 });
 
 test("lanes: commit picks a free lane; setLane clamps and is undoable", () => {
@@ -272,6 +275,58 @@ test("edit-mode edits are undoable after leaving edit mode", () => {
   m.undo(); // undoes the edit inside the committed set
   assert.ok(!sel.set.contains(5));
   assert.equal(m.committed().length, 1, "commit itself not undone yet");
+});
+
+test("per-member hide: entries hide individually, union with whole-hide", () => {
+  const m = model();
+  m.addToTarget(sub(0)); // {0,1}
+  m.addToTarget(sub(1)); // {2}
+  const sel = m.commit()!;
+  m.setEntryHidden(sel.id, sub(0), true);
+  assert.ok(m.entryHidden(sel.id, sub(0)) && !m.entryHidden(sel.id, sub(1)));
+  assert.ok(m.isPointHidden(0) && m.isPointHidden(1) && !m.isPointHidden(2));
+  m.toggleEntryHidden(sel.id, sub(0));
+  assert.ok(!m.isPointHidden(0));
+  // non-members can't be part-hidden
+  assert.deepEqual(m.setEntryHidden(sel.id, sub(2), true), []);
+  // batch hide is one undo unit
+  m.setEntriesHidden(sel.id, [sub(0), sub(1)], true);
+  assert.ok(m.isPointHidden(0) && m.isPointHidden(2));
+  m.undo();
+  assert.ok(!m.isPointHidden(0) && !m.isPointHidden(2), "one undo reverts the batch");
+});
+
+test("removing an edited member drops its individual hide; delete un-hides parts", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  const sel = m.commit()!;
+  m.setEntryHidden(sel.id, sub(0), true);
+  m.beginEdit(sel.id);
+  m.removeFromTarget(sub(0));
+  assert.ok(!m.isPointHidden(0), "hide dropped with the member");
+  m.undo(); // restores member AND its hide in one op
+  assert.ok(sel.set.has(sub(0)) && m.isPointHidden(0));
+  m.endEdit();
+  const affected = m.deleteSelection(sel.id);
+  assert.deepEqual(affected.sort(), [0, 1], "part-hidden points reported for un-hide");
+  assert.ok(!m.isPointHidden(0));
+});
+
+test("clearTarget clears pending, or the edited selection with its hides (one undo)", () => {
+  const m = model();
+  m.addToTarget(sub(2));
+  m.clearTarget();
+  assert.equal(m.pending.entryCount, 0);
+  m.undo();
+  assert.equal(m.pending.entryCount, 1);
+  const sel = m.commit()!;
+  m.setEntryHidden(sel.id, sub(2), true);
+  m.beginEdit(sel.id);
+  m.clearTarget();
+  assert.equal(sel.set.entryCount, 0);
+  assert.ok(!m.isPointHidden(3), "individual hides cleared too");
+  m.undo();
+  assert.ok(sel.set.has(sub(2)) && m.isPointHidden(3), "one undo restores entries + hides");
 });
 
 test("undo of delete restores the selection with its hidden flag", () => {

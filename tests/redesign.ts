@@ -123,21 +123,26 @@ async function withDriver(fn: (d: E2EDriver) => Promise<void>, w = 1180, h = 780
 
 // ============================ S0: startup & mirror ===========================
 async function S0(): Promise<void> {
-  console.log("S0 — startup: pre-hidden bulk selection, mirrored top section");
+  console.log("S0 — startup: all visible, pre-made bulk selection, flat top section");
   await withDriver(async (d) => {
     const list = await committed(d);
     check("S0: one pre-made committed selection at startup", list.length === 1, JSON.stringify(list));
-    check("S0: it is the bulk category, hidden, neutral category name",
-      list[0]?.name === "solvent" && list[0]?.hidden === true, JSON.stringify(list[0]));
+    check("S0: it is the bulk category, VISIBLE, neutral category name",
+      list[0]?.name === "solvent" && list[0]?.hidden === false, JSON.stringify(list[0]));
     const vis = await visibleCount(d);
-    check("S0: bulk points are invisible by default", vis === 6000 - list[0].pts, `visible=${vis}`);
+    check("S0: nothing is hidden by default — the user decides", vis === 6000, `visible=${vis}`);
     check("S0: pending target starts empty", (await pendingEntries(d)) === 0);
     check("S0: commit button disabled while pending is empty",
       await d.evaluate<boolean>(`document.getElementById('commit-btn').disabled`));
 
-    // top section stores entries FLAT at their own level — no hierarchy
+    // one right-click on the pre-made selection hides the environment
+    const head0 = (await selHead(d, "/solvent/"))!;
+    await d.rightClick(head0.x, head0.y);
+    await sleep(150);
+    check("S0: one action hides the bulk environment",
+      (await visibleCount(d)) === 6000 - list[0].pts, `visible=${await visibleCount(d)}`);
     const head = await selHead(d, "/solvent/");
-    check("S0: top section shows the hidden selection (purple class)",
+    check("S0: hidden selection turns purple",
       head !== null && /hidden-sel/.test(head.cls), head?.cls ?? "missing");
     await d.evaluate(`(()=>{
       const b=[...document.querySelectorAll('#selections .sel-block')][0];
@@ -310,6 +315,14 @@ async function S2(): Promise<void> {
     await sleep(120);
     check("S2: bottom clicks now add to the edited selection",
       (await committed(d))[1].entries === 2);
+    // camera is PARKED while editing: focus actions pulse but never move it
+    const camEdit = await camPos(d);
+    const memberEdit = (await topRow(d, "/beta/"))!;
+    await d.click(memberEdit.x, memberEdit.y);
+    await sleep(600);
+    check("S2: focus does not move the camera while editing",
+      !camMoved(camEdit, await camPos(d)));
+    check("S2: ...but still pulses the region", (await flashCount(d)) > 0);
     // member rows grow a remove control in edit mode
     const removed = await d.evaluate<boolean>(`(()=>{
       const rm=document.querySelector('#selections .entry-remove');
@@ -325,6 +338,12 @@ async function S2(): Promise<void> {
     await sleep(120);
     check("S2: Done exits edit mode", (await editingName(d)) === null);
     check("S2: button reads Create selection again", (await btnText(d)) === "Create selection");
+    // focus moves the camera again once editing is done
+    const camDone = await camPos(d);
+    const memberDone = (await topRow(d, "/beta|alpha/"))!;
+    await d.click(memberDone.x, memberDone.y);
+    await sleep(600);
+    check("S2: focus moves the camera again after Done", camMoved(camDone, await camPos(d)));
 
     // rename inline (unique names); bracket label follows
     await d.evaluate(`(()=>{
@@ -342,11 +361,12 @@ async function S2(): Promise<void> {
     await sleep(150);
     list = await committed(d);
     check("S2: inline rename applies", list[1].name === "core", JSON.stringify(list.map((c) => c.name)));
-    const bracketName = await d.evaluate<string>(`(()=>{
-      const names=[...document.querySelectorAll('.bracket-name')].map(b=>b.textContent);
-      return names.join(',');
-    })()`);
-    check("S2: bracket in the bottom tree carries the new name", /core/.test(bracketName), bracketName);
+    const bracketTitles = await d.evaluate<string>(
+      `[...document.querySelectorAll('.bracket')].map(b=>b.title).join(',')`);
+    check("S2: bracket keeps the new name in its tooltip (no clunky label)",
+      /core/.test(bracketTitles), bracketTitles);
+    check("S2: no name labels rendered on brackets",
+      await d.evaluate<number>(`document.querySelectorAll('.bracket-name').length`) === 0);
     await d.screenshot(`${REPORT}/S2_renamed.png`);
   });
 }
@@ -392,6 +412,62 @@ async function S3(): Promise<void> {
         d2 > d0 * 0.85, `${d2.toFixed(1)} vs home ${d0.toFixed(1)}`);
       check("S3: empty click selects nothing", (await pendingEntries(d)) === 0);
     }
+
+    // with parts hidden, an empty click frames just what is VISIBLE: hide the
+    // bulk AND beta+gamma so only alpha remains, then check the camera centers
+    // on the visible centroid at a tighter distance
+    const solHead = (await selHead(d, "/solvent/"))!;
+    await d.rightClick(solHead.x, solHead.y); // hide the bulk
+    await sleep(200);
+    const betaRow = (await bottomRow(d, "/beta/"))!;
+    const gammaRow = (await bottomRow(d, "/gamma/"))!;
+    await d.click(betaRow.x, betaRow.y);
+    await d.click(gammaRow.x, gammaRow.y);
+    await sleep(100);
+    const btn2 = await d.evaluate<{ x: number; y: number }>(`(()=>{
+      const r=document.getElementById('commit-btn').getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2};
+    })()`);
+    await d.click(btn2.x, btn2.y);
+    await sleep(150);
+    const bgHead = (await selHead(d, "/selection_1/"))!;
+    await d.rightClick(bgHead.x, bgHead.y); // hide beta+gamma
+    await sleep(200);
+    const empty2 = await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const r=document.getElementById('app').getBoundingClientRect();
+      const spots=[[r.left+20,r.bottom-20],[r.left+20,r.top+80],[r.right-20,r.bottom-20]];
+      for (const [x,y] of spots) if (${V}.debug.pick(x,y) < 0) return {x,y};
+      return null;
+    })()`);
+    if (empty2) {
+      await d.click(empty2.x, empty2.y);
+      await sleep(700);
+      const framed = await d.evaluate<{ off: number; dist: number; want: number }>(`(()=>{
+        const b=${V}.debug.visibleBounds();
+        const t=${V}.controls.target;
+        const off=Math.hypot(t.x-b.center[0], t.y-b.center[1], t.z-b.center[2]);
+        const fov=(${V}.camera.fov*Math.PI)/180;
+        return {off, dist:${V}.camera.position.distanceTo(t),
+                want: b.radius/Math.sin(fov/2)*1.4};
+      })()`);
+      check("S3: empty click centers on the VISIBLE centroid",
+        framed.off < d0 * 0.1, `off=${framed.off.toFixed(2)} (home dist ${d0.toFixed(1)})`);
+      check("S3: ...at the fit-to-visible distance (frames only what is shown)",
+        Math.abs(framed.dist - framed.want) < framed.want * 0.15,
+        `dist=${framed.dist.toFixed(1)} vs fit ${framed.want.toFixed(1)}`);
+    } else {
+      check("S3: (skipped visible-framing — no empty pixel found)", true);
+    }
+    // unwind the five state changes (hide, 2 clicks, commit, hide) so the
+    // rest of the scenario starts from the untouched startup state
+    for (let i = 0; i < 5; i++) {
+      await d.ctrlZ();
+      await sleep(80);
+    }
+    check("S3: framing detour fully undone",
+      (await committed(d)).length === 1 && (await visibleCount(d)) === 6000 &&
+        (await pendingEntries(d)) === 0,
+      `committed=${(await committed(d)).length} visible=${await visibleCount(d)}`);
 
     // Ctrl+left-click = subgroup-level select into the pending target
     const proj2 = await d.evaluate<{ x: number; y: number }>(`${V}.debug.projectPoint(${pIdx})`);
@@ -541,9 +617,13 @@ async function S5(): Promise<void> {
     check("S5: focus flash fades out fully", f2.flash === 0 && (await flashCount(d)) === 0,
       `flash=${f2.flash}`);
 
-    // hidden wins: selecting the hidden bulk category shows NO green in 3D
+    // hidden wins: hide the bulk selection first, then selecting it shows NO
+    // green in 3D (the tint is gated on visibility)
     await d.escape();
     await sleep(100);
+    const solventHead = (await selHead(d, "/solvent/"))!;
+    await d.rightClick(solventHead.x, solventHead.y);
+    await sleep(200);
     const clean = await greenCount(d, await d.captureB64(`${REPORT}/S5_clean.png`));
     const solvent = (await bottomRow(d, "/solvent/"))!;
     await d.click(solvent.x, solvent.y);
@@ -551,10 +631,13 @@ async function S5(): Promise<void> {
     const hiddenSel = await greenCount(d, await d.captureB64(`${REPORT}/S5_hidden_wins.png`));
     const selN = await selCount(d);
     check("S5: hidden selection is in the target (state)", selN > 1000, `selCount=${selN}`);
-    check("S5: but hidden wins — no green glow for hidden points",
+    check("S5: but hidden wins — no green tint for hidden points",
       hiddenSel < clean + 500, `green px ${hiddenSel} (clean ${clean})`);
     await d.escape();
     await sleep(100);
+    const solventHead2 = (await selHead(d, "/solvent/"))!;
+    await d.rightClick(solventHead2.x, solventHead2.y); // un-hide again
+    await sleep(150);
 
     // brackets: committed bracket present, movable by dragging its name
     await d.click(alpha.x, alpha.y);
@@ -566,8 +649,7 @@ async function S5(): Promise<void> {
     await d.click(btn.x, btn.y);
     await sleep(200);
     const br = await d.evaluate<{ x: number; y: number; lane: number } | null>(`(()=>{
-      const b=[...document.querySelectorAll('.bracket')].find(x=>
-        /selection_1/.test(x.querySelector('.bracket-name')?.textContent ?? ''));
+      const b=[...document.querySelectorAll('.bracket')].find(x=>/selection_1/.test(x.title));
       if(!b) return null; const r=b.getBoundingClientRect();
       return {x:r.left+3, y:r.top+r.height/2, lane:${V}.model.committed()[1].lane};
     })()`);
@@ -587,13 +669,9 @@ async function S5(): Promise<void> {
 
     // a bracket shows only once the view is EXPANDED to its entries' level:
     // a subgroup-level pending selection has no bracket while collapsed
-    await d.evaluate(`${V}.resetCamera()`);
-    await sleep(700);
-    const pIdx = await d.evaluate<number>(`${V}.hierarchy.pointsOf({level:'category',id:0})[0]`);
-    const proj = await d.evaluate<{ x: number; y: number }>(`${V}.debug.projectPoint(${pIdx})`);
-    await d.click(proj.x, proj.y, 1, 2 /* Ctrl: subgroup-level select */);
+    await d.evaluate(`${V}.refreshPoints(${V}.model.addToTarget({level:'subgroup', id:0}))`);
     await sleep(200);
-    check("S5: subgroup entry selected via 3D",
+    check("S5: subgroup entry in the pending target",
       (await d.evaluate<string>(`${V}.model.pending.listEntries()[0]?.level ?? ''`)) === "subgroup");
     const collapsed = await d.evaluate<boolean>(`!!document.querySelector('.bracket.pending')`);
     check("S5: NO bracket while the tree is collapsed above the entry level", !collapsed);
@@ -687,9 +765,170 @@ async function S6(): Promise<void> {
   });
 }
 
+// ============================ S8: refinements =================================
+async function S8(): Promise<void> {
+  console.log("S8 — split brackets, per-member hide, clear button, relayout");
+  await withDriver(async (d) => {
+    const alpha = (await bottomRow(d, "/alpha/"))!;
+    const beta = (await bottomRow(d, "/beta/"))!;
+    const gamma = (await bottomRow(d, "/gamma/"))!;
+
+    // expandable carets have a forgiving hit box
+    const caretW = await d.evaluate<number>(
+      `document.querySelector('#tree-host .caret.exp').getBoundingClientRect().width`);
+    check("S8: expandable carets have a generous hit box", caretW >= 18, `${caretW}px`);
+
+    // non-contiguous coverage → the bracket SPLITS into segments
+    await d.click(alpha.x, alpha.y);
+    await sleep(80);
+    await d.click(gamma.x, gamma.y); // beta (unselected) sits between
+    await sleep(200);
+    const pendingSegs = await d.evaluate<number>(
+      `document.querySelectorAll('.bracket.pending').length`);
+    check("S8: bracket splits into one segment per contiguous run", pendingSegs === 2,
+      `${pendingSegs} segments`);
+    await d.screenshot(`${REPORT}/S8_split_brackets.png`);
+
+    // Clear button: two-step confirm, undoable
+    const clearBtn = await d.evaluate<{ x: number; y: number; disabled: boolean }>(`(()=>{
+      const b=document.getElementById('clear-btn'); const r=b.getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2, disabled:b.disabled};
+    })()`);
+    check("S8: Clear enabled while a target exists", !clearBtn.disabled);
+    await d.click(clearBtn.x, clearBtn.y);
+    await sleep(80);
+    const armed = await d.evaluate<string>(`document.getElementById('clear-btn').textContent`);
+    check("S8: first click asks 'are you sure'", armed === "sure?", JSON.stringify(armed));
+    check("S8: nothing cleared yet", (await pendingEntries(d)) === 2);
+    await d.click(clearBtn.x, clearBtn.y);
+    await sleep(100);
+    check("S8: second click clears the current selection", (await pendingEntries(d)) === 0);
+    await d.ctrlZ();
+    await sleep(100);
+    check("S8: the clear is undoable", (await pendingEntries(d)) === 2);
+
+    // commit alpha+gamma → selection_1 with two members
+    const btn = await d.evaluate<{ x: number; y: number }>(`(()=>{
+      const r=document.getElementById('commit-btn').getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2};
+    })()`);
+    await d.click(btn.x, btn.y);
+    await sleep(200);
+    await d.evaluate(`(()=>{
+      const blocks=[...document.querySelectorAll('#selections .sel-block')];
+      const b=blocks.find(x=>/selection_1/.test(x.querySelector('.sel-name').textContent));
+      b.querySelector('.caret').click();
+    })()`);
+    await sleep(150);
+
+    // top-section left-click: temporary YELLOW flash + focus, no state change
+    const memberA = (await topRow(d, "/alpha/"))!;
+    await d.click(memberA.x, memberA.y);
+    await sleep(120);
+    const flashed = await d.evaluate<boolean>(`(()=>{
+      const rows=[...document.querySelectorAll('#selections .tree-row.selectable')];
+      return rows.some(r=>r.classList.contains('row-flash'));
+    })()`);
+    check("S8: top left-click flashes the row yellow (temporary)", flashed);
+    check("S8: ...and changes no state", (await committed(d))[1].entries === 2);
+
+    // right-click a MEMBER row hides just that member (purple state)
+    const visAll = await visibleCount(d);
+    await d.rightClick(memberA.x, memberA.y);
+    await sleep(150);
+    check("S8: member right-click hides only that member",
+      (await visibleCount(d)) === visAll - 400, `${visAll}→${await visibleCount(d)}`);
+    const purple = await d.evaluate<boolean>(`(()=>{
+      const rows=[...document.querySelectorAll('#selections .tree-row.selectable')];
+      return rows.some(r=>r.classList.contains('hidden-entry-row'));
+    })()`);
+    check("S8: hidden member is marked purple", purple);
+    const countLabel = await d.evaluate<string>(`(()=>{
+      const blocks=[...document.querySelectorAll('#selections .sel-block')];
+      const b=blocks.find(x=>/selection_1/.test(x.querySelector('.sel-name').textContent));
+      return b.querySelector('.sel-count').textContent;
+    })()`);
+    check("S8: header counts the part-hidden members", /1 hidden/.test(countLabel), countLabel);
+    await d.screenshot(`${REPORT}/S8_member_hidden.png`);
+    await d.rightClick(memberA.x, memberA.y);
+    await sleep(150);
+    check("S8: member right-click again un-hides", (await visibleCount(d)) === visAll);
+
+    // right-DRAG across members hides them all (one undo unit)
+    const memberA2 = (await topRow(d, "/alpha/"))!;
+    const memberG = (await topRow(d, "/gamma/"))!;
+    await d.drag(memberA2.x, memberA2.y, memberG.x, memberG.y, 4, { button: "right" });
+    await sleep(200);
+    check("S8: right-drag hides the dragged members",
+      (await visibleCount(d)) === visAll - 800, `visible=${await visibleCount(d)}`);
+    await d.ctrlZ();
+    await sleep(150);
+    check("S8: the drag-hide undoes as one unit", (await visibleCount(d)) === visAll);
+
+    // whole-selection hide via the header still works
+    const head = (await selHead(d, "/selection_1/"))!;
+    await d.rightClick(head.x, head.y);
+    await sleep(150);
+    check("S8: header right-click still hides the whole selection",
+      (await committed(d))[1].hidden === true);
+    await d.rightClick(head.x, head.y);
+    await sleep(150);
+
+    // deleting a selection must not strand the panel on blank space
+    await expandBottomCategory(d, "/solvent/");
+    await sleep(150);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const grp=rows.find(r=>r.dataset.level==='group' && /solvent/.test(r.textContent));
+      grp?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(300);
+    await d.evaluate(`document.getElementById('sidebar-content').scrollTop = 900`);
+    await sleep(250);
+    await d.evaluate(`(()=>{
+      const blocks=[...document.querySelectorAll('#selections .sel-block')];
+      const b=blocks.find(x=>/selection_1/.test(x.querySelector('.sel-name').textContent));
+      [...b.querySelectorAll('.sel-ctl')].find(x=>x.textContent==='✕').click();
+    })()`);
+    await sleep(400);
+    const inView = await d.evaluate<number>(`(()=>{
+      const sc=document.getElementById('sidebar-content').getBoundingClientRect();
+      return [...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>{const rr=r.getBoundingClientRect();
+          return rr.height>0 && rr.bottom>sc.top && rr.top<sc.bottom;}).length;
+    })()`);
+    check("S8: after deleting a selection the panel is not blank", inView > 5, `${inView} rows in view`);
+    await d.screenshot(`${REPORT}/S8_delete_relayout.png`);
+
+    // collapsing from a deep scroll clamps the scroll into range
+    await d.evaluate(`document.getElementById('sidebar-content').scrollTop = 900`);
+    await sleep(200);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const cat=rows.find(r=>r.dataset.level==='category' && /solvent/.test(r.textContent));
+      cat.querySelector('.caret').click();
+    })()`);
+    await sleep(400);
+    const clamp = await d.evaluate<{ top: number; max: number; inView: number }>(`(()=>{
+      const sc=document.getElementById('sidebar-content');
+      const r=sc.getBoundingClientRect();
+      const inView=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(x=>{const rr=x.getBoundingClientRect();
+          return rr.height>0 && rr.bottom>r.top && rr.top<r.bottom;}).length;
+      return {top:sc.scrollTop, max:Math.max(0,sc.scrollHeight-sc.clientHeight), inView};
+    })()`);
+    check("S8: collapsing from deep scroll clamps back into range",
+      clamp.top <= clamp.max + 1, JSON.stringify(clamp));
+    check("S8: content fills the viewport after the collapse", clamp.inView > 0, `${clamp.inView} rows`);
+    await d.screenshot(`${REPORT}/S8_collapse_clamped.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

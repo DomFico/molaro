@@ -56,15 +56,20 @@ export const HUD_CSS = /* css */ `
   #app { flex: 1 1 auto; min-width: 0; min-height: 0; position: relative; overflow: hidden; }
   #app canvas { display: block; }
 
-  /* commit button — the single "Create selection" / "Done" control (viewer corner) */
-  #commit-btn { position: absolute; top: 10px; right: 10px; z-index: 15;
-    padding: 5px 12px; font: inherit; font-weight: bold; letter-spacing: 0.2px;
-    color: #0b3529; background: #9fe8cd; border: 1px solid #5cb99a; border-radius: 4px;
-    cursor: pointer; }
+  /* viewer-corner actions: Clear (two-step confirm) + Create selection / Done */
+  #viewer-actions { position: absolute; top: 10px; right: 10px; z-index: 15;
+    display: flex; gap: 6px; }
+  #viewer-actions button { padding: 5px 12px; font: inherit; font-weight: bold;
+    letter-spacing: 0.2px; border-radius: 4px; cursor: pointer; }
+  #commit-btn { color: #0b3529; background: #9fe8cd; border: 1px solid #5cb99a; }
   #commit-btn:hover:not(:disabled) { background: #b8f2dd; }
   #commit-btn:disabled { background: #2e3a37; color: #71817c; border-color: #47524e;
     cursor: default; }
   #commit-btn.editing { background: #f2dc9b; border-color: #bfa35c; color: #3a2f10; }
+  #clear-btn { color: #ccc; background: #3a3a3a; border: 1px solid #555; }
+  #clear-btn:hover:not(:disabled) { background: #4a4a4a; }
+  #clear-btn:disabled { color: #71817c; border-color: #47524e; cursor: default; }
+  #clear-btn.confirm { color: #3a1010; background: #e8a9a9; border-color: #b96c6c; }
 
   /* collapsed: hide the panel + divider; a reopen tab sits at the last dock edge */
   #root.panel-collapsed #sidebar, #root.panel-collapsed #divider { display: none; }
@@ -117,6 +122,9 @@ export const HUD_CSS = /* css */ `
   .rename-input.rename-bad { border-color: #ff6060; }
   .entry-remove { flex: none; cursor: pointer; color: #888; padding: 0 4px; }
   .entry-remove:hover { color: #fff; }
+  /* individually hidden member (right-click a row): persistent purple state */
+  .tree-row.hidden-entry-row { background: rgba(185, 139, 224, 0.16); color: #c9a6ec; }
+  .tree-row.hidden-entry-row .tree-label { text-decoration: line-through; }
 
   /* ---- bottom section: build tree + bracket overlay ------------------------- */
   #tree-hint { color: #7a7a7a; padding: 0 4px 8px; line-height: 1.5; }
@@ -146,8 +154,15 @@ export const HUD_CSS = /* css */ `
     22%  { background-color: rgba(255, 233, 168, 0.35); }
     100% { background-color: rgba(255, 233, 168, 0); }
   }
-  .caret { width: 10px; display: inline-block; color: #888; cursor: pointer; }
-  .tree-label { overflow: hidden; text-overflow: ellipsis; }
+  .caret { width: 10px; flex: none; display: inline-block; color: #888; cursor: pointer; }
+  /* expandable carets get a big forgiving hit box (reaches left into the
+     indent) so a near-miss expands instead of selecting */
+  .caret.exp { width: 20px; margin-left: -8px; height: 18px; line-height: 18px;
+    text-align: center; border-radius: 3px; }
+  .caret.exp:hover { background: #46525c; color: #eee; }
+  /* the label takes the row's free space so trailing controls (the edit-mode
+     ✕) sit at the right edge, never under a mid-row click */
+  .tree-label { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 
   /* brackets: vertical spans in the tree gutter; scroll with the content */
   .bracket-layer { position: absolute; left: 0; top: 0; right: 0; pointer-events: none; z-index: 5; }
@@ -160,12 +175,8 @@ export const HUD_CSS = /* css */ `
   .bracket.pending { border-color: #9fe8cd; pointer-events: none;
     animation: bracketPulse 1.6s ease-in-out infinite; }
   @keyframes bracketPulse { 0%, 100% { opacity: 0.9; } 50% { opacity: 0.45; } }
-  /* the name may run past a short bracket (down the gutter) so it stays
-     readable and grabbable even for a single-row span */
-  .bracket-name { position: absolute; left: -1px; top: 1px; max-height: 96px;
-    writing-mode: vertical-rl; transform: rotate(180deg); font-size: 9px; line-height: 8px;
-    color: #a5a5a5; overflow: hidden; white-space: nowrap; user-select: none; }
-  .bracket.hidden .bracket-name { color: #c9a6ec; }
+  /* bracket names are not rendered in the tree (they live in the top
+     section); hovering a bracket shows its name via the title tooltip */
 
   /* top/bottom dock: the whole content flows LEFT-TO-RIGHT. #sidebar-content
      becomes a row: the selections section is a fixed left column, the tree host
@@ -204,7 +215,10 @@ export const HUD_BODY = /* html */ `
       </div>
       <div id="divider" title="drag to resize the panel"></div>
       <div id="app">
-        <button id="commit-btn" disabled>Create selection</button>
+        <div id="viewer-actions">
+          <button id="clear-btn" disabled>Clear</button>
+          <button id="commit-btn" disabled>Create selection</button>
+        </div>
       </div>
     </div>
     <div id="controls">

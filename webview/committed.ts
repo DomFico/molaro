@@ -27,6 +27,10 @@ export interface CommittedActions {
   focusEntry(e: Entry): void;
   focusPoints(points: number[]): void;
   toggleHidden(id: number): void;
+  /** Hide/show ONE member entry (right-click on a member row). */
+  toggleEntryHidden(id: number, e: Entry): void;
+  /** Hide/show several member entries at once (right-drag over rows). */
+  setEntriesHidden(id: number, entries: Entry[], hidden: boolean): void;
   beginEdit(id: number): void;
   endEdit(): void;
   rename(id: number, name: string): boolean;
@@ -53,7 +57,7 @@ export function mountCommitted(
   const signature = (): string => {
     const parts = model
       .committed()
-      .map((c) => `${c.id}:${c.name}:${c.hidden ? 1 : 0}:${c.set.entryCount}`);
+      .map((c) => `${c.id}:${c.name}:${c.hidden ? 1 : 0}:${c.set.entryCount}:${c.hiddenPart.entryCount}`);
     return `${model.editing?.id ?? -1}|${parts.join("|")}`;
   };
 
@@ -65,6 +69,9 @@ export function mountCommitted(
     for (const t of mounted) t.dispose();
     mounted.length = 0;
     container.innerHTML = "";
+    // section height may change (blocks added/removed): let virtual lists and
+    // brackets below re-window against the shifted layout
+    requestAnimationFrame(() => window.dispatchEvent(new Event("panelrelayout")));
 
     const head = document.createElement("div");
     head.className = "sel-section-head";
@@ -104,7 +111,13 @@ export function mountCommitted(
 
     const count = document.createElement("span");
     count.className = "sel-count";
-    count.textContent = `${fmt(sel.set.pointCount)} pts${sel.hidden ? " · hidden" : ""}`;
+    count.textContent = `${fmt(sel.set.pointCount)} pts${
+      sel.hidden
+        ? " · hidden"
+        : sel.hiddenPart.entryCount > 0
+          ? ` · ${sel.hiddenPart.entryCount} hidden`
+          : ""
+    }`;
 
     const editBtn = document.createElement("button");
     editBtn.className = "sel-ctl row-ctl";
@@ -136,7 +149,10 @@ export function mountCommitted(
     const buildBody = (): void => {
       if (built) return;
       built = true;
-      // flat member list: exactly the stored entries, at their own level
+      // flat member list: exactly the stored entries, at their own level.
+      // Left click/drag FOCUSES members (temporary yellow flash); right
+      // click/drag hides INDIVIDUAL members (persistent purple state) — the
+      // whole-selection hide stays on the header.
       const list = mountEntryList(
         body,
         hierarchy,
@@ -149,12 +165,22 @@ export function mountCommitted(
             for (const e of entries) pts.push(...hierarchy.pointsOf(e));
             actions.focusPoints(pts);
           },
-          secondaryClick: () => actions.toggleHidden(sel.id),
-          secondaryTrailEnd: () => actions.toggleHidden(sel.id),
+          secondaryClick: (e) => actions.toggleEntryHidden(sel.id, e),
+          secondaryTrailEnd: (entries) => {
+            // hide (or, starting on a hidden member, show) all dragged rows
+            const hide = !model.entryHidden(sel.id, entries[0]);
+            actions.setEntriesHidden(sel.id, entries, hide);
+          },
         },
         {
+          flashOnPrimary: true,
           flashOnSecondary: false,
           decorate: (e, row) => {
+            row.classList.toggle("hidden-entry-row", model.entryHidden(sel.id, e));
+            // the shared target pulse: edited members breathe in unison
+            const covered = model.targetCoversEntry(e);
+            row.classList.toggle("sel-covered", covered);
+            row.style.animationDelay = covered ? `-${performance.now() % 1600}ms` : "";
             row.querySelector(".entry-remove")?.remove();
             if (editingThis) {
               const rm = document.createElement("span");

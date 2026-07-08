@@ -44,20 +44,27 @@ export function mountBrackets(
     bottom: number;
   }
 
-  /** Span of the visible rows covered by `set` (entry rows or descendants —
-   * never ancestors), in layer coordinates. Null while none are expanded
-   * into view. */
-  const spanFor = (set: NodeSet): Span | null => {
+  /** CONTIGUOUS spans of the visible rows covered by `set` (entry rows or
+   * descendants — never ancestors). A selection whose covered rows have gaps
+   * (e.g. a painted range with the middle removed) yields several segments —
+   * several brackets, one selection. Empty while nothing is expanded into
+   * view. */
+  const spansFor = (set: NodeSet): Span[] => {
     const layerTop = layer.getBoundingClientRect().top;
-    let top = Infinity;
-    let bottom = -Infinity;
+    const rows: { top: number; bottom: number }[] = [];
     tree.forEachVisibleRow((e: Entry, el) => {
       if (!model.coversEntry(set, e)) return;
       const r = el.getBoundingClientRect();
-      if (r.top - layerTop < top) top = r.top - layerTop;
-      if (r.bottom - layerTop > bottom) bottom = r.bottom - layerTop;
+      rows.push({ top: r.top - layerTop, bottom: r.bottom - layerTop });
     });
-    return top === Infinity ? null : { top, bottom };
+    rows.sort((a, b) => a.top - b.top);
+    const spans: Span[] = [];
+    for (const r of rows) {
+      const last = spans[spans.length - 1];
+      if (last && r.top - last.bottom < 4) last.bottom = Math.max(last.bottom, r.bottom);
+      else spans.push({ top: r.top, bottom: r.bottom });
+    }
+    return spans;
   };
 
   const bracketEl = (
@@ -72,13 +79,9 @@ export function mountBrackets(
     b.style.left = `${x}px`;
     b.style.top = `${span.top}px`;
     b.style.height = `${Math.max(span.bottom - span.top, 6)}px`;
-    if (name !== null) {
-      const label = document.createElement("span");
-      label.className = "bracket-name";
-      label.textContent = name;
-      label.title = `${name} — drag sideways to move this bracket`;
-      b.appendChild(label);
-    }
+    // the NAME is not rendered in the tree (it lives in the top section);
+    // it stays discoverable on hover, and the whole bracket is the drag handle
+    if (name !== null) b.title = `${name} — drag sideways to move this bracket`;
     if (onDragLane) {
       b.addEventListener("pointerdown", (e) => {
         if (e.button !== 0) return;
@@ -106,31 +109,43 @@ export function mountBrackets(
 
   const layout = (): void => {
     layer.innerHTML = "";
+    // Size the layer to the CONTENT height, never to a height inflated by the
+    // layer's own previous size — otherwise a collapse leaves a tall empty
+    // scroll area (the "blank panel below" glitch).
+    layer.style.height = "0px";
     layer.style.height = `${host.scrollHeight}px`;
 
-    // committed brackets (neutral; purple when hidden)
+    // committed brackets (neutral; purple when hidden) — one bracket PER
+    // CONTIGUOUS covered run; the name rides the first segment
     for (const sel of model.committed()) {
       if (sel.set.entryCount === 0) continue;
-      const span = spanFor(sel.set);
-      if (!span) continue;
       const cls = sel.hidden ? "committed hidden" : "committed";
-      layer.appendChild(
-        bracketEl(LANE_X0 + sel.lane * LANE_W, span, cls, sel.name, (laneDx) => {
-          if (laneDx !== 0) model.setLane(sel.id, sel.lane + laneDx);
-        }),
-      );
+      spansFor(sel.set).forEach((span, i) => {
+        layer.appendChild(
+          bracketEl(LANE_X0 + sel.lane * LANE_W, span, cls, i === 0 ? sel.name : null, (laneDx) => {
+            if (laneDx !== 0) model.setLane(sel.id, sel.lane + laneDx);
+          }),
+        );
+      });
     }
 
-    // pending bracket (green, innermost lane, unnamed, not draggable);
-    // its pulse is phase-locked to the global clock (unison with the rows)
+    // pending brackets (green, innermost lane, unnamed, not draggable);
+    // pulse phase-locked to the global clock (unison with the rows)
     const target = model.target;
     if (target.entryCount > 0) {
-      const span = spanFor(target);
-      if (span) {
+      for (const span of spansFor(target)) {
         const b = bracketEl(PENDING_X, span, "pending", null, null);
         b.style.animationDelay = `-${performance.now() % 1600}ms`;
         layer.appendChild(b);
       }
+    }
+
+    // content may have shrunk (collapse / deleted selection): keep the scroll
+    // position inside the new range so the viewport never strands on blank
+    const sc = host.closest("#sidebar-content") as HTMLElement | null;
+    if (sc) {
+      const max = Math.max(0, sc.scrollHeight - sc.clientHeight);
+      if (sc.scrollTop > max) sc.scrollTop = max;
     }
   };
 

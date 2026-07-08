@@ -482,11 +482,21 @@ async function main(): Promise<void> {
     const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
     animateCameraTo(center.clone().addScaledVector(dir, dist), center);
   };
+  /** Frame what is actually VISIBLE: with parts hidden, an empty click zooms
+   * and centers on the remaining points, not the whole-scene bbox. */
+  const frameVisible = (): void => {
+    const idx: number[] = [];
+    for (let p = 0; p < visible.length; p++) if (visible[p] > 0.5) idx.push(p);
+    if (idx.length === 0 || idx.length === visible.length) resetCamera();
+    else zoomToPoints(idx);
+  };
   let flashStart = -1;
   let flashPts: number[] = [];
   const focusPoints = (indices: number[]): void => {
     if (indices.length === 0) return;
-    zoomToPoints(indices);
+    // While EDITING a selection the camera stays parked — focus actions still
+    // pulse the region, but never move the view; Done restores focus moves.
+    if (!model.editing) zoomToPoints(indices);
     for (const p of flashPts) flashArray[p] = 0;
     for (const p of indices) flashArray[p] = 1;
     flashPts = indices;
@@ -495,14 +505,28 @@ async function main(): Promise<void> {
   };
   const focusEntry = (e: Entry): void => focusPoints(hierarchy.pointsOf(e));
 
-  // -- commit button ("Create selection" / "Done", viewer corner) ---------------
+  // -- viewer-corner actions: Clear (two-step confirm) + Create/Done -----------
   const commitBtn = document.getElementById("commit-btn") as HTMLButtonElement | null;
+  const clearBtn = document.getElementById("clear-btn") as HTMLButtonElement | null;
+  let clearArmedTimer = 0;
+  const disarmClear = (): void => {
+    if (!clearBtn) return;
+    clearTimeout(clearArmedTimer);
+    clearArmedTimer = 0;
+    clearBtn.classList.remove("confirm");
+    clearBtn.textContent = "Clear";
+  };
   const updateCommitBtn = (): void => {
     if (!commitBtn) return;
     const editing = model.editing !== null;
     commitBtn.textContent = editing ? "Done" : "Create selection";
     commitBtn.classList.toggle("editing", editing);
     commitBtn.disabled = !editing && model.pending.entryCount === 0;
+    if (clearBtn) {
+      const canClear = model.target.entryCount > 0;
+      clearBtn.disabled = !canClear;
+      if (!canClear) disarmClear();
+    }
   };
   commitBtn?.addEventListener("click", () => {
     if (model.editing) {
@@ -511,6 +535,18 @@ async function main(): Promise<void> {
       const sel = model.commit();
       if (sel) refreshPoints(sel.set.resolvedPoints()); // green clears
     }
+  });
+  // Clear asks "are you sure" inline: first click arms it for a few seconds,
+  // the second click actually clears the current selection (undoable).
+  clearBtn?.addEventListener("click", () => {
+    if (!clearBtn.classList.contains("confirm")) {
+      clearBtn.classList.add("confirm");
+      clearBtn.textContent = "sure?";
+      clearArmedTimer = window.setTimeout(disarmClear, 3000);
+      return;
+    }
+    disarmClear();
+    refreshPoints(model.clearTarget());
   });
 
   // -- the two panel sections, both through the ONE tree component --------------
@@ -583,6 +619,9 @@ async function main(): Promise<void> {
     focusEntry,
     focusPoints,
     toggleHidden: (id) => refreshPoints(model.toggleHidden(id)),
+    toggleEntryHidden: (id, e) => refreshPoints(model.toggleEntryHidden(id, e)),
+    setEntriesHidden: (id, entries, hidden) =>
+      refreshPoints(model.setEntriesHidden(id, entries, hidden)),
     beginEdit: (id) => refreshPoints(model.beginEdit(id)),
     endEdit: () => refreshPoints(model.endEdit()),
     rename: (id, name) => model.rename(id, name),
@@ -602,13 +641,11 @@ async function main(): Promise<void> {
   });
   updateCommitBtn();
 
-  // -- sensible default: one PRE-MADE HIDDEN committed selection per bulk
-  // category (neutral name = the category's label; initial state, not undoable) --
+  // -- convenience default: one PRE-MADE committed selection per bulk category
+  // (neutral name = the category's label) so the environment can be hidden
+  // with one right-click. NOTHING is hidden initially — the user decides.
   for (const c of bulkCategories(header)) {
-    const seeded = model.seedHidden(header.categories[c] ?? `category ${c}`, [
-      { level: "category", id: c },
-    ]);
-    refreshPoints(seeded.set.resolvedPoints());
+    model.seed(header.categories[c] ?? `category ${c}`, [{ level: "category", id: c }]);
   }
   parts.rebuildLines();
 
@@ -723,7 +760,8 @@ async function main(): Promise<void> {
     if (down.button !== 0) return; // plain right-click: nothing (pan is the drag)
     const idx = pickAt(e.clientX, e.clientY);
     if (idx < 0) {
-      resetCamera(); // click on empty space: zoom back out to the whole scene
+      // empty space: zoom back out to frame what is VISIBLE (parked while editing)
+      if (!model.editing) frameVisible();
       return;
     }
     // focus the clicked point's subgroup — orient + yellow pulse, no selection
@@ -931,6 +969,12 @@ async function main(): Promise<void> {
         flashCount: (): number => flashPts.length,
         /** what a click at client (x,y) would pick (-1 = empty space). */
         pick: (x: number, y: number): number => pickAt(x, y),
+        /** centroid+radius of the currently visible points (current frame). */
+        visibleBounds: (): { center: [number, number, number]; radius: number } | null => {
+          const idx: number[] = [];
+          for (let p = 0; p < visible.length; p++) if (visible[p] > 0.5) idx.push(p);
+          return selectionBounds(positionAttr.array as Float32Array, idx);
+        },
         /** current overlay pulse strengths (green target, yellow flash). */
         pulse: (): { sel: number; flash: number } => ({
           sel: parts.selMat.uniforms.uStrength.value as number,
