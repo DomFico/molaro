@@ -190,10 +190,68 @@ importantly, **it opens from a file**.
   **current** viewing direction (it recenters and backs out, without flipping to
   the initial orientation). Right-drag **pan sensitivity** was reduced.
 - **Dockable, collapsible panel.** The classification panel can be docked to any
-  edge (left/right/top/bottom) via the small toolbar at its top, resized by the
-  divider, and collapsed away (a "panel" button in the top bar brings it back).
+  edge (left/right/top/bottom), resized by the divider, and collapsed away.
   Docked top/bottom, the tree lays its categories out horizontally and scrolls
   left/right. The choice persists via the webview state API.
+
+## Increment 4.7: persistent selection & hidden sets
+
+Two parts: panel/camera polish, and a general **persistent selection/hidden-set**
+model driven by direct manipulation at any level of the hierarchy.
+
+### Panel & camera (Part A)
+
+The panel **defaults to the right** edge and is **docked by dragging its grip**
+onto an edge drop-zone (the overlay highlights the nearest edge). The X is
+replaced by a **collapse** control that animates the panel closed and leaves a
+**reopen tab at the last dock edge**. Rotation **inertia was reduced** to a gentle
+nudge. (Horizontal docks now reflow the tree and scroll on the correct axis.)
+
+### Selection & hidden sets (Part B) — the agent-context substrate
+
+Interaction is driven by **two persistent, independent, first-class sets**
+(`webview/sets.ts`): a **selection set** and a **hidden set**. Each holds
+**entries** — a reference to a node at **any** level (`category` / `group` /
+`subgroup` / `point`) — and resolves to the **union of points** its entries
+cover, reference-counted so add/remove is incremental (smooth at N≈250k).
+
+These sets are deliberately the **shared-context representation a future
+agent-driven layer will read and write** ("analyze what's selected", "hide the
+solvent"). They are modeled as clean state with a small API — add / remove /
+toggle / range-add / clear / resolve-to-points / list-entries — so the agent can
+target them later without a refactor. **No agent is wired up**; this is only the
+substrate. The **active-sets surface** in the panel (collapsible *Selected* /
+*Hidden* sections with per-entry counts, remove, and clear-all) is the
+inspectable view of that state.
+
+**Rendering** extends the existing layers: the hidden set's resolved points get
+`visible = 0` in the representation layer (and their edges hide too); the
+selection set draws a **green highlight overlay on visible points only**. There
+is **no dimmed/transparent middle state** — a node is either hidden (not drawn)
+or a full first-class citizen (white, selectable → green). **Hidden wins**: a
+point in both sets isn't drawn; un-hide it and it shows as selected.
+
+**Gestures** (remappable) — left-click selects, right-click hides:
+
+| Gesture | Effect |
+|---|---|
+| Left-click | Select **only** this (replace) |
+| **Ctrl/Cmd**+Left-click | **Toggle** this entry in/out of the selection (accumulate) |
+| **Shift**+Left-click | **Range**-select every row between the anchor and this one |
+| Right-click | **Toggle** this entry in/out of the hidden set |
+| **Shift**+Right-click | **Range**-hide between anchor and this one |
+
+Range is defined by the currently-visible tree-row order (the file-explorer
+idiom, generalized to any depth), so it is **tree-only**; the 3D view supports
+plain (select-only) and Ctrl (accumulate), and dragging stays camera orbit. The
+tree gains a **fourth level** — expand a subgroup to reveal and select/hide its
+individual **points**.
+
+**Bulk is no longer a special case:** high-cardinality (solvent-like) categories
+start as **entries in the hidden set** by default (so the default view isn't a
+hairball). Un-hiding is just removing that entry (right-click the category, or
+its row in the active-sets surface) — after which it renders white and selects
+green like anything else.
 
 ## Running the extension
 
@@ -416,9 +474,10 @@ webview/     main.ts (Three.js renderer + controls + interaction wiring),
              transport.ts (FIFO correlation), playback.ts (playhead/prefetch/cache),
              geometry.ts (pure prep),
              representation.ts (replaceable per-point base look, defaults only),
-             selection.ts (selection substrate + store), classification.ts (tree
-             model + bulk detection), sidebar.ts (tree DOM), picking.ts (CPU pick),
-             hud.ts (shared DOM skeleton + layout CSS for both hosts)
+             sets.ts (persistent selection/hidden set store — agent-context state),
+             classification.ts (tree model + bulk detection), sidebar.ts (tree DOM
+             + gestures), activesets.ts (Selected/Hidden surface), picking.ts (CPU
+             pick), hud.ts (shared DOM skeleton + layout CSS for both hosts)
 media/       fixtures/ — Increment 1 fixture files (kept for tests; not the data path)
 tests/       Python: test_roundtrip.py, make_fixtures.py, make_webview_fixture.py,
              make_openfile_fixtures.py (structure/trajectory/orphan open-from-file fixtures)
@@ -426,9 +485,10 @@ tests/       Python: test_roundtrip.py, make_fixtures.py, make_webview_fixture.p
              picking tests, bridge.ts (headless E2E: real broker + producer, no VS
              Code; /selftest route drives selection), sidebar_spotcheck.ts (runs a
              real corpus header through the sidebar's classification path),
-             e2e_driver.ts + fixes_4_5/4_6/4_6_1.ts (CDP-driven validation)
+             sets.test.ts (set-store unit tests), e2e_driver.ts +
+             fixes_4_5/4_6/4_6_1/4_7.ts (CDP-driven validation)
 dist/        build output (generated)
-reports/     fixes_4_5/, fixes_4_6/, fixes_4_6_1/ — screenshots (gitignored; regenerable)
+reports/     fixes_4_5/…/4_7/ — screenshot evidence (gitignored; regenerable)
 ```
 
 `SyntheticSource` implements the same `DataSource` interface a real data source

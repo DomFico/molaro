@@ -25,8 +25,7 @@ const canvasRect = (d: E2EDriver) =>
   d.evaluate<{ x: number; y: number; w: number; h: number }>(
     "(()=>{const r=document.querySelector('#app canvas').getBoundingClientRect();return {x:r.left,y:r.top,w:r.width,h:r.height};})()",
   );
-const selCount = (d: E2EDriver) => d.evaluate<number>(`${V}.selection.current.indices.length`);
-const selKind = (d: E2EDriver) => d.evaluate<string>(`${V}.selection.current.descriptor.kind`);
+const selCount = (d: E2EDriver) => d.evaluate<number>(`${V}.sets.selection.pointCount`);
 const frameNum = (d: E2EDriver) => d.evaluate<number>(`${V}.player.frame`);
 const isPlaying = (d: E2EDriver) => d.evaluate<boolean>(`${V}.player.playing`);
 const sliderVal = (d: E2EDriver) => d.evaluate<number>("Number(document.getElementById('scrubber').value)");
@@ -75,7 +74,7 @@ async function A1(): Promise<void> {
     await pause(d);
     const r = await canvasRect(d);
     const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
-    await d.evaluate(`${V}.selection.clear()`);
+    await d.evaluate(`${V}.actions.clearSelection()`);
     const before = await selCount(d);
     const camBefore = await camPos(d);
     await d.drag(cx - 130, cy - 90, cx + 130, cy + 90, 12);
@@ -87,9 +86,9 @@ async function A1(): Promise<void> {
     check("drag leaves selection empty", before === 0 && afterDrag === 0, `before=${before} afterDrag=${afterDrag}`);
     check("drag moved the camera (orbit worked)", camMoved > 0.01, `moved=${camMoved.toFixed(3)}`);
 
-    // A no-move click on a bright (on-point) pixel selects. Reveal bulk first so
-    // the scene fills the center (bulk solvent is hidden by default in 4.6).
-    await d.evaluate(`${V}.rep.setBulkVisible(true)`);
+    // A no-move click on a bright (on-point) pixel selects. Un-hide bulk first so
+    // the scene fills the center (bulk solvent is hidden by default).
+    await d.evaluate(`${V}.actions.clearSet('hidden')`);
     await sleep(200);
     const hit = await findBrightPixel(d, r);
     if (hit) {
@@ -178,7 +177,7 @@ async function A2(): Promise<void> {
 
     // Zoom-to-selection: select a subgroup, invoke the real zoom path, confirm
     // the camera reframed closer to the selection centroid.
-    await d.evaluate(`${V}.selection.selectSubgroup(1)`);
+    await d.evaluate(`${V}.actions.selectOnly({level:'subgroup', id:1})`);
     await sleep(100);
     const distToSelBefore = await selectionCamDist(d);
     await d.evaluate(`${V}.zoomToSelection()`);
@@ -192,7 +191,7 @@ async function A2(): Promise<void> {
 /** Distance from camera to the current selection centroid at the current frame. */
 function selectionCamDist(d: E2EDriver): Promise<number> {
   return d.evaluate<number>(`(()=>{
-    const v=${V}; const idx=v.selection.current.indices; if(!idx.length) return Infinity;
+    const v=${V}; const idx=v.sets.selection.resolvedPoints(); if(!idx.length) return Infinity;
     const f=v.player.frame; const chunk=v.player.getFrame(f); if(!chunk) return Infinity;
     const nP=v.rep.state.visible.length; const off=(f-chunk.start)*nP*3; const pos=chunk.positions;
     let cx=0,cy=0,cz=0; for(const p of idx){cx+=pos[off+p*3];cy+=pos[off+p*3+1];cz+=pos[off+p*3+2];}
@@ -258,7 +257,7 @@ async function A4(): Promise<void> {
 // -- B: layout — reserved, non-overlapping regions at multiple sizes/widths ----
 async function B(): Promise<void> {
   console.log("B — non-overlapping reserved layout, resizable sidebar");
-  const regions = ["#topbar", "#status", "#sidebar", "#app", "#controls", "#bulk-toggle"];
+  const regions = ["#topbar", "#status", "#sidebar", "#app", "#controls"];
   const configs: Array<{ w: number; h: number; sidebar: number; label: string }> = [
     { w: 1000, h: 700, sidebar: 300, label: "1000x700_sb300" },
     { w: 1400, h: 900, sidebar: 420, label: "1400x900_sb420" },
@@ -267,7 +266,7 @@ async function B(): Promise<void> {
   for (const cfg of configs) {
     await withDriver({ bridgePort: 8965, cdpPort: 9265, width: cfg.w, height: cfg.h, nPoints: 9000 }, async (d) => {
       // make a selection so both header and selection readout have text
-      await d.evaluate(`${V}.selection.selectSubgroup(0)`);
+      await d.evaluate(`${V}.actions.selectOnly({level:'subgroup', id:0})`);
       await d.evaluate(`(()=>{const s=document.getElementById('sidebar'); s.style.width='${cfg.sidebar}px';})()`);
       await d.evaluate(`${V}.applyResize()`);
       await sleep(250);
@@ -276,10 +275,6 @@ async function B(): Promise<void> {
 
       // header occupies the top bar cleanly (B1: no on-canvas overlay to collide)
       check(`${cfg.label}: header present in top bar`, !!rects["#status"] && rects["#status"].w > 0);
-      // bulk toggle fully inside #app and above the controls bar, unobscured (B2)
-      const bt = rects["#bulk-toggle"], app = rects["#app"], ctr = rects["#controls"];
-      const btInApp = bt && app && bt.x >= app.x - 1 && bt.x + bt.w <= app.x + app.w + 1 && bt.y >= app.y - 1;
-      check(`${cfg.label}: bulk toggle unobscured (in canvas, above controls)`, !!btInApp && !overlaps(bt, ctr), JSON.stringify(bt));
       // core regions do not overlap each other (B3)
       const core = ["#topbar", "#sidebar", "#app", "#controls"];
       let anyOverlap = false, which = "";
@@ -287,8 +282,8 @@ async function B(): Promise<void> {
         for (let j = i + 1; j < core.length; j++)
           if (overlaps(rects[core[i]], rects[core[j]])) { anyOverlap = true; which = `${core[i]}∩${core[j]}`; }
       check(`${cfg.label}: topbar/sidebar/canvas/controls all disjoint`, !anyOverlap, which);
-      // selection readout appears exactly once — only the sidebar box (4.6 C)
-      const selNodes = await d.evaluate<number>("document.querySelectorAll('.sel-readout, #selreadout').length");
+      // selection readout appears exactly once — the active-sets "Selected" title
+      const selNodes = await d.evaluate<number>("document.querySelectorAll('.set-title.sel').length");
       check(`${cfg.label}: single selection-readout node (no duplicate)`, selNodes === 1, `nodes=${selNodes}`);
       // sidebar honored the requested width (resizable)
       check(`${cfg.label}: sidebar width applied (${cfg.sidebar}px)`, Math.abs((rects["#sidebar"]?.w ?? 0) - cfg.sidebar) < 2, `w=${rects["#sidebar"]?.w}`);

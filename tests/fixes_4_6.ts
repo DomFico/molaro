@@ -98,7 +98,7 @@ async function B1(): Promise<void> {
     await pause(d);
     const home = await camPos(d);
     // Zoom into a subgroup so the camera is far from home, settle the tween.
-    await d.evaluate(`${V}.selection.selectSubgroup(0)`);
+    await d.evaluate(`${V}.actions.selectOnly({level:'subgroup', id:0})`);
     await d.evaluate(`${V}.zoomToSelection()`);
     await sleep(600);
     const zoomed = await camPos(d);
@@ -119,7 +119,7 @@ async function B2(): Promise<void> {
   console.log("B2 — camera transitions animate (intermediate frames), not snap");
   await withDriver({ bridgePort: 8975, cdpPort: 9275, producerArgs: ["--n-points", "5000", "--n-frames", "120"] }, 2800, async (d) => {
     await pause(d);
-    await d.evaluate(`${V}.selection.selectSubgroup(0)`);
+    await d.evaluate(`${V}.actions.selectOnly({level:'subgroup', id:0})`);
     const start = await camPos(d);
     await d.evaluate(`${V}.zoomToSelection()`);
     // Sample during the ~360ms tween: an early sample must be strictly between
@@ -168,25 +168,25 @@ async function B3(): Promise<void> {
   });
 }
 
-// -- C: selection readout is deduplicated (one place only) --------------------
+// -- C: selection readout renders in exactly one place (the active-sets box) --
 async function C(): Promise<void> {
   console.log("C — selection readout renders in exactly one place");
   await withDriver({ bridgePort: 8977, cdpPort: 9277, producerArgs: ["--n-points", "5000", "--n-frames", "120"] }, 2800, async (d) => {
     const topRight = await d.evaluate<number>("document.querySelectorAll('#selreadout').length");
-    const sidebarBoxes = await d.evaluate<number>("document.querySelectorAll('.sel-readout').length");
-    await d.evaluate(`${V}.selection.selectSubgroup(0)`);
+    const boxes = await d.evaluate<number>("document.querySelectorAll('.set-title.sel').length");
+    await d.evaluate(`${V}.actions.selectOnly({level:'subgroup', id:0})`);
     await sleep(150);
-    const text = await d.evaluate<string>("document.querySelector('.sel-readout').textContent");
+    const text = await d.evaluate<string>("document.querySelector('.set-title.sel').textContent");
     await d.screenshot(`${REPORT}/C_dedup_readout/single_readout.png`);
-    check("top-right readout removed", topRight === 0, `#selreadout=${topRight}`);
-    check("exactly one selection readout (sidebar box)", sidebarBoxes === 1, `.sel-readout=${sidebarBoxes}`);
-    check("sidebar readout updates on selection", /subgroup/i.test(text), JSON.stringify(text));
+    check("no old top-right readout node", topRight === 0, `#selreadout=${topRight}`);
+    check("exactly one selection readout (active-sets box)", boxes === 1, `.set-title.sel=${boxes}`);
+    check("readout updates on selection", /1 entry/.test(text), JSON.stringify(text));
   });
 }
 
-// -- D: bulk hidden by default on small AND large datasets; toggle works -------
+// -- D: bulk hidden by default on small AND large datasets; un-hide works ------
 async function D(): Promise<void> {
-  console.log("D — bulk hidden by default (both scales) + working toggle");
+  console.log("D — bulk hidden by default (both scales) + un-hide");
   const scales: Array<{ n: number; label: string }> = [
     { n: 5600, label: "small" }, // ~4,480-pt solvent — the 'cage solvent' scale
     { n: 20000, label: "large" },
@@ -194,22 +194,18 @@ async function D(): Promise<void> {
   for (const s of scales) {
     await withDriver({ bridgePort: 8978, cdpPort: 9278, producerArgs: ["--n-points", String(s.n), "--n-frames", "120"] }, 2800, async (d) => {
       await pause(d);
-      const hasBulk = await d.evaluate<boolean>(`${V}.rep.hasBulk`);
-      const shown0 = await d.evaluate<boolean>(`${V}.rep.bulkShown`);
-      const btnVisible = await d.evaluate<boolean>("(()=>{const b=document.getElementById('bulk-toggle'); return getComputedStyle(b).display!=='none';})()");
+      // Bulk is a pre-populated hidden-set entry (no special toggle).
+      const hidPts = await d.evaluate<number>(`${V}.sets.hidden.pointCount`);
+      const hidEntries = await d.evaluate<number>(`${V}.sets.hidden.entryCount`);
       const hiddenB64 = await d.captureB64(`${REPORT}/D_bulk/${s.label}_hidden_default.png`);
       const lumHidden = await meanLuminance(d, hiddenB64);
-      check(`${s.label}: has a bulk category`, hasBulk);
-      check(`${s.label}: bulk hidden by default`, shown0 === false);
-      check(`${s.label}: bulk toggle visible (pairing requirement)`, btnVisible);
-      // Toggle reveals bulk.
-      await d.evaluate("document.getElementById('bulk-toggle').click()");
+      check(`${s.label}: has a bulk category (in hidden set)`, hidEntries >= 1 && hidPts > 1000, `entries=${hidEntries} pts=${hidPts}`);
+      // Un-hide by clearing the hidden set (removes the bulk entry).
+      await d.evaluate(`${V}.actions.clearSet('hidden')`);
       await sleep(300);
-      const shown1 = await d.evaluate<boolean>(`${V}.rep.bulkShown`);
       const shownB64 = await d.captureB64(`${REPORT}/D_bulk/${s.label}_shown_after_toggle.png`);
       const lumShown = await meanLuminance(d, shownB64);
-      check(`${s.label}: toggle reveals bulk`, shown1 === true);
-      check(`${s.label}: revealing bulk adds points (brighter)`, lumShown > lumHidden + 1, `hidden=${lumHidden.toFixed(1)} shown=${lumShown.toFixed(1)}`);
+      check(`${s.label}: un-hiding reveals bulk (brighter)`, lumShown > lumHidden + 1 && (await d.evaluate<number>(`${V}.sets.hidden.pointCount`)) === 0, `hidden=${lumHidden.toFixed(1)} shown=${lumShown.toFixed(1)}`);
     });
   }
 }

@@ -14,7 +14,7 @@ import { parseArgs } from "node:util";
 import { parseHeader } from "../contract/contract.ts";
 import { ProducerBroker } from "../src/broker.ts";
 import { bulkCategories, buildTree } from "../webview/classification.ts";
-import { SelectionStore } from "../webview/selection.ts";
+import { Hierarchy, NodeSet } from "../webview/sets.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const { values: args } = parseArgs({
@@ -48,13 +48,14 @@ const broker = new ProducerBroker(
       console.log(`bulk categories (hidden by default): ${[...bulk].join(", ") || "none"}`);
 
       // Exercise selection on the first non-bulk group with subgroups, if any.
-      const sel = new SelectionStore(header);
+      const hierarchy = new Hierarchy(header);
+      const sel = new NodeSet(hierarchy, "selection");
       const target = tree.categories.find((c) => !c.bulk && c.groups.some((g) => g.subgroups.length > 0));
       if (target) {
         const g = target.groups.find((gg) => gg.subgroups.length > 0)!;
         const subId = g.subgroups[0].subgroupId;
-        sel.selectSubgroup(subId);
-        console.log(`select subgroup ${subId} -> ${sel.current.indices.length} point indices, kind=${sel.current.descriptor.kind}`);
+        sel.add({ level: "subgroup", id: subId });
+        console.log(`select subgroup ${subId} -> ${sel.pointCount} point indices, entries=${sel.entryCount}`);
       } else {
         console.log("no non-bulk structured subgroup to select (degenerate structure — OK)");
       }

@@ -1,75 +1,77 @@
 /**
- * Classification sidebar — the primary selection surface (DOM).
+ * Classification tree — the primary direct-manipulation surface (DOM).
  *
- * Renders the category -> group -> subgroup tree from classification.ts and
- * wires it to the SelectionStore, which the 3D view shares: clicking a node
- * selects it in both surfaces; the store's snapshot drives which row is marked
- * active, so tree and 3D stay in sync with no cross-surface messaging.
+ * Renders category → group → subgroup → point (drill-to-points is the fourth,
+ * lazily-built level). Every row is an ENTRY at its level. Gestures drive the
+ * persistent selection/hidden sets (see sets.ts); the sets drive the row classes
+ * back (.selected green, .hidden-entry struck-through), so the tree and 3D view
+ * stay in sync through the shared sets, not cross-surface messaging.
  *
- * Two rules keep a real dataset's tree fast:
- *  - **Bulk categories** render as a single summary row (count only), never
- *    enumerated by default; they can be expanded on demand.
- *  - **Lazy + capped rendering**: a node's children are built the first time it
- *    is expanded, and any subgroup list is capped (large lists show a truncation
- *    note) so even a category with thousands of subgroups never floods the DOM.
- *
- * Double-clicking a subgroup (or group) requests zoom-to-selection via the
- * injected `onZoom` callback.
+ * Gestures (remappable): left = select, right = hide; plain = only-this,
+ * Ctrl/Cmd = toggle/accumulate, Shift = range over the currently-visible rows
+ * between the anchor and the clicked row (the file-explorer idiom, generalized to
+ * any depth). Double-click zooms. Lazy + capped rendering keeps big trees fast.
  */
-import type { TreeModel, CategoryNode, GroupNode } from "./classification.ts";
-import type { SelectionSnapshot, SelectionStore } from "./selection.ts";
+import type { CategoryNode, GroupNode, TreeModel } from "./classification.ts";
+import type { Entry, Hierarchy, NodeSet } from "./sets.ts";
+import { entryKey } from "./sets.ts";
 
-/** Max subgroup rows rendered under one group before truncating. */
 const MAX_SUBGROUP_ROWS = 200;
+const MAX_POINT_ROWS = 200;
 
-interface SidebarCallbacks {
-  onZoom: (kind: "subgroup" | "group", id: number) => void;
+export interface SidebarActions {
+  selectOnly(e: Entry): void;
+  selectToggle(e: Entry): void;
+  selectRange(entries: Entry[]): void;
+  hideToggle(e: Entry): void;
+  hideRange(entries: Entry[]): void;
+  zoomTo(e: Entry): void;
 }
 
 export function mountSidebar(
   container: HTMLElement,
   tree: TreeModel,
-  selection: SelectionStore,
-  callbacks: SidebarCallbacks,
+  hierarchy: Hierarchy,
+  selection: NodeSet,
+  hidden: NodeSet,
+  actions: SidebarActions,
 ): void {
   container.innerHTML = "";
 
-  const readout = document.createElement("div");
-  readout.className = "sel-readout";
-  readout.textContent = "no selection";
-  container.appendChild(readout);
-
   const hint = document.createElement("div");
   hint.className = "sidebar-hint";
-  hint.textContent = "click a row to select · double-click to zoom";
+  hint.textContent = "left-click select · right-click hide · Ctrl add · Shift range";
   container.appendChild(hint);
 
   const treeRoot = document.createElement("div");
   treeRoot.className = "tree";
   container.appendChild(treeRoot);
 
-  // Rows that carry a selectable target register here so the active-selection
-  // highlight can be applied from the store snapshot.
-  interface Selectable {
-    el: HTMLElement;
-    kind: "subgroup" | "group" | "category";
-    id: number;
-  }
-  const selectables: Selectable[] = [];
+  const rowEntry = new WeakMap<HTMLElement, Entry>();
+  const selectableRows: HTMLElement[] = [];
+  let anchorEl: HTMLElement | null = null;
+
+  const visibleRows = (): HTMLElement[] =>
+    selectableRows.filter((r) => r.isConnected && r.offsetParent !== null);
+
+  const rangeEntries = (clicked: HTMLElement): Entry[] => {
+    const rows = visibleRows();
+    const ci = rows.indexOf(clicked);
+    if (ci < 0) return [];
+    const ai = anchorEl ? rows.indexOf(anchorEl) : -1;
+    if (ai < 0) return [rowEntry.get(clicked)!];
+    const [lo, hi] = ai <= ci ? [ai, ci] : [ci, ai];
+    return rows.slice(lo, hi + 1).map((r) => rowEntry.get(r)!);
+  };
 
   const makeRow = (
     depth: number,
     text: string,
-    opts: {
-      selectable?: { kind: "subgroup" | "group" | "category"; id: number };
-      expandable?: boolean;
-      muted?: boolean;
-    } = {},
-  ): { row: HTMLElement; caret: HTMLElement; label: HTMLElement } => {
+    opts: { entry?: Entry; expandable?: boolean } = {},
+  ): { row: HTMLElement; caret: HTMLElement } => {
     const row = document.createElement("div");
     row.className = "tree-row";
     row.style.paddingLeft = `${6 + depth * 14}px`;
-    if (opts.muted) row.classList.add("muted");
 
     const caret = document.createElement("span");
     caret.className = "caret";
@@ -81,84 +83,120 @@ export function mountSidebar(
     label.textContent = text;
     row.appendChild(label);
 
-    if (opts.selectable) {
-      const sel = opts.selectable;
+    if (opts.entry) {
+      const entry = opts.entry;
       row.classList.add("selectable");
-      selectables.push({ el: row, kind: sel.kind, id: sel.id });
+      rowEntry.set(row, entry);
+      selectableRows.push(row);
+
       row.addEventListener("click", (e) => {
+        if (e.target === caret) return; // caret toggles expansion, not select
         e.stopPropagation();
-        if (sel.kind === "subgroup") selection.selectSubgroup(sel.id);
-        else if (sel.kind === "group") selection.selectGroup(sel.id);
-        else selection.selectCategory(sel.id);
+        if (e.shiftKey) actions.selectRange(rangeEntries(row));
+        else if (e.ctrlKey || e.metaKey) {
+          actions.selectToggle(entry);
+          anchorEl = row;
+        } else {
+          actions.selectOnly(entry);
+          anchorEl = row;
+        }
       });
-      if (sel.kind !== "category") {
-        row.addEventListener("dblclick", (e) => {
-          e.stopPropagation();
-          callbacks.onZoom(sel.kind as "subgroup" | "group", sel.id);
-        });
-      }
+      row.addEventListener("contextmenu", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.shiftKey) actions.hideRange(rangeEntries(row));
+        else {
+          actions.hideToggle(entry);
+          anchorEl = row;
+        }
+      });
+      row.addEventListener("dblclick", (e) => {
+        e.stopPropagation();
+        actions.zoomTo(entry);
+      });
+      applyRowClasses(row, entry);
     }
-    return { row, caret, label };
+    return { row, caret };
   };
 
-  // Lazy expander: builds children on first expand, toggles thereafter.
-  const attachExpander = (
-    caret: HTMLElement,
-    header: HTMLElement,
-    childHost: HTMLElement,
-    build: () => void,
-  ): void => {
+  const applyRowClasses = (row: HTMLElement, entry: Entry): void => {
+    row.classList.toggle("selected", selection.has(entry));
+    row.classList.toggle("hidden-entry", hidden.has(entry));
+  };
+  const refresh = (): void => {
+    for (const row of selectableRows) {
+      const entry = rowEntry.get(row);
+      if (entry) applyRowClasses(row, entry);
+    }
+  };
+
+  const attachExpander = (caret: HTMLElement, childHost: HTMLElement, build: () => void): void => {
     let built = false;
     let open = false;
-    const toggle = (e: Event) => {
+    caret.addEventListener("click", (e) => {
       e.stopPropagation();
       open = !open;
       if (open && !built) {
         build();
         built = true;
       }
-      childHost.style.display = open ? "block" : "none";
+      childHost.style.display = open ? "" : "none";
       caret.textContent = open ? "▾" : "▸";
-    };
-    caret.addEventListener("click", toggle);
-    // Clicking the caret toggles; clicking the label selects (wired elsewhere).
+    });
+  };
+
+  const buildPoints = (host: HTMLElement, subgroupId: number, depth: number): void => {
+    const pts = hierarchy.subgroupPoints(subgroupId);
+    for (const p of pts.slice(0, MAX_POINT_ROWS)) {
+      const entry: Entry = { level: "point", id: p };
+      const { row } = makeRow(depth, hierarchy.label(entry), { entry });
+      host.appendChild(row);
+    }
+    if (pts.length > MAX_POINT_ROWS) {
+      const { row } = makeRow(depth, `…and ${fmt(pts.length - MAX_POINT_ROWS)} more points`);
+      host.appendChild(row);
+    }
   };
 
   const buildGroup = (host: HTMLElement, group: GroupNode, depth: number): void => {
-    const { row, caret } = makeRow(depth, `${group.label} — ${fmt(group.pointCount)} pts, ${fmt(group.subgroups.length)} sub`, {
-      selectable: { kind: "group", id: group.groupId },
-      expandable: group.subgroups.length > 0,
-    });
+    const { row, caret } = makeRow(
+      depth,
+      `${group.label} — ${fmt(group.pointCount)} pts, ${fmt(group.subgroups.length)} sub`,
+      { entry: { level: "group", id: group.groupId }, expandable: group.subgroups.length > 0 },
+    );
     host.appendChild(row);
     const kids = document.createElement("div");
     kids.style.display = "none";
     host.appendChild(kids);
-    attachExpander(caret, row, kids, () => {
-      const shown = group.subgroups.slice(0, MAX_SUBGROUP_ROWS);
-      for (const sub of shown) {
-        const { row: sr } = makeRow(depth + 1, `${sub.label} — ${fmt(sub.pointCount)} pts`, {
-          selectable: { kind: "subgroup", id: sub.subgroupId },
-        });
+    attachExpander(caret, kids, () => {
+      for (const subNode of group.subgroups.slice(0, MAX_SUBGROUP_ROWS)) {
+        const { row: sr, caret: sc } = makeRow(
+          depth + 1,
+          `${subNode.label} — ${fmt(subNode.pointCount)} pts`,
+          { entry: { level: "subgroup", id: subNode.subgroupId }, expandable: subNode.pointCount > 0 },
+        );
         kids.appendChild(sr);
+        const pkids = document.createElement("div");
+        pkids.style.display = "none";
+        kids.appendChild(pkids);
+        attachExpander(sc, pkids, () => buildPoints(pkids, subNode.subgroupId, depth + 2));
       }
       if (group.subgroups.length > MAX_SUBGROUP_ROWS) {
-        const { row: more } = makeRow(depth + 1, `…and ${fmt(group.subgroups.length - MAX_SUBGROUP_ROWS)} more subgroups`, { muted: true });
+        const { row: more } = makeRow(
+          depth + 1,
+          `…and ${fmt(group.subgroups.length - MAX_SUBGROUP_ROWS)} more subgroups`,
+        );
         kids.appendChild(more);
       }
     });
   };
 
   const buildCategory = (cat: CategoryNode): void => {
-    const summary = cat.bulk
-      ? `${cat.label} — ${fmt(cat.pointCount)} pts, ${fmt(cat.subgroupCount)} subgroups (bulk)`
-      : `${cat.label} — ${fmt(cat.pointCount)} pts`;
-    const { row, caret } = makeRow(0, summary, {
-      selectable: { kind: "category", id: cat.categoryIndex },
+    const { row, caret } = makeRow(0, `${cat.label} — ${fmt(cat.pointCount)} pts`, {
+      entry: { level: "category", id: cat.categoryIndex },
       expandable: cat.groups.length > 0,
-      muted: cat.bulk,
     });
-    // Wrap each category (row + its children) in a block so a top/bottom dock can
-    // flow the categories horizontally (see .cat-block in hud.ts).
+    // Wrap each category so a top/bottom dock can flow categories horizontally.
     const block = document.createElement("div");
     block.className = "cat-block";
     block.appendChild(row);
@@ -166,33 +204,15 @@ export function mountSidebar(
     kids.style.display = "none";
     block.appendChild(kids);
     treeRoot.appendChild(block);
-    attachExpander(caret, row, kids, () => {
+    attachExpander(caret, kids, () => {
       for (const group of cat.groups) buildGroup(kids, group, 1);
     });
   };
 
   for (const cat of tree.categories) buildCategory(cat);
 
-  // -- selection reflection ---------------------------------------------------
-  selection.subscribe((snap: SelectionSnapshot) => {
-    const d = snap.descriptor;
-    for (const s of selectables) {
-      const active = d.kind === s.kind && d.id === s.id;
-      s.el.classList.toggle("active", active);
-    }
-    readout.textContent = renderReadout(snap);
-  });
-}
-
-function renderReadout(snap: SelectionSnapshot): string {
-  const d = snap.descriptor;
-  if (d.kind === "none" || snap.indices.length === 0) return "no selection";
-  const kindLabel = d.kind === "subgroup" ? "subgroup" : d.kind;
-  let text = `${kindLabel}: ${d.label} · ${fmt(snap.indices.length)} pts`;
-  if (snap.neighborSubgroups.length > 0) {
-    text += ` · +${fmt(snap.neighborSubgroups.length)} neighbor subgroups`;
-  }
-  return text;
+  selection.onChange(refresh);
+  hidden.onChange(refresh);
 }
 
 function fmt(n: number): string {

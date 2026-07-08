@@ -153,30 +153,21 @@ const harnessHtml = (hold: boolean, selftest = false) => /* html */ `<!DOCTYPE h
   <script nonce="${NONCE}" src="/main.js"></script>
   ${selftest ? `<script nonce="${NONCE}">
     // E2E self-test: drives the real DOM (clicks) the way a user would and logs
-    // results so a headless run can assert selection/sync/toggle behavior.
+    // results so a headless run can assert the selection/hidden set behavior.
     // Harness-only. Waits for streaming to warm up, then walks the tree.
     setTimeout(() => {
       const log = (...a) => console.log("[selftest]", ...a);
+      const sel = () => document.querySelector('.set-title.sel').textContent;
       try {
-        const cats = [...document.querySelectorAll("#sidebar .tree-row.selectable")];
+        const cats = [...document.querySelectorAll("#tree-host .tree-row.selectable")];
         log("category rows:", cats.length);
-        // Select the first (structured) category, expect tree+canvas readouts sync.
+        // Left-click a category selects it (green).
         cats[0].click();
-        log("after category click: sidebar=", document.querySelector(".sel-readout").textContent,
-            "| active=", document.querySelectorAll(".tree-row.active").length);
-        // Expand first category, then its first group, select first subgroup.
-        document.querySelector("#sidebar .tree-row .caret").click();
-        const groupCaret = document.querySelectorAll("#sidebar .tree-row .caret")[1];
-        if (groupCaret) groupCaret.click();
-        const subRow = [...document.querySelectorAll("#sidebar .tree-row.selectable")]
-          .find((r) => /subgroup/.test(r.textContent));
-        if (subRow) { subRow.click();
-          log("after subgroup click: sidebar=", document.querySelector(".sel-readout").textContent); }
-        // The one representation control: bulk toggle.
-        const btn = document.getElementById("bulk-toggle");
-        log("bulk button:", btn.textContent, "display=", btn.style.display || "shown");
-        btn.click();
-        log("after bulk toggle:", btn.textContent);
+        log("after category select:", sel(), "| selected rows:", document.querySelectorAll(".tree-row.selected").length);
+        // Right-click a category hides it (a hidden entry).
+        cats[1].dispatchEvent(new MouseEvent("contextmenu", { bubbles: true }));
+        log("after right-click hide:", document.querySelector('.set-title.hid').textContent,
+            "| hidden rows:", document.querySelectorAll(".tree-row.hidden-entry").length);
         log("DONE");
       } catch (e) { log("ERROR", e && e.message); }
     }, 3000);

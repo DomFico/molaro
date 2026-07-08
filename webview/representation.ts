@@ -1,24 +1,22 @@
 /**
  * Representation layer — the per-point base look the renderer draws.
  *
- * This is deliberately a *replaceable* layer holding only DEFAULT state: a
- * uniform color, a uniform size, and per-point visibility (with bulk categories
- * hidden by default). A future agent-driven layer is meant to REPLACE how these
- * buffers are computed — from channels, predicates, arbitrary per-point styling
- * — without any other code changing. So the renderer only ever reads the three
- * flat buffers below; no representation policy lives in the render loop.
+ * Deliberately a *replaceable* layer holding only DEFAULT state: a uniform color
+ * (white), a uniform size, and per-point visibility. A future agent-driven layer
+ * is meant to REPLACE how these buffers are computed — from channels, predicates,
+ * arbitrary per-point styling — without any other code changing; the renderer
+ * only ever reads the three flat buffers below.
  *
- * It ships exactly ONE control: bulk-category visibility. There are no color
- * pickers, schemes, or per-subset controls here on purpose — that space belongs
- * to the future layer, and selection is a separate overlay (see selection.ts),
- * never a mutation of `color`. If you find selection writing into `color`, that
- * is the bug the two-layer split exists to prevent.
+ * As of Increment 4.7, visibility is driven by the persistent **hidden set** (see
+ * sets.ts): its resolved points get `visible = 0`, everything else `1`. There is
+ * no dimmed/transparent middle state — a point is either drawn as a full
+ * first-class citizen (white; selection highlights it green) or not drawn at all.
+ * No styling controls live here (color schemes/pickers belong to the future
+ * agent layer); visibility hide/show is not styling and is in scope.
  */
-import type { Header } from "../contract/contract.ts";
-import { bulkCategories } from "./classification.ts";
 
 // Defaults (the flat base look). RGB in 0..1 for a vertex-color attribute.
-export const DEFAULT_COLOR: [number, number, number] = [0.83, 0.83, 0.83];
+export const DEFAULT_COLOR: [number, number, number] = [0.9, 0.9, 0.9];
 export const DEFAULT_SIZE = 3;
 
 export interface RepresentationState {
@@ -26,62 +24,26 @@ export interface RepresentationState {
   color: Float32Array;
   /** length N — per-point screen-space point size. */
   size: Float32Array;
-  /** length N — 1 = drawn, 0 = hidden. */
+  /** length N — 1 = drawn, 0 = hidden (driven by the hidden set). */
   visible: Float32Array;
 }
 
 export class RepresentationLayer {
   readonly state: RepresentationState;
-  /** Point indices belonging to bulk categories (hidden unless toggled on). */
-  private readonly bulkPoints: number[] = [];
-  private bulkVisible = false;
   /** Set when any buffer changed so the renderer re-uploads attributes. */
   dirty = true;
 
-  constructor(header: Header) {
-    const n = header.n_points;
-    const color = new Float32Array(n * 3);
-    const size = new Float32Array(n);
-    const visible = new Float32Array(n);
-    for (let p = 0; p < n; p++) {
+  constructor(nPoints: number) {
+    const color = new Float32Array(nPoints * 3);
+    const size = new Float32Array(nPoints);
+    const visible = new Float32Array(nPoints);
+    for (let p = 0; p < nPoints; p++) {
       color[p * 3] = DEFAULT_COLOR[0];
       color[p * 3 + 1] = DEFAULT_COLOR[1];
       color[p * 3 + 2] = DEFAULT_COLOR[2];
       size[p] = DEFAULT_SIZE;
       visible[p] = 1;
     }
-    const bulk = bulkCategories(header);
-    if (bulk.size > 0) {
-      const cat = header.points.category;
-      for (let p = 0; p < n; p++) {
-        if (bulk.has(cat[p])) {
-          this.bulkPoints.push(p);
-          visible[p] = 0; // bulk hidden by default — an un-hidden bulk is a hairball
-        }
-      }
-    }
     this.state = { color, size, visible };
-  }
-
-  get hasBulk(): boolean {
-    return this.bulkPoints.length > 0;
-  }
-
-  get bulkShown(): boolean {
-    return this.bulkVisible;
-  }
-
-  /** The one representation control: show/hide all bulk-category points. */
-  setBulkVisible(on: boolean): void {
-    if (on === this.bulkVisible) return;
-    this.bulkVisible = on;
-    const v = on ? 1 : 0;
-    for (const p of this.bulkPoints) this.state.visible[p] = v;
-    this.dirty = true;
-  }
-
-  toggleBulk(): boolean {
-    this.setBulkVisible(!this.bulkVisible);
-    return this.bulkVisible;
   }
 }

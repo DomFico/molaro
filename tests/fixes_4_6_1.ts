@@ -74,13 +74,13 @@ async function collapsing(d: E2EDriver): Promise<void> {
   await d.evaluate(`${V}.panel.setCollapsed(true)`);
   await sleep(250);
   const s = await rect(d, "#sidebar");
-  const showBtn = await d.evaluate<boolean>("(()=>{const b=document.getElementById('panel-show'); return !!b && getComputedStyle(b).display!=='none';})()");
+  const showBtn = await d.evaluate<boolean>("(()=>{const b=document.getElementById('panel-reopen'); return !!b && getComputedStyle(b).display!=='none';})()");
   const hidden = !s || s.w === 0;
   await d.screenshot(`${REPORT}/collapsed.png`);
   check("collapsed: panel not shown", hidden, `sidebar=${JSON.stringify(s)}`);
-  check("collapsed: 'show panel' button visible", showBtn);
+  check("collapsed: reopen tab visible", showBtn);
   // restore
-  await d.evaluate("document.getElementById('panel-show').click()");
+  await d.evaluate("document.getElementById('panel-reopen').click()");
   await sleep(200);
   const s2 = await rect(d, "#sidebar");
   check("show: panel restored", !!s2 && s2.w > 0);
@@ -99,7 +99,7 @@ async function zoomOutKeepsOrientation(d: E2EDriver): Promise<void> {
   await sleep(1800);
   const dRot = dir(await camPos(d), await camTarget(d));
   // Zoom into a subgroup, then double-click empty to scale back out.
-  await d.evaluate(`${V}.selection.selectSubgroup(0)`);
+  await d.evaluate(`${V}.actions.selectOnly({level:'subgroup', id:0})`);
   await d.evaluate(`${V}.zoomToSelection()`);
   await sleep(600);
   await d.screenshot(`${REPORT}/zoomout_before.png`);

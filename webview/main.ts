@@ -1,24 +1,22 @@
 /**
- * Webview renderer — Increment 4: the interaction backbone.
+ * Webview renderer — Increment 4.7: persistent selection & hidden sets.
  *
- * Builds on Increment 2/3 streaming+playback. This increment adds a first-class
- * SELECTION substrate, a classification SIDEBAR to navigate/select from, and
- * selection-driven camera — while leaving REPRESENTATION a deliberately blank,
- * replaceable layer (defaults only, one bulk-visibility toggle). The three
- * concerns are kept orthogonal:
+ * Builds on the streaming+playback stack. Interaction is now driven by two
+ * persistent, first-class sets (see sets.ts) that a future agent-driven layer
+ * will point at:
  *
  *  - representation.ts owns the per-point base look (color/size/visible). The
- *    base points are drawn with a shader that reads those three per-point
- *    buffers. A future agent-driven layer replaces how they are computed with
- *    nothing else changing.
- *  - selection.ts owns "what is pointed at". It is drawn as a highlight OVERLAY
- *    (two extra indexed Points objects sharing the same position buffer) on top
- *    of the base — it never mutates representation buffers.
- *  - camera is pure view navigation, plus zoom-to-selection.
+ *    base points are drawn with a shader reading those buffers. VISIBILITY is
+ *    driven by the HIDDEN set (its resolved points → visible=0); there is no
+ *    dimmed middle state.
+ *  - the SELECTION set is drawn as a green highlight OVERLAY on VISIBLE points
+ *    only — a second Points pass reading per-point `aSel` + shared `aVisible`.
+ *  - edges/polylines are drawn only between two visible endpoints (so hiding a
+ *    category also removes its edge hairball).
+ *  - camera is pure view navigation, plus zoom-to-selection / zoom-out.
  *
- * Positions still stream zero-copy: every displayed frame swaps a subarray view
- * into the one shared position attribute; the base points, the edges/polylines,
- * and both selection overlays all reference that same attribute.
+ * Set changes flip only the affected points' bits (incremental; smooth at
+ * N≈250k). Positions still stream zero-copy into the one shared attribute.
  */
 import * as THREE from "three";
 // Trackball (not Orbit) controls: free rotation with no up-vector / no polar
@@ -32,14 +30,14 @@ import {
   type FrameChunk,
   type Header,
 } from "../contract/contract.ts";
-import { edgeSegmentIndices, polylineSegmentIndices } from "./geometry.ts";
 import { StreamingPlayer } from "./playback.ts";
 import { Transport, rejectIfErrorPayload } from "./transport.ts";
 import { RepresentationLayer } from "./representation.ts";
-import { SelectionStore, type SelectionSnapshot } from "./selection.ts";
 import { bulkCategories, buildTree } from "./classification.ts";
-import { mountSidebar } from "./sidebar.ts";
-import { neighborSubgroups, pickPoint, selectionBounds } from "./picking.ts";
+import { mountSidebar, type SidebarActions } from "./sidebar.ts";
+import { mountActiveSets } from "./activesets.ts";
+import { Hierarchy, NodeSet, type Entry } from "./sets.ts";
+import { pickPoint, selectionBounds } from "./picking.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
 const PLAYBACK_FPS = 30;
@@ -51,13 +49,9 @@ const MAX_CACHE_BYTES = 256 * 1024 * 1024;
 const EDGE_COLOR = 0x5a7a9a;
 const POLYLINE_COLOR = 0x9a7a5a;
 const BACKGROUND = 0x1e1e1e;
-const SELECTION_COLOR = 0x33ffcc; // primary highlight overlay
-const NEIGHBOR_COLOR = 0xffa63d; // neighbor highlight overlay
+const SELECTION_COLOR = 0x33ffcc; // selection highlight overlay
 
 const PICK_PIXEL_THRESHOLD = 12;
-// Cap on the non-bulk population we brute-force for neighbor queries; above it,
-// skip (a spatial index would be the fix). Well above real non-bulk sizes.
-const NEIGHBOR_CANDIDATE_CAP = 80_000;
 
 declare function acquireVsCodeApi(): {
   postMessage(msg: unknown): void;
@@ -95,72 +89,84 @@ interface SceneParts {
   scene: THREE.Scene;
   positionAttr: THREE.BufferAttribute;
   drawables: THREE.Object3D[];
+  /** color/size/visible attributes to re-upload when the representation changes. */
   repAttrs: THREE.BufferAttribute[];
-  selectionIndex: THREE.BufferAttribute;
-  selectionGeo: THREE.BufferGeometry;
-  neighborIndex: THREE.BufferAttribute;
-  neighborGeo: THREE.BufferGeometry;
-  /** Edges internal to bulk categories — shown only when bulk is revealed, so
-   * hiding bulk points doesn't leave a hairball of bulk edges. Null if none. */
-  bulkEdges: THREE.Object3D | null;
+  /** per-point selection flag (0/1) drawn by the highlight overlay. */
+  selAttr: THREE.BufferAttribute;
+  /** shared visibility attribute (also the overlay's), re-uploaded on hide/show. */
+  visibleAttr: THREE.BufferAttribute;
+  /** rebuild edge + polyline draw ranges from current visibility. */
+  rebuildLines: () => void;
 }
 
 function basePointsMaterial(pixelRatio: number): THREE.ShaderMaterial {
   // Reads the representation layer's per-point color/size/visible buffers.
-  // Hidden points collapse (size 0) and discard, so bulk stays truly hidden.
+  // Hidden points collapse (size 0) and discard.
   return new THREE.ShaderMaterial({
     uniforms: { uPixelRatio: { value: pixelRatio } },
     vertexShader: `
-      attribute vec3 aColor;
-      attribute float aSize;
-      attribute float aVisible;
-      uniform float uPixelRatio;
-      varying vec3 vColor;
-      varying float vVisible;
+      attribute vec3 aColor; attribute float aSize; attribute float aVisible;
+      uniform float uPixelRatio; varying vec3 vColor; varying float vVisible;
       void main() {
-        vColor = aColor;
-        vVisible = aVisible;
+        vColor = aColor; vVisible = aVisible;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         gl_PointSize = aVisible > 0.5 ? aSize * uPixelRatio : 0.0;
-      }
-    `,
+      }`,
     fragmentShader: `
-      varying vec3 vColor;
-      varying float vVisible;
-      void main() {
-        if (vVisible < 0.5) discard;
-        gl_FragColor = vec4(vColor, 1.0);
-      }
-    `,
+      varying vec3 vColor; varying float vVisible;
+      void main() { if (vVisible < 0.5) discard; gl_FragColor = vec4(vColor, 1.0); }`,
   });
 }
 
-function overlayMaterial(color: number, size: number): THREE.PointsMaterial {
-  // Drawn on top of the base (depthTest off) as a distinct highlight. This is
-  // the selection channel — independent of the representation layer.
-  return new THREE.PointsMaterial({
-    color,
-    size,
-    sizeAttenuation: false,
-    depthTest: false,
+/** Selection highlight overlay: green dots on points that are BOTH selected and
+ * visible, drawn on top (depthTest off). Reads per-point aSel + shared aVisible. */
+function selectionOverlayMaterial(pixelRatio: number, size: number): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
     transparent: true,
+    depthTest: false,
+    uniforms: {
+      uPixelRatio: { value: pixelRatio },
+      uSize: { value: size },
+      uColor: { value: new THREE.Color(SELECTION_COLOR) },
+    },
+    vertexShader: `
+      attribute float aVisible; attribute float aSel;
+      uniform float uPixelRatio; uniform float uSize; varying float vShow;
+      void main() {
+        vShow = (aSel > 0.5 && aVisible > 0.5) ? 1.0 : 0.0;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = vShow > 0.5 ? uSize * uPixelRatio : 0.0;
+      }`,
+    fragmentShader: `
+      uniform vec3 uColor; varying float vShow;
+      void main() { if (vShow < 0.5) discard; gl_FragColor = vec4(uColor, 1.0); }`,
   });
 }
 
-function buildScene(header: Header, rep: RepresentationLayer, pixelRatio: number): SceneParts {
+/** Flatten polylines into segment endpoint pairs once (for the rebuild filter). */
+function polylineSegmentPairs(polylines: number[][]): [number, number][] {
+  const out: [number, number][] = [];
+  for (const poly of polylines) for (let i = 0; i + 1 < poly.length; i++) out.push([poly[i], poly[i + 1]]);
+  return out;
+}
+
+function buildScene(
+  header: Header,
+  rep: RepresentationLayer,
+  selArray: Float32Array,
+  pixelRatio: number,
+): SceneParts {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(BACKGROUND);
   const n = header.n_points;
 
   const positionAttr = new THREE.BufferAttribute(new Float32Array(n * 3), 3);
   positionAttr.setUsage(THREE.DynamicDrawUsage);
-
   const colorAttr = new THREE.BufferAttribute(rep.state.color, 3);
   const sizeAttr = new THREE.BufferAttribute(rep.state.size, 1);
   const visibleAttr = new THREE.BufferAttribute(rep.state.visible, 1);
-  colorAttr.setUsage(THREE.DynamicDrawUsage);
-  sizeAttr.setUsage(THREE.DynamicDrawUsage);
-  visibleAttr.setUsage(THREE.DynamicDrawUsage);
+  const selAttr = new THREE.BufferAttribute(selArray, 1);
+  for (const a of [colorAttr, sizeAttr, visibleAttr, selAttr]) a.setUsage(THREE.DynamicDrawUsage);
 
   const drawables: THREE.Object3D[] = [];
 
@@ -171,78 +177,55 @@ function buildScene(header: Header, rep: RepresentationLayer, pixelRatio: number
   pointsGeo.setAttribute("aVisible", visibleAttr);
   drawables.push(new THREE.Points(pointsGeo, basePointsMaterial(pixelRatio)));
 
-  // Split edges into structural vs bulk-internal (both endpoints in a bulk
-  // category). Bulk-internal edges are drawn as a separate object gated on the
-  // bulk toggle, so hiding bulk points also hides their edge hairball (4.6 D).
-  const bulk = bulkCategories(header);
-  const isBulkPoint = (p: number): boolean => bulk.has(header.points.category[p]);
-  const structuralEdges: [number, number][] = [];
-  const bulkInternalEdges: [number, number][] = [];
-  for (const e of header.edges) {
-    (isBulkPoint(e[0]) && isBulkPoint(e[1]) ? bulkInternalEdges : structuralEdges).push(e);
-  }
-  if (structuralEdges.length > 0) {
+  // Edges + polylines: an index big enough for every segment, with a draw range
+  // that rebuildLines() trims to segments whose BOTH endpoints are visible (so a
+  // hidden category also hides its edge hairball).
+  const visible = rep.state.visible;
+  const mkLines = (pairs: [number, number][], color: number) => {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", positionAttr);
-    geo.setIndex(new THREE.BufferAttribute(edgeSegmentIndices(structuralEdges), 1));
-    drawables.push(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: EDGE_COLOR })));
-  }
-  let bulkEdges: THREE.Object3D | null = null;
-  if (bulkInternalEdges.length > 0) {
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", positionAttr);
-    geo.setIndex(new THREE.BufferAttribute(edgeSegmentIndices(bulkInternalEdges), 1));
-    bulkEdges = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: EDGE_COLOR }));
-    bulkEdges.frustumCulled = false;
-    bulkEdges.visible = false; // follows the bulk toggle (see the display loop)
-    scene.add(bulkEdges);
-  }
-  if (header.polylines.length > 0) {
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", positionAttr);
-    geo.setIndex(new THREE.BufferAttribute(polylineSegmentIndices(header.polylines), 1));
-    drawables.push(
-      new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: POLYLINE_COLOR })),
-    );
-  }
+    const index = new THREE.BufferAttribute(new Uint32Array(pairs.length * 2), 1);
+    index.setUsage(THREE.DynamicDrawUsage);
+    geo.setIndex(index);
+    geo.setDrawRange(0, 0);
+    drawables.push(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color })));
+    return () => {
+      const arr = index.array as Uint32Array;
+      let k = 0;
+      for (const [a, b] of pairs) {
+        if (visible[a] > 0.5 && visible[b] > 0.5) {
+          arr[k++] = a;
+          arr[k++] = b;
+        }
+      }
+      index.needsUpdate = true;
+      geo.setDrawRange(0, k);
+    };
+  };
+  const rebuildEdges = header.edges.length ? mkLines(header.edges, EDGE_COLOR) : () => {};
+  const polySegs = polylineSegmentPairs(header.polylines);
+  const rebuildPoly = polySegs.length ? mkLines(polySegs, POLYLINE_COLOR) : () => {};
+  const rebuildLines = (): void => {
+    rebuildEdges();
+    rebuildPoly();
+  };
 
-  // Selection + neighbor overlays: indexed Points sharing the position buffer.
-  const neighborGeo = new THREE.BufferGeometry();
-  neighborGeo.setAttribute("position", positionAttr);
-  const neighborIndex = new THREE.BufferAttribute(new Uint32Array(n), 1);
-  neighborIndex.setUsage(THREE.DynamicDrawUsage);
-  neighborGeo.setIndex(neighborIndex);
-  neighborGeo.setDrawRange(0, 0);
-  const neighborPoints = new THREE.Points(neighborGeo, overlayMaterial(NEIGHBOR_COLOR, 6));
-  neighborPoints.renderOrder = 10;
-
-  const selectionGeo = new THREE.BufferGeometry();
-  selectionGeo.setAttribute("position", positionAttr);
-  const selectionIndex = new THREE.BufferAttribute(new Uint32Array(n), 1);
-  selectionIndex.setUsage(THREE.DynamicDrawUsage);
-  selectionGeo.setIndex(selectionIndex);
-  selectionGeo.setDrawRange(0, 0);
-  const selectionPoints = new THREE.Points(selectionGeo, overlayMaterial(SELECTION_COLOR, 8));
-  selectionPoints.renderOrder = 11;
-
-  drawables.push(neighborPoints, selectionPoints);
+  // Selection highlight overlay: a second Points pass over all N, green where
+  // selected & visible.
+  const overlayGeo = new THREE.BufferGeometry();
+  overlayGeo.setAttribute("position", positionAttr);
+  overlayGeo.setAttribute("aVisible", visibleAttr);
+  overlayGeo.setAttribute("aSel", selAttr);
+  const overlay = new THREE.Points(overlayGeo, selectionOverlayMaterial(pixelRatio, 9));
+  overlay.renderOrder = 11;
+  drawables.push(overlay);
 
   for (const obj of drawables) {
     obj.frustumCulled = false;
     obj.visible = false; // until the first frame is displayed
     scene.add(obj);
   }
-  return {
-    scene,
-    positionAttr,
-    drawables,
-    repAttrs: [colorAttr, sizeAttr, visibleAttr],
-    selectionIndex,
-    selectionGeo,
-    neighborIndex,
-    neighborGeo,
-    bulkEdges,
-  };
+  return { scene, positionAttr, drawables, repAttrs: [colorAttr, sizeAttr, visibleAttr], selAttr, visibleAttr, rebuildLines };
 }
 
 function frameCamera(header: Header, aspect: number) {
@@ -292,10 +275,13 @@ async function main(): Promise<void> {
   container.appendChild(renderer.domElement);
 
   // -- interaction state layers ------------------------------------------------
-  const rep = new RepresentationLayer(header);
-  const selection = new SelectionStore(header);
+  const rep = new RepresentationLayer(header.n_points);
+  const hierarchy = new Hierarchy(header);
+  const selectionSet = new NodeSet(hierarchy, "selection");
+  const hiddenSet = new NodeSet(hierarchy, "hidden");
+  const selArray = new Float32Array(header.n_points); // per-point selection flag
 
-  const parts = buildScene(header, rep, renderer.getPixelRatio());
+  const parts = buildScene(header, rep, selArray, renderer.getPixelRatio());
   const { scene, positionAttr, drawables, repAttrs } = parts;
   const { camera, target, size: sceneSize } = frameCamera(
     header,
@@ -303,14 +289,14 @@ async function main(): Promise<void> {
   );
   const controls = new TrackballControls(camera, renderer.domElement);
   controls.target.copy(target);
-  // Inertia (4.6 B3): a flick keeps the view spinning and decays smoothly, so
-  // turning the structure around needs less dragging. A low damping factor =
-  // more coast; a slow, deliberate drag still positions precisely.
+  // Gentle inertia (4.7 A5): a flick gives a short nudge that decays quickly, not
+  // a long spin. Higher damping = faster decay; a slow drag still positions
+  // precisely.
   controls.staticMoving = false;
-  controls.dynamicDampingFactor = 0.12;
-  controls.rotateSpeed = 2.2;
+  controls.dynamicDampingFactor = 0.32;
+  controls.rotateSpeed = 1.5;
   controls.zoomSpeed = 1.2;
-  controls.panSpeed = 0.3; // right-drag translation was too touchy — halved
+  controls.panSpeed = 0.3;
   controls.handleResize();
   controls.update();
 
@@ -400,35 +386,22 @@ async function main(): Promise<void> {
       : undefined;
   const panel = setupPanelDocking(scheduleResize, applyResize, persist);
 
-  // -- neighbor highlighting (nice-to-have): brute-force radius over non-bulk --
-  const bulk = bulkCategories(header);
-  const nonBulkPoints: number[] = [];
-  for (let p = 0; p < header.n_points; p++) {
-    if (!bulk.has(header.points.category[p])) nonBulkPoints.push(p);
-  }
-  const subgroupOfPoint = header.points.subgroup_id;
-  const neighborRadius = 0.18 * sceneSize;
-  let neighborEnabled = true;
-  selection.setNeighborProvider((indices, selfSubs) => {
-    if (!neighborEnabled || nonBulkPoints.length > NEIGHBOR_CANDIDATE_CAP) {
-      return { subgroups: [], indices: [] };
-    }
-    const positions = positionAttr.array as Float32Array;
-    const subs = neighborSubgroups(
-      positions,
-      indices,
-      nonBulkPoints,
-      subgroupOfPoint,
-      selfSubs,
-      neighborRadius,
-    );
-    const nIdx: number[] = [];
-    for (const s of subs) for (const p of selection.subgroupIndices(s)) nIdx.push(p);
-    return { subgroups: subs, indices: nIdx };
-  });
+  // -- selection/hidden set → render bit flips (incremental) -------------------
+  const visible = rep.state.visible;
+  // Flip the render bits for exactly the points an entry mutation touched.
+  const flipSelectionBits = (points: number[]): void => {
+    for (const p of points) selArray[p] = selectionSet.contains(p) ? 1 : 0;
+    selDirty = true;
+  };
+  const flipHiddenBits = (points: number[]): void => {
+    for (const p of points) visible[p] = hiddenSet.contains(p) ? 0 : 1;
+    rep.dirty = true; // re-upload visible; overlay shares it. Edges rebuilt below.
+    parts.rebuildLines();
+  };
+  let selDirty = false;
 
-  // -- classification sidebar (in-webview surface) -----------------------------
-  const zoomTo = (indices: number[]): void => {
+  // -- zoom-to helpers ---------------------------------------------------------
+  const zoomToPoints = (indices: number[]): void => {
     const b = selectionBounds(positionAttr.array as Float32Array, indices);
     if (!b) return;
     const center = new THREE.Vector3(b.center[0], b.center[1], b.center[2]);
@@ -437,42 +410,56 @@ async function main(): Promise<void> {
     const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
     animateCameraTo(center.clone().addScaledVector(dir, dist), center);
   };
-  const sidebar = document.getElementById("sidebar-content");
-  if (sidebar) {
-    mountSidebar(sidebar, buildTree(header), selection, {
-      onZoom: (kind, id) => {
-        const idx = kind === "subgroup"
-          ? selection.subgroupIndices(id)
-          : gatherGroupIndices(header, id);
-        zoomTo(idx);
-      },
-    });
+  const zoomToSelection = (): void => zoomToPoints(selectionSet.resolvedPoints());
+
+  // -- the gesture actions (shared by tree, 3D, and the active-sets surface) ---
+  const selectOnly = (e: Entry): void => flipSelectionBits(selectionSet.replaceWith([e]));
+  const selectToggle = (e: Entry): void => flipSelectionBits(selectionSet.toggle(e));
+  const selectRange = (entries: Entry[]): void => flipSelectionBits(selectionSet.addMany(entries));
+  const hideToggle = (e: Entry): void => flipHiddenBits(hiddenSet.toggle(e));
+  const hideRange = (entries: Entry[]): void => flipHiddenBits(hiddenSet.addMany(entries));
+  const clearSelection = (): void => flipSelectionBits(selectionSet.clear());
+  const removeEntry = (kind: "selection" | "hidden", e: Entry): void => {
+    if (kind === "selection") {
+      const pts = selectionSet.remove(e);
+      if (pts) flipSelectionBits(pts);
+    } else {
+      const pts = hiddenSet.remove(e);
+      if (pts) flipHiddenBits(pts);
+    }
+  };
+  const clearSet = (kind: "selection" | "hidden"): void =>
+    kind === "selection" ? clearSelection() : flipHiddenBits(hiddenSet.clear());
+
+  // -- classification sidebar (tree) + active-sets surface ---------------------
+  const sidebarActions: SidebarActions = {
+    selectOnly,
+    selectToggle,
+    selectRange,
+    hideToggle,
+    hideRange,
+    zoomTo: (e) => zoomToPoints(hierarchy.pointsOf(e)),
+  };
+  const treeHost = document.getElementById("tree-host");
+  if (treeHost) {
+    mountSidebar(treeHost, buildTree(header), hierarchy, selectionSet, hiddenSet, sidebarActions);
+  }
+  const activeSetsHost = document.getElementById("active-sets");
+  if (activeSetsHost) {
+    mountActiveSets(activeSetsHost, selectionSet, hiddenSet, hierarchy, { removeEntry, clearSet });
   }
 
-  // -- selection overlay + bulk toggle -----------------------------------------
-  // The selection readout is rendered once, by the sidebar (.sel-readout); this
-  // subscription only drives the 3D highlight overlays (4.6 C: no duplicate).
-  selection.subscribe((snap: SelectionSnapshot) => {
-    updateOverlay(parts.selectionIndex, parts.selectionGeo, snap.indices);
-    updateOverlay(parts.neighborIndex, parts.neighborGeo, snap.neighborIndices);
-  });
+  // -- bulk pre-hidden by default (a plain hidden entry per bulk category) -----
+  // No "show bulk" special case: bulk starts as hidden-set entries; un-hiding is
+  // just removing the entry (right-click the category, or the active-sets list).
+  const bulkPre = bulkCategories(header);
+  if (bulkPre.size > 0) {
+    const entries: Entry[] = [...bulkPre].map((c) => ({ level: "category", id: c }));
+    flipHiddenBits(hiddenSet.addMany(entries));
+  }
+  parts.rebuildLines();
 
-  const bulkBtn = document.getElementById("bulk-toggle") as HTMLButtonElement | null;
-  const refreshBulkBtn = () => {
-    if (!bulkBtn) return;
-    if (!rep.hasBulk) {
-      bulkBtn.style.display = "none";
-      return;
-    }
-    bulkBtn.textContent = rep.bulkShown ? "hide bulk" : "show bulk";
-  };
-  refreshBulkBtn();
-  bulkBtn?.addEventListener("click", () => {
-    rep.toggleBulk();
-    refreshBulkBtn();
-  });
-
-  // -- picking + camera keys ---------------------------------------------------
+  // -- picking + 3D gestures + keys --------------------------------------------
   const vp = new THREE.Matrix4();
   const pickAt = (clientX: number, clientY: number): number => {
     const rect = renderer.domElement.getBoundingClientRect();
@@ -493,54 +480,55 @@ async function main(): Promise<void> {
     );
     return r.index;
   };
-  // Distinguish a click (select) from a click-drag (orbit) by a movement
-  // threshold, so orbiting the camera never paints a selection (A1). Double-click
-  // (within time + proximity) zooms to the picked subgroup.
+  // 3D gestures (same model as the tree; range is tree-only). A click vs a
+  // click-drag is distinguished by a movement threshold so orbiting/panning never
+  // selects or hides (drag stays camera). Left = select, right = hide; Ctrl/Cmd =
+  // toggle/accumulate. Double-click a point zooms to it; double-click empty backs
+  // the camera out.
   const CLICK_MOVE_THRESHOLD = 5; // px; more movement than this is a camera drag
   const DOUBLE_CLICK_MS = 300;
-  let pointerDown: { x: number; y: number } | null = null;
+  renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
+  let pointerDown: { x: number; y: number; button: number } | null = null;
   let lastClick = { t: 0, x: 0, y: 0 };
   renderer.domElement.addEventListener("pointerdown", (e) => {
-    pointerDown = e.button === 0 ? { x: e.clientX, y: e.clientY } : null;
+    pointerDown =
+      e.button === 0 || e.button === 2 ? { x: e.clientX, y: e.clientY, button: e.button } : null;
   });
   // pointerup on window so it still fires if the control captured the pointer.
   window.addEventListener("pointerup", (e) => {
     const down = pointerDown;
     pointerDown = null;
-    if (e.button !== 0 || !down) return;
+    if (!down || e.button !== down.button) return;
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_MOVE_THRESHOLD) {
-      return; // it was a drag (orbit/pan) — select nothing
+      return; // it was a drag (orbit/pan) — never selects or hides
+    }
+    const idx = pickAt(e.clientX, e.clientY);
+    const point: Entry = { level: "point", id: idx };
+    if (down.button === 2) {
+      if (idx >= 0) hideToggle(point); // right-click hides the picked point
+      return;
     }
     const now = performance.now();
     const isDouble =
       now - lastClick.t < DOUBLE_CLICK_MS &&
       Math.hypot(e.clientX - lastClick.x, e.clientY - lastClick.y) < 8;
     lastClick = { t: now, x: e.clientX, y: e.clientY };
-    const idx = pickAt(e.clientX, e.clientY);
     if (idx < 0) {
-      // Double-click on empty space backs the camera out to whole-scene framing
-      // (4.6 B1); a single click on empty space clears the selection.
-      if (isDouble) resetCamera();
-      else selection.clear();
+      if (isDouble) resetCamera(); // double-click empty → whole-scene framing
+      else clearSelection();
       return;
     }
-    selection.selectPoint(idx);
-    if (isDouble) zoomTo(selection.current.indices);
+    if (isDouble) {
+      selectOnly(point);
+      zoomToSelection();
+    } else if (e.ctrlKey || e.metaKey) {
+      selectToggle(point);
+    } else {
+      selectOnly(point);
+    }
   });
   window.addEventListener("keydown", (e) => {
-    if (e.key === "b" || e.key === "B") {
-      rep.toggleBulk();
-      refreshBulkBtn();
-    } else if (e.key === "n" || e.key === "N") {
-      neighborEnabled = !neighborEnabled;
-      // Recompute the current selection so the overlay reflects the toggle.
-      const d = selection.current.descriptor;
-      if (d.kind === "subgroup") selection.selectSubgroup(d.id);
-      else if (d.kind === "group") selection.selectGroup(d.id);
-      else if (d.kind === "category") selection.selectCategory(d.id);
-    } else if (e.key === "Escape") {
-      selection.clear();
-    }
+    if (e.key === "Escape") clearSelection();
   });
 
   // -- streaming player --------------------------------------------------------
@@ -641,8 +629,10 @@ async function main(): Promise<void> {
       for (const a of repAttrs) a.needsUpdate = true;
       rep.dirty = false;
     }
-    // Bulk-internal edges track the bulk toggle (only once a frame is shown).
-    if (parts.bulkEdges) parts.bulkEdges.visible = displayedFrame >= 0 && rep.bulkShown;
+    if (selDirty) {
+      parts.selAttr.needsUpdate = true;
+      selDirty = false;
+    }
     if (!isStatic && now - fpsMarkMs >= 1000) {
       displayFps = (shownSinceMark * 1000) / (now - fpsMarkMs);
       shownSinceMark = 0;
@@ -684,11 +674,22 @@ async function main(): Promise<void> {
       camera,
       controls,
       player,
-      selection,
       rep,
+      hierarchy,
+      sets: { selection: selectionSet, hidden: hiddenSet },
+      actions: {
+        selectOnly,
+        selectToggle,
+        selectRange,
+        hideToggle,
+        hideRange,
+        clearSelection,
+        removeEntry,
+        clearSet,
+      },
       applyResize,
       setPlaying,
-      zoomToSelection: () => zoomTo(selection.current.indices),
+      zoomToSelection,
       resetCamera,
       panel,
     };
@@ -713,10 +714,11 @@ async function main(): Promise<void> {
 }
 
 /**
- * Dockable + collapsible classification panel. Sets `data-dock` on #root (which
- * the HUD CSS turns into the left/right/top/bottom layout), toggles a collapsed
- * class, and resizes the panel from the divider (width side-docked, height
- * top/bottom-docked). Returns a small control API for the test seam.
+ * Dockable + collapsible classification panel (4.7 A). Docking is by DRAGGING the
+ * grip onto an edge drop-zone (the overlay highlights the nearest edge). Collapse
+ * animates the panel size to 0 and leaves a reopen tab at the last dock edge;
+ * reopen animates it back. The divider resizes the panel (width side-docked,
+ * height top/bottom-docked). Returns a small control API for the test seam.
  */
 function setupPanelDocking(
   scheduleResize: () => void,
@@ -727,52 +729,128 @@ function setupPanelDocking(
   const sidebar = document.getElementById("sidebar");
   const divider = document.getElementById("divider");
   const middle = document.getElementById("middle");
-  if (!root || !sidebar || !divider || !middle) return null;
+  const overlay = document.getElementById("dock-overlay");
+  const grip = document.getElementById("panel-grip");
+  if (!root || !sidebar || !divider || !middle || !overlay || !grip) return null;
 
   const saved = persist?.get();
   const state: PanelState = {
-    dock: saved?.dock ?? "left",
+    dock: saved?.dock ?? "right",
     collapsed: saved?.collapsed ?? false,
     width: saved?.width ?? 300,
-    height: saved?.height ?? 200,
+    height: saved?.height ?? 220,
   };
   const isSide = (): boolean => state.dock === "left" || state.dock === "right";
   const clampW = (w: number): number => Math.max(160, Math.min(w, window.innerWidth * 0.6));
   const clampH = (h: number): number => Math.max(120, Math.min(h, window.innerHeight * 0.7));
+  const targetSize = (): number => (isSide() ? clampW(state.width) : clampH(state.height));
 
-  const apply = (): void => {
-    root.dataset.dock = state.dock;
-    root.classList.toggle("panel-collapsed", state.collapsed);
+  // Set the panel's active dimension (width side-docked, height top/bottom).
+  const setSize = (px: number): void => {
     if (isSide()) {
-      sidebar.style.width = `${clampW(state.width)}px`;
+      sidebar.style.width = `${px}px`;
       sidebar.style.height = "";
     } else {
-      sidebar.style.height = `${clampH(state.height)}px`;
+      sidebar.style.height = `${px}px`;
       sidebar.style.width = "";
     }
-    for (const b of root.querySelectorAll<HTMLElement>("[data-dock-to]")) {
-      b.classList.toggle("active", b.getAttribute("data-dock-to") === state.dock);
-    }
+  };
+
+  const layout = (): void => {
+    root.dataset.dock = state.dock;
+    if (!state.collapsed) setSize(targetSize());
     persist?.set(state);
     scheduleResize();
   };
 
-  for (const btn of root.querySelectorAll<HTMLElement>("[data-dock-to]")) {
-    btn.addEventListener("click", () => {
-      state.dock = btn.getAttribute("data-dock-to") as DockPos;
-      state.collapsed = false;
-      apply();
-    });
-  }
-  document.getElementById("panel-collapse")?.addEventListener("click", () => {
-    state.collapsed = true;
-    apply();
-  });
-  document.getElementById("panel-show")?.addEventListener("click", () => {
-    state.collapsed = false;
-    apply();
-  });
+  // Short eased size animation for collapse/open (4.7 A4).
+  let animRAF = 0;
+  const animateSize = (from: number, to: number, then: () => void): void => {
+    if (animRAF) cancelAnimationFrame(animRAF);
+    const start = performance.now();
+    const dur = 190;
+    const ease = (k: number) => (k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2);
+    const step = (now: number): void => {
+      const k = Math.min(1, (now - start) / dur);
+      setSize(from + (to - from) * ease(k));
+      applyResize();
+      if (k < 1) animRAF = requestAnimationFrame(step);
+      else {
+        animRAF = 0;
+        then();
+      }
+    };
+    animRAF = requestAnimationFrame(step);
+  };
 
+  const collapse = (): void => {
+    if (state.collapsed) return;
+    state.collapsed = true;
+    persist?.set(state);
+    animateSize(targetSize(), 0, () => {
+      root.classList.add("panel-collapsed");
+      applyResize();
+    });
+  };
+  const open = (): void => {
+    if (!state.collapsed) return;
+    state.collapsed = false;
+    persist?.set(state);
+    root.classList.remove("panel-collapsed");
+    animateSize(0, targetSize(), () => applyResize());
+  };
+  const setCollapsed = (c: boolean): void => (c ? collapse() : open());
+
+  const setDock = (pos: DockPos): void => {
+    state.dock = pos;
+    if (state.collapsed) {
+      state.collapsed = false;
+      root.classList.remove("panel-collapsed");
+    }
+    layout();
+  };
+
+  document.getElementById("panel-collapse")?.addEventListener("click", collapse);
+  document.getElementById("panel-reopen")?.addEventListener("click", open);
+
+  // -- drag-to-dock ------------------------------------------------------------
+  const zones = [...overlay.querySelectorAll<HTMLElement>(".dock-zone")];
+  const nearestZone = (x: number, y: number): DockPos => {
+    const dl = x / window.innerWidth, dr = 1 - x / window.innerWidth;
+    const dt = y / window.innerHeight, db = 1 - y / window.innerHeight;
+    const m = Math.min(dl, dr, dt, db);
+    return m === dl ? "left" : m === dr ? "right" : m === dt ? "top" : "bottom";
+  };
+  let docking = false;
+  let hotZone: DockPos = state.dock;
+  grip.addEventListener("pointerdown", (e) => {
+    docking = true;
+    hotZone = state.dock;
+    grip.setPointerCapture(e.pointerId);
+    overlay.classList.add("active");
+    e.preventDefault();
+  });
+  grip.addEventListener("pointermove", (e) => {
+    if (!docking) return;
+    hotZone = nearestZone(e.clientX, e.clientY);
+    for (const z of zones) z.classList.toggle("hot", z.dataset.zone === hotZone);
+  });
+  const endDock = (e: PointerEvent): void => {
+    if (!docking) return;
+    docking = false;
+    try {
+      grip.releasePointerCapture(e.pointerId);
+    } catch {
+      /* gone */
+    }
+    overlay.classList.remove("active");
+    for (const z of zones) z.classList.remove("hot");
+    setDock(hotZone);
+  };
+  grip.addEventListener("pointerup", endDock);
+  grip.addEventListener("pointercancel", endDock);
+
+  // -- divider resize ----------------------------------------------------------
   let dragging = false;
   divider.addEventListener("pointerdown", (e) => {
     dragging = true;
@@ -787,57 +865,26 @@ function setupPanelDocking(
     else if (state.dock === "right") state.width = clampW(m.right - pe.clientX);
     else if (state.dock === "top") state.height = clampH(pe.clientY - m.top);
     else state.height = clampH(m.bottom - pe.clientY);
-    if (isSide()) sidebar.style.width = `${state.width}px`;
-    else sidebar.style.height = `${state.height}px`;
+    setSize(targetSize());
     scheduleResize();
   });
-  const end = (e: Event): void => {
+  const endResize = (e: Event): void => {
     if (!dragging) return;
     dragging = false;
     try {
       (e.target as Element).releasePointerCapture((e as PointerEvent).pointerId);
     } catch {
-      /* capture may already be gone */
+      /* gone */
     }
     persist?.set(state);
     applyResize();
   };
-  divider.addEventListener("pointerup", end);
-  divider.addEventListener("pointercancel", end);
+  divider.addEventListener("pointerup", endResize);
+  divider.addEventListener("pointercancel", endResize);
 
-  apply();
-  return {
-    state,
-    setDock: (pos) => {
-      state.dock = pos;
-      state.collapsed = false;
-      apply();
-    },
-    setCollapsed: (collapsed) => {
-      state.collapsed = collapsed;
-      apply();
-    },
-  };
-}
-
-/** Copy selected indices into an overlay's index buffer and set its draw range. */
-function updateOverlay(
-  indexAttr: THREE.BufferAttribute,
-  geo: THREE.BufferGeometry,
-  indices: number[],
-): void {
-  const arr = indexAttr.array as Uint32Array;
-  const count = Math.min(indices.length, arr.length);
-  for (let i = 0; i < count; i++) arr[i] = indices[i];
-  indexAttr.needsUpdate = true;
-  geo.setDrawRange(0, count);
-}
-
-function gatherGroupIndices(header: Header, groupId: number): number[] {
-  const out: number[] = [];
-  const g = header.points.group_id;
-  for (let p = 0; p < g.length; p++) if (g[p] === groupId) out.push(p);
-  return out;
+  root.classList.toggle("panel-collapsed", state.collapsed);
+  layout();
+  return { state, setDock, setCollapsed };
 }
 
 main().catch((err) => {
