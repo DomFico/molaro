@@ -180,6 +180,21 @@ importantly, **it opens from a file**.
   hiding a structured polymer. Bulk points **and** their internal edges hide by
   default (no hairball) and the bulk-visibility toggle reveals both.
 
+### Follow-up tweaks
+
+- **Companion resolution** now also handles the common `system.pdb` + `traj.xtc`
+  layout: after the same-basename match it falls back to the single topology in
+  the folder, or — with several candidates — the one whose **atom count matches**
+  the trajectory.
+- **Double-click empty space** scales back to whole-scene framing from the
+  **current** viewing direction (it recenters and backs out, without flipping to
+  the initial orientation). Right-drag **pan sensitivity** was reduced.
+- **Dockable, collapsible panel.** The classification panel can be docked to any
+  edge (left/right/top/bottom) via the small toolbar at its top, resized by the
+  divider, and collapsed away (a "panel" button in the top bar brings it back).
+  Docked top/bottom, the tree lays its categories out horizontally and scrolls
+  left/right. The choice persists via the webview state API.
+
 ## Running the extension
 
 ```bash
@@ -411,9 +426,9 @@ tests/       Python: test_roundtrip.py, make_fixtures.py, make_webview_fixture.p
              picking tests, bridge.ts (headless E2E: real broker + producer, no VS
              Code; /selftest route drives selection), sidebar_spotcheck.ts (runs a
              real corpus header through the sidebar's classification path),
-             e2e_driver.ts + fixes_4_5.ts + fixes_4_6.ts (CDP-driven validation)
+             e2e_driver.ts + fixes_4_5/4_6/4_6_1.ts (CDP-driven validation)
 dist/        build output (generated)
-reports/     fixes_4_5/, fixes_4_6/ — screenshot evidence (gitignored; regenerable)
+reports/     fixes_4_5/, fixes_4_6/, fixes_4_6_1/ — screenshots (gitignored; regenerable)
 ```
 
 `SyntheticSource` implements the same `DataSource` interface a real data source
@@ -461,6 +476,7 @@ cd viewer
 npm run build
 node tests/fixes_4_5.ts            # all fixes (A1 A2 A3 A4 B); or a subset: node tests/fixes_4_5.ts A1 B
 node tests/fixes_4_6.ts            # open-from-file / camera / readout / bulk (A B1 B2 B3 C D)
+node tests/fixes_4_6_1.ts          # dockable/collapsible panel + zoom-out orientation
 ```
 
 `fixes_4_6.ts` generates its open-from-file fixtures with `VIEWER_PYTHON` (the

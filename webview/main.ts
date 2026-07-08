@@ -59,7 +59,24 @@ const PICK_PIXEL_THRESHOLD = 12;
 // skip (a spatial index would be the fix). Well above real non-bulk sizes.
 const NEIGHBOR_CANDIDATE_CAP = 80_000;
 
-declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };
+declare function acquireVsCodeApi(): {
+  postMessage(msg: unknown): void;
+  getState?(): unknown;
+  setState?(s: unknown): void;
+};
+
+type DockPos = "left" | "right" | "top" | "bottom";
+interface PanelState {
+  dock: DockPos;
+  collapsed: boolean;
+  width: number;
+  height: number;
+}
+export interface PanelControl {
+  setDock(pos: DockPos): void;
+  setCollapsed(collapsed: boolean): void;
+  readonly state: PanelState;
+}
 
 interface ViewerConfig {
   autoplay?: boolean;
@@ -293,13 +310,12 @@ async function main(): Promise<void> {
   controls.dynamicDampingFactor = 0.12;
   controls.rotateSpeed = 2.2;
   controls.zoomSpeed = 1.2;
-  controls.panSpeed = 0.6;
+  controls.panSpeed = 0.3; // right-drag translation was too touchy — halved
   controls.handleResize();
   controls.update();
 
-  // The "home" pose (whole-scene framing) captured before any interaction, so
-  // double-click-empty can back all the way out to it (4.6 B1).
-  const homePosition = camera.position.clone();
+  // Scene center (bbox center) — the pivot double-click-empty frames the whole
+  // scene around, keeping the current viewing direction.
   const homeTarget = controls.target.clone();
 
   // Camera transitions are animated, not snapped (4.6 B2): a short ease-in-out
@@ -311,6 +327,19 @@ async function main(): Promise<void> {
   let camTween:
     | { p0: THREE.Vector3; p1: THREE.Vector3; t0: THREE.Vector3; t1: THREE.Vector3; start: number }
     | null = null;
+  // Zero TrackballControls' residual rotate/zoom/pan velocity so leftover
+  // inertia doesn't resume after a camera tween finishes (which would drift the
+  // orientation). The motion state is internal (underscore) fields.
+  const stopControlsMotion = (): void => {
+    const c = controls as unknown as {
+      _movePrev: THREE.Vector2; _moveCurr: THREE.Vector2;
+      _zoomStart: THREE.Vector2; _zoomEnd: THREE.Vector2;
+      _panStart: THREE.Vector2; _panEnd: THREE.Vector2;
+    };
+    c._movePrev.copy(c._moveCurr);
+    c._zoomStart.copy(c._zoomEnd);
+    c._panStart.copy(c._panEnd);
+  };
   const animateCameraTo = (toPos: THREE.Vector3, toTarget: THREE.Vector3): void => {
     camTween = {
       p0: camera.position.clone(),
@@ -319,9 +348,19 @@ async function main(): Promise<void> {
       t1: toTarget.clone(),
       start: performance.now(),
     };
+    stopControlsMotion();
     controls.enabled = false;
   };
-  const resetCamera = (): void => animateCameraTo(homePosition, homeTarget);
+  // Double-click empty space "scales back" to frame the whole scene from the
+  // CURRENT orientation — it recenters on the scene and backs the distance out
+  // to the home framing, but keeps the current viewing direction (no flip to the
+  // initial pose).
+  const resetCamera = (): void => {
+    const dir = new THREE.Vector3().subVectors(camera.position, controls.target);
+    if (dir.lengthSq() < 1e-9) dir.set(0.9, 0.7, 1.1);
+    dir.normalize();
+    animateCameraTo(homeTarget.clone().addScaledVector(dir, sceneSize * 1.6), homeTarget.clone());
+  };
 
   // Resize atomically: size + camera aspect + trackball screen + an immediate
   // redraw, so there is never a stretched or blank (white) intermediate frame.
@@ -347,37 +386,19 @@ async function main(): Promise<void> {
   };
   window.addEventListener("resize", scheduleResize);
 
-  // Resizable sidebar (Increment 4.5, B3): drag the divider to change the split;
-  // the canvas re-lays-out and re-renders through applyResize (no overlap).
-  const divider = document.getElementById("divider");
-  const sidebarEl = document.getElementById("sidebar");
-  if (divider && sidebarEl) {
-    let draggingDivider = false;
-    divider.addEventListener("pointerdown", (e) => {
-      draggingDivider = true;
-      (e.target as Element).setPointerCapture((e as PointerEvent).pointerId);
-      e.preventDefault();
-    });
-    divider.addEventListener("pointermove", (e) => {
-      if (!draggingDivider) return;
-      const left = sidebarEl.getBoundingClientRect().left;
-      const w = Math.max(180, Math.min((e as PointerEvent).clientX - left, window.innerWidth * 0.6));
-      sidebarEl.style.width = `${w}px`;
-      scheduleResize();
-    });
-    const endDivider = (e: Event): void => {
-      if (!draggingDivider) return;
-      draggingDivider = false;
-      try {
-        (e.target as Element).releasePointerCapture((e as PointerEvent).pointerId);
-      } catch {
-        /* capture may already be gone */
-      }
-      applyResize();
-    };
-    divider.addEventListener("pointerup", endDivider);
-    divider.addEventListener("pointercancel", endDivider);
-  }
+  // Dockable + collapsible classification panel (4.6.1). The panel can sit on any
+  // edge (left/right/top/bottom) and collapse away; the divider resizes it (its
+  // width when side-docked, its height when top/bottom-docked). Preference is
+  // persisted via the webview state API when available (absent in the harness).
+  const persist =
+    host.getState && host.setState
+      ? {
+          get: () => (host.getState!() as { panel?: PanelState } | undefined)?.panel,
+          set: (s: PanelState) =>
+            host.setState!({ ...((host.getState!() as object) ?? {}), panel: s }),
+        }
+      : undefined;
+  const panel = setupPanelDocking(scheduleResize, applyResize, persist);
 
   // -- neighbor highlighting (nice-to-have): brute-force radius over non-bulk --
   const bulk = bulkCategories(header);
@@ -416,7 +437,7 @@ async function main(): Promise<void> {
     const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
     animateCameraTo(center.clone().addScaledVector(dir, dist), center);
   };
-  const sidebar = document.getElementById("sidebar");
+  const sidebar = document.getElementById("sidebar-content");
   if (sidebar) {
     mountSidebar(sidebar, buildTree(header), selection, {
       onZoom: (kind, id) => {
@@ -640,6 +661,7 @@ async function main(): Promise<void> {
       camera.lookAt(controls.target);
       if (k >= 1) {
         camTween = null;
+        stopControlsMotion(); // clear any stale velocity before resuming control
         controls.enabled = true;
         controls.update();
       }
@@ -668,6 +690,7 @@ async function main(): Promise<void> {
       setPlaying,
       zoomToSelection: () => zoomTo(selection.current.indices),
       resetCamera,
+      panel,
     };
   }
 
@@ -687,6 +710,114 @@ async function main(): Promise<void> {
       );
     }, 2000);
   }
+}
+
+/**
+ * Dockable + collapsible classification panel. Sets `data-dock` on #root (which
+ * the HUD CSS turns into the left/right/top/bottom layout), toggles a collapsed
+ * class, and resizes the panel from the divider (width side-docked, height
+ * top/bottom-docked). Returns a small control API for the test seam.
+ */
+function setupPanelDocking(
+  scheduleResize: () => void,
+  applyResize: () => void,
+  persist?: { get: () => PanelState | undefined; set: (s: PanelState) => void },
+): PanelControl | null {
+  const root = document.getElementById("root");
+  const sidebar = document.getElementById("sidebar");
+  const divider = document.getElementById("divider");
+  const middle = document.getElementById("middle");
+  if (!root || !sidebar || !divider || !middle) return null;
+
+  const saved = persist?.get();
+  const state: PanelState = {
+    dock: saved?.dock ?? "left",
+    collapsed: saved?.collapsed ?? false,
+    width: saved?.width ?? 300,
+    height: saved?.height ?? 200,
+  };
+  const isSide = (): boolean => state.dock === "left" || state.dock === "right";
+  const clampW = (w: number): number => Math.max(160, Math.min(w, window.innerWidth * 0.6));
+  const clampH = (h: number): number => Math.max(120, Math.min(h, window.innerHeight * 0.7));
+
+  const apply = (): void => {
+    root.dataset.dock = state.dock;
+    root.classList.toggle("panel-collapsed", state.collapsed);
+    if (isSide()) {
+      sidebar.style.width = `${clampW(state.width)}px`;
+      sidebar.style.height = "";
+    } else {
+      sidebar.style.height = `${clampH(state.height)}px`;
+      sidebar.style.width = "";
+    }
+    for (const b of root.querySelectorAll<HTMLElement>("[data-dock-to]")) {
+      b.classList.toggle("active", b.getAttribute("data-dock-to") === state.dock);
+    }
+    persist?.set(state);
+    scheduleResize();
+  };
+
+  for (const btn of root.querySelectorAll<HTMLElement>("[data-dock-to]")) {
+    btn.addEventListener("click", () => {
+      state.dock = btn.getAttribute("data-dock-to") as DockPos;
+      state.collapsed = false;
+      apply();
+    });
+  }
+  document.getElementById("panel-collapse")?.addEventListener("click", () => {
+    state.collapsed = true;
+    apply();
+  });
+  document.getElementById("panel-show")?.addEventListener("click", () => {
+    state.collapsed = false;
+    apply();
+  });
+
+  let dragging = false;
+  divider.addEventListener("pointerdown", (e) => {
+    dragging = true;
+    (e.target as Element).setPointerCapture((e as PointerEvent).pointerId);
+    e.preventDefault();
+  });
+  divider.addEventListener("pointermove", (e) => {
+    if (!dragging) return;
+    const m = middle.getBoundingClientRect();
+    const pe = e as PointerEvent;
+    if (state.dock === "left") state.width = clampW(pe.clientX - m.left);
+    else if (state.dock === "right") state.width = clampW(m.right - pe.clientX);
+    else if (state.dock === "top") state.height = clampH(pe.clientY - m.top);
+    else state.height = clampH(m.bottom - pe.clientY);
+    if (isSide()) sidebar.style.width = `${state.width}px`;
+    else sidebar.style.height = `${state.height}px`;
+    scheduleResize();
+  });
+  const end = (e: Event): void => {
+    if (!dragging) return;
+    dragging = false;
+    try {
+      (e.target as Element).releasePointerCapture((e as PointerEvent).pointerId);
+    } catch {
+      /* capture may already be gone */
+    }
+    persist?.set(state);
+    applyResize();
+  };
+  divider.addEventListener("pointerup", end);
+  divider.addEventListener("pointercancel", end);
+
+  apply();
+  return {
+    state,
+    setDock: (pos) => {
+      state.dock = pos;
+      state.collapsed = false;
+      apply();
+    },
+    setCollapsed: (collapsed) => {
+      state.collapsed = collapsed;
+      apply();
+    },
+  };
 }
 
 /** Copy selected indices into an overlay's index buffer and set its draw range. */

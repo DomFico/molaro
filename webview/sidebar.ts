@@ -157,10 +157,15 @@ export function mountSidebar(
       expandable: cat.groups.length > 0,
       muted: cat.bulk,
     });
-    treeRoot.appendChild(row);
+    // Wrap each category (row + its children) in a block so a top/bottom dock can
+    // flow the categories horizontally (see .cat-block in hud.ts).
+    const block = document.createElement("div");
+    block.className = "cat-block";
+    block.appendChild(row);
     const kids = document.createElement("div");
     kids.style.display = "none";
-    treeRoot.appendChild(kids);
+    block.appendChild(kids);
+    treeRoot.appendChild(block);
     attachExpander(caret, row, kids, () => {
       for (const group of cat.groups) buildGroup(kids, group, 1);
     });
