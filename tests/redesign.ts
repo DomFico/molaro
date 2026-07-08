@@ -952,6 +952,37 @@ async function S8(): Promise<void> {
     await d.rightClick(head.x, head.y); // un-hide selection_1 again
     await sleep(150);
 
+    // ...and the OTHER way: selection_1 (alpha+gamma, OLDER, visible) must
+    // survive hiding a NEWER broad selection that covers it entirely
+    const rows2 = {
+      alpha: (await bottomRow(d, "/alpha/"))!,
+      beta: (await bottomRow(d, "/beta/"))!,
+      gamma: (await bottomRow(d, "/gamma/"))!,
+    };
+    await d.click(rows2.alpha.x, rows2.alpha.y);
+    await d.click(rows2.beta.x, rows2.beta.y);
+    await d.click(rows2.gamma.x, rows2.gamma.y);
+    await sleep(100);
+    const btnB = await d.evaluate<{ x: number; y: number }>(`(()=>{
+      const r=document.getElementById('commit-btn').getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2};
+    })()`);
+    await d.click(btnB.x, btnB.y); // broad selection (alpha+beta+gamma)
+    await sleep(200);
+    const broadHead = (await selHead(d, "/selection_2/"))!;
+    await d.rightClick(broadHead.x, broadHead.y); // hide the broad one
+    await sleep(200);
+    check("S8: hiding a broad selection leaves the earlier selection visible",
+      (await visibleCount(d)) === visAll - 400,
+      `visible=${await visibleCount(d)} (only beta should hide)`);
+    for (let i = 0; i < 5; i++) {
+      await d.ctrlZ(); // hide, commit, 3 adds
+      await sleep(80);
+    }
+    check("S8: broad-hide detour fully undone",
+      (await visibleCount(d)) === visAll && (await committed(d)).length === 2,
+      `visible=${await visibleCount(d)} committed=${(await committed(d)).length}`);
+
     // deleting a selection must not strand the panel on blank space
     await expandBottomCategory(d, "/solvent/");
     await sleep(150);

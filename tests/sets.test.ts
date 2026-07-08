@@ -146,33 +146,49 @@ test("hidden is the union of hidden committed selections", () => {
   assert.deepEqual([0, 1, 2].map((p) => m.isPointHidden(p)), [false, false, true]);
 });
 
-test("overlap precedence: a NEWER selection shows points an older hidden one covers", () => {
+test("show wins: a selection inside a hidden region shows its points", () => {
   const m = model();
   m.addToTarget(cat(0)); // {0,1,2}
-  const older = m.commit()!;
-  m.setHidden(older.id, true);
+  const broad = m.commit()!;
+  m.setHidden(broad.id, true);
   assert.ok(m.isPointHidden(0) && m.isPointHidden(2));
   m.addToTarget(sub(0)); // {0,1} inside the hidden region
-  const newer = m.commit()!;
-  assert.ok(!m.isPointHidden(0) && !m.isPointHidden(1), "newer selection shows its points");
+  const inner = m.commit()!;
+  assert.ok(!m.isPointHidden(0) && !m.isPointHidden(1), "visible selection shows its points");
   assert.ok(m.isPointHidden(2), "uncovered remainder stays hidden");
-  m.setHidden(newer.id, true);
-  assert.ok(m.isPointHidden(0), "newest vote flips both ways");
-  m.setHidden(newer.id, false);
-  const affected = m.deleteSelection(newer.id);
-  assert.ok(m.isPointHidden(0) && m.isPointHidden(1), "delete resurfaces the older hide");
+  m.setHidden(inner.id, true);
+  assert.ok(m.isPointHidden(0), "hiding the inner one too hides everything");
+  m.setHidden(inner.id, false);
+  const affected = m.deleteSelection(inner.id);
+  assert.ok(m.isPointHidden(0) && m.isPointHidden(1), "delete resurfaces the broad hide");
   assert.deepEqual(affected.sort(), [0, 1], "all covered points reported on delete");
 });
 
-test("overlap precedence: a newer HIDDEN selection hides inside an older visible one", () => {
+test("show wins: an OLDER fine selection survives a NEWER broad hide", () => {
   const m = model();
-  const seedSel = m.seed("everything", [cat(0)]); // visible, covers {0,1,2}
-  m.addToTarget(sub(0)); // {0,1}
-  const subset = m.commit()!;
-  m.setHidden(subset.id, true);
-  assert.ok(m.isPointHidden(0) && m.isPointHidden(1), "newer hide wins over the older seed");
-  assert.ok(!m.isPointHidden(2), "the rest of the seed stays visible");
-  assert.ok(!seedSel.hidden);
+  m.addToTarget(sub(0)); // {0,1} — the lowest-level selection, made FIRST
+  const fine = m.commit()!;
+  m.addToTarget(cat(0)); // {0,1,2} — then the entire thing
+  const broad = m.commit()!;
+  m.setHidden(broad.id, true);
+  assert.ok(!m.isPointHidden(0) && !m.isPointHidden(1),
+    "the first selection stays visible by virtue of being a selection");
+  assert.ok(m.isPointHidden(2), "the rest of the broad selection hides");
+  m.setHidden(fine.id, true); // hide it explicitly and everything goes
+  assert.ok(m.isPointHidden(0) && m.isPointHidden(1));
+  assert.ok(!fine.hidden === false && !broad.hidden === false);
+});
+
+test("show wins: another visible selection defeats a part-hide of the same points", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  m.addToTarget(sub(1));
+  const a = m.commit()!; // {0,1,2}
+  m.setEntryHidden(a.id, sub(0), true);
+  assert.ok(m.isPointHidden(0), "part-hide works while only one selection covers");
+  m.addToTarget(sub(0));
+  m.commit(); // a second, visible selection over the same points
+  assert.ok(!m.isPointHidden(0), "the visible selection shows them");
 });
 
 // -- edit mode --------------------------------------------------------------------

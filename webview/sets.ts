@@ -355,23 +355,20 @@ export class SelectionModel {
   targetContains(point: number): boolean {
     return this.target.contains(point);
   }
-  /** Invisible footprint. Where selections OVERLAP, the NEWEST one covering
-   * the point decides: a new selection carved out of a hidden region shows
-   * its points ("by virtue of being a selection it is shown"), while a newer
-   * hidden selection inside a visible one still hides. Within a single
-   * selection, its own part-hidden members count as hidden. Points covered
+  /** Invisible footprint. SHOW WINS: a visible committed selection always
+   * shows its points — "by virtue of being a selection it is shown" — no
+   * matter what older or newer hidden selections overlap it. A point is
+   * hidden only when at least one selection hides it (whole-hide, or its own
+   * part-hidden members) AND no visible selection covers it. Points covered
    * by no selection are simply visible. */
   isPointHidden(point: number): boolean {
-    let hidden = false;
-    let bestId = -1;
+    let hideVote = false;
     for (const c of this.committedList) {
       if (!c.set.contains(point)) continue;
-      if (c.id > bestId) {
-        bestId = c.id;
-        hidden = c.hidden || c.hiddenPart.contains(point);
-      }
+      if (c.hidden || c.hiddenPart.contains(point)) hideVote = true;
+      else return false; // a visible selection shows the point — show wins
     }
-    return hidden;
+    return hideVote;
   }
   /** Is this member entry individually hidden within its selection? */
   entryHidden(id: number, e: Entry): boolean {
