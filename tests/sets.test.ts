@@ -6,7 +6,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import type { Header } from "../contract/contract.ts";
-import { Hierarchy, NodeSet, entryKey, type Entry } from "../webview/sets.ts";
+import { Hierarchy, NodeSet, SelectionModel, entryKey, type Entry } from "../webview/sets.ts";
 
 /** Header: cat0 = group0{sub0:[0,1], sub1:[2]}; cat1 = group1{sub2:[3,4,5]}. */
 function makeHeader(): Header {
@@ -117,4 +117,88 @@ test("onChange fires on mutation, unsubscribes cleanly", () => {
   off();
   s.clear();
   assert.equal(n, 2);
+});
+
+test("Hierarchy exposes ancestors + subgroup-of-point", () => {
+  const h = new Hierarchy(makeHeader());
+  assert.equal(h.subgroupOfPoint(4), 2);
+  assert.deepEqual(h.ancestorsOfSubgroup(2), { category: 1, group: 1 });
+  assert.deepEqual(h.ancestorsOfSubgroup(0), { category: 0, group: 0 });
+});
+
+// ---- SelectionModel (named groups) ----------------------------------------
+
+test("SelectionModel starts with one active group, auto-named", () => {
+  const m = new SelectionModel(new Hierarchy(makeHeader()));
+  assert.equal(m.list().length, 1);
+  assert.equal(m.list()[0].name, "selection_1");
+  assert.equal(m.active.id, m.list()[0].id);
+});
+
+test("newGroup creates + activates; setActive switches", () => {
+  const m = new SelectionModel(new Hierarchy(makeHeader()));
+  const g2 = m.newGroup();
+  assert.equal(m.list().length, 2);
+  assert.equal(m.active.id, g2.id);
+  assert.equal(g2.name, "selection_2");
+  m.setActive(m.list()[0].id);
+  assert.equal(m.active.id, m.list()[0].id);
+});
+
+test("rename changes the group name", () => {
+  const m = new SelectionModel(new Hierarchy(makeHeader()));
+  m.rename(m.active.id, "waters");
+  assert.equal(m.list()[0].name, "waters");
+});
+
+test("toggle affects only the ACTIVE group; other groups untouched", () => {
+  const m = new SelectionModel(new Hierarchy(makeHeader()));
+  const g1 = m.active;
+  m.toggle(sub(0)); // into g1
+  const g2 = m.newGroup(); // now active
+  m.toggle(sub(2)); // into g2
+  assert.ok(g1.set.has(sub(0)) && !g1.set.has(sub(2)));
+  assert.ok(g2.set.has(sub(2)) && !g2.set.has(sub(0)));
+  // union covers both groups' points
+  assert.ok(m.containsPoint(0) && m.containsPoint(3));
+  assert.deepEqual(m.resolvedPoints().sort((a, b) => a - b), [0, 1, 3, 4, 5]);
+});
+
+test("toggle add then toggle remove leaves siblings intact (no replace)", () => {
+  const m = new SelectionModel(new Hierarchy(makeHeader()));
+  m.toggle(sub(0)); // {0,1}
+  m.toggle(pt(4)); // add, not replace -> {0,1,4}
+  assert.deepEqual(m.resolvedPoints().sort((a, b) => a - b), [0, 1, 4]);
+  m.toggle(sub(0)); // remove just sub(0) -> {4}
+  assert.deepEqual(m.resolvedPoints(), [4]);
+  assert.ok(m.anyHas(pt(4)) && !m.anyHas(sub(0)));
+});
+
+test("an entry can live in two groups (overlap); union stays until both gone", () => {
+  const m = new SelectionModel(new Hierarchy(makeHeader()));
+  m.toggle(sub(2)); // g1: {3,4,5}
+  const g2 = m.newGroup();
+  m.toggle(sub(2)); // g2 also: {3,4,5}
+  assert.ok(m.containsPoint(3));
+  m.setActive(m.list()[0].id);
+  m.toggle(sub(2)); // remove from g1; still in g2
+  assert.ok(m.containsPoint(3));
+  m.setActive(g2.id);
+  m.toggle(sub(2)); // remove from g2
+  assert.ok(!m.containsPoint(3));
+});
+
+test("delete removes a group (keeps >=1) and un-covers only its points", () => {
+  const m = new SelectionModel(new Hierarchy(makeHeader()));
+  m.toggle(sub(0)); // g1 {0,1}
+  const g2 = m.newGroup();
+  m.toggle(sub(2)); // g2 {3,4,5}
+  const affected = m.delete(g2.id);
+  assert.deepEqual(affected.sort((a, b) => a - b), [3, 4, 5]);
+  assert.ok(m.containsPoint(0) && !m.containsPoint(3));
+  assert.equal(m.list().length, 1);
+  // deleting the last remaining group keeps at least one (fresh, empty)
+  m.delete(m.list()[0].id);
+  assert.equal(m.list().length, 1);
+  assert.equal(m.resolvedPoints().length, 0);
 });

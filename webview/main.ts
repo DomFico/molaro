@@ -34,9 +34,9 @@ import { StreamingPlayer } from "./playback.ts";
 import { Transport, rejectIfErrorPayload } from "./transport.ts";
 import { RepresentationLayer } from "./representation.ts";
 import { bulkCategories, buildTree } from "./classification.ts";
-import { mountSidebar, type SidebarActions } from "./sidebar.ts";
+import { mountSidebar, type SidebarActions, type SidebarHandle } from "./sidebar.ts";
 import { mountActiveSets } from "./activesets.ts";
-import { Hierarchy, NodeSet, type Entry } from "./sets.ts";
+import { Hierarchy, NodeSet, SelectionModel, type Entry } from "./sets.ts";
 import { pickPoint, selectionBounds } from "./picking.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
@@ -277,9 +277,9 @@ async function main(): Promise<void> {
   // -- interaction state layers ------------------------------------------------
   const rep = new RepresentationLayer(header.n_points);
   const hierarchy = new Hierarchy(header);
-  const selectionSet = new NodeSet(hierarchy, "selection");
-  const hiddenSet = new NodeSet(hierarchy, "hidden");
-  const selArray = new Float32Array(header.n_points); // per-point selection flag
+  const selectionModel = new SelectionModel(hierarchy); // multiple named groups
+  const hiddenSet = new NodeSet(hierarchy, "hidden"); // one global hidden set
+  const selArray = new Float32Array(header.n_points); // per-point selection flag (union of all groups)
 
   const parts = buildScene(header, rep, selArray, renderer.getPixelRatio());
   const { scene, positionAttr, drawables, repAttrs } = parts;
@@ -361,6 +361,7 @@ async function main(): Promise<void> {
     camera.updateProjectionMatrix();
     controls.handleResize();
     renderer.render(scene, camera);
+    window.dispatchEvent(new Event("panelrelayout")); // virtual lists re-window
   };
   let resizePending = 0;
   const scheduleResize = (): void => {
@@ -386,11 +387,12 @@ async function main(): Promise<void> {
       : undefined;
   const panel = setupPanelDocking(scheduleResize, applyResize, persist);
 
-  // -- selection/hidden set → render bit flips (incremental) -------------------
+  // -- selection/hidden → render bit flips (incremental) -----------------------
   const visible = rep.state.visible;
-  // Flip the render bits for exactly the points an entry mutation touched.
+  let selDirty = false;
+  // Selection is the UNION of all named groups; flip only the touched points.
   const flipSelectionBits = (points: number[]): void => {
-    for (const p of points) selArray[p] = selectionSet.contains(p) ? 1 : 0;
+    for (const p of points) selArray[p] = selectionModel.containsPoint(p) ? 1 : 0;
     selDirty = true;
   };
   const flipHiddenBits = (points: number[]): void => {
@@ -398,7 +400,6 @@ async function main(): Promise<void> {
     rep.dirty = true; // re-upload visible; overlay shares it. Edges rebuilt below.
     parts.rebuildLines();
   };
-  let selDirty = false;
 
   // -- zoom-to helpers ---------------------------------------------------------
   const zoomToPoints = (indices: number[]): void => {
@@ -410,52 +411,44 @@ async function main(): Promise<void> {
     const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
     animateCameraTo(center.clone().addScaledVector(dir, dist), center);
   };
-  const zoomToSelection = (): void => zoomToPoints(selectionSet.resolvedPoints());
+  const zoomToSelection = (): void => zoomToPoints(selectionModel.resolvedPoints());
 
-  // -- the gesture actions (shared by tree, 3D, and the active-sets surface) ---
-  const selectOnly = (e: Entry): void => flipSelectionBits(selectionSet.replaceWith([e]));
-  const selectToggle = (e: Entry): void => flipSelectionBits(selectionSet.toggle(e));
-  const selectRange = (entries: Entry[]): void => flipSelectionBits(selectionSet.addMany(entries));
-  const hideToggle = (e: Entry): void => flipHiddenBits(hiddenSet.toggle(e));
-  const hideRange = (entries: Entry[]): void => flipHiddenBits(hiddenSet.addMany(entries));
-  const clearSelection = (): void => flipSelectionBits(selectionSet.clear());
-  const removeEntry = (kind: "selection" | "hidden", e: Entry): void => {
-    if (kind === "selection") {
-      const pts = selectionSet.remove(e);
-      if (pts) flipSelectionBits(pts);
-    } else {
+  // -- gesture actions (toggle-only; select acts on the ACTIVE group) ----------
+  const toggleSelect = (e: Entry): void => flipSelectionBits(selectionModel.toggle(e));
+  const addSelect = (e: Entry): void => flipSelectionBits(selectionModel.addToActive(e)); // drag-paint
+  const toggleHide = (e: Entry): void => flipHiddenBits(hiddenSet.toggle(e));
+  const clearActiveGroup = (): void => flipSelectionBits(selectionModel.clearGroup(selectionModel.active.id));
+
+  // -- named-group + hidden actions (active-sets surface) ----------------------
+  const activeSetsActions = {
+    newGroup: () => selectionModel.newGroup(),
+    renameGroup: (id: number, name: string) => selectionModel.rename(id, name),
+    deleteGroup: (id: number) => flipSelectionBits(selectionModel.delete(id)),
+    setActiveGroup: (id: number) => selectionModel.setActive(id),
+    removeSelectionEntry: (gid: number, e: Entry) => flipSelectionBits(selectionModel.removeEntryFrom(gid, e)),
+    removeHiddenEntry: (e: Entry) => {
       const pts = hiddenSet.remove(e);
       if (pts) flipHiddenBits(pts);
-    }
+    },
+    clearHidden: () => flipHiddenBits(hiddenSet.clear()),
   };
-  const clearSet = (kind: "selection" | "hidden"): void =>
-    kind === "selection" ? clearSelection() : flipHiddenBits(hiddenSet.clear());
 
-  // -- classification sidebar (tree) + active-sets surface ---------------------
-  const sidebarActions: SidebarActions = {
-    selectOnly,
-    selectToggle,
-    selectRange,
-    hideToggle,
-    hideRange,
-    zoomTo: (e) => zoomToPoints(hierarchy.pointsOf(e)),
-  };
+  // -- classification tree + active-sets surface -------------------------------
+  const sidebarActions: SidebarActions = { toggleSelect, addSelect, toggleHide };
+  let sidebar: SidebarHandle | null = null;
   const treeHost = document.getElementById("tree-host");
   if (treeHost) {
-    mountSidebar(treeHost, buildTree(header), hierarchy, selectionSet, hiddenSet, sidebarActions);
+    sidebar = mountSidebar(treeHost, buildTree(header), hierarchy, selectionModel, hiddenSet, sidebarActions);
   }
   const activeSetsHost = document.getElementById("active-sets");
   if (activeSetsHost) {
-    mountActiveSets(activeSetsHost, selectionSet, hiddenSet, hierarchy, { removeEntry, clearSet });
+    mountActiveSets(activeSetsHost, selectionModel, hiddenSet, hierarchy, activeSetsActions);
   }
 
-  // -- bulk pre-hidden by default (a plain hidden entry per bulk category) -----
-  // No "show bulk" special case: bulk starts as hidden-set entries; un-hiding is
-  // just removing the entry (right-click the category, or the active-sets list).
+  // -- bulk pre-hidden by default (one hidden entry per bulk category) ---------
   const bulkPre = bulkCategories(header);
   if (bulkPre.size > 0) {
-    const entries: Entry[] = [...bulkPre].map((c) => ({ level: "category", id: c }));
-    flipHiddenBits(hiddenSet.addMany(entries));
+    flipHiddenBits(hiddenSet.addMany([...bulkPre].map((c) => ({ level: "category", id: c }) as Entry)));
   }
   parts.rebuildLines();
 
@@ -480,13 +473,22 @@ async function main(): Promise<void> {
     );
     return r.index;
   };
-  // 3D gestures (same model as the tree; range is tree-only). A click vs a
-  // click-drag is distinguished by a movement threshold so orbiting/panning never
-  // selects or hides (drag stays camera). Left = select, right = hide; Ctrl/Cmd =
-  // toggle/accumulate. Double-click a point zooms to it; double-click empty backs
-  // the camera out.
-  const CLICK_MOVE_THRESHOLD = 5; // px; more movement than this is a camera drag
+  // 3D gestures (toggle-only, no modifiers). Left = toggle-select, right =
+  // toggle-hide; a drag (past the threshold) stays camera orbit and never
+  // selects. Resolution is COARSE when oriented and FINE when zoomed in (B5): a
+  // click resolves to the point's SUBGROUP by default, or to the individual POINT
+  // once the camera is closer than ZOOM_POINT_FACTOR·sceneSize. Selecting scrolls
+  // the panel to that subgroup. Double-click a point zooms to it (net-zero
+  // selection); double-click empty backs the camera out.
+  const CLICK_MOVE_THRESHOLD = 5;
   const DOUBLE_CLICK_MS = 300;
+  const ZOOM_POINT_FACTOR = 0.7;
+  const resolve3D = (idx: number): Entry => {
+    const dist = camera.position.distanceTo(controls.target);
+    return dist < sceneSize * ZOOM_POINT_FACTOR
+      ? { level: "point", id: idx }
+      : { level: "subgroup", id: hierarchy.subgroupOfPoint(idx) };
+  };
   renderer.domElement.addEventListener("contextmenu", (e) => e.preventDefault());
   let pointerDown: { x: number; y: number; button: number } | null = null;
   let lastClick = { t: 0, x: 0, y: 0 };
@@ -494,18 +496,14 @@ async function main(): Promise<void> {
     pointerDown =
       e.button === 0 || e.button === 2 ? { x: e.clientX, y: e.clientY, button: e.button } : null;
   });
-  // pointerup on window so it still fires if the control captured the pointer.
   window.addEventListener("pointerup", (e) => {
     const down = pointerDown;
     pointerDown = null;
     if (!down || e.button !== down.button) return;
-    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_MOVE_THRESHOLD) {
-      return; // it was a drag (orbit/pan) — never selects or hides
-    }
+    if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > CLICK_MOVE_THRESHOLD) return; // drag = camera
     const idx = pickAt(e.clientX, e.clientY);
-    const point: Entry = { level: "point", id: idx };
     if (down.button === 2) {
-      if (idx >= 0) hideToggle(point); // right-click hides the picked point
+      if (idx >= 0) toggleHide(resolve3D(idx)); // right-click toggles hide
       return;
     }
     const now = performance.now();
@@ -515,20 +513,19 @@ async function main(): Promise<void> {
     lastClick = { t: now, x: e.clientX, y: e.clientY };
     if (idx < 0) {
       if (isDouble) resetCamera(); // double-click empty → whole-scene framing
-      else clearSelection();
-      return;
+      return; // a single click on empty space does nothing (toggle model)
     }
+    const entry = resolve3D(idx);
     if (isDouble) {
-      selectOnly(point);
-      zoomToSelection();
-    } else if (e.ctrlKey || e.metaKey) {
-      selectToggle(point);
+      toggleSelect(entry); // undo the single-click toggle from the first click
+      zoomToPoints(hierarchy.pointsOf(entry));
     } else {
-      selectOnly(point);
+      toggleSelect(entry);
+      sidebar?.revealSubgroup(entry.level === "subgroup" ? entry.id : hierarchy.subgroupOfPoint(idx));
     }
   });
   window.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") clearSelection();
+    if (e.key === "Escape") clearActiveGroup();
   });
 
   // -- streaming player --------------------------------------------------------
@@ -676,16 +673,15 @@ async function main(): Promise<void> {
       player,
       rep,
       hierarchy,
-      sets: { selection: selectionSet, hidden: hiddenSet },
+      selection: selectionModel,
+      hidden: hiddenSet,
+      sidebar,
       actions: {
-        selectOnly,
-        selectToggle,
-        selectRange,
-        hideToggle,
-        hideRange,
-        clearSelection,
-        removeEntry,
-        clearSet,
+        toggleSelect,
+        addSelect,
+        toggleHide,
+        clearActiveGroup,
+        ...activeSetsActions,
       },
       applyResize,
       setPlaying,
@@ -756,8 +752,17 @@ function setupPanelDocking(
     }
   };
 
+  // A1: the collapse arrow points toward the edge the panel collapses to.
+  const collapseBtn = document.getElementById("panel-collapse");
+  const arrowFor = (d: DockPos): string =>
+    d === "left" ? "◂" : d === "right" ? "▸" : d === "top" ? "▴" : "▾";
+  const updateArrow = (): void => {
+    if (collapseBtn) collapseBtn.textContent = arrowFor(state.dock);
+  };
+
   const layout = (): void => {
     root.dataset.dock = state.dock;
+    updateArrow();
     if (!state.collapsed) setSize(targetSize());
     persist?.set(state);
     scheduleResize();

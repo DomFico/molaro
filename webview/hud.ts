@@ -61,15 +61,17 @@ export const HUD_CSS = /* css */ `
   #root.panel-collapsed[data-dock="top"]    #panel-reopen { top: 26px; left: 50%; transform: translateX(-50%); border-radius: 0 0 3px 3px; }
   #root.panel-collapsed[data-dock="bottom"] #panel-reopen { bottom: 40px; left: 50%; transform: translateX(-50%); border-radius: 3px 3px 0 0; }
 
-  /* drag-to-dock overlay: nearest-edge zone highlights while dragging the grip */
-  #dock-overlay { display: none; position: absolute; inset: 0; z-index: 50; }
+  /* drag-to-dock overlay: a soft translucent fill on the target dock region
+     (no hard outline) — only the nearest-edge zone shows while dragging (A2). */
+  #dock-overlay { display: none; position: absolute; inset: 0; z-index: 50; pointer-events: none; }
   #dock-overlay.active { display: block; }
-  .dock-zone { position: absolute; background: rgba(51,255,204,0.06); border: 2px dashed rgba(51,255,204,0.3); }
-  .dock-zone.hot { background: rgba(51,255,204,0.22); border-color: #33ffcc; }
-  .dock-zone[data-zone="top"]    { top: 0; left: 26%; right: 26%; height: 26%; }
-  .dock-zone[data-zone="bottom"] { bottom: 0; left: 26%; right: 26%; height: 26%; }
-  .dock-zone[data-zone="left"]   { left: 0; top: 0; bottom: 0; width: 24%; }
-  .dock-zone[data-zone="right"]  { right: 0; top: 0; bottom: 0; width: 24%; }
+  .dock-zone { position: absolute; background: transparent; border-radius: 6px;
+    transition: background 90ms ease; }
+  .dock-zone.hot { background: rgba(120,180,225,0.16); box-shadow: inset 0 0 0 1px rgba(150,200,235,0.28); }
+  .dock-zone[data-zone="top"]    { top: 0; left: 0; right: 0; height: 30%; }
+  .dock-zone[data-zone="bottom"] { bottom: 0; left: 0; right: 0; height: 30%; }
+  .dock-zone[data-zone="left"]   { left: 0; top: 0; bottom: 0; width: 28%; }
+  .dock-zone[data-zone="right"]  { right: 0; top: 0; bottom: 0; width: 28%; }
 
   /* reserved bottom control bar */
   #controls { flex: none; height: 40px; display: flex; align-items: center; gap: 10px;
@@ -79,7 +81,7 @@ export const HUD_CSS = /* css */ `
   #controls input[type="range"] { flex: 1; }
   #controls .readout { min-width: 240px; text-align: right; white-space: pre; }
 
-  /* active-sets surface (Selected / Hidden) */
+  /* active-sets surface (Selections / Hidden) */
   #active-sets { border-bottom: 1px solid #3a3a3a; margin-bottom: 6px; padding-bottom: 4px; }
   .set-section { margin: 2px 0; }
   .set-head { display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 2px 4px; }
@@ -87,18 +89,26 @@ export const HUD_CSS = /* css */ `
   .set-title { flex: 1 1 auto; }
   .set-title.sel { color: #33ffcc; }
   .set-title.hid { color: #d0a0ff; }
-  .set-clear { font: inherit; color: #ccc; background: #3a3a3a; border: 1px solid #555;
+  .set-mini-btn { font: inherit; color: #ccc; background: #3a3a3a; border: 1px solid #555;
     border-radius: 3px; cursor: pointer; padding: 0 6px; }
   .set-entries { display: none; }
   .set-section.open .set-entries { display: block; }
-  .entry-row { display: flex; align-items: baseline; gap: 6px; padding: 1px 4px 1px 18px; white-space: nowrap; }
+  .sel-group { margin: 2px 0 4px; }
+  .sel-group.active > .sel-group-head { color: #7fffe6; }
+  .sel-group-head { display: flex; align-items: center; gap: 5px; padding: 1px 4px; }
+  .sel-dot { width: 10px; color: #33ffcc; }
+  .sel-group-name { flex: 1 1 auto; cursor: pointer; overflow: hidden; text-overflow: ellipsis; }
+  .entry-tree { }
+  .entry-row { display: flex; align-items: center; gap: 6px; padding: 1px 4px; white-space: nowrap; }
+  .entry-row.structural { color: #8a8a8a; }
   .entry-label { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis; }
   .entry-remove { cursor: pointer; color: #888; }
   .entry-remove:hover { color: #fff; }
 
-  /* classification tree */
+  /* classification tree (fixed-height rows so long lists can virtualize) */
   .sidebar-hint { color: #7a7a7a; padding: 0 4px 8px; }
-  .tree-row { display: flex; align-items: baseline; gap: 4px; padding: 2px 4px;
+  .vlist { position: relative; }
+  .tree-row { display: flex; align-items: center; gap: 4px; height: 18px; padding: 0 4px;
     border-radius: 3px; white-space: nowrap; }
   .tree-row.selectable { cursor: pointer; }
   .tree-row.selectable:hover { background: #2f3a42; }
@@ -107,9 +117,18 @@ export const HUD_CSS = /* css */ `
   .caret { width: 10px; display: inline-block; color: #888; cursor: pointer; }
   .tree-label { overflow: hidden; text-overflow: ellipsis; }
 
-  /* top/bottom dock: lay categories out horizontally, scroll left/right */
+  /* top/bottom dock: the whole content flows LEFT-TO-RIGHT (A3). #sidebar-content
+     becomes a row: active-sets is a fixed left column, the tree host takes the
+     rest and scrolls horizontally with its categories laid out as columns. */
   #root[data-dock="top"] #sidebar-content, #root[data-dock="bottom"] #sidebar-content {
+    display: flex; flex-direction: row; align-items: stretch; gap: 12px;
     overflow-x: auto; overflow-y: hidden; }
+  #root[data-dock="top"] #active-sets, #root[data-dock="bottom"] #active-sets {
+    flex: none; width: 240px; overflow-y: auto; border-bottom: none;
+    border-right: 1px solid #3a3a3a; margin-bottom: 0; padding-right: 8px; }
+  #root[data-dock="top"] #tree-host, #root[data-dock="bottom"] #tree-host {
+    flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; }
+  #root[data-dock="top"] .sidebar-hint, #root[data-dock="bottom"] .sidebar-hint { display: none; }
   #root[data-dock="top"] .tree, #root[data-dock="bottom"] .tree {
     display: flex; flex-direction: row; align-items: flex-start; gap: 18px; height: 100%; }
   #root[data-dock="top"] .cat-block, #root[data-dock="bottom"] .cat-block {

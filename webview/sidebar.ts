@@ -1,68 +1,97 @@
 /**
  * Classification tree — the primary direct-manipulation surface (DOM).
  *
- * Renders category → group → subgroup → point (drill-to-points is the fourth,
- * lazily-built level). Every row is an ENTRY at its level. Gestures drive the
- * persistent selection/hidden sets (see sets.ts); the sets drive the row classes
- * back (.selected green, .hidden-entry struck-through), so the tree and 3D view
- * stay in sync through the shared sets, not cross-surface messaging.
+ * Renders category → group → subgroup → point. Every row is an ENTRY at its
+ * level. Gestures are TOGGLE-only (Increment 4.8): a left-click toggles the
+ * entry in the ACTIVE selection group, a click-hold-drag paints (adds) each row
+ * it passes, and a right-click toggles the entry in the hidden set — no
+ * plain-click-replace, no modifier keys. The selection/hidden sets drive the row
+ * classes back (.selected green, .hidden-entry struck-through).
  *
- * Gestures (remappable): left = select, right = hide; plain = only-this,
- * Ctrl/Cmd = toggle/accumulate, Shift = range over the currently-visible rows
- * between the anchor and the clicked row (the file-explorer idiom, generalized to
- * any depth). Double-click zooms. Lazy + capped rendering keeps big trees fast.
+ * The subgroup/point lists (the only ones that get huge) are VIRTUALIZED over a
+ * flat, fixed-height item model, so the full list renders with no truncation and
+ * stays fast; drilling a subgroup to its points splices point items into the same
+ * flat model. `revealSubgroup` expands ancestors and scrolls a subgroup into view
+ * (used by 3D scroll-to-selection).
  */
-import type { CategoryNode, GroupNode, TreeModel } from "./classification.ts";
-import type { Entry, Hierarchy, NodeSet } from "./sets.ts";
-import { entryKey } from "./sets.ts";
+import type { CategoryNode, GroupNode, SubgroupNode, TreeModel } from "./classification.ts";
+import type { Entry, Hierarchy, NodeSet, SelectionModel } from "./sets.ts";
+import { VirtualList } from "./virtuallist.ts";
 
-const MAX_SUBGROUP_ROWS = 200;
-const MAX_POINT_ROWS = 200;
+const ROW_H = 18;
 
 export interface SidebarActions {
-  selectOnly(e: Entry): void;
-  selectToggle(e: Entry): void;
-  selectRange(entries: Entry[]): void;
-  hideToggle(e: Entry): void;
-  hideRange(entries: Entry[]): void;
-  zoomTo(e: Entry): void;
+  toggleSelect(e: Entry): void; // left-click
+  addSelect(e: Entry): void; // paint-drag
+  toggleHide(e: Entry): void; // right-click
+}
+
+export interface SidebarHandle {
+  revealSubgroup(subgroupId: number): void;
 }
 
 export function mountSidebar(
   container: HTMLElement,
   tree: TreeModel,
   hierarchy: Hierarchy,
-  selection: NodeSet,
+  selection: SelectionModel,
   hidden: NodeSet,
   actions: SidebarActions,
-): void {
+): SidebarHandle {
   container.innerHTML = "";
+  const scrollRoot = (container.closest("#sidebar-content") as HTMLElement) ?? container;
 
   const hint = document.createElement("div");
   hint.className = "sidebar-hint";
-  hint.textContent = "left-click select · right-click hide · Ctrl add · Shift range";
+  hint.textContent = "left-click select · drag to paint · right-click hide";
   container.appendChild(hint);
 
   const treeRoot = document.createElement("div");
   treeRoot.className = "tree";
   container.appendChild(treeRoot);
 
-  const rowEntry = new WeakMap<HTMLElement, Entry>();
-  const selectableRows: HTMLElement[] = [];
-  let anchorEl: HTMLElement | null = null;
-
-  const visibleRows = (): HTMLElement[] =>
-    selectableRows.filter((r) => r.isConnected && r.offsetParent !== null);
-
-  const rangeEntries = (clicked: HTMLElement): Entry[] => {
-    const rows = visibleRows();
-    const ci = rows.indexOf(clicked);
-    if (ci < 0) return [];
-    const ai = anchorEl ? rows.indexOf(anchorEl) : -1;
-    if (ai < 0) return [rowEntry.get(clicked)!];
-    const [lo, hi] = ai <= ci ? [ai, ci] : [ci, ai];
-    return rows.slice(lo, hi + 1).map((r) => rowEntry.get(r)!);
+  const isSelected = (e: Entry): boolean => selection.anyHas(e);
+  const isHidden = (e: Entry): boolean => hidden.has(e);
+  const entryOf = (row: HTMLElement): Entry => ({
+    level: row.dataset.level as Entry["level"],
+    id: Number(row.dataset.id),
+  });
+  const applyClasses = (row: HTMLElement): void => {
+    const e = entryOf(row);
+    row.classList.toggle("selected", isSelected(e));
+    row.classList.toggle("hidden-entry", isHidden(e));
   };
+
+  // -- drag-paint state (shared; delegated move/up on window) ------------------
+  let paint: { startEntry: Entry; moved: boolean; painted: Set<string> } | null = null;
+  const rowUnder = (x: number, y: number): HTMLElement | null => {
+    const el = document.elementFromPoint(x, y);
+    const row = el?.closest?.(".tree-row.selectable") as HTMLElement | null;
+    return row && treeRoot.contains(row) ? row : null;
+  };
+  const paintKey = (e: Entry): string => `${e.level}:${e.id}`;
+  window.addEventListener("pointermove", (e) => {
+    if (!paint) return;
+    const row = rowUnder(e.clientX, e.clientY);
+    if (!row) return;
+    if (!paint.moved) {
+      // first movement turns the gesture into a paint: add the start row too
+      paint.moved = true;
+      paint.painted.add(paintKey(paint.startEntry));
+      actions.addSelect(paint.startEntry);
+    }
+    const entry = entryOf(row);
+    const key = paintKey(entry);
+    if (!paint.painted.has(key)) {
+      paint.painted.add(key);
+      actions.addSelect(entry);
+    }
+  });
+  window.addEventListener("pointerup", () => {
+    if (!paint) return;
+    if (!paint.moved) actions.toggleSelect(paint.startEntry); // a plain click = toggle
+    paint = null;
+  });
 
   const makeRow = (
     depth: number,
@@ -86,48 +115,21 @@ export function mountSidebar(
     if (opts.entry) {
       const entry = opts.entry;
       row.classList.add("selectable");
-      rowEntry.set(row, entry);
-      selectableRows.push(row);
-
-      row.addEventListener("click", (e) => {
-        if (e.target === caret) return; // caret toggles expansion, not select
-        e.stopPropagation();
-        if (e.shiftKey) actions.selectRange(rangeEntries(row));
-        else if (e.ctrlKey || e.metaKey) {
-          actions.selectToggle(entry);
-          anchorEl = row;
-        } else {
-          actions.selectOnly(entry);
-          anchorEl = row;
-        }
+      row.dataset.level = entry.level;
+      row.dataset.id = String(entry.id);
+      row.addEventListener("pointerdown", (e) => {
+        if (e.button !== 0 || e.target === caret) return;
+        e.preventDefault();
+        paint = { startEntry: entry, moved: false, painted: new Set() };
       });
       row.addEventListener("contextmenu", (e) => {
         e.preventDefault();
         e.stopPropagation();
-        if (e.shiftKey) actions.hideRange(rangeEntries(row));
-        else {
-          actions.hideToggle(entry);
-          anchorEl = row;
-        }
+        actions.toggleHide(entry);
       });
-      row.addEventListener("dblclick", (e) => {
-        e.stopPropagation();
-        actions.zoomTo(entry);
-      });
-      applyRowClasses(row, entry);
+      applyClasses(row);
     }
     return { row, caret };
-  };
-
-  const applyRowClasses = (row: HTMLElement, entry: Entry): void => {
-    row.classList.toggle("selected", selection.has(entry));
-    row.classList.toggle("hidden-entry", hidden.has(entry));
-  };
-  const refresh = (): void => {
-    for (const row of selectableRows) {
-      const entry = rowEntry.get(row);
-      if (entry) applyRowClasses(row, entry);
-    }
   };
 
   const attachExpander = (caret: HTMLElement, childHost: HTMLElement, build: () => void): void => {
@@ -145,22 +147,64 @@ export function mountSidebar(
     });
   };
 
-  const buildPoints = (host: HTMLElement, subgroupId: number, depth: number): void => {
-    const pts = hierarchy.subgroupPoints(subgroupId);
-    for (const p of pts.slice(0, MAX_POINT_ROWS)) {
-      const entry: Entry = { level: "point", id: p };
-      const { row } = makeRow(depth, hierarchy.label(entry), { entry });
-      host.appendChild(row);
-    }
-    if (pts.length > MAX_POINT_ROWS) {
-      const { row } = makeRow(depth, `…and ${fmt(pts.length - MAX_POINT_ROWS)} more points`);
-      host.appendChild(row);
-    }
+  // A group's subgroup+point list, virtualized over a flat, fixed-height model.
+  type FlatItem = { kind: "sub"; node: SubgroupNode; expanded: boolean } | { kind: "point"; id: number };
+  interface Subtree {
+    vlist: VirtualList;
+    reveal(subId: number): void;
+  }
+  const buildGroupSubtree = (group: GroupNode): Subtree => {
+    const flat: FlatItem[] = group.subgroups.map((s) => ({ kind: "sub", node: s, expanded: false }));
+    let vlist!: VirtualList;
+    const renderRow = (i: number): HTMLElement => {
+      const item = flat[i];
+      if (item.kind === "point") {
+        const entry: Entry = { level: "point", id: item.id };
+        return makeRow(3, hierarchy.label(entry), { entry }).row;
+      }
+      const s = item.node;
+      const entry: Entry = { level: "subgroup", id: s.subgroupId };
+      const { row, caret } = makeRow(2, `${s.label} — ${fmt(s.pointCount)} pts`, {
+        entry,
+        expandable: s.pointCount > 0,
+      });
+      caret.textContent = item.expanded ? "▾" : s.pointCount > 0 ? "▸" : "";
+      caret.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const at = flat.indexOf(item);
+        if (at < 0) return;
+        if (!item.expanded) {
+          const pts = hierarchy.subgroupPoints(s.subgroupId);
+          flat.splice(at + 1, 0, ...pts.map((p) => ({ kind: "point", id: p }) as FlatItem));
+          item.expanded = true;
+        } else {
+          let rm = 0;
+          while (flat[at + 1 + rm]?.kind === "point") rm++;
+          flat.splice(at + 1, rm);
+          item.expanded = false;
+        }
+        vlist.setCount(flat.length);
+      });
+      return row;
+    };
+    vlist = new VirtualList(scrollRoot, flat.length, ROW_H, renderRow);
+    return {
+      vlist,
+      reveal: (subId) => {
+        const idx = flat.findIndex((it) => it.kind === "sub" && it.node.subgroupId === subId);
+        if (idx >= 0) vlist.scrollToIndex(idx);
+      },
+    };
   };
 
-  const buildGroup = (host: HTMLElement, group: GroupNode, depth: number): void => {
+  // category → group scaffolding (few of each; not virtualized)
+  const catExpand = new Map<number, () => void>();
+  const groupExpand = new Map<number, () => void>();
+  const groupSubtree = new Map<number, Subtree>();
+
+  const buildGroup = (host: HTMLElement, group: GroupNode): void => {
     const { row, caret } = makeRow(
-      depth,
+      1,
       `${group.label} — ${fmt(group.pointCount)} pts, ${fmt(group.subgroups.length)} sub`,
       { entry: { level: "group", id: group.groupId }, expandable: group.subgroups.length > 0 },
     );
@@ -169,25 +213,12 @@ export function mountSidebar(
     kids.style.display = "none";
     host.appendChild(kids);
     attachExpander(caret, kids, () => {
-      for (const subNode of group.subgroups.slice(0, MAX_SUBGROUP_ROWS)) {
-        const { row: sr, caret: sc } = makeRow(
-          depth + 1,
-          `${subNode.label} — ${fmt(subNode.pointCount)} pts`,
-          { entry: { level: "subgroup", id: subNode.subgroupId }, expandable: subNode.pointCount > 0 },
-        );
-        kids.appendChild(sr);
-        const pkids = document.createElement("div");
-        pkids.style.display = "none";
-        kids.appendChild(pkids);
-        attachExpander(sc, pkids, () => buildPoints(pkids, subNode.subgroupId, depth + 2));
-      }
-      if (group.subgroups.length > MAX_SUBGROUP_ROWS) {
-        const { row: more } = makeRow(
-          depth + 1,
-          `…and ${fmt(group.subgroups.length - MAX_SUBGROUP_ROWS)} more subgroups`,
-        );
-        kids.appendChild(more);
-      }
+      const st = buildGroupSubtree(group);
+      groupSubtree.set(group.groupId, st);
+      kids.appendChild(st.vlist.el);
+    });
+    groupExpand.set(group.groupId, () => {
+      if (kids.style.display === "none") caret.dispatchEvent(new MouseEvent("click"));
     });
   };
 
@@ -196,7 +227,6 @@ export function mountSidebar(
       entry: { level: "category", id: cat.categoryIndex },
       expandable: cat.groups.length > 0,
     });
-    // Wrap each category so a top/bottom dock can flow categories horizontally.
     const block = document.createElement("div");
     block.className = "cat-block";
     block.appendChild(row);
@@ -205,14 +235,31 @@ export function mountSidebar(
     block.appendChild(kids);
     treeRoot.appendChild(block);
     attachExpander(caret, kids, () => {
-      for (const group of cat.groups) buildGroup(kids, group, 1);
+      for (const group of cat.groups) buildGroup(kids, group);
+    });
+    catExpand.set(cat.categoryIndex, () => {
+      if (kids.style.display === "none") caret.dispatchEvent(new MouseEvent("click"));
     });
   };
 
   for (const cat of tree.categories) buildCategory(cat);
 
+  const refresh = (): void => {
+    for (const row of treeRoot.querySelectorAll<HTMLElement>(".tree-row.selectable")) applyClasses(row);
+  };
   selection.onChange(refresh);
   hidden.onChange(refresh);
+
+  return {
+    revealSubgroup: (subId) => {
+      const anc = hierarchy.ancestorsOfSubgroup(subId);
+      if (!anc) return;
+      catExpand.get(anc.category)?.();
+      groupExpand.get(anc.group)?.();
+      // let the group's list mount, then scroll to the subgroup
+      requestAnimationFrame(() => groupSubtree.get(anc.group)?.reveal(subId));
+    },
+  };
 }
 
 function fmt(n: number): string {

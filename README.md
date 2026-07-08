@@ -253,6 +253,57 @@ hairball). Un-hiding is just removing that entry (right-click the category, or
 its row in the active-sets surface) — after which it renders white and selects
 green like anything else.
 
+## Increment 4.8: named selection groups + docking/tree polish
+
+Two load-bearing reversals of the previous model, plus docking/tree polish.
+
+### Named selection groups (the agent-context substrate)
+
+Selection now lives in **multiple named groups** — `selection_1`, `selection_2`,
+… (`webview/sets.ts`, `SelectionModel`) — because these named groups are exactly
+the addressable state a future agent-driven layer will point at ("analyze
+`selection_2`"). Exactly one group is **active**; a **"+ new selection"** control
+starts a new active group, and groups are **renameable** and **deletable**. Every
+select action affects the **active** group only; an entry may live in several
+groups (overlap allowed). Rendering draws the **union** of all groups in the same
+green (groups are distinguished in the panel, not by color — per-group colors are
+a natural future extension the agent layer will drive). Hiding stays **one**
+global set, with bulk categories pre-populated. The **active-sets surface** lists
+each group as a hierarchical tree (category → group → subgroup, bottoming out at
+points only where points were individually selected — never a flat point list),
+with the active group marked and rename / delete / new controls; the sets are
+clean, first-class state with an API (create/rename/delete/set-active; toggle-add
+/remove; resolve-to-points; list). **No agent is wired** — this is the substrate.
+
+### Toggle-only gestures (the reversal)
+
+Clicks **toggle**; nothing ever replaces the whole selection. Selecting elsewhere
+**adds**; clicking an already-selected/hidden thing **removes just that thing**.
+Modifier keys are gone.
+
+| Surface | Gesture | Effect |
+|---|---|---|
+| Tree | Left-click a row | Toggle that entry in the **active** selection group |
+| Tree | Click-hold-drag over rows | **Paint**: add each row the drag passes |
+| Tree | Right-click a row | Toggle that entry in the **hidden** set |
+| 3D | Left-click | Toggle the point's **subgroup** (oriented) or the **point** (zoomed in); scroll the panel to it |
+| 3D | Right-click | Toggle that subgroup/point in the hidden set |
+| 3D | Drag | Camera orbit (never selects) |
+
+Selecting or hiding a node stores **one hierarchical entry** at the level clicked
+and resolves to all points under it (a subgroup entry is one entry, not a list of
+its points). A 3D click resolves **coarse to orient, fine to specify**: the
+clicked point's subgroup by default, the individual point once zoomed in past a
+threshold — and it **scrolls the panel tree to that subgroup**.
+
+### Docking & tree polish
+
+The collapse arrow points **toward** the dock edge; the drag-dock overlay is a
+soft **translucent fill** of the target region (no hard outline); docked top or
+bottom the panel content **flows left-to-right**; and long subgroup/point lists
+render in **full** (no "N more" truncation), **virtualized** so thousands of rows
+stay fast (`webview/virtuallist.ts`).
+
 ## Running the extension
 
 ```bash
@@ -474,10 +525,11 @@ webview/     main.ts (Three.js renderer + controls + interaction wiring),
              transport.ts (FIFO correlation), playback.ts (playhead/prefetch/cache),
              geometry.ts (pure prep),
              representation.ts (replaceable per-point base look, defaults only),
-             sets.ts (persistent selection/hidden set store — agent-context state),
-             classification.ts (tree model + bulk detection), sidebar.ts (tree DOM
-             + gestures), activesets.ts (Selected/Hidden surface), picking.ts (CPU
-             pick), hud.ts (shared DOM skeleton + layout CSS for both hosts)
+             sets.ts (named-group SelectionModel + hidden NodeSet — agent-context
+             state), classification.ts (tree model + bulk detection), sidebar.ts
+             (tree DOM + toggle/paint gestures), activesets.ts (named-group surface),
+             virtuallist.ts (virtualized long lists), picking.ts (CPU pick),
+             hud.ts (shared DOM skeleton + layout CSS for both hosts)
 media/       fixtures/ — Increment 1 fixture files (kept for tests; not the data path)
 tests/       Python: test_roundtrip.py, make_fixtures.py, make_webview_fixture.py,
              make_openfile_fixtures.py (structure/trajectory/orphan open-from-file fixtures)
@@ -485,10 +537,10 @@ tests/       Python: test_roundtrip.py, make_fixtures.py, make_webview_fixture.p
              picking tests, bridge.ts (headless E2E: real broker + producer, no VS
              Code; /selftest route drives selection), sidebar_spotcheck.ts (runs a
              real corpus header through the sidebar's classification path),
-             sets.test.ts (set-store unit tests), e2e_driver.ts +
-             fixes_4_5/4_6/4_6_1/4_7.ts (CDP-driven validation)
+             sets.test.ts (set-store + SelectionModel unit tests), e2e_driver.ts +
+             fixes_4_5/4_6/4_6_1/4_8.ts (CDP-driven validation)
 dist/        build output (generated)
-reports/     fixes_4_5/…/4_7/ — screenshot evidence (gitignored; regenerable)
+reports/     fixes_4_5/…/4_8/ — screenshot evidence (gitignored; regenerable)
 ```
 
 `SyntheticSource` implements the same `DataSource` interface a real data source

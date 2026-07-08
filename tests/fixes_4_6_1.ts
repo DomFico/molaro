@@ -99,7 +99,7 @@ async function zoomOutKeepsOrientation(d: E2EDriver): Promise<void> {
   await sleep(1800);
   const dRot = dir(await camPos(d), await camTarget(d));
   // Zoom into a subgroup, then double-click empty to scale back out.
-  await d.evaluate(`${V}.actions.selectOnly({level:'subgroup', id:0})`);
+  await d.evaluate(`${V}.actions.toggleSelect({level:'subgroup', id:0})`);
   await d.evaluate(`${V}.zoomToSelection()`);
   await sleep(600);
   await d.screenshot(`${REPORT}/zoomout_before.png`);

@@ -25,7 +25,7 @@ const canvasRect = (d: E2EDriver) =>
   d.evaluate<{ x: number; y: number; w: number; h: number }>(
     "(()=>{const r=document.querySelector('#app canvas').getBoundingClientRect();return {x:r.left,y:r.top,w:r.width,h:r.height};})()",
   );
-const selCount = (d: E2EDriver) => d.evaluate<number>(`${V}.sets.selection.pointCount`);
+const selCount = (d: E2EDriver) => d.evaluate<number>(`${V}.selection.resolvedPoints().length`);
 const frameNum = (d: E2EDriver) => d.evaluate<number>(`${V}.player.frame`);
 const isPlaying = (d: E2EDriver) => d.evaluate<boolean>(`${V}.player.playing`);
 const sliderVal = (d: E2EDriver) => d.evaluate<number>("Number(document.getElementById('scrubber').value)");
@@ -74,7 +74,7 @@ async function A1(): Promise<void> {
     await pause(d);
     const r = await canvasRect(d);
     const cx = r.x + r.w / 2, cy = r.y + r.h / 2;
-    await d.evaluate(`${V}.actions.clearSelection()`);
+    await d.evaluate(`${V}.actions.clearActiveGroup()`);
     const before = await selCount(d);
     const camBefore = await camPos(d);
     await d.drag(cx - 130, cy - 90, cx + 130, cy + 90, 12);
@@ -88,7 +88,7 @@ async function A1(): Promise<void> {
 
     // A no-move click on a bright (on-point) pixel selects. Un-hide bulk first so
     // the scene fills the center (bulk solvent is hidden by default).
-    await d.evaluate(`${V}.actions.clearSet('hidden')`);
+    await d.evaluate(`${V}.actions.clearHidden()`);
     await sleep(200);
     const hit = await findBrightPixel(d, r);
     if (hit) {
@@ -97,14 +97,13 @@ async function A1(): Promise<void> {
       const afterClick = await selCount(d);
       await d.screenshot(`${REPORT}/A1_drag_vs_click/after_click_selects.png`);
       check("no-move click on a point selects", afterClick > 0, `count=${afterClick}`);
+      // toggle model: clicking the same thing again de-selects it
+      await d.click(hit.x, hit.y);
+      await sleep(120);
+      check("clicking the same thing again de-selects it", (await selCount(d)) === 0);
     } else {
       check("found a point pixel to click", false, "no bright pixel located");
     }
-
-    // A no-move click on empty space clears.
-    await d.click(r.x + 6, r.y + 6);
-    await sleep(120);
-    check("click on empty space clears", (await selCount(d)) === 0);
   });
 }
 
@@ -177,7 +176,7 @@ async function A2(): Promise<void> {
 
     // Zoom-to-selection: select a subgroup, invoke the real zoom path, confirm
     // the camera reframed closer to the selection centroid.
-    await d.evaluate(`${V}.actions.selectOnly({level:'subgroup', id:1})`);
+    await d.evaluate(`${V}.actions.toggleSelect({level:'subgroup', id:1})`);
     await sleep(100);
     const distToSelBefore = await selectionCamDist(d);
     await d.evaluate(`${V}.zoomToSelection()`);
@@ -191,7 +190,7 @@ async function A2(): Promise<void> {
 /** Distance from camera to the current selection centroid at the current frame. */
 function selectionCamDist(d: E2EDriver): Promise<number> {
   return d.evaluate<number>(`(()=>{
-    const v=${V}; const idx=v.sets.selection.resolvedPoints(); if(!idx.length) return Infinity;
+    const v=${V}; const idx=v.selection.resolvedPoints(); if(!idx.length) return Infinity;
     const f=v.player.frame; const chunk=v.player.getFrame(f); if(!chunk) return Infinity;
     const nP=v.rep.state.visible.length; const off=(f-chunk.start)*nP*3; const pos=chunk.positions;
     let cx=0,cy=0,cz=0; for(const p of idx){cx+=pos[off+p*3];cy+=pos[off+p*3+1];cz+=pos[off+p*3+2];}
@@ -266,7 +265,7 @@ async function B(): Promise<void> {
   for (const cfg of configs) {
     await withDriver({ bridgePort: 8965, cdpPort: 9265, width: cfg.w, height: cfg.h, nPoints: 9000 }, async (d) => {
       // make a selection so both header and selection readout have text
-      await d.evaluate(`${V}.actions.selectOnly({level:'subgroup', id:0})`);
+      await d.evaluate(`${V}.actions.toggleSelect({level:'subgroup', id:0})`);
       await d.evaluate(`(()=>{const s=document.getElementById('sidebar'); s.style.width='${cfg.sidebar}px';})()`);
       await d.evaluate(`${V}.applyResize()`);
       await sleep(250);

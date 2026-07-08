@@ -35,16 +35,69 @@ export class Hierarchy {
   private readonly byCategory = new Map<number, number[]>();
   private readonly byGroup = new Map<number, number[]>();
   private readonly bySubgroup = new Map<number, number[]>();
+  private readonly subOfPoint: ReadonlyArray<number>;
+  private readonly ancestorOfSub = new Map<number, { category: number; group: number }>();
+  private readonly catOfGroup = new Map<number, number>();
   private readonly header: Header;
 
   constructor(header: Header) {
     this.header = header;
     this.n = header.n_points;
     const { category, group_id, subgroup_id } = header.points;
+    this.subOfPoint = subgroup_id;
     for (let p = 0; p < this.n; p++) {
       push(this.byCategory, category[p], p);
       push(this.byGroup, group_id[p], p);
       push(this.bySubgroup, subgroup_id[p], p);
+      if (!this.ancestorOfSub.has(subgroup_id[p])) {
+        this.ancestorOfSub.set(subgroup_id[p], { category: category[p], group: group_id[p] });
+      }
+      if (!this.catOfGroup.has(group_id[p])) this.catOfGroup.set(group_id[p], category[p]);
+    }
+  }
+
+  /** The subgroup a point belongs to (for coarse 3D resolution). */
+  subgroupOfPoint(point: number): number {
+    return this.subOfPoint[point];
+  }
+
+  /** The category + group a subgroup sits under (for scroll-to-selection). */
+  ancestorsOfSubgroup(subgroupId: number): { category: number; group: number } | undefined {
+    return this.ancestorOfSub.get(subgroupId);
+  }
+
+  /** The category a group sits under. */
+  categoryOfGroup(groupId: number): number | undefined {
+    return this.catOfGroup.get(groupId);
+  }
+
+  /** category → group → subgroup path of an entry (for the active-sets tree). */
+  pathOf(e: Entry): Entry[] {
+    switch (e.level) {
+      case "category":
+        return [e];
+      case "group": {
+        const c = this.catOfGroup.get(e.id);
+        return c === undefined ? [e] : [{ level: "category", id: c }, e];
+      }
+      case "subgroup": {
+        const a = this.ancestorOfSub.get(e.id);
+        return a
+          ? [{ level: "category", id: a.category }, { level: "group", id: a.group }, e]
+          : [e];
+      }
+      case "point": {
+        const s = this.subOfPoint[e.id];
+        const a = this.ancestorOfSub.get(s);
+        return a
+          ? [
+              { level: "category", id: a.category },
+              { level: "group", id: a.group },
+              { level: "subgroup", id: s },
+              e,
+            ]
+          : [e];
+      }
     }
   }
 
@@ -205,6 +258,147 @@ export class NodeSet {
     this.covered = 0;
     this.entries.clear();
     return affected;
+  }
+
+  onChange(fn: () => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+  private emit(): void {
+    for (const fn of this.listeners) fn();
+  }
+}
+
+/**
+ * A single named selection group (`selection_1`, …). Each wraps a `NodeSet`, so
+ * a group holds hierarchical entries and resolves to points exactly like the
+ * hidden set does.
+ */
+export interface SelectionGroup {
+  id: number;
+  name: string;
+  set: NodeSet;
+}
+
+/**
+ * The named-group selection model (Increment 4.8) — the addressable substrate a
+ * future agent-driven layer points at ("analyze selection_2"). Selection is
+ * organized into multiple named groups; exactly one is ACTIVE and every select
+ * action toggles in the active group only. An entry may live in several groups
+ * (overlap is allowed). Rendering consumes the UNION of all groups (all green);
+ * groups are distinguished in the panel, not by color.
+ */
+export class SelectionModel {
+  private readonly hierarchy: Hierarchy;
+  private readonly groups: SelectionGroup[] = [];
+  private activeId = -1;
+  private nextId = 1;
+  private autoCounter = 0;
+  private readonly listeners = new Set<() => void>();
+
+  constructor(hierarchy: Hierarchy) {
+    this.hierarchy = hierarchy;
+    this.newGroup(); // always start with selection_1 active
+  }
+
+  list(): readonly SelectionGroup[] {
+    return this.groups;
+  }
+  get active(): SelectionGroup {
+    return this.byId(this.activeId)!;
+  }
+  get activeId_(): number {
+    return this.activeId;
+  }
+  private byId(id: number): SelectionGroup | undefined {
+    return this.groups.find((g) => g.id === id);
+  }
+
+  /** Create a new group, auto-named, and make it active. */
+  newGroup(): SelectionGroup {
+    const g: SelectionGroup = {
+      id: this.nextId++,
+      name: `selection_${++this.autoCounter}`,
+      set: new NodeSet(this.hierarchy, "selection"),
+    };
+    this.groups.push(g);
+    this.activeId = g.id;
+    this.emit();
+    return g;
+  }
+  rename(id: number, name: string): void {
+    const g = this.byId(id);
+    if (g) {
+      g.name = name.trim() || g.name;
+      this.emit();
+    }
+  }
+  /** Delete a group (always keeps ≥1); returns its resolved points so the caller
+   * can re-flip the union for those points. */
+  delete(id: number): number[] {
+    const idx = this.groups.findIndex((g) => g.id === id);
+    if (idx < 0) return [];
+    const affected = this.groups[idx].set.resolvedPoints();
+    this.groups.splice(idx, 1);
+    if (this.groups.length === 0) {
+      this.newGroup(); // emits
+      return affected;
+    }
+    if (this.activeId === id) this.activeId = this.groups[Math.min(idx, this.groups.length - 1)].id;
+    this.emit();
+    return affected;
+  }
+  setActive(id: number): void {
+    if (this.byId(id) && id !== this.activeId) {
+      this.activeId = id;
+      this.emit();
+    }
+  }
+
+  /** Toggle an entry in the ACTIVE group; returns affected points. */
+  toggle(e: Entry): number[] {
+    const pts = this.active.set.toggle(e);
+    this.emit();
+    return pts;
+  }
+  /** Add an entry to the ACTIVE group (idempotent; for drag-paint). */
+  addToActive(e: Entry): number[] {
+    const pts = this.active.set.add(e) ?? [];
+    this.emit();
+    return pts;
+  }
+  /** Remove one entry from a specific group; returns affected points. */
+  removeEntryFrom(groupId: number, e: Entry): number[] {
+    const g = this.byId(groupId);
+    if (!g) return [];
+    const pts = g.set.remove(e) ?? [];
+    this.emit();
+    return pts;
+  }
+  /** Clear one group's entries; returns affected points. */
+  clearGroup(groupId: number): number[] {
+    const g = this.byId(groupId);
+    if (!g) return [];
+    const pts = g.set.clear();
+    this.emit();
+    return pts;
+  }
+
+  /** Union membership across ALL groups (what the green overlay draws). */
+  containsPoint(point: number): boolean {
+    for (const g of this.groups) if (g.set.contains(point)) return true;
+    return false;
+  }
+  /** Whether ANY group holds this exact entry (drives the tree row's green). */
+  anyHas(e: Entry): boolean {
+    for (const g of this.groups) if (g.set.has(e)) return true;
+    return false;
+  }
+  /** Union of resolved points across all groups (for zoom-to-selection). */
+  resolvedPoints(): number[] {
+    const out: number[] = [];
+    for (let p = 0; p < this.hierarchy.n; p++) if (this.containsPoint(p)) out.push(p);
+    return out;
   }
 
   onChange(fn: () => void): () => void {
