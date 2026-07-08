@@ -115,6 +115,24 @@ def build_source(args: argparse.Namespace):
             name=args.dataset_name,
             ligand_residues=args.ligand_residue or (),
         )
+    if args.open:
+        # Open a file directly (Increment 4.6): resolve a companion topology for
+        # trajectory files; structure files open standalone. Frame count decides
+        # static vs playback downstream.
+        from producer.file_resolve import resolve_open_target  # lazy
+        from producer.mdtraj_source import MdtrajSource
+
+        resolved = resolve_open_target(args.open)
+        log.info(
+            "opening %s -> topology=%s trajectory=%s",
+            args.open, resolved["topology"], resolved["trajectory"],
+        )
+        return MdtrajSource(
+            topology_path=resolved["topology"],
+            trajectory_path=resolved["trajectory"],
+            name=None,
+            ligand_residues=args.ligand_residue or (),
+        )
     return SyntheticSource(n_points=args.n_points, n_frames=args.n_frames, seed=args.seed)
 
 
@@ -128,6 +146,7 @@ def main() -> None:
     ap.add_argument("--dataset-name", help="display name for --dataset")
     ap.add_argument("--ligand-residue", action="append", help="residue name(s) to tag as ligand")
     ap.add_argument("--system", help="benchmark system id or directory (real mdtraj source)")
+    ap.add_argument("--open", help="path to a structure or trajectory file to open directly")
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args()
 

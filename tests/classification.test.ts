@@ -6,12 +6,27 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import type { Header } from "../contract/contract.ts";
-import {
-  BULK_POINT_THRESHOLD,
-  BULK_SUBGROUP_THRESHOLD,
-  bulkCategories,
-  buildTree,
-} from "../webview/classification.ts";
+import { bulkCategories, buildTree } from "../webview/classification.ts";
+
+/** Build category/group/subgroup arrays for `nSub` subgroups of `perSub` points
+ * each, all in one category/group. */
+function repeatingCategory(nSub: number, perSub: number, cat: number, subBase: number): {
+  category: number[];
+  group: number[];
+  subgroup: number[];
+} {
+  const category: number[] = [];
+  const group: number[] = [];
+  const subgroup: number[] = [];
+  for (let s = 0; s < nSub; s++) {
+    for (let k = 0; k < perSub; k++) {
+      category.push(cat);
+      group.push(cat);
+      subgroup.push(subBase + s);
+    }
+  }
+  return { category, group, subgroup };
+}
 
 /** Minimal Header with just the fields the classifier reads. */
 function makeHeader(
@@ -64,32 +79,37 @@ test("buildTree nests category -> group -> subgroup with counts", () => {
   assert.equal(c1.groups[0].groupId, 1);
 });
 
-test("bulkCategories fires only when a category is large on BOTH axes", () => {
-  const n = BULK_POINT_THRESHOLD + BULK_SUBGROUP_THRESHOLD + 10;
-  const category: number[] = [];
-  const group: number[] = [];
-  const subgroup: number[] = [];
-  // cat0 "solvent": many points, each its own subgroup -> bulk on both axes.
-  for (let i = 0; i < n; i++) {
-    category.push(0);
-    group.push(0);
-    subgroup.push(i); // one subgroup per point -> subgroupCount == n
-  }
-  // cat1 "protein": many points but few subgroups -> NOT bulk (few subgroups).
-  for (let i = 0; i < BULK_POINT_THRESHOLD + 100; i++) {
-    category.push(1);
-    group.push(1);
-    subgroup.push(1_000_000 + (i % 50)); // only 50 subgroups
-  }
-  const header = makeHeader(category, group, subgroup, ["solvent", "protein"]);
-
+test("bulkCategories: small solvent (tiny repeating subgroups, dominant) is bulk", () => {
+  // A ~4,500-point solvent of 3-atom waters (1,500 subgroups) alongside a small
+  // 300-atom / 20-residue polymer — the exact 'cage solvent' case the old
+  // absolute thresholds missed. Relative heuristic must flag solvent, not polymer.
+  const sol = repeatingCategory(1500, 3, 0, 0); // 4500 pts, 1500 subs, avg 3
+  const poly = repeatingCategory(20, 15, 1, 10_000); // 300 pts, 20 subs, avg 15
+  const header = makeHeader(
+    [...sol.category, ...poly.category],
+    [...sol.group, ...poly.group],
+    [...sol.subgroup, ...poly.subgroup],
+    ["solvent", "polymer"],
+  );
   const bulk = bulkCategories(header);
-  assert.ok(bulk.has(0), "solvent (many pts + many subgroups) is bulk");
-  assert.ok(!bulk.has(1), "protein (many pts, few subgroups) is not bulk");
+  assert.ok(bulk.has(0), "small dominant tiny-subgroup solvent is bulk");
+  assert.ok(!bulk.has(1), "the 20-residue polymer is not bulk");
+});
 
-  const tree = buildTree(header);
-  assert.equal(tree.categories.find((c) => c.categoryIndex === 0)?.bulk, true);
-  assert.equal(tree.categories.find((c) => c.categoryIndex === 1)?.bulk, false);
+test("bulkCategories: a large polymer (big residues) is never bulk even at 100%", () => {
+  // Protein-only: 3,000 atoms / 200 residues => avg 15 atoms/residue. Dominant
+  // (100% of points) but its units are not tiny, so it stays visible.
+  const poly = repeatingCategory(200, 15, 0, 0);
+  const header = makeHeader(poly.category, poly.group, poly.subgroup, ["polymer"]);
+  assert.ok(!bulkCategories(header).has(0), "large-residue polymer is not bulk");
+});
+
+test("bulkCategories: never hides a tiny whole system", () => {
+  // A 46-bead coarse-grained model (20 subgroups): dominant + tiny units, but
+  // below the absolute floors, so it must NOT be hidden.
+  const cg = repeatingCategory(20, 2, 0, 0); // 40 pts, 20 subs
+  const header = makeHeader(cg.category, cg.group, cg.subgroup, ["polymer"]);
+  assert.ok(!bulkCategories(header).has(0), "tiny whole system is not bulk");
 });
 
 test("buildTree degrades gracefully with no real structure", () => {

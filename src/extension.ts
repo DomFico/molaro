@@ -44,6 +44,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const producerLog = vscode.window.createOutputChannel("Point Viewer Producer");
   context.subscriptions.push(producerLog);
 
+  // viewer.open — synthetic (default) or a benchmark system / explicit topology.
   context.subscriptions.push(
     vscode.commands.registerCommand("viewer.open", (args?: OpenArgs) => {
       const isReal = Boolean(args?.system || args?.topology);
@@ -65,53 +66,97 @@ export function activate(context: vscode.ExtensionContext): void {
         producerArgs = ["--n-points", String(nPoints), "--n-frames", String(nFrames), "--seed", String(seed)];
         title = `Point Viewer (N=${nPoints})`;
       }
-
-      const panel = vscode.window.createWebviewPanel(
-        "viewer",
+      openPanel(context, producerLog, {
+        producerArgs,
         title,
-        vscode.ViewColumn.Active,
-        {
-          enableScripts: true,
-          localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist", "webview")],
-        },
-      );
-
-      const broker = new ProducerBroker(
-        {
-          pythonPath: args?.pythonPath ?? (isReal ? realPythonPath() : undefined),
-          serveScript: vscode.Uri.joinPath(context.extensionUri, "producer", "serve.py").fsPath,
-          producerArgs,
-        },
-        {
-          onMessage: (payload) => {
-            void panel.webview.postMessage({ type: "fromProducer", payload });
-          },
-          onExit: (reason) => {
-            void panel.webview.postMessage({ type: "producerExit", message: reason });
-            void vscode.window.showErrorMessage(`Point Viewer producer: ${reason}`);
-          },
-          onLog: (line) => producerLog.appendLine(line),
-        },
-      );
-
-      panel.webview.onDidReceiveMessage((msg: { type?: string; request?: unknown }) => {
-        if (msg?.type === "toProducer" && msg.request) {
-          try {
-            broker.send(msg.request as { type: "header" | "frames" });
-          } catch (err) {
-            void panel.webview.postMessage({
-              type: "producerExit",
-              message: err instanceof Error ? err.message : String(err),
-            });
-          }
-        }
+        pythonPath: args?.pythonPath ?? (isReal ? realPythonPath() : undefined),
       });
-
-      panel.onDidDispose(() => broker.dispose());
-      broker.start();
-      panel.webview.html = renderHtml(panel.webview, context.extensionUri);
     }),
   );
+
+  // viewer.openFile — open the viewer directly on a data file (Increment 4.6),
+  // invokable from the Explorer context menu. The data-source layer resolves a
+  // companion topology for trajectory files; structure files open standalone.
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "viewer.openFile",
+      async (uri?: vscode.Uri, uris?: vscode.Uri[]) => {
+        const target = uri ?? uris?.[0] ?? (await pickFile());
+        if (!target) return;
+        openPanel(context, producerLog, {
+          producerArgs: ["--open", target.fsPath],
+          title: `Point Viewer (${target.path.split("/").pop()})`,
+          pythonPath: realPythonPath(),
+        });
+      },
+    ),
+  );
+}
+
+async function pickFile(): Promise<vscode.Uri | undefined> {
+  const picked = await vscode.window.showOpenDialog({
+    canSelectMany: false,
+    openLabel: "Open in Point Viewer",
+    title: "Open a structure or trajectory file",
+  });
+  return picked?.[0];
+}
+
+interface PanelOpts {
+  producerArgs: string[];
+  title: string;
+  pythonPath?: string;
+}
+
+function openPanel(
+  context: vscode.ExtensionContext,
+  producerLog: vscode.OutputChannel,
+  opts: PanelOpts,
+): void {
+  const panel = vscode.window.createWebviewPanel(
+    "viewer",
+    opts.title,
+    vscode.ViewColumn.Active,
+    {
+      enableScripts: true,
+      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist", "webview")],
+    },
+  );
+
+  const broker = new ProducerBroker(
+    {
+      pythonPath: opts.pythonPath,
+      serveScript: vscode.Uri.joinPath(context.extensionUri, "producer", "serve.py").fsPath,
+      producerArgs: opts.producerArgs,
+    },
+    {
+      onMessage: (payload) => {
+        void panel.webview.postMessage({ type: "fromProducer", payload });
+      },
+      onExit: (reason) => {
+        void panel.webview.postMessage({ type: "producerExit", message: reason });
+        void vscode.window.showErrorMessage(`Point Viewer producer: ${reason}`);
+      },
+      onLog: (line) => producerLog.appendLine(line),
+    },
+  );
+
+  panel.webview.onDidReceiveMessage((msg: { type?: string; request?: unknown }) => {
+    if (msg?.type === "toProducer" && msg.request) {
+      try {
+        broker.send(msg.request as { type: "header" | "frames" });
+      } catch (err) {
+        void panel.webview.postMessage({
+          type: "producerExit",
+          message: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  });
+
+  panel.onDidDispose(() => broker.dispose());
+  broker.start();
+  panel.webview.html = renderHtml(panel.webview, context.extensionUri);
 }
 
 export function deactivate(): void {}

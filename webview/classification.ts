@@ -16,16 +16,27 @@
 import type { Header } from "../contract/contract.ts";
 
 /**
- * A category is "bulk" only if it is large on BOTH axes: many points AND many
- * subgroups. Solvent/environment has ~one subgroup (residue) per few atoms, so
- * it runs to thousands of subgroups; even a large multi-chain protein rarely
- * exceeds ~2000 residues. Keeping the subgroup bar high therefore hides bulk
- * water while leaving the structured polymer visible (verified: on a 222k-atom
- * membrane system, solvent's 14,300 subgroups are bulk but the 1,472-residue
- * polymer is not).
+ * Bulk-category detection — a RELATIVE/proportional heuristic (Increment 4.6),
+ * replacing the earlier absolute thresholds that only fired on very large
+ * systems (so a 4,500-point cage solvent stayed visible and hairballed the
+ * default view). A category is "bulk" — environment to hide by default — when it
+ * is BOTH:
+ *   - a large fraction of the whole scene (`>= BULK_POINT_FRACTION` of all
+ *     points), and
+ *   - made of many small repeating units (many subgroups, each tiny on average
+ *     — `avg points/subgroup <= BULK_MAX_AVG_SUBGROUP_SIZE`).
+ * Two small absolute floors keep it from ever hiding a tiny *whole* system (a
+ * 46-bead coarse-grained model is the entire structure, not environment).
+ *
+ * This catches solvent/water/lipid-tail environments at any scale (a 143k-atom
+ * membrane solvent AND a 4,500-atom cage solvent) while never flagging a
+ * structured polymer: a protein is a large fraction of points but its residues
+ * average ~8–15 atoms each — above the tiny-unit bar — so it stays visible.
  */
-export const BULK_POINT_THRESHOLD = 5_000;
-export const BULK_SUBGROUP_THRESHOLD = 2_000;
+export const BULK_POINT_FRACTION = 0.3;
+export const BULK_MAX_AVG_SUBGROUP_SIZE = 12;
+export const BULK_MIN_POINTS = 500; // floor: never hide a tiny whole system
+export const BULK_MIN_SUBGROUPS = 50; // floor: must be many repeating units
 
 export interface SubgroupNode {
   subgroupId: number;
@@ -57,12 +68,15 @@ export interface TreeModel {
   categories: CategoryNode[];
 }
 
-/** Indices of the categories judged "bulk" for this header. */
+/** Indices of the categories judged "bulk" for this header (see the heuristic
+ * documented on the constants above). */
 export function bulkCategories(header: Header): Set<number> {
   const bulk = new Set<number>();
   const nCat = header.categories.length;
   const points = header.points.category;
   const subgroups = header.points.subgroup_id;
+  const total = points.length;
+  if (total === 0) return bulk;
   const pointCount = new Array<number>(nCat).fill(0);
   const subSets: Array<Set<number>> = Array.from({ length: nCat }, () => new Set<number>());
   for (let p = 0; p < points.length; p++) {
@@ -71,7 +85,17 @@ export function bulkCategories(header: Header): Set<number> {
     subSets[c].add(subgroups[p]);
   }
   for (let c = 0; c < nCat; c++) {
-    if (pointCount[c] > BULK_POINT_THRESHOLD && subSets[c].size > BULK_SUBGROUP_THRESHOLD) {
+    const pts = pointCount[c];
+    const subCount = subSets[c].size;
+    if (subCount === 0) continue;
+    const avgSubgroupSize = pts / subCount;
+    const fraction = pts / total;
+    if (
+      pts >= BULK_MIN_POINTS &&
+      subCount >= BULK_MIN_SUBGROUPS &&
+      fraction >= BULK_POINT_FRACTION &&
+      avgSubgroupSize <= BULK_MAX_AVG_SUBGROUP_SIZE
+    ) {
       bulk.add(c);
     }
   }

@@ -150,6 +150,36 @@ browser interaction, a screenshot, and an automated assertion (see
   skeleton and layout CSS are shared (`webview/hud.ts`) between the extension
   host and the test harness so the two can't drift.
 
+## Increment 4.6: barebones completion
+
+Closes the last functional gaps so the viewer is genuinely usable — most
+importantly, **it opens from a file**.
+
+- **Open from a file (A).** A `viewer.openFile` command (wired to the Explorer
+  right-click menu, `Open in Point Viewer`) opens the viewer on a path. The
+  data-source layer (`producer/file_resolve.py`) decides what to do: a
+  **standalone structure** (`.pdb`/`.gro`/…) opens on its own; a **trajectory**
+  (`.xtc`/`.dcd`/…) gets its companion topology resolved by a **thin
+  sibling-by-basename match** (same stem, an expected topology extension) — and
+  if none is found, a **clear error** names what's missing instead of crashing.
+  Static-vs-playback is then decided by frame count (one frame → static view,
+  play controls disabled). File-type logic lives only in the data-source layer,
+  never the renderer.
+- **Camera (B).** Double-clicking **empty space** backs the camera out to
+  whole-scene framing (the natural "zoom out"); camera moves (zoom-to-selection
+  and zoom-out) **animate** with a short ease-in-out tween instead of snapping;
+  and rotation has **inertia** — a flick keeps the view spinning and decays, so
+  turning the structure around needs less dragging.
+- **Deduplicated readout (C).** The redundant top-right selection indicator is
+  gone; the selection readout now lives in exactly one place, the sidebar box.
+- **Bulk detection (D).** The bulk-category test is now **relative** — a category
+  is bulk when it is a large fraction of all points *and* made of many small
+  repeating subgroups (tiny average size) — with small absolute floors so a tiny
+  whole system is never hidden. This catches solvent at any scale (a
+  4,500-point cage solvent as well as a 143k-point membrane solvent) while never
+  hiding a structured polymer. Bulk points **and** their internal edges hide by
+  default (no hairball) and the bulk-visibility toggle reveals both.
+
 ## Running the extension
 
 ```bash
@@ -172,6 +202,15 @@ the panel terminates the producer. Default dataset is N=20,000 / T=600; for othe
 sizes:
 `vscode.commands.executeCommand("viewer.open", { nPoints: 250000, nFrames: 2500 })`.
 Producer stderr logs appear in the "Point Viewer Producer" output channel.
+
+### Opening a file (Increment 4.6)
+
+Right-click a structure or trajectory file in the Explorer → **Open in Point
+Viewer**, or run the `viewer.openFile` command. A structure file (`.pdb`,
+`.gro`, …) opens as a static view; a trajectory file (`.xtc`, `.dcd`, …) resolves
+its companion topology by sibling basename (e.g. `run.xtc` → `run.pdb` beside it)
+and plays. mdtraj is required, so this uses the same `VIEWER_PYTHON` interpreter
+as below.
 
 ### Opening a real dataset (Increment 3)
 
@@ -353,6 +392,7 @@ producer/    source.py (DataSource interface), synthetic.py (generator),
              mdtraj_source.py (REAL source: MD files → contract),
              domain_rules.py (vendored classification/trace rules),
              corpus.py (benchmark-system resolver),
+             file_resolve.py (open-from-file: structure vs trajectory + companion),
              serve.py (long-lived stdio server, stdout = protocol only),
              CONTRACT_FIT_AUDIT.md (Phase-1 audit of all 9 systems)
 src/         extension.ts (command, panel, CSP), broker.ts (spawn/relay/lifecycle),
@@ -365,14 +405,15 @@ webview/     main.ts (Three.js renderer + controls + interaction wiring),
              model + bulk detection), sidebar.ts (tree DOM), picking.ts (CPU pick),
              hud.ts (shared DOM skeleton + layout CSS for both hosts)
 media/       fixtures/ — Increment 1 fixture files (kept for tests; not the data path)
-tests/       Python: test_roundtrip.py, make_fixtures.py, make_webview_fixture.py
+tests/       Python: test_roundtrip.py, make_fixtures.py, make_webview_fixture.py,
+             make_openfile_fixtures.py (structure/trajectory/orphan open-from-file fixtures)
              TS: contract/geometry/framing/playback/producer_protocol/classification/
              picking tests, bridge.ts (headless E2E: real broker + producer, no VS
              Code; /selftest route drives selection), sidebar_spotcheck.ts (runs a
              real corpus header through the sidebar's classification path),
-             e2e_driver.ts + fixes_4_5.ts (CDP-driven interaction/layout validation)
+             e2e_driver.ts + fixes_4_5.ts + fixes_4_6.ts (CDP-driven validation)
 dist/        build output (generated)
-reports/     fixes_4_5/ — screenshot evidence for the Increment 4.5 fixes
+reports/     fixes_4_5/, fixes_4_6/ — screenshot evidence (gitignored; regenerable)
 ```
 
 `SyntheticSource` implements the same `DataSource` interface a real data source
@@ -419,8 +460,10 @@ behavior while capturing screenshots. Requires `google-chrome` on `DISPLAY`.
 cd viewer
 npm run build
 node tests/fixes_4_5.ts            # all fixes (A1 A2 A3 A4 B); or a subset: node tests/fixes_4_5.ts A1 B
+node tests/fixes_4_6.ts            # open-from-file / camera / readout / bulk (A B1 B2 B3 C D)
 ```
 
-It prints a `[PASS]`/`[FAIL]` line per assertion (drag-leaves-selection-empty,
+`fixes_4_6.ts` generates its open-from-file fixtures with `VIEWER_PYTHON` (the
+mdtraj env). It prints a `[PASS]`/`[FAIL]` line per assertion (drag-leaves-selection-empty,
 over-the-pole camera motion, slider-tracks-frame, clear-color-is-background,
 region-bounding-boxes-disjoint, …) and writes PNGs under `reports/fixes_4_5/`.

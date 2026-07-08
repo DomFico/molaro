@@ -87,7 +87,10 @@ async function A1(): Promise<void> {
     check("drag leaves selection empty", before === 0 && afterDrag === 0, `before=${before} afterDrag=${afterDrag}`);
     check("drag moved the camera (orbit worked)", camMoved > 0.01, `moved=${camMoved.toFixed(3)}`);
 
-    // A no-move click on a bright (on-point) pixel selects.
+    // A no-move click on a bright (on-point) pixel selects. Reveal bulk first so
+    // the scene fills the center (bulk solvent is hidden by default in 4.6).
+    await d.evaluate(`${V}.rep.setBulkVisible(true)`);
+    await sleep(200);
     const hit = await findBrightPixel(d, r);
     if (hit) {
       await d.click(hit.x, hit.y);
@@ -255,7 +258,7 @@ async function A4(): Promise<void> {
 // -- B: layout — reserved, non-overlapping regions at multiple sizes/widths ----
 async function B(): Promise<void> {
   console.log("B — non-overlapping reserved layout, resizable sidebar");
-  const regions = ["#topbar", "#status", "#selreadout", "#sidebar", "#app", "#controls", "#bulk-toggle"];
+  const regions = ["#topbar", "#status", "#sidebar", "#app", "#controls", "#bulk-toggle"];
   const configs: Array<{ w: number; h: number; sidebar: number; label: string }> = [
     { w: 1000, h: 700, sidebar: 300, label: "1000x700_sb300" },
     { w: 1400, h: 900, sidebar: 420, label: "1400x900_sb420" },
@@ -271,8 +274,8 @@ async function B(): Promise<void> {
       const rects: Record<string, any> = {};
       for (const sel of regions) rects[sel] = await rect(d, sel);
 
-      // header vs selection readout must not overlap (B1)
-      check(`${cfg.label}: header ⟂ selection readout (no overlap)`, !overlaps(rects["#status"], rects["#selreadout"]));
+      // header occupies the top bar cleanly (B1: no on-canvas overlay to collide)
+      check(`${cfg.label}: header present in top bar`, !!rects["#status"] && rects["#status"].w > 0);
       // bulk toggle fully inside #app and above the controls bar, unobscured (B2)
       const bt = rects["#bulk-toggle"], app = rects["#app"], ctr = rects["#controls"];
       const btInApp = bt && app && bt.x >= app.x - 1 && bt.x + bt.w <= app.x + app.w + 1 && bt.y >= app.y - 1;
@@ -284,9 +287,9 @@ async function B(): Promise<void> {
         for (let j = i + 1; j < core.length; j++)
           if (overlaps(rects[core[i]], rects[core[j]])) { anyOverlap = true; which = `${core[i]}∩${core[j]}`; }
       check(`${cfg.label}: topbar/sidebar/canvas/controls all disjoint`, !anyOverlap, which);
-      // selection readout appears exactly once
-      const selCountNodes = await d.evaluate<number>("document.querySelectorAll('#selreadout').length");
-      check(`${cfg.label}: single selection-readout node (no doubling)`, selCountNodes === 1, `nodes=${selCountNodes}`);
+      // selection readout appears exactly once — only the sidebar box (4.6 C)
+      const selNodes = await d.evaluate<number>("document.querySelectorAll('.sel-readout, #selreadout').length");
+      check(`${cfg.label}: single selection-readout node (no duplicate)`, selNodes === 1, `nodes=${selNodes}`);
       // sidebar honored the requested width (resizable)
       check(`${cfg.label}: sidebar width applied (${cfg.sidebar}px)`, Math.abs((rects["#sidebar"]?.w ?? 0) - cfg.sidebar) < 2, `w=${rects["#sidebar"]?.w}`);
 

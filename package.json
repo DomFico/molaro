@@ -14,8 +14,21 @@
       {
         "command": "viewer.open",
         "title": "Point Viewer: Open"
+      },
+      {
+        "command": "viewer.openFile",
+        "title": "Open in Point Viewer"
       }
-    ]
+    ],
+    "menus": {
+      "explorer/context": [
+        {
+          "command": "viewer.openFile",
+          "when": "resourceExtname =~ /\\.(pdb|gro|mol2|cif|h5|xtc|trr|dcd|nc|netcdf|binpos|mdcrd|crd|trj|dtr|lammpstrj|xyz|prmtop|parm7|psf|top)$/i",
+          "group": "navigation@9"
+        }
+      ]
+    }
   },
   "scripts": {
     "build": "npm run build:extension && npm run build:webview",

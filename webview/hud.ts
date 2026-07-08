@@ -17,12 +17,11 @@ export const HUD_CSS = /* css */ `
   * { box-sizing: border-box; }
   #root { position: absolute; inset: 0; display: flex; flex-direction: column; }
 
-  /* reserved top bar: header (left) + selection readout (right), never overlap */
+  /* reserved top bar: dataset header only. The selection readout lives once, in
+   * the sidebar box (.sel-readout) — no duplicate on-canvas indicator (4.6 C). */
   #topbar { flex: none; height: 26px; display: flex; align-items: center; gap: 16px;
     padding: 0 10px; background: #1e1e1e; border-bottom: 1px solid #3a3a3a; }
   #status { flex: 1 1 auto; min-width: 0; color: #9a9a9a;
-    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  #selreadout { flex: 0 1 auto; min-width: 0; color: #33ffcc; text-align: right;
     white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
   /* middle row: sidebar | divider | canvas */
@@ -64,7 +63,6 @@ export const HUD_BODY = /* html */ `
   <div id="root">
     <div id="topbar">
       <span id="status">loading…</span>
-      <span id="selreadout"></span>
     </div>
     <div id="middle">
       <div id="sidebar"></div>

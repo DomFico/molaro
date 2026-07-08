@@ -83,6 +83,9 @@ interface SceneParts {
   selectionGeo: THREE.BufferGeometry;
   neighborIndex: THREE.BufferAttribute;
   neighborGeo: THREE.BufferGeometry;
+  /** Edges internal to bulk categories — shown only when bulk is revealed, so
+   * hiding bulk points doesn't leave a hairball of bulk edges. Null if none. */
+  bulkEdges: THREE.Object3D | null;
 }
 
 function basePointsMaterial(pixelRatio: number): THREE.ShaderMaterial {
@@ -151,11 +154,31 @@ function buildScene(header: Header, rep: RepresentationLayer, pixelRatio: number
   pointsGeo.setAttribute("aVisible", visibleAttr);
   drawables.push(new THREE.Points(pointsGeo, basePointsMaterial(pixelRatio)));
 
-  if (header.edges.length > 0) {
+  // Split edges into structural vs bulk-internal (both endpoints in a bulk
+  // category). Bulk-internal edges are drawn as a separate object gated on the
+  // bulk toggle, so hiding bulk points also hides their edge hairball (4.6 D).
+  const bulk = bulkCategories(header);
+  const isBulkPoint = (p: number): boolean => bulk.has(header.points.category[p]);
+  const structuralEdges: [number, number][] = [];
+  const bulkInternalEdges: [number, number][] = [];
+  for (const e of header.edges) {
+    (isBulkPoint(e[0]) && isBulkPoint(e[1]) ? bulkInternalEdges : structuralEdges).push(e);
+  }
+  if (structuralEdges.length > 0) {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", positionAttr);
-    geo.setIndex(new THREE.BufferAttribute(edgeSegmentIndices(header.edges), 1));
+    geo.setIndex(new THREE.BufferAttribute(edgeSegmentIndices(structuralEdges), 1));
     drawables.push(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: EDGE_COLOR })));
+  }
+  let bulkEdges: THREE.Object3D | null = null;
+  if (bulkInternalEdges.length > 0) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", positionAttr);
+    geo.setIndex(new THREE.BufferAttribute(edgeSegmentIndices(bulkInternalEdges), 1));
+    bulkEdges = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: EDGE_COLOR }));
+    bulkEdges.frustumCulled = false;
+    bulkEdges.visible = false; // follows the bulk toggle (see the display loop)
+    scene.add(bulkEdges);
   }
   if (header.polylines.length > 0) {
     const geo = new THREE.BufferGeometry();
@@ -201,6 +224,7 @@ function buildScene(header: Header, rep: RepresentationLayer, pixelRatio: number
     selectionGeo,
     neighborIndex,
     neighborGeo,
+    bulkEdges,
   };
 }
 
@@ -262,12 +286,42 @@ async function main(): Promise<void> {
   );
   const controls = new TrackballControls(camera, renderer.domElement);
   controls.target.copy(target);
-  controls.staticMoving = true; // no inertial drift — deterministic, no pole lock
+  // Inertia (4.6 B3): a flick keeps the view spinning and decays smoothly, so
+  // turning the structure around needs less dragging. A low damping factor =
+  // more coast; a slow, deliberate drag still positions precisely.
+  controls.staticMoving = false;
+  controls.dynamicDampingFactor = 0.12;
   controls.rotateSpeed = 2.2;
   controls.zoomSpeed = 1.2;
   controls.panSpeed = 0.6;
   controls.handleResize();
   controls.update();
+
+  // The "home" pose (whole-scene framing) captured before any interaction, so
+  // double-click-empty can back all the way out to it (4.6 B1).
+  const homePosition = camera.position.clone();
+  const homeTarget = controls.target.clone();
+
+  // Camera transitions are animated, not snapped (4.6 B2): a short ease-in-out
+  // tween of position + target. While a tween runs, trackball control is
+  // disabled so it can't fight the interpolation.
+  const CAMERA_TWEEN_MS = 360;
+  const easeInOut = (k: number): number =>
+    k < 0.5 ? 2 * k * k : 1 - Math.pow(-2 * k + 2, 2) / 2;
+  let camTween:
+    | { p0: THREE.Vector3; p1: THREE.Vector3; t0: THREE.Vector3; t1: THREE.Vector3; start: number }
+    | null = null;
+  const animateCameraTo = (toPos: THREE.Vector3, toTarget: THREE.Vector3): void => {
+    camTween = {
+      p0: camera.position.clone(),
+      p1: toPos.clone(),
+      t0: controls.target.clone(),
+      t1: toTarget.clone(),
+      start: performance.now(),
+    };
+    controls.enabled = false;
+  };
+  const resetCamera = (): void => animateCameraTo(homePosition, homeTarget);
 
   // Resize atomically: size + camera aspect + trackball screen + an immediate
   // redraw, so there is never a stretched or blank (white) intermediate frame.
@@ -360,9 +414,7 @@ async function main(): Promise<void> {
     const fov = (camera.fov * Math.PI) / 180;
     const dist = Math.max(b.radius, sceneSize * 0.02) / Math.sin(fov / 2) * 1.4;
     const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
-    controls.target.copy(center);
-    camera.position.copy(center).addScaledVector(dir, dist);
-    controls.update();
+    animateCameraTo(center.clone().addScaledVector(dir, dist), center);
   };
   const sidebar = document.getElementById("sidebar");
   if (sidebar) {
@@ -376,10 +428,10 @@ async function main(): Promise<void> {
     });
   }
 
-  // -- on-canvas selection readout + bulk toggle -------------------------------
-  const selReadout = document.getElementById("selreadout");
+  // -- selection overlay + bulk toggle -----------------------------------------
+  // The selection readout is rendered once, by the sidebar (.sel-readout); this
+  // subscription only drives the 3D highlight overlays (4.6 C: no duplicate).
   selection.subscribe((snap: SelectionSnapshot) => {
-    if (selReadout) selReadout.textContent = canvasReadout(snap);
     updateOverlay(parts.selectionIndex, parts.selectionGeo, snap.indices);
     updateOverlay(parts.neighborIndex, parts.neighborGeo, snap.neighborIndices);
   });
@@ -445,7 +497,10 @@ async function main(): Promise<void> {
     lastClick = { t: now, x: e.clientX, y: e.clientY };
     const idx = pickAt(e.clientX, e.clientY);
     if (idx < 0) {
-      if (!isDouble) selection.clear();
+      // Double-click on empty space backs the camera out to whole-scene framing
+      // (4.6 B1); a single click on empty space clears the selection.
+      if (isDouble) resetCamera();
+      else selection.clear();
       return;
     }
     selection.selectPoint(idx);
@@ -506,9 +561,14 @@ async function main(): Promise<void> {
   const playBtn = document.getElementById("playpause") as HTMLButtonElement;
   const scrubber = document.getElementById("scrubber") as HTMLInputElement;
   const readout = document.getElementById("readout") as HTMLSpanElement;
-  scrubber.max = String(nFrames - 1);
-  playBtn.disabled = false;
-  scrubber.disabled = false;
+  // Static (single-frame) vs trajectory is decided by frame count (4.6 A): a
+  // structure opened on its own is one frame, so the play controls are disabled
+  // — frame 0 still displays through the loop below.
+  const isStatic = nFrames <= 1;
+  scrubber.max = String(Math.max(0, nFrames - 1));
+  playBtn.disabled = isStatic;
+  scrubber.disabled = isStatic;
+  if (isStatic) readout.textContent = "static · 1 frame";
   const setPlaying = (on: boolean) => {
     if (on) player.play();
     else player.pause();
@@ -560,7 +620,9 @@ async function main(): Promise<void> {
       for (const a of repAttrs) a.needsUpdate = true;
       rep.dirty = false;
     }
-    if (now - fpsMarkMs >= 1000) {
+    // Bulk-internal edges track the bulk toggle (only once a frame is shown).
+    if (parts.bulkEdges) parts.bulkEdges.visible = displayedFrame >= 0 && rep.bulkShown;
+    if (!isStatic && now - fpsMarkMs >= 1000) {
       displayFps = (shownSinceMark * 1000) / (now - fpsMarkMs);
       shownSinceMark = 0;
       fpsMarkMs = now;
@@ -570,7 +632,20 @@ async function main(): Promise<void> {
         `cache ${(s.cacheBytes / 1e6).toFixed(0)}MB/${s.cachedChunks}ch · ` +
         `inflight ${s.inFlight} · stalls ${s.stalls}`;
     }
-    controls.update();
+    if (camTween) {
+      const k = Math.min(1, (now - camTween.start) / CAMERA_TWEEN_MS);
+      const e = easeInOut(k);
+      camera.position.lerpVectors(camTween.p0, camTween.p1, e);
+      controls.target.lerpVectors(camTween.t0, camTween.t1, e);
+      camera.lookAt(controls.target);
+      if (k >= 1) {
+        camTween = null;
+        controls.enabled = true;
+        controls.update();
+      }
+    } else {
+      controls.update(); // applies rotation inertia decay when idle
+    }
     renderer.render(scene, camera);
   });
 
@@ -592,10 +667,11 @@ async function main(): Promise<void> {
       applyResize,
       setPlaying,
       zoomToSelection: () => zoomTo(selection.current.indices),
+      resetCamera,
     };
   }
 
-  if (cfg.autoplay) setPlaying(true);
+  if (cfg.autoplay && !isStatic) setPlaying(true);
   if (cfg.statsLog) {
     setInterval(() => {
       const mem = (performance as unknown as { memory?: { usedJSHeapSize: number } }).memory;
@@ -631,14 +707,6 @@ function gatherGroupIndices(header: Header, groupId: number): number[] {
   const g = header.points.group_id;
   for (let p = 0; p < g.length; p++) if (g[p] === groupId) out.push(p);
   return out;
-}
-
-function canvasReadout(snap: SelectionSnapshot): string {
-  const d = snap.descriptor;
-  if (d.kind === "none" || snap.indices.length === 0) return "";
-  let text = `▣ ${d.kind}: ${d.label} · ${snap.indices.length.toLocaleString("en-US")} pts`;
-  if (snap.neighborSubgroups.length > 0) text += ` · +${snap.neighborSubgroups.length} neighbors`;
-  return text;
 }
 
 main().catch((err) => {

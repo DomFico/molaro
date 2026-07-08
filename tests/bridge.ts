@@ -35,15 +35,19 @@ const { values: args } = parseArgs({
     // Real mdtraj source: --system <corpus id> spawns the producer under
     // --python (a mdtraj-capable interpreter, e.g. the mdbench conda env).
     system: { type: "string" },
+    // Open a file directly (Increment 4.6): --open <path> under --python.
+    open: { type: "string" },
     python: { type: "string", default: "python3" },
   },
 });
 
 const pendingResponses: http.ServerResponse[] = [];
 
-const producerArgs = args.system
-  ? ["--system", args.system]
-  : ["--n-points", args["n-points"]!, "--n-frames", args["n-frames"]!];
+const producerArgs = args.open
+  ? ["--open", args.open]
+  : args.system
+    ? ["--system", args.system]
+    : ["--n-points", args["n-points"]!, "--n-frames", args["n-frames"]!];
 
 const broker = new ProducerBroker(
   {
@@ -159,7 +163,6 @@ const harnessHtml = (hold: boolean, selftest = false) => /* html */ `<!DOCTYPE h
         // Select the first (structured) category, expect tree+canvas readouts sync.
         cats[0].click();
         log("after category click: sidebar=", document.querySelector(".sel-readout").textContent,
-            "| canvas=", document.getElementById("selreadout").textContent,
             "| active=", document.querySelectorAll(".tree-row.active").length);
         // Expand first category, then its first group, select first subgroup.
         document.querySelector("#sidebar .tree-row .caret").click();
@@ -168,7 +171,7 @@ const harnessHtml = (hold: boolean, selftest = false) => /* html */ `<!DOCTYPE h
         const subRow = [...document.querySelectorAll("#sidebar .tree-row.selectable")]
           .find((r) => /subgroup/.test(r.textContent));
         if (subRow) { subRow.click();
-          log("after subgroup click: canvas=", document.getElementById("selreadout").textContent); }
+          log("after subgroup click: sidebar=", document.querySelector(".sel-readout").textContent); }
         // The one representation control: bulk toggle.
         const btn = document.getElementById("bulk-toggle");
         log("bulk button:", btn.textContent, "display=", btn.style.display || "shown");

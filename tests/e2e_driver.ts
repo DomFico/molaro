@@ -53,10 +53,16 @@ export class E2EDriver {
   private nextId = 1;
   private readonly pending = new Map<number, { resolve: (v: any) => void; reject: (e: any) => void }>();
   private readonly events = new Map<string, ((params: any) => void)[]>();
+  private bridgeLog = "";
   readonly opts: DriverOptions;
 
   constructor(opts: DriverOptions) {
     this.opts = opts;
+  }
+
+  /** Accumulated bridge+producer stderr (for asserting clear error messages). */
+  get log(): string {
+    return this.bridgeLog;
   }
 
   async start(): Promise<void> {
@@ -76,7 +82,10 @@ export class E2EDriver {
     this.bridge = spawn("node", args, {
       cwd: root,
       env: { ...process.env, ...(o.corpusRoot ? { VIEWER_CORPUS_ROOT: o.corpusRoot } : {}) },
-      stdio: ["ignore", "ignore", "inherit"],
+      stdio: ["ignore", "ignore", "pipe"],
+    });
+    this.bridge.stderr?.on("data", (d: Buffer) => {
+      this.bridgeLog += d.toString();
     });
     const up = await poll(async () => {
       try {
@@ -223,6 +232,15 @@ export class E2EDriver {
   async click(x: number, y: number, clickCount = 1): Promise<void> {
     await this.mouse("mousePressed", x, y, { clickCount });
     await this.mouse("mouseReleased", x, y, { clickCount });
+  }
+
+  /** A double-click: two down/up pairs back-to-back (well under the recognizer's
+   * 300ms window since there are no sleeps between events). */
+  async doubleClick(x: number, y: number): Promise<void> {
+    await this.mouse("mousePressed", x, y, { clickCount: 1 });
+    await this.mouse("mouseReleased", x, y, { clickCount: 1 });
+    await this.mouse("mousePressed", x, y, { clickCount: 2 });
+    await this.mouse("mouseReleased", x, y, { clickCount: 2 });
   }
 
   /** A drag: down, several moves, up — a real orbit gesture. */
