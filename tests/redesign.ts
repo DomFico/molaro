@@ -926,7 +926,30 @@ async function S8(): Promise<void> {
       const heads=[...document.querySelectorAll('#selections .sel-head')];
       return heads.some(h=>h.classList.contains('row-flash-purple'));
     })()`));
-    await d.rightClick(head.x, head.y);
+
+    // overlap precedence: while selection_1 (alpha+gamma) is hidden, COMMIT a
+    // new selection of alpha inside it — the newer selection SHOWS its points
+    check("S8: hidden selection hides its points", (await visibleCount(d)) === visAll - 800,
+      `visible=${await visibleCount(d)}`);
+    const alphaNow = (await bottomRow(d, "/alpha/"))!; // fresh rect (layout shifted)
+    await d.click(alphaNow.x, alphaNow.y); // alpha is inside the hidden selection
+    await sleep(100);
+    const btnC = await d.evaluate<{ x: number; y: number }>(`(()=>{
+      const r=document.getElementById('commit-btn').getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2};
+    })()`);
+    await d.click(btnC.x, btnC.y);
+    await sleep(200);
+    check("S8: a NEW selection inside a hidden one is shown like normal",
+      (await visibleCount(d)) === visAll - 400, `visible=${await visibleCount(d)}`);
+    await d.ctrlZ(); // undo the commit
+    await sleep(120);
+    await d.ctrlZ(); // undo the pending add
+    await sleep(120);
+    check("S8: undo re-hides the overlap", (await visibleCount(d)) === visAll - 800,
+      `visible=${await visibleCount(d)}`);
+
+    await d.rightClick(head.x, head.y); // un-hide selection_1 again
     await sleep(150);
 
     // deleting a selection must not strand the panel on blank space

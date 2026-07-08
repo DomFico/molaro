@@ -146,6 +146,35 @@ test("hidden is the union of hidden committed selections", () => {
   assert.deepEqual([0, 1, 2].map((p) => m.isPointHidden(p)), [false, false, true]);
 });
 
+test("overlap precedence: a NEWER selection shows points an older hidden one covers", () => {
+  const m = model();
+  m.addToTarget(cat(0)); // {0,1,2}
+  const older = m.commit()!;
+  m.setHidden(older.id, true);
+  assert.ok(m.isPointHidden(0) && m.isPointHidden(2));
+  m.addToTarget(sub(0)); // {0,1} inside the hidden region
+  const newer = m.commit()!;
+  assert.ok(!m.isPointHidden(0) && !m.isPointHidden(1), "newer selection shows its points");
+  assert.ok(m.isPointHidden(2), "uncovered remainder stays hidden");
+  m.setHidden(newer.id, true);
+  assert.ok(m.isPointHidden(0), "newest vote flips both ways");
+  m.setHidden(newer.id, false);
+  const affected = m.deleteSelection(newer.id);
+  assert.ok(m.isPointHidden(0) && m.isPointHidden(1), "delete resurfaces the older hide");
+  assert.deepEqual(affected.sort(), [0, 1], "all covered points reported on delete");
+});
+
+test("overlap precedence: a newer HIDDEN selection hides inside an older visible one", () => {
+  const m = model();
+  const seedSel = m.seed("everything", [cat(0)]); // visible, covers {0,1,2}
+  m.addToTarget(sub(0)); // {0,1}
+  const subset = m.commit()!;
+  m.setHidden(subset.id, true);
+  assert.ok(m.isPointHidden(0) && m.isPointHidden(1), "newer hide wins over the older seed");
+  assert.ok(!m.isPointHidden(2), "the rest of the seed stays visible");
+  assert.ok(!seedSel.hidden);
+});
+
 // -- edit mode --------------------------------------------------------------------
 
 test("edit mode redirects the target to the committed set; Done restores pending", () => {

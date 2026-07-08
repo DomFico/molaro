@@ -355,14 +355,23 @@ export class SelectionModel {
   targetContains(point: number): boolean {
     return this.target.contains(point);
   }
-  /** Invisible footprint: is p covered by any fully hidden committed
-   * selection, or by an individually hidden member entry? */
+  /** Invisible footprint. Where selections OVERLAP, the NEWEST one covering
+   * the point decides: a new selection carved out of a hidden region shows
+   * its points ("by virtue of being a selection it is shown"), while a newer
+   * hidden selection inside a visible one still hides. Within a single
+   * selection, its own part-hidden members count as hidden. Points covered
+   * by no selection are simply visible. */
   isPointHidden(point: number): boolean {
+    let hidden = false;
+    let bestId = -1;
     for (const c of this.committedList) {
-      if (c.hidden && c.set.contains(point)) return true;
-      if (c.hiddenPart.contains(point)) return true;
+      if (!c.set.contains(point)) continue;
+      if (c.id > bestId) {
+        bestId = c.id;
+        hidden = c.hidden || c.hiddenPart.contains(point);
+      }
     }
-    return false;
+    return hidden;
   }
   /** Is this member entry individually hidden within its selection? */
   entryHidden(id: number, e: Entry): boolean {
@@ -645,17 +654,16 @@ export class SelectionModel {
     const sel = this.committedList[idx];
     this.committedList.splice(idx, 1);
     if (this.editingId === id) this.editingId = null;
-    const hiddenPts = (): number[] =>
-      sel.hidden ? sel.set.resolvedPoints() : sel.hiddenPart.resolvedPoints();
-    const affected = hiddenPts();
+    // ALL covered points may change visibility: the selection's own vote
+    // disappears, so older overlapping selections' votes resurface.
     this.pushUndo({
       undo: () => {
         this.committedList.splice(Math.min(idx, this.committedList.length), 0, sel);
-        return hiddenPts();
+        return sel.set.resolvedPoints();
       },
     });
     this.emit();
-    return affected;
+    return sel.set.resolvedPoints();
   }
 
   /** Startup prefab: a pre-made VISIBLE committed selection (NOT undoable —
