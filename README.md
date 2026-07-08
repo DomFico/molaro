@@ -56,8 +56,99 @@ prefetching, bounded chunk cache. **Increment 3** (current) adds the **real data
 source**: a `DataSource` that reads actual molecular-dynamics trajectory files
 (via mdtraj) and emits the *exact same* contract — swapped in behind the existing
 interface with **nothing downstream changed**. Transport, playback, and the
-renderer never learn the data is molecular. Still the flat look, still no data
-interaction and no channel-driven styling.
+renderer never learn the data is molecular. **Increment 4** (current) adds the
+**interaction backbone**: a first-class selection model, a classification
+sidebar to navigate and select from, and selection-driven camera — see
+[the interaction model](#increment-4-design-the-interaction-backbone) below.
+The look stays flat on purpose; styling belongs to a future agent-driven layer.
+
+## Increment 4 design: the interaction backbone
+
+This increment builds the **state a future agent-driven layer will act on**, and
+nothing that layer should own. It is modeled as **three orthogonal concerns**:
+
+- **Representation** (`webview/representation.ts`) — the per-point *base look*:
+  three flat buffers `color` / `size` / `visible`. This increment fills them with
+  **defaults only** (uniform color and size; **bulk categories hidden**). It is a
+  deliberately **replaceable** layer: a future agent-driven system replaces *how*
+  these buffers are computed (from channels, predicates, arbitrary per-point
+  styling) with **nothing else changing** — the base points are drawn by a shader
+  that only reads the three buffers, so no representation policy lives in the
+  render loop. It ships **exactly one** control: a bulk-visibility toggle. No
+  color pickers, schemes, per-subset controls, or settings panel — that space is
+  left empty on purpose for the future layer.
+- **Selection** (`webview/selection.ts`) — the ephemeral "what is pointed at":
+  a set of point indices plus a descriptor (a point, subgroup, group, or whole
+  category) and an optional neighbor set. It is the rich substrate an agent will
+  drive ("select the points matching predicate X"). It is drawn as a **highlight
+  overlay** — two extra indexed `Points` objects sharing the base position buffer,
+  drawn on top — and **never mutates** representation buffers. The two layers are
+  orthogonal *by construction*: a wholesale recolor of the base would not touch a
+  single field of the selection, and vice versa.
+- **Camera** — pure orbit/zoom/pan, plus **zoom-to-selection** (double-click a
+  subgroup in 3D or the tree to frame it).
+
+**The classification sidebar** (`webview/classification.ts` + `sidebar.ts`)
+renders a **category → group → subgroup** tree mirroring the contract's
+attributes. Its load-bearing decision is **bulk-category collapse**: a category
+that is high-cardinality on *both* axes (many points **and** many subgroups —
+`> 5,000` points **and** `> 2,000` subgroups, judged client-side, no contract
+change) is treated as **bulk** — shown as a single summary row, **hidden in the
+base representation by default**, and never enumerated. The dual threshold is
+tuned so bulk *water/solvent* (thousands of subgroups) collapses while a large
+protein does not: on the 222k-atom membrane system, solvent's 14,300 subgroups
+are bulk but the 1,472-residue polymer stays visible and navigable. The tree
+renders **lazily** (children built on first expand) and **caps** any subgroup
+list at 200 rows, so even a category with thousands of subgroups never floods
+the DOM.
+
+**Selection stays in sync** because the 3D view and the sidebar both subscribe
+to one `SelectionStore` — selecting in either surface reflects in the other with
+no cross-process messaging. Picking is a CPU projection pass
+(`webview/picking.ts`), O(N) per click.
+
+**Neighbor highlighting** (nice-to-have, present): selecting a subgroup also
+highlights subgroups with any point within a spatial radius, a brute-force query
+over the **non-bulk** population (a spatial index is the noted future
+optimization). Toggle with **`n`**; bulk visibility with **`b`** or the on-canvas
+button; clear selection with **Escape**.
+
+### Sidebar placement decision
+
+The sidebar lives **in-webview** (a left region beside the canvas), not as a
+separate VS Code panel. **Reason:** a single surface makes tree↔3D selection sync
+local state instead of cross-process messaging between the panel and the webview.
+
+## Increment 4.5: interaction & layout fixes
+
+A correctness-and-structure pass over the interaction backbone (the aesthetic
+pass is deliberately deferred). Six fixes, each validated with a scripted
+browser interaction, a screenshot, and an automated assertion (see
+[Validating the interaction fixes](#validating-the-interaction-fixes)):
+
+- **Click vs. click-drag (A1).** A drag now orbits the camera *without* painting
+  a selection: pointer-down records the position and pointer-up only selects if
+  the pointer moved less than ~5 px. Click-to-select and double-click-to-zoom
+  still work.
+- **Full 360° rotation (A2).** Camera control switched from `OrbitControls` to
+  **`TrackballControls`** — free rotation with no up-vector and no polar clamp,
+  so the view rolls over the poles instead of gimbal-locking. This is the
+  **control choice carried over from the interaction backbone**: trackball, not
+  orbit. Pan, wheel-zoom, and zoom-to-selection all still function.
+- **Scrubber ↔ playhead (A3).** The slider is now two-way bound: the playhead
+  drives it every frame during playback. The feedback is guarded by an
+  *actively-dragging* flag rather than focus, so the slider keeps tracking after
+  a scrub (the old focus guard froze it once the slider had been touched).
+- **No white flash on resize (A4).** The renderer's clear color is set to the
+  background explicitly, and resize updates size + camera aspect + trackball
+  screen and re-renders together, coalesced to one call per frame.
+- **Reserved, non-overlapping layout (B1–B3).** The surface is a vertical stack
+  of reserved regions — a top bar (dataset header + selection readout in
+  separate cells), a middle row (**resizable sidebar** | drag divider | canvas),
+  and a bottom control bar — so nothing floats over the canvas except the single
+  bulk-visibility toggle, which sits in its own unobstructed corner. The DOM
+  skeleton and layout CSS are shared (`webview/hud.ts`) between the extension
+  host and the test harness so the two can't drift.
 
 ## Running the extension
 
@@ -72,8 +163,13 @@ included), or run `code --extensionDevelopmentPath=$PWD`. In the Extension
 Development Host, run **“Point Viewer: Open”**. The panel spawns the producer
 (needs `python3` + numpy), streams the header and frame chunks, and the bottom
 bar gives play/pause, a scrubber over all frames, and a live readout (frame,
-display fps, cache MB/chunks, in-flight requests, stalls). Closing the panel
-terminates the producer. Default dataset is N=20,000 / T=600; for other sizes:
+display fps, cache MB/chunks, in-flight requests, stalls). The **left sidebar**
+is the classification tree — click a row to select (highlighted in both the tree
+and the 3D view), **double-click** a subgroup/group to frame the camera on it, or
+click a point directly in 3D. Keys: **`b`** toggles bulk-category visibility,
+**`n`** toggles neighbor highlighting, **Escape** clears the selection. Closing
+the panel terminates the producer. Default dataset is N=20,000 / T=600; for other
+sizes:
 `vscode.commands.executeCommand("viewer.open", { nPoints: 250000, nFrames: 2500 })`.
 Producer stderr logs appear in the "Point Viewer Producer" output channel.
 
@@ -261,13 +357,22 @@ producer/    source.py (DataSource interface), synthetic.py (generator),
              CONTRACT_FIT_AUDIT.md (Phase-1 audit of all 9 systems)
 src/         extension.ts (command, panel, CSP), broker.ts (spawn/relay/lifecycle),
              framing.ts (length-prefix stream parser)
-webview/     main.ts (Three.js renderer + controls), transport.ts (FIFO correlation),
-             playback.ts (playhead/prefetch/bounded cache), geometry.ts (pure prep)
+webview/     main.ts (Three.js renderer + controls + interaction wiring),
+             transport.ts (FIFO correlation), playback.ts (playhead/prefetch/cache),
+             geometry.ts (pure prep),
+             representation.ts (replaceable per-point base look, defaults only),
+             selection.ts (selection substrate + store), classification.ts (tree
+             model + bulk detection), sidebar.ts (tree DOM), picking.ts (CPU pick),
+             hud.ts (shared DOM skeleton + layout CSS for both hosts)
 media/       fixtures/ — Increment 1 fixture files (kept for tests; not the data path)
 tests/       Python: test_roundtrip.py, make_fixtures.py, make_webview_fixture.py
-             TS: contract/geometry/framing/playback/producer_protocol tests,
-             bridge.ts (headless E2E harness: real broker + producer, no VS Code)
+             TS: contract/geometry/framing/playback/producer_protocol/classification/
+             picking tests, bridge.ts (headless E2E: real broker + producer, no VS
+             Code; /selftest route drives selection), sidebar_spotcheck.ts (runs a
+             real corpus header through the sidebar's classification path),
+             e2e_driver.ts + fixes_4_5.ts (CDP-driven interaction/layout validation)
 dist/        build output (generated)
+reports/     fixes_4_5/ — screenshot evidence for the Increment 4.5 fixes
 ```
 
 `SyntheticSource` implements the same `DataSource` interface a real data source
@@ -302,3 +407,20 @@ stress): `node tests/bridge.ts --port 8940 --n-points 250000 --n-frames 2500`,
 then open `http://127.0.0.1:8940/` in a browser — the page autoplays and logs
 `[viewer-stats]` lines (cache bytes, in-flight, stalls, heap) every 2 s while
 the bridge logs the producer's RSS.
+
+### Validating the interaction fixes
+
+The Increment 4.5 interaction/layout fixes are validated by driving the real
+webview over the real producer through Chrome's DevTools Protocol (Node's
+built-in WebSocket — no puppeteer), scripting each gesture, and asserting the
+behavior while capturing screenshots. Requires `google-chrome` on `DISPLAY`.
+
+```bash
+cd viewer
+npm run build
+node tests/fixes_4_5.ts            # all fixes (A1 A2 A3 A4 B); or a subset: node tests/fixes_4_5.ts A1 B
+```
+
+It prints a `[PASS]`/`[FAIL]` line per assertion (drag-leaves-selection-empty,
+over-the-pole camera motion, slider-tracks-frame, clear-color-is-background,
+region-bounding-boxes-disjoint, …) and writes PNGs under `reports/fixes_4_5/`.

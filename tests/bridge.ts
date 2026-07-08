@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { ProducerBroker } from "../src/broker.ts";
+import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const { values: args } = parseArgs({
@@ -90,34 +91,19 @@ const TINY_PNG = Buffer.from(
   "base64",
 );
 
-const harnessHtml = (hold: boolean) => /* html */ `<!DOCTYPE html>
+const harnessHtml = (hold: boolean, selftest = false) => /* html */ `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-${NONCE}'; style-src 'nonce-${NONCE}'; img-src 'self' data:; connect-src 'self';">
   <title>viewer harness</title>
-  <style nonce="${NONCE}">
-    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
-    #app { width: 100%; height: 100%; }
-    #status { position: absolute; top: 8px; left: 8px; font: 12px monospace; color: #9a9a9a; white-space: pre; }
-    #controls { position: absolute; left: 0; right: 0; bottom: 0; display: flex; align-items: center; gap: 10px;
-      padding: 8px 12px; background: rgba(30,30,30,0.85); font: 12px monospace; color: #ccc; }
-    #controls button { width: 60px; }
-    #controls input[type="range"] { flex: 1; }
-    #controls .readout { min-width: 240px; text-align: right; white-space: pre; }
-  </style>
+  <style nonce="${NONCE}">${HUD_CSS}</style>
 </head>
 <body>
-  <div id="app"></div>
-  <div id="status">loading…</div>
-  <div id="controls">
-    <button id="playpause" disabled>play</button>
-    <input id="scrubber" type="range" min="0" max="0" value="0" step="1" disabled>
-    <span id="readout" class="readout"></span>
-  </div>
+  ${HUD_BODY}
   ${hold ? '<img id="holdopen" src="/slow.png" width="1" height="1" alt="">' : ""}
   <script nonce="${NONCE}">
-    window.__VIEWER__ = { autoplay: true, statsLog: true, screenshotMode: true };
+    window.__VIEWER__ = { autoplay: true, statsLog: true, screenshotMode: true, test: true };
     // Headless Chrome under --virtual-time-budget never fires rAF (timers only),
     // so back the render loop with setTimeout. Harness-only; the real webview
     // uses native rAF.
@@ -161,6 +147,37 @@ const harnessHtml = (hold: boolean) => /* html */ `<!DOCTYPE html>
     })();
   </script>
   <script nonce="${NONCE}" src="/main.js"></script>
+  ${selftest ? `<script nonce="${NONCE}">
+    // E2E self-test: drives the real DOM (clicks) the way a user would and logs
+    // results so a headless run can assert selection/sync/toggle behavior.
+    // Harness-only. Waits for streaming to warm up, then walks the tree.
+    setTimeout(() => {
+      const log = (...a) => console.log("[selftest]", ...a);
+      try {
+        const cats = [...document.querySelectorAll("#sidebar .tree-row.selectable")];
+        log("category rows:", cats.length);
+        // Select the first (structured) category, expect tree+canvas readouts sync.
+        cats[0].click();
+        log("after category click: sidebar=", document.querySelector(".sel-readout").textContent,
+            "| canvas=", document.getElementById("selreadout").textContent,
+            "| active=", document.querySelectorAll(".tree-row.active").length);
+        // Expand first category, then its first group, select first subgroup.
+        document.querySelector("#sidebar .tree-row .caret").click();
+        const groupCaret = document.querySelectorAll("#sidebar .tree-row .caret")[1];
+        if (groupCaret) groupCaret.click();
+        const subRow = [...document.querySelectorAll("#sidebar .tree-row.selectable")]
+          .find((r) => /subgroup/.test(r.textContent));
+        if (subRow) { subRow.click();
+          log("after subgroup click: canvas=", document.getElementById("selreadout").textContent); }
+        // The one representation control: bulk toggle.
+        const btn = document.getElementById("bulk-toggle");
+        log("bulk button:", btn.textContent, "display=", btn.style.display || "shown");
+        btn.click();
+        log("after bulk toggle:", btn.textContent);
+        log("DONE");
+      } catch (e) { log("ERROR", e && e.message); }
+    }, 3000);
+  </script>` : ""}
 </body>
 </html>`;
 
@@ -179,9 +196,9 @@ const server = http.createServer((req, res) => {
         res.end(String(err));
       }
     });
-  } else if (req.url === "/" || req.url === "/harness.html" || req.url === "/hold") {
+  } else if (req.url === "/" || req.url === "/harness.html" || req.url === "/hold" || req.url === "/selftest") {
     res.writeHead(200, { "content-type": "text/html" });
-    res.end(harnessHtml(req.url === "/hold"));
+    res.end(harnessHtml(req.url === "/hold", req.url === "/selftest"));
   } else if (req.url === "/slow.png") {
     setTimeout(() => {
       res.writeHead(200, { "content-type": "image/png" });

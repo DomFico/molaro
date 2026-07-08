@@ -20,6 +20,7 @@ import * as vscode from "vscode";
 import { randomBytes } from "node:crypto";
 
 import { ProducerBroker } from "./broker.ts";
+import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
 
 const DEFAULT_N_POINTS = 20_000;
 const DEFAULT_N_FRAMES = 600;
@@ -146,36 +147,10 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   <meta http-equiv="Content-Security-Policy" content="${csp}">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Point Viewer</title>
-  <style nonce="${nonce}">
-    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
-    #app { width: 100%; height: 100%; }
-    #status {
-      position: absolute; top: 8px; left: 8px;
-      font: 12px monospace; color: #9a9a9a; white-space: pre;
-      pointer-events: none; user-select: none;
-    }
-    #controls {
-      position: absolute; left: 0; right: 0; bottom: 0;
-      display: flex; align-items: center; gap: 10px;
-      padding: 8px 12px; background: rgba(30, 30, 30, 0.85);
-      font: 12px monospace; color: #cccccc;
-    }
-    #controls button {
-      width: 60px; padding: 3px 0; font: inherit; color: inherit;
-      background: #3a3a3a; border: 1px solid #555; border-radius: 3px; cursor: pointer;
-    }
-    #controls input[type="range"] { flex: 1; }
-    #controls .readout { min-width: 240px; text-align: right; white-space: pre; }
-  </style>
+  <style nonce="${nonce}">${HUD_CSS}</style>
 </head>
 <body>
-  <div id="app"></div>
-  <div id="status">loading…</div>
-  <div id="controls">
-    <button id="playpause" disabled>play</button>
-    <input id="scrubber" type="range" min="0" max="0" value="0" step="1" disabled>
-    <span id="readout" class="readout"></span>
-  </div>
+  ${HUD_BODY}
   <script nonce="${nonce}">window.__VIEWER__ = { autoplay: false };</script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
