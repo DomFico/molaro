@@ -182,7 +182,9 @@ function openPanel(
     );
     terminal.webview.html = renderTerminalHtml(terminal.webview, context.extensionUri);
     terminal.webview.onDidReceiveMessage((msg: { type?: string }) => {
-      if (msg?.type === "command") void panel.webview.postMessage(msg);
+      if (msg?.type === "command" || msg?.type === "complete") {
+        void panel.webview.postMessage(msg);
+      }
     });
     terminal.onDidDispose(() => {
       terminal = null;
@@ -207,7 +209,7 @@ function openPanel(
       }
     } else if (msg?.type === "openTerminal") {
       openTerminal();
-    } else if (msg?.type === "commandResult") {
+    } else if (msg?.type === "commandResult" || msg?.type === "completeResult") {
       void terminal?.webview.postMessage(msg);
     }
   });

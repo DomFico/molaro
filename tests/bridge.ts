@@ -135,7 +135,9 @@ const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* ht
           // between the viewer and terminal panels; in the single-page
           // harness both live in one document, so re-dispatch as an incoming
           // message (async, mirroring postMessage delivery).
-          if (msg.type === "command" || msg.type === "commandResult" || msg.type === "openTerminal") {
+          if (msg.type === "command" || msg.type === "commandResult" ||
+              msg.type === "complete" || msg.type === "completeResult" ||
+              msg.type === "openTerminal") {
             setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: msg })), 0);
             return;
           }

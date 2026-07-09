@@ -10,6 +10,7 @@ import type { Header } from "../contract/contract.ts";
 import { buildTree } from "../webview/classification.ts";
 import { Hierarchy, type Entry } from "../webview/sets.ts";
 import {
+  completeTarget,
   globMatch,
   parseTarget,
   resolveTarget,
@@ -301,6 +302,101 @@ test("a category-spanning SUBGROUP mirrors its rows too (defensive shape)", () =
   assert.deepEqual(spanKeys("right.span.sD"), ["subgroup:203"]);
   assert.deepEqual(spanKeys("left.span.sD.*"), ["point:5", "point:6"]);
   assert.deepEqual(spanKeys("*.*.sD"), ["subgroup:203"]); // deduped across branches
+});
+
+// -- completion: the inverse of resolution over the same scoped descent --------------
+
+const VERBS = ["view", "hide"];
+const NAMES = new Map<string, readonly Entry[]>([
+  ["solvent", [{ level: "category", id: 2 }]],
+  ["sol2", [{ level: "group", id: 13 }]],
+  ["my picks", [{ level: "subgroup", id: 100 }]],
+]);
+/** Complete at the END of `text` against the main fixture (cursor omitted). */
+function comp(text: string, cursor = text.length) {
+  return completeTarget(text, cursor, tree, hier, header.points.type, NAMES, VERBS);
+}
+function compSpan(text: string, cursor = text.length) {
+  return completeTarget(text, cursor, spanTree, spanHier, spanHeader.points.type, NAMES, VERBS);
+}
+
+test("completion: verbs at the start of the line (unique adds a space)", () => {
+  assert.deepEqual(comp("vi"), { start: 0, candidates: ["view"], applied: "ew " });
+  assert.deepEqual(comp(""), { start: 0, candidates: ["hide", "view"], applied: "" });
+  assert.deepEqual(comp("  h"), { start: 2, candidates: ["hide"], applied: "ide " });
+  assert.deepEqual(comp("   ", 3).candidates, ["hide", "view"]);
+  assert.deepEqual(comp("zoom").candidates, []);
+});
+
+test("completion: categories (interior level — unique appends the dot)", () => {
+  assert.deepEqual(comp("view a"), { start: 5, candidates: ["alpha"], applied: "lpha." });
+  assert.deepEqual(comp("view "), { start: 5, candidates: ["alpha", "beta", "env3"], applied: "" });
+});
+
+test("completion: groups under the scoped category (dot on unique)", () => {
+  assert.deepEqual(comp("view alpha."), { start: 11, candidates: ["g-1", "g-2"], applied: "g-" });
+  assert.deepEqual(comp("view alpha.g-1"), { start: 11, candidates: ["g-1"], applied: "." });
+  assert.deepEqual(comp("view beta."), { start: 10, candidates: ["g-7"], applied: "g-7." });
+});
+
+test("completion: subgroups scoped by the branch — NO trailing dot", () => {
+  assert.deepEqual(comp("view alpha.g-1."), { start: 15, candidates: ["s1", "s2"], applied: "s" });
+  assert.deepEqual(comp("view alpha.g-1.s1"), { start: 15, candidates: ["s1"], applied: "" });
+  assert.deepEqual(comp("view alpha.g-2."), { start: 15, candidates: ["s1"], applied: "s1" });
+});
+
+test("completion honors the visible tree's category split of a spanning group", () => {
+  // "span" renders under both left and right; each branch offers ONLY its own
+  // subgroups (sD spans and shows under both)
+  assert.deepEqual(compSpan("view left.span.").candidates, ["sA", "sD"]);
+  assert.deepEqual(compSpan("view right.span.").candidates, ["sB", "sD"]);
+  assert.deepEqual(compSpan("view *.span.").candidates, ["sA", "sB", "sD"]);
+});
+
+test("completion: leaf point types under the scoped subgroup — no dot ever", () => {
+  assert.deepEqual(comp("view alpha.g-1.s1."), { start: 18, candidates: ["t2", "tH"], applied: "t" });
+  assert.deepEqual(comp("view alpha.g-1.s2."), { start: 18, candidates: ["anchor"], applied: "anchor" });
+  assert.deepEqual(comp("view alpha.g-1.s1.t").applied, "");
+  assert.deepEqual(comp("view beta.g-7.s7.").candidates, ["anchor", "t9", "tH"]);
+});
+
+test("completion: @ completes committed-selection names", () => {
+  assert.deepEqual(comp("view @").candidates, ["my picks", "sol2", "solvent"]);
+  assert.deepEqual(comp("view @sol"), { start: 6, candidates: ["sol2", "solvent"], applied: "" });
+  assert.deepEqual(comp("view @solv"), { start: 6, candidates: ["solvent"], applied: "ent" });
+});
+
+test("completion: after + a fresh term begins (path or @)", () => {
+  assert.deepEqual(comp("view alpha + ").candidates, ["alpha", "beta", "env3"]);
+  assert.deepEqual(comp("view alpha + e"), { start: 13, candidates: ["env3"], applied: "nv3." });
+  assert.deepEqual(comp("view alpha +@sol").candidates, ["sol2", "solvent"]);
+});
+
+test("completion: list elements complete in the SAME segment's scope", () => {
+  assert.deepEqual(comp("view alpha.g-1,"), { start: 15, candidates: ["g-1", "g-2"], applied: "g-" });
+  assert.deepEqual(comp("view alpha,").candidates, ["alpha", "beta", "env3"]);
+});
+
+test("completion: no-op inside globs and ranges — but dashes in labels still work", () => {
+  assert.deepEqual(comp("view al*").candidates, []); // glob in progress
+  assert.deepEqual(comp("view alpha.3-").candidates, []); // range in progress
+  assert.deepEqual(comp("view alpha.3-9").candidates, []); // complete range
+  // a dash inside an ordinary label is NOT a range — completion keeps working
+  assert.deepEqual(comp("view alpha.g-"), { start: 11, candidates: ["g-1", "g-2"], applied: "" });
+});
+
+test("completion: total on junk — empty candidates, never a throw", () => {
+  assert.deepEqual(comp("view alpha..").candidates, []); // empty segment prefix
+  assert.deepEqual(comp("view alpha beta").candidates, []); // space inside a term
+  assert.deepEqual(comp("view a.b.c.d.").candidates, []); // below the leaf
+  assert.deepEqual(comp('view "unclosed').candidates, []); // quote in token
+  assert.deepEqual(comp("view nosuch.").candidates, []); // scope resolves nothing
+});
+
+test("completion: only text before the cursor counts", () => {
+  // cursor after "view a" with trailing text present — completes the category
+  const r = comp("view aXXXX", 6);
+  assert.deepEqual(r, { start: 5, candidates: ["alpha"], applied: "lpha." });
 });
 
 // -- glob matcher edge cases ---------------------------------------------------------

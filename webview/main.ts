@@ -39,7 +39,8 @@ import { bulkCategories, buildTree } from "./classification.ts";
 import { flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
-import { createCommandRegistry, type CommandResult } from "./commands.ts";
+import { createCommandRegistry, makeRunComplete, type CommandResult } from "./commands.ts";
+import type { Completion } from "./address.ts";
 import { entryKey, Hierarchy, SelectionModel, type Entry } from "./sets.ts";
 import { pickPoint, selectionBounds } from "./picking.ts";
 
@@ -364,17 +365,28 @@ async function main(): Promise<void> {
   const cfg: ViewerConfig = (window as unknown as { __VIEWER__?: ViewerConfig }).__VIEWER__ ?? {};
   const host = acquireVsCodeApi();
   const transport = new Transport((msg) => host.postMessage(msg));
-  // Commands from the terminal panel (routed through the host) run through the
-  // SAME dispatcher the test seam uses; rebound once the registry exists below.
+  // Commands/completions from the terminal panel (routed through the host)
+  // run through the SAME dispatcher/completer the test seam uses; rebound once
+  // the registry exists below.
   let runCommand: (text: string) => CommandResult = () => ({
     status: "error",
     message: "viewer is still loading",
   });
+  let runComplete: (text: string, cursor: number) => Completion = () => ({
+    start: 0,
+    candidates: [],
+    applied: "",
+  });
   window.addEventListener("message", (e: MessageEvent) => {
-    const msg = e.data as { type?: string; id?: number; text?: string };
+    const msg = e.data as { type?: string; id?: number; text?: string; cursor?: number };
     if (msg?.type === "command") {
       const result = runCommand(String(msg.text ?? ""));
       host.postMessage({ type: "commandResult", id: msg.id, ...result });
+      return;
+    }
+    if (msg?.type === "complete") {
+      const result = runComplete(String(msg.text ?? ""), Number(msg.cursor ?? 0));
+      host.postMessage({ type: "completeResult", id: msg.id, ...result });
       return;
     }
     transport.handleMessage(e.data);
@@ -713,7 +725,7 @@ async function main(): Promise<void> {
       flashRow(row);
     }
   };
-  const commands = createCommandRegistry({
+  const commandContext = {
     hierarchy,
     tree: fullTree, // the SAME model the bottom tree renders — click parity
     pointTypes: header.points.type,
@@ -722,14 +734,15 @@ async function main(): Promise<void> {
       for (const c of model.committed()) byName.set(c.name, c.set.listEntries());
       return byName;
     },
-    isPointHidden: (p) => model.isPointHidden(p),
     focusPoints,
     frameVisible: () => {
       if (!model.editing) frameVisible(); // parked while editing, like the gesture
     },
     flashEntryRows,
-  });
+  };
+  const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);
+  runComplete = makeRunComplete(commandContext, commands);
   document.getElementById("terminal-btn")?.addEventListener("click", () => {
     host.postMessage({ type: "openTerminal" });
   });
@@ -1046,6 +1059,7 @@ async function main(): Promise<void> {
       model,
       actions: committedActions,
       command: runCommand,
+      complete: runComplete,
       refreshPoints,
       focusPoints,
       focusEntry,
@@ -1067,8 +1081,14 @@ async function main(): Promise<void> {
           for (let i = 0; i < visible.length; i++) if (visible[i] > 0.5) s++;
           return s;
         },
-        /** number of points in the active focus flash. */
-        flashCount: (): number => flashPts.length,
+        /** number of points VISIBLY pulsing in the active focus flash —
+         * hidden points carry the flag but the overlay gates them out, so
+         * they don't count (matches what is actually on screen). */
+        flashCount: (): number => {
+          let s = 0;
+          for (const p of flashPts) if (visible[p] > 0.5) s++;
+          return s;
+        },
         /** what a click at client (x,y) would pick (-1 = empty space). */
         pick: (x: number, y: number): number => pickAt(x, y),
         /** centroid+radius of the currently visible points (current frame). */

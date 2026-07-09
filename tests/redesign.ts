@@ -1380,16 +1380,51 @@ async function S9(): Promise<void> {
     check("S9: nomatch moves nothing", closeCam(camBeforeMiss, await camState()) &&
       (await flashCount(d)) === 0);
 
-    // -- hidden filtering (show-wins): an entirely hidden target is a nomatch ---
+    // -- hidden targets: view frames them like a real click on the hidden row —
+    // the camera goes there, the pulse stays dark (overlay gates on
+    // visibility), nothing is unhidden, nothing lands on the undo stack
     const solHead = (await selHead(d, "/solvent/"))!;
     await d.rightClick(solHead.x, solHead.y); // hide the bulk selection
     await sleep(200);
+    const visHidden = await visibleCount(d);
+    const undoBefore = await d.evaluate<number>(`${V}.model.undoDepth`);
     const rHidden = await cmd("view @solvent");
-    const rHiddenCat = await cmd("view solvent");
-    check("S9: an entirely hidden target is a nomatch (@name and path alike)",
-      rHidden.status === "nomatch" && rHiddenCat.status === "nomatch",
-      JSON.stringify([rHidden, rHiddenCat]));
-    check("S9: hidden nomatch moves nothing", closeCam(camBeforeMiss, await camState()));
+    check("S9: a fully hidden target still resolves and frames",
+      rHidden.status === "ok" && rHidden.message === "focused 4800 points",
+      JSON.stringify(rHidden));
+    await sleep(150);
+    check("S9: ...with ZERO visible pulse (hidden points don't glow)",
+      (await flashCount(d)) === 0, `flash=${await flashCount(d)}`);
+    await sleep(500);
+    const camHiddenCmd = await camState();
+    check("S9: ...and the camera moved to it", !closeCam(camBeforeMiss, camHiddenCmd));
+    // parity: a REAL click on the hidden selection's name frames the same pose
+    await reset();
+    const nmHidden = (await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const blocks=[...document.querySelectorAll('#selections .sel-block')];
+      const el=blocks.find(b=>/solvent/.test(b.querySelector('.sel-name')?.textContent ?? ''));
+      if(!el) return null; const r=el.querySelector('.sel-name').getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2};
+    })()`))!;
+    await d.click(nmHidden.x, nmHidden.y);
+    await sleep(150);
+    check("S9: the real hidden-row click pulses nothing visible either",
+      (await flashCount(d)) === 0, `flash=${await flashCount(d)}`);
+    await sleep(500);
+    const camHiddenClick = await camState();
+    check("S9: hidden view ≡ clicking the hidden row (same camera pose)",
+      closeCam(camHiddenCmd, camHiddenClick),
+      `cmd=${camHiddenCmd.map((v) => v.toFixed(3))} click=${camHiddenClick.map((v) => v.toFixed(3))}`);
+    const rHiddenPath = await cmd("view solvent");
+    check("S9: the path form frames the hidden target too",
+      rHiddenPath.status === "ok" && rHiddenPath.message === "focused 4800 points",
+      JSON.stringify(rHiddenPath));
+    check("S9: view unhides NOTHING",
+      (await visibleCount(d)) === visHidden &&
+        (await d.evaluate<boolean>(`${V}.model.committed()[0].hidden`)),
+      `visible=${await visibleCount(d)}`);
+    check("S9: hidden views push nothing onto the undo stack",
+      (await d.evaluate<number>(`${V}.model.undoDepth`)) === undoBefore);
     const solHead2 = (await selHead(d, "/solvent/"))!;
     await d.rightClick(solHead2.x, solHead2.y); // un-hide again
     await sleep(200);

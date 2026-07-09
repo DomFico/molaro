@@ -87,7 +87,7 @@ try {
   await submit("view zzz");
   lines = await logLines();
   check("nomatch prints as a dim line",
-    /term-nomatch/.test(lines[5]?.cls ?? "") && /no visible points match/.test(lines[5]?.text ?? ""),
+    /term-nomatch/.test(lines[5]?.cls ?? "") && /nothing matches/.test(lines[5]?.text ?? ""),
     JSON.stringify(lines[5]));
 
   // up/down history over the three submitted commands
@@ -101,6 +101,36 @@ try {
   check("ArrowUp stops at the oldest", (await inputValue()) === "view alpha");
   await d.key("ArrowDown", "ArrowDown", 40);
   check("ArrowDown walks back forward", (await inputValue()) === "bogus");
+
+  // Tab completion round-trips through the SAME relay: the terminal ships
+  // {complete, text, cursor}, the viewer computes over its tree, the result
+  // extends the input and ambiguous candidates print into the log
+  await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
+  await clickInput();
+  await d.insertText("view alp");
+  await d.key("Tab", "Tab", 9);
+  await sleep(400);
+  check("Tab completes a unique category and appends the level dot",
+    (await inputValue()) === "view alpha.", JSON.stringify(await inputValue()));
+  await d.insertText("group-");
+  await d.key("Tab", "Tab", 9);
+  await sleep(400);
+  let lines2 = await logLines();
+  let lastLine = lines2[lines2.length - 1];
+  check("ambiguous Tab prints the candidate list through the relay",
+    /term-echo/.test(lastLine?.cls ?? "") && lastLine?.text === "group-0  group-1  group-2",
+    JSON.stringify(lastLine));
+  check("…and the input is unchanged (no shared extension)",
+    (await inputValue()) === "view alpha.group-");
+  await d.insertText("0.sub");
+  await d.key("Tab", "Tab", 9);
+  await sleep(400);
+  check("Tab extends to the common prefix of the branch's subgroups",
+    (await inputValue()) === "view alpha.group-0.subgroup-", JSON.stringify(await inputValue()));
+  lines2 = await logLines();
+  lastLine = lines2[lines2.length - 1];
+  check("…printing the scoped candidates (alpha's subgroups only)",
+    lastLine?.text === "subgroup-0  subgroup-3", JSON.stringify(lastLine));
 
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {

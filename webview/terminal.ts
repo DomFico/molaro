@@ -22,6 +22,14 @@ interface CommandResultMsg {
   message: string;
 }
 
+interface CompleteResultMsg {
+  type: "completeResult";
+  id: number;
+  start: number;
+  candidates: string[];
+  applied: string;
+}
+
 function main(): void {
   const host = acquireVsCodeApi();
   const log = document.getElementById("term-log");
@@ -36,10 +44,28 @@ function main(): void {
     log.scrollTop = log.scrollHeight;
   };
 
+  // Tab completion is computed viewer-side; the terminal only remembers what
+  // it asked for, applies the returned extension if the input is unchanged
+  // (stale replies drop), and prints ambiguous candidate lists shell-style.
+  let pendingComplete: { id: number; text: string; cursor: number } | null = null;
+
   window.addEventListener("message", (e: MessageEvent) => {
-    const m = e.data as CommandResultMsg | undefined;
-    if (m?.type !== "commandResult") return;
-    print(m.status === "error" ? "term-err" : m.status === "nomatch" ? "term-nomatch" : "term-ok", m.message);
+    const m = e.data as CommandResultMsg | CompleteResultMsg | undefined;
+    if (m?.type === "commandResult") {
+      print(m.status === "error" ? "term-err" : m.status === "nomatch" ? "term-nomatch" : "term-ok", m.message);
+      return;
+    }
+    if (m?.type === "completeResult") {
+      const req = pendingComplete;
+      pendingComplete = null;
+      if (!req || m.id !== req.id || input.value !== req.text) return; // stale
+      if (m.applied) {
+        input.value = req.text.slice(0, req.cursor) + m.applied + req.text.slice(req.cursor);
+        const caret = req.cursor + m.applied.length;
+        input.setSelectionRange(caret, caret);
+      }
+      if (m.candidates.length > 1) print("term-echo", m.candidates.join("  "));
+    }
   });
 
   let nextId = 1;
@@ -77,6 +103,15 @@ function main(): void {
         input.value = history[histAt];
       }
       e.preventDefault();
+    } else if (e.key === "Tab") {
+      e.preventDefault(); // keep focus in the input
+      const req = {
+        id: nextId++,
+        text: input.value,
+        cursor: input.selectionStart ?? input.value.length,
+      };
+      pendingComplete = req;
+      host.postMessage({ type: "complete", id: req.id, text: req.text, cursor: req.cursor });
     }
   });
 

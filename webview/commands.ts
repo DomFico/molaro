@@ -13,7 +13,7 @@
  * same state mutations, same camera tween, same flashes, same row feedback.
  * Commands get no rendering or camera code of their own.
  */
-import { parseTarget, resolveTarget } from "./address.ts";
+import { completeTarget, parseTarget, resolveTarget, type Completion } from "./address.ts";
 import type { TreeModel } from "./classification.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
 
@@ -38,8 +38,6 @@ export interface CommandContext {
   pointTypes: readonly string[];
   /** Committed-selection name → its stored entries (for "@name"). */
   committedEntries(): ReadonlyMap<string, readonly Entry[]>;
-  /** Show-wins visibility (SelectionModel.isPointHidden). */
-  isPointHidden(point: number): boolean;
   /** The gesture focus path: camera tween + yellow flash (main.ts focusPoints). */
   focusPoints(points: number[]): void;
   /** The empty-space-click path: frame the visible scene (parked while editing). */
@@ -53,6 +51,11 @@ export class CommandRegistry {
 
   register(verb: string, handler: CommandHandler): void {
     this.handlers.set(verb, handler);
+  }
+
+  /** Registered verb names (completion pool — grows with every new verb). */
+  verbs(): string[] {
+    return [...this.handlers.keys()];
   }
 
   /** Dispatch: leading token = verb, remainder = the handler's argument. */
@@ -69,11 +72,14 @@ export class CommandRegistry {
 }
 
 /**
- * `view` — camera focus, the text twin of the right-click / right-drag focus
- * gestures. No argument frames the visible scene (the empty-space-click path);
- * with a target expression it frames the resolved entries' visible points and
- * plays the same yellow pulse + row flashes a gesture would. Never a state
- * change; an empty match is a `nomatch`, not an error.
+ * `view` — camera focus, the text twin of the row-click / right-drag focus
+ * gestures. No argument frames the VISIBLE scene (the empty-space-click
+ * analog); with a target expression it frames the FULL resolved union —
+ * hidden points included, exactly like clicking a hidden row: the camera
+ * goes there, the yellow pulse lights only the currently visible points
+ * (the overlay gates on visibility — no logic added here), and nothing is
+ * unhidden. Never a state change; `nomatch` means only that the address
+ * resolves to nothing.
  */
 export function makeViewHandler(ctx: CommandContext): CommandHandler {
   return (args: string): CommandResult => {
@@ -84,18 +90,19 @@ export function makeViewHandler(ctx: CommandContext): CommandHandler {
     const ast = parseTarget(args);
     if (ast.kind === "error") return { status: "error", message: ast.message };
     const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
-    // Union the entries' points, dropping the currently hidden (show-wins).
+    // Union the entries' points — hidden ones included (a click on a hidden
+    // row frames it too; only the pulse is visibility-gated, downstream).
     const seen = new Set<number>();
     const points: number[] = [];
     for (const e of entries) {
       for (const p of ctx.hierarchy.pointsOf(e)) {
         if (seen.has(p)) continue;
         seen.add(p);
-        if (!ctx.isPointHidden(p)) points.push(p);
+        points.push(p);
       }
     }
     if (points.length === 0) {
-      return { status: "nomatch", message: `no visible points match "${args}"` };
+      return { status: "nomatch", message: `nothing matches "${args}"` };
     }
     ctx.focusPoints(points); // the same call the right-drag union-focus makes
     ctx.flashEntryRows(entries);
@@ -109,4 +116,23 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   const registry = new CommandRegistry();
   registry.register("view", makeViewHandler(ctx));
   return registry;
+}
+
+/** Tab completion for the terminal — `runCommand`'s sibling. Gathers the
+ * registry's verb names plus the viewer surface and defers to the pure
+ * completeTarget; the terminal ships {text, cursor} and applies the result. */
+export function makeRunComplete(
+  ctx: CommandContext,
+  registry: CommandRegistry,
+): (text: string, cursor: number) => Completion {
+  return (text, cursor) =>
+    completeTarget(
+      text,
+      cursor,
+      ctx.tree,
+      ctx.hierarchy,
+      ctx.pointTypes,
+      ctx.committedEntries(),
+      registry.verbs(),
+    );
 }

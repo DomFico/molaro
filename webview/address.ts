@@ -30,9 +30,12 @@
  * segment (`..`, leading or trailing `.`). Quoted strings (`"…"`) are exact
  * literals — `*` inside quotes is not a glob; unbalanced quotes are errors.
  *
+ * `completeTarget` is resolution's inverse: it walks the same descent to the
+ * cursor's scope and enumerates the labels one level down (Tab completion).
+ *
  * Pure — no DOM, no Three.js; unit-tested in Node (tests/address.test.ts).
  */
-import type { GroupNode, SubgroupNode, TreeModel } from "./classification.ts";
+import type { CategoryNode, GroupNode, SubgroupNode, TreeModel } from "./classification.ts";
 import { entryKey, type Entry, type Hierarchy } from "./sets.ts";
 
 export type Predicate =
@@ -227,7 +230,7 @@ export function resolveTarget(
       continue;
     }
     const segs = term.segments;
-    const cats = tree.categories.filter((c) => segmentMatches(segs[0], c.label));
+    const cats = catsMatching(segs[0], tree);
     if (segs.length === 1) {
       for (const c of cats) add({ level: "category", id: c.categoryIndex });
       continue;
@@ -235,20 +238,14 @@ export function resolveTarget(
     // level 2: the group nodes rendered under each matched category branch
     // (a spanning group appears once per category; a path ENDING here yields
     // the bare group entry — the same entry clicking that row creates)
-    const groups: GroupNode[] = [];
-    for (const c of cats) {
-      for (const g of c.groups) if (segmentMatches(segs[1], g.label)) groups.push(g);
-    }
+    const groups = groupsMatching(segs[1], cats);
     if (segs.length === 2) {
       for (const g of groups) add({ level: "group", id: g.groupId });
       continue;
     }
     // level 3: the subgroup rows of those category-scoped branches only —
     // descent PAST a group never leaves the category it was reached through
-    const subs: SubgroupNode[] = [];
-    for (const g of groups) {
-      for (const s of g.subgroups) if (segmentMatches(segs[2], s.label)) subs.push(s);
-    }
+    const subs = subgroupsMatching(segs[2], groups);
     if (segs.length === 3) {
       for (const s of subs) add({ level: "subgroup", id: s.subgroupId });
       continue;
@@ -261,6 +258,161 @@ export function resolveTarget(
     }
   }
   return out;
+}
+
+// The one scoped descent, shared by resolution and completion so the two can
+// never disagree about what sits under a partially-specified path.
+function catsMatching(seg: Segment, tree: TreeModel): CategoryNode[] {
+  return tree.categories.filter((c) => segmentMatches(seg, c.label));
+}
+function groupsMatching(seg: Segment, cats: CategoryNode[]): GroupNode[] {
+  const out: GroupNode[] = [];
+  for (const c of cats) for (const g of c.groups) if (segmentMatches(seg, g.label)) out.push(g);
+  return out;
+}
+function subgroupsMatching(seg: Segment, groups: GroupNode[]): SubgroupNode[] {
+  const out: SubgroupNode[] = [];
+  for (const g of groups) for (const s of g.subgroups) if (segmentMatches(seg, s.label)) out.push(s);
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Completion — the inverse of resolution over the SAME scoped descent
+// ---------------------------------------------------------------------------
+
+export interface Completion {
+  /** Index in `text` where the token under the cursor begins. */
+  start: number;
+  /** Sorted, distinct candidates whose literal prefix is the current token. */
+  candidates: string[];
+  /** The string to INSERT at the cursor: the unique completion (plus "." after
+   * a category/group, " " after a verb) or the common-prefix extension. */
+  applied: string;
+}
+
+/** Token characters end at these; the scan-back from the cursor stops here. */
+const TOKEN_DELIMS = new Set([".", ",", "+", "@", '"']);
+
+/**
+ * Complete the token under `cursor` in a partial command line. Total — junk
+ * or malformed prefixes yield empty candidates, never a throw.
+ *
+ * Positions: at line start it completes VERBS (caller supplies the registry's
+ * names; a unique match also appends a space); inside a path it completes the
+ * labels one level below the already-typed segments, resolved by the same
+ * category-scoped descent `resolveTarget` performs over the visible tree
+ * (completing `cat.group.` offers only that branch's subgroups); at the leaf
+ * it offers the distinct point-type tokens under the scoped subgroups; after
+ * `@` the committed-selection names; after `+` a fresh term. A unique
+ * category/group completion appends "." so tabbing flows down levels; leaf,
+ * subgroup, and name completions append nothing.
+ *
+ * No-ops (empty candidates): a token containing `*` (glob in progress), a
+ * token that IS a range in progress (`\d+-\d*` — a dash inside an ordinary
+ * label like "group-0" still completes; only numeric range syntax opts out),
+ * reserved characters, quotes, and anything whose structural prefix doesn't
+ * parse. Only `text[0..cursor)` is considered.
+ */
+export function completeTarget(
+  text: string,
+  cursor: number,
+  tree: TreeModel,
+  hierarchy: Hierarchy,
+  types: readonly string[],
+  committedNames: ReadonlyMap<string, readonly Entry[]>,
+  verbs: readonly string[],
+): Completion {
+  const head = text.slice(0, Math.max(0, Math.min(cursor, text.length)));
+
+  // the token = the maximal run of token characters ending at the cursor
+  let ts = head.length;
+  while (ts > 0 && !TOKEN_DELIMS.has(head[ts - 1]) && !/\s/.test(head[ts - 1])) ts--;
+  const token = head.slice(ts);
+  const none: Completion = { start: ts, candidates: [], applied: "" };
+
+  // pattern-in-progress → completion opts out (globs, numeric ranges, junk)
+  if (/[*[\]?"]/.test(token)) return none;
+  if (/^\d+-\d*$/.test(token)) return none;
+
+  const before = head.slice(0, ts);
+
+  // verb position: nothing but whitespace before the token
+  if (/^\s*$/.test(before)) return finish(ts, token, verbs, " ");
+
+  // @name: the token hangs directly off an "@"
+  if (before.endsWith("@")) return finish(ts, token, committedNames.keys(), "");
+
+  // current term = after the last "+" (or after the verb); the structural
+  // prefix before the token must be empty or end at a "." / "," boundary
+  const plusAt = before.lastIndexOf("+");
+  let termBefore: string;
+  if (plusAt >= 0) {
+    termBefore = before.slice(plusAt + 1);
+  } else {
+    const m = /^\s*\S+\s+([\s\S]*)$/.exec(before);
+    if (!m) return none;
+    termBefore = m[1];
+  }
+  termBefore = termBefore.trim();
+  if (/[@"\s]/.test(termBefore)) return none; // refs/quotes/spaces → not a completable path
+
+  // completed segments = everything before the segment the token belongs to
+  let completed: string[];
+  if (termBefore === "") {
+    completed = [];
+  } else if (termBefore.endsWith(".")) {
+    completed = termBefore.slice(0, -1).split(".");
+  } else if (termBefore.endsWith(",")) {
+    completed = termBefore.slice(0, -1).split(".").slice(0, -1); // list continues the same segment
+  } else {
+    return none; // a finished token with no separator — malformed position
+  }
+  const k = completed.length;
+  if (k > 3) return none; // nothing below the leaf level
+
+  if (k === 0) return finish(ts, token, tree.categories.map((c) => c.label), ".");
+
+  const parsed = parseTarget(completed.join("."));
+  if (parsed.kind === "error" || parsed.terms[0].kind !== "path") return none;
+  const segs = parsed.terms[0].segments;
+
+  const cats = catsMatching(segs[0], tree);
+  if (k === 1) {
+    return finish(ts, token, cats.flatMap((c) => c.groups.map((g) => g.label)), ".");
+  }
+  const groups = groupsMatching(segs[1], cats);
+  if (k === 2) {
+    return finish(ts, token, groups.flatMap((g) => g.subgroups.map((s) => s.label)), "");
+  }
+  const subs = subgroupsMatching(segs[2], groups);
+  const leafTypes: string[] = [];
+  for (const s of subs) {
+    for (const p of hierarchy.subgroupPoints(s.subgroupId)) {
+      const t = types[p];
+      if (t) leafTypes.push(t);
+    }
+  }
+  return finish(ts, token, leafTypes, "");
+}
+
+function finish(
+  start: number,
+  token: string,
+  pool: Iterable<string>,
+  uniqueSuffix: string,
+): Completion {
+  const candidates = [...new Set(pool)].filter((c) => c.startsWith(token)).sort();
+  if (candidates.length === 0) return { start, candidates, applied: "" };
+  if (candidates.length === 1) {
+    return { start, candidates, applied: candidates[0].slice(token.length) + uniqueSuffix };
+  }
+  let common = candidates[0];
+  for (const c of candidates) {
+    let i = 0;
+    while (i < common.length && i < c.length && common[i] === c[i]) i++;
+    common = common.slice(0, i);
+  }
+  return { start, candidates, applied: common.slice(token.length) };
 }
 
 function segmentMatches(seg: Segment, name: string): boolean {
