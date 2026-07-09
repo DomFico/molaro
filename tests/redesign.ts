@@ -1248,6 +1248,64 @@ async function S9(): Promise<void> {
     check("S9: trailing-int range addresses the same subgroup",
       rRange.status === "ok" && rRange.message === "focused 100 points", JSON.stringify(rRange));
 
+    // -- spanning-group parity: group-0's points span alpha/beta/gamma; the
+    // tree renders it under EACH, listing only that category's subgroups.
+    // A path ENDING at the group resolves to the bare group entry — exactly
+    // the entry a real click on that row creates (the whole group).
+    await reset();
+    const rSpan = await cmd("view alpha.group-0");
+    check("S9: bare group path = the row's whole-group entry (like its click)",
+      rSpan.status === "ok" && rSpan.message === "focused 400 points", JSON.stringify(rSpan));
+    await sleep(150);
+    check("S9: ...pulsing the whole spanning group", (await flashCount(d)) === 400,
+      `flash=${await flashCount(d)}`);
+    await sleep(500);
+    const camGroupCmd = await camState();
+    await reset();
+    const grpRow = (await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const el=rows.find(r=>r.dataset.level==='group');
+      if(!el) return null; const r=el.getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2};
+    })()`))!;
+    await d.rightClick(grpRow.x, grpRow.y);
+    await sleep(150);
+    check("S9: a real click on that category-scoped group row pulses the same 400",
+      (await flashCount(d)) === 400, `flash=${await flashCount(d)}`);
+    await sleep(500);
+    const camGroupClick = await camState();
+    check("S9: bare-group command ≡ clicking the category-scoped group row",
+      closeCam(camGroupCmd, camGroupClick),
+      `cmd=${camGroupCmd.map((v) => v.toFixed(3))} click=${camGroupClick.map((v) => v.toFixed(3))}`);
+
+    // ...but descent PAST the group is category-scoped: alpha's branch shows
+    // only subgroup-0 and subgroup-3, and the resolver mirrors those rows
+    await reset();
+    const rScope = await cmd("view alpha.group-0.*");
+    check("S9: descent through the spanning group stays inside alpha's branch",
+      rScope.status === "ok" && rScope.message === "focused 200 points", JSON.stringify(rScope));
+    await sleep(650);
+    const camScopeCmd = await camState();
+    await reset();
+    const s0 = (await bottomRow(d, "/subgroup-0\\b/"))!;
+    const s3 = (await bottomRow(d, "/subgroup-3\\b/"))!;
+    await d.drag(s0.x, s0.y, s3.x, s3.y, 4, { button: "right" });
+    await sleep(150);
+    check("S9: right-drag over the SAME rendered rows pulses the same 200",
+      (await flashCount(d)) === 200, `flash=${await flashCount(d)}`);
+    await sleep(500);
+    const camScopeDrag = await camState();
+    check("S9: category-scoped descent ≡ dragging the rows the tree shows",
+      closeCam(camScopeCmd, camScopeDrag),
+      `cmd=${camScopeCmd.map((v) => v.toFixed(3))} drag=${camScopeDrag.map((v) => v.toFixed(3))}`);
+    const rBeta = await cmd("view beta.group-0.*");
+    const rAllBranches = await cmd("view *.group-0.*");
+    check("S9: each category branch scopes to its own subgroups",
+      rBeta.status === "ok" && rBeta.message === "focused 100 points" &&
+        rAllBranches.message === "focused 400 points",
+      JSON.stringify([rBeta.message, rAllBranches.message]));
+
     // -- multi-match parity: `view <glob>` vs a right-drag over the same rows --
     await expandBottomCategory(d, "/alpha/"); // collapse back → category rows adjacent
     await sleep(200);

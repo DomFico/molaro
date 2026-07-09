@@ -7,6 +7,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import type { Header } from "../contract/contract.ts";
+import { buildTree } from "../webview/classification.ts";
 import { Hierarchy, type Entry } from "../webview/sets.ts";
 import {
   globMatch,
@@ -46,12 +47,13 @@ function makeHeader(): Header {
 
 const header = makeHeader();
 const hier = new Hierarchy(header);
+const tree = buildTree(header);
 const none = new Map<string, readonly Entry[]>();
 
 function resolve(expr: string, committed: ReadonlyMap<string, readonly Entry[]> = none): Entry[] {
   const ast = parseTarget(expr);
   assert.equal(ast.kind, "target", `parse failed for "${expr}": ${(ast as ParseError).message}`);
-  return resolveTarget(ast as TargetAst, hier, header.points.type, committed);
+  return resolveTarget(ast as TargetAst, tree, hier, header.points.type, committed);
 }
 /** Sorted "level:id" keys — resolution results are sets, order-insensitive here. */
 function keys(expr: string, committed?: ReadonlyMap<string, readonly Entry[]>): string[] {
@@ -222,6 +224,83 @@ test("quoted literals are exact — no glob, no range", () => {
   assert.deepEqual(keys(`alpha."g-1".s1`), ["subgroup:100"]);
   assert.deepEqual(keys(`alpha."g*"`), []); // no group literally named "g*"
   assert.deepEqual(keys(`"1-5"`), []); // no category literally named "1-5"
+});
+
+// -- category-spanning groups: the resolver mirrors the VISIBLE tree -----------------
+
+/**
+ * A group whose points span categories (contract-legal: only subgroup→group
+ * is constrained). The visible tree renders "span" under BOTH left and right,
+ * each branch listing only that category's subgroups:
+ *
+ *   left  → span { sA: pts 0,1 } + { sD: pt 5 }    right → span { sB: pts 2,3 } + { sD: pt 6 }
+ *   lone  → solo { sC: pt 4 }
+ *
+ * sD (pts 5,6) even spans categories itself — the defensive shape buildTree
+ * renders under both branches; drilling it shows ALL its points either way.
+ */
+function makeSpanningHeader(): Header {
+  const category = [0, 0, 1, 1, 2, 0, 1];
+  const group_id = [20, 20, 20, 20, 21, 20, 20];
+  const subgroup_id = [200, 200, 201, 201, 202, 203, 203];
+  const type = ["p0", "p1", "p2", "p3", "p4", "p5", "p6"];
+  return {
+    version: "0.1.0", name: "span", n_points: category.length, n_frames: 1, units: "m", bbox: null,
+    points: { type, group_id, subgroup_id, category },
+    categories: ["left", "right", "lone"],
+    groups: { "20": "span", "21": "solo" },
+    subgroups: { "200": "sA", "201": "sB", "202": "sC", "203": "sD" },
+    edges: [], polylines: [], channels: [],
+  };
+}
+
+const spanHeader = makeSpanningHeader();
+const spanHier = new Hierarchy(spanHeader);
+const spanTree = buildTree(spanHeader);
+function spanKeys(expr: string): string[] {
+  const ast = parseTarget(expr);
+  assert.equal(ast.kind, "target", `parse failed for "${expr}": ${(ast as ParseError).message}`);
+  return resolveTarget(ast as TargetAst, spanTree, spanHier, spanHeader.points.type, none)
+    .map((e) => `${e.level}:${e.id}`)
+    .sort();
+}
+
+test("descent through a spanning group stays inside the category branch", () => {
+  // the required exclusion: a category-prefixed path over a spanning group
+  // never resolves the other category's children/points
+  assert.deepEqual(spanKeys("left.span.*"), ["subgroup:200", "subgroup:203"]);
+  assert.deepEqual(spanKeys("right.span.*"), ["subgroup:201", "subgroup:203"]);
+  assert.deepEqual(spanKeys("left.span.s*.p0,p1"), ["point:0", "point:1"]); // never 2,3
+  assert.deepEqual(spanKeys("right.span.sB.*"), ["point:2", "point:3"]); // never 0,1
+  // sB is rendered only under right — reaching it through left resolves nothing
+  assert.deepEqual(spanKeys("left.span.sB"), []);
+});
+
+test("a category prefix surfaces every group the tree renders under it", () => {
+  // pre-fix, descent used first-seen-category childrenOf, so right.* was
+  // empty; the visible tree shows span under right too
+  assert.deepEqual(spanKeys("right.*"), ["group:20"]);
+  assert.deepEqual(spanKeys("left.*"), ["group:20"]);
+  assert.deepEqual(spanKeys("*.span"), ["group:20"]); // one entry, deduped across branches
+});
+
+test("a path TERMINATING at a spanning group yields the bare group entry (click parity)", () => {
+  // clicking the "span" row under either category creates {level:"group",
+  // id:20}, whose pointsOf is the WHOLE group — the resolver returns that
+  // same entry; the category prefix scopes which ROWS match, and scopes any
+  // FURTHER descent, but a group entry cannot carry a category
+  assert.deepEqual(spanKeys("left.span"), ["group:20"]);
+  assert.deepEqual(spanKeys("right.span"), ["group:20"]);
+  assert.deepEqual(spanHier.pointsOf({ level: "group", id: 20 }).sort(), [0, 1, 2, 3, 5, 6]);
+});
+
+test("a category-spanning SUBGROUP mirrors its rows too (defensive shape)", () => {
+  // sD renders under both branches; drilling it shows all its points either
+  // way (the tree's drill uses subgroupPoints) — resolution matches
+  assert.deepEqual(spanKeys("left.span.sD"), ["subgroup:203"]);
+  assert.deepEqual(spanKeys("right.span.sD"), ["subgroup:203"]);
+  assert.deepEqual(spanKeys("left.span.sD.*"), ["point:5", "point:6"]);
+  assert.deepEqual(spanKeys("*.*.sD"), ["subgroup:203"]); // deduped across branches
 });
 
 // -- glob matcher edge cases ---------------------------------------------------------

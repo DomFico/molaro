@@ -11,11 +11,19 @@
  *   predicate   := "*" | glob | range | literal
  *   range       := INT "-" INT                  trailing integer in [lo, hi]
  *
- * Matching is SCOPED RECURSIVE DESCENT: segment 1 picks categories, segment 2
- * filters each match's `childrenOf`, and so on — a glob never leaks to nodes
- * under other parents. Levels 1–3 match against the node's label; level 4
- * matches the point's `type` string. All matching is case-sensitive. A
- * k-segment path yields entries at level k — it never auto-descends.
+ * Matching is SCOPED RECURSIVE DESCENT over the VISIBLE TREE — the same
+ * `classification.ts buildTree` model the bottom panel renders — so a path
+ * resolves to exactly the entries that clicking the corresponding rows would
+ * produce (parity by construction). A group with points in several categories
+ * is rendered under EACH of them with only that category's subgroups; descent
+ * follows that: `cat.group.*` stays inside `cat`'s branch. A path that
+ * TERMINATES at a group yields the bare group entry — precisely what clicking
+ * that row selects (the whole group, even where it also appears under other
+ * categories; Entry carries no category, and neither does the row's click).
+ * Levels 1–3 match against the node's label; level 4 matches the point's
+ * `type` string over the subgroup's drilled point rows. All matching is
+ * case-sensitive. A k-segment path yields entries at level k — it never
+ * auto-descends.
  *
  * Reserved for later syntax (clear parse errors today, so adding them can't
  * change the meaning of existing expressions): `[`, `]`, `?`, and the empty
@@ -24,6 +32,7 @@
  *
  * Pure — no DOM, no Three.js; unit-tested in Node (tests/address.test.ts).
  */
+import type { GroupNode, SubgroupNode, TreeModel } from "./classification.ts";
 import { entryKey, type Entry, type Hierarchy } from "./sets.ts";
 
 export type Predicate =
@@ -182,8 +191,15 @@ class Parser {
 // ---------------------------------------------------------------------------
 
 /**
- * Resolve an AST to a deduplicated Entry[] against a Hierarchy.
+ * Resolve an AST to a deduplicated Entry[] against the VISIBLE tree.
  *
+ * - `tree` is the `buildTree` model the bottom panel renders — descending it
+ *   (rather than any independent parent map) is what guarantees a resolved
+ *   path equals the rows a user would click, including category-spanning
+ *   groups/subgroups, which the tree renders once per category branch with
+ *   only that branch's children.
+ * - `hierarchy` supplies the drilled point rows of a subgroup (the same
+ *   accessor the tree's drill-to-points uses).
  * - `types` is the header's per-point `type` array (the level-4 match string).
  * - `committedNames` maps committed-selection names to their STORED entries
  *   (returned at their stored levels; an unknown name resolves to nothing —
@@ -191,6 +207,7 @@ class Parser {
  */
 export function resolveTarget(
   ast: TargetAst,
+  tree: TreeModel,
   hierarchy: Hierarchy,
   types: readonly string[],
   committedNames: ReadonlyMap<string, readonly Entry[]>,
@@ -209,23 +226,39 @@ export function resolveTarget(
       for (const e of committedNames.get(term.name) ?? []) add(e);
       continue;
     }
-    // Scoped descent: seed with matching categories, then filter each
-    // frontier node's children by the next segment. Level = segment count.
-    let frontier = hierarchy
-      .categoryEntries()
-      .filter((e) => segmentMatches(term.segments[0], hierarchy.label(e)));
-    for (let level = 1; level < term.segments.length; level++) {
-      const seg = term.segments[level];
-      const next: Entry[] = [];
-      for (const parent of frontier) {
-        for (const child of hierarchy.childrenOf(parent)) {
-          const name = child.level === "point" ? (types[child.id] ?? "") : hierarchy.label(child);
-          if (segmentMatches(seg, name)) next.push(child);
-        }
-      }
-      frontier = next;
+    const segs = term.segments;
+    const cats = tree.categories.filter((c) => segmentMatches(segs[0], c.label));
+    if (segs.length === 1) {
+      for (const c of cats) add({ level: "category", id: c.categoryIndex });
+      continue;
     }
-    for (const e of frontier) add(e);
+    // level 2: the group nodes rendered under each matched category branch
+    // (a spanning group appears once per category; a path ENDING here yields
+    // the bare group entry — the same entry clicking that row creates)
+    const groups: GroupNode[] = [];
+    for (const c of cats) {
+      for (const g of c.groups) if (segmentMatches(segs[1], g.label)) groups.push(g);
+    }
+    if (segs.length === 2) {
+      for (const g of groups) add({ level: "group", id: g.groupId });
+      continue;
+    }
+    // level 3: the subgroup rows of those category-scoped branches only —
+    // descent PAST a group never leaves the category it was reached through
+    const subs: SubgroupNode[] = [];
+    for (const g of groups) {
+      for (const s of g.subgroups) if (segmentMatches(segs[2], s.label)) subs.push(s);
+    }
+    if (segs.length === 3) {
+      for (const s of subs) add({ level: "subgroup", id: s.subgroupId });
+      continue;
+    }
+    // level 4: the subgroup's drilled point rows, matched on the type string
+    for (const s of subs) {
+      for (const p of hierarchy.subgroupPoints(s.subgroupId)) {
+        if (segmentMatches(segs[3], types[p] ?? "")) add({ level: "point", id: p });
+      }
+    }
   }
   return out;
 }

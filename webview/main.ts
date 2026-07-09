@@ -715,6 +715,7 @@ async function main(): Promise<void> {
   };
   const commands = createCommandRegistry({
     hierarchy,
+    tree: fullTree, // the SAME model the bottom tree renders — click parity
     pointTypes: header.points.type,
     committedEntries: () => {
       const byName = new Map<string, readonly Entry[]>();

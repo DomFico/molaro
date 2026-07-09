@@ -14,6 +14,7 @@
  * Commands get no rendering or camera code of their own.
  */
 import { parseTarget, resolveTarget } from "./address.ts";
+import type { TreeModel } from "./classification.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
 
 export type CommandStatus = "ok" | "nomatch" | "error";
@@ -30,6 +31,9 @@ export type CommandHandler = (args: string) => CommandResult;
  * or function the gesture handlers use (see the wiring in main.ts). */
 export interface CommandContext {
   hierarchy: Hierarchy;
+  /** The buildTree model the bottom panel renders — target resolution
+   * descends THIS structure so commands mirror the visible rows exactly. */
+  tree: TreeModel;
   /** header.points.type — the level-4 (leaf) match strings. */
   pointTypes: readonly string[];
   /** Committed-selection name → its stored entries (for "@name"). */
@@ -79,7 +83,7 @@ export function makeViewHandler(ctx: CommandContext): CommandHandler {
     }
     const ast = parseTarget(args);
     if (ast.kind === "error") return { status: "error", message: ast.message };
-    const entries = resolveTarget(ast, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
+    const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
     // Union the entries' points, dropping the currently hidden (show-wins).
     const seen = new Set<number>();
     const points: number[] = [];
