@@ -149,6 +149,33 @@ try {
     /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "focused 1 points",
     JSON.stringify(lastLine));
 
+  // @name.<leaf-pred>: filter the seeded selection through the real relay.
+  // The solvent seed at this harness's N=6000 holds 1,600 tiny subgroups,
+  // one anchor each.
+  await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
+  await clickInput();
+  await d.insertText("view @solvent.anchor");
+  await d.key("Enter", "Enter", 13);
+  await sleep(500);
+  lines2 = await logLines();
+  lastLine = lines2[lines2.length - 1];
+  check("view @name.<literal> filters the committed selection via the relay",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "focused 1600 points",
+    JSON.stringify(lastLine));
+  // Tab after @name. lists the SELECTION's own type tokens
+  await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
+  await clickInput();
+  await d.insertText("view @solvent.");
+  await d.key("Tab", "Tab", 9);
+  await sleep(400);
+  lines2 = await logLines();
+  lastLine = lines2[lines2.length - 1];
+  check("Tab after @name. prints the selection-scoped type tokens",
+    /term-echo/.test(lastLine?.cls ?? "") && lastLine?.text === "anchor  t0  t1  t2  t3",
+    JSON.stringify(lastLine));
+  check("…leaving the input unchanged (no common prefix)",
+    (await inputValue()) === "view @solvent.");
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();

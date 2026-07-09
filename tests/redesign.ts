@@ -1355,6 +1355,103 @@ async function S9(): Promise<void> {
       rQuoted.status === "ok" && rQuoted.message === "focused 100 points",
       JSON.stringify(rQuoted));
 
+    // -- @name.<leaf-pred>: filter a committed selection ------------------------
+    // build a KNOWN mixed selection through the real path: click the first
+    // three point rows (anchor + two t-types), commit
+    const firstPointRows = await d.evaluate<{ x: number; y: number; id: number }[]>(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0 && r.dataset.level==='point');
+      return rows.slice(0,3).map(r=>{const b=r.getBoundingClientRect();
+        return {x:b.left+b.width/2, y:b.top+b.height/2, id:Number(r.dataset.id)};});
+    })()`);
+    check("S9: three point rows available to build from", firstPointRows.length === 3);
+    for (const r of firstPointRows) {
+      await d.click(r.x, r.y);
+      await sleep(80);
+    }
+    const btnAt = await d.evaluate<{ x: number; y: number }>(`(()=>{
+      const r=document.getElementById('commit-btn').getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2};
+    })()`);
+    await d.click(btnAt.x, btnAt.y);
+    await sleep(250);
+    check("S9: committed a mixed 3-point selection",
+      (await committed(d)).some((c) => c.name === "selection_1" && c.pts === 3),
+      JSON.stringify(await committed(d)));
+    const rWhole = await cmd("view @selection_1");
+    check("S9: unfiltered @name unchanged", rWhole.message === "focused 3 points",
+      JSON.stringify(rWhole));
+
+    // #N filter parity: identical pose to a real click on that point's row
+    // (row rects re-queried — committing shifted the layout)
+    const p1 = firstPointRows[1];
+    await reset();
+    const rSelIdx = await cmd(`view @selection_1.#${p1.id}`);
+    check("S9: @sel.#N contains-and-frames one point",
+      rSelIdx.status === "ok" && rSelIdx.message === "focused 1 points", JSON.stringify(rSelIdx));
+    await sleep(650);
+    const camSelIdx = await camState();
+    await reset();
+    const p1Row = (await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const el=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .find(r=>r.dataset.level==='point' && Number(r.dataset.id)===${p1.id}
+          && r.getBoundingClientRect().height>0);
+      if(!el) return null; const b=el.getBoundingClientRect();
+      return {x:b.left+b.width/2, y:b.top+b.height/2};
+    })()`))!;
+    await d.rightClick(p1Row.x, p1Row.y);
+    await sleep(650);
+    check("S9: @sel.#N ≡ clicking that point's row (same camera pose)",
+      closeCam(camSelIdx, await camState()),
+      `cmd=${camSelIdx.map((v) => v.toFixed(3))}`);
+
+    // glob filter parity: the same subset a manual pick of those rows frames
+    await reset();
+    const rSelGlob = await cmd("view @selection_1.t*");
+    check("S9: @sel.<glob> filters by type within the selection",
+      rSelGlob.status === "ok" && rSelGlob.message === "focused 2 points",
+      JSON.stringify(rSelGlob));
+    await sleep(650);
+    const camSelGlob = await camState();
+    await reset();
+    const rows12 = await d.evaluate<{ x: number; y: number }[]>(`(()=>{
+      const ids=[${firstPointRows[1].id},${firstPointRows[2].id}];
+      return ids.map(id=>{
+        const el=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+          .find(r=>r.dataset.level==='point' && Number(r.dataset.id)===id
+            && r.getBoundingClientRect().height>0);
+        const b=el.getBoundingClientRect();
+        return {x:b.left+b.width/2, y:b.top+b.height/2};});
+    })()`);
+    await d.drag(rows12[0].x, rows12[0].y, rows12[1].x, rows12[1].y, 4, { button: "right" });
+    await sleep(150);
+    check("S9: the manual pick pulses the same 2 points", (await flashCount(d)) === 2,
+      `flash=${await flashCount(d)}`);
+    await sleep(500);
+    check("S9: @sel.<glob> ≡ a manual pick of those rows (same camera pose)",
+      closeCam(camSelGlob, await camState()),
+      `cmd=${camSelGlob.map((v) => v.toFixed(3))}`);
+
+    // remaining filter forms: literal, list, containment miss
+    const rSelLit = await cmd("view @selection_1.anchor");
+    const rSelList = await cmd("view @selection_1.t1,anchor");
+    const rSelMiss = await cmd("view @selection_1.#5000");
+    check("S9: literal/list filters count; out-of-selection index is a nomatch",
+      rSelLit.message === "focused 1 points" && rSelList.message === "focused 2 points" &&
+        rSelMiss.status === "nomatch",
+      JSON.stringify([rSelLit.message, rSelList.message, rSelMiss.status]));
+
+    // unwind the detour (3 build clicks + 1 commit) so the state-purity
+    // checks below still see the untouched startup state
+    for (let i = 0; i < 4; i++) {
+      await d.ctrlZ();
+      await sleep(80);
+    }
+    check("S9: @filter detour fully undone",
+      (await committed(d)).length === 1 && (await pendingEntries(d)) === 0 &&
+        !(await d.evaluate<boolean>(`${V}.model.canUndo`)),
+      `committed=${(await committed(d)).length} pending=${await pendingEntries(d)}`);
+
     // -- multi-match parity: `view <glob>` vs a right-drag over the same rows --
     await expandBottomCategory(d, "/alpha/"); // collapse back → category rows adjacent
     await sleep(200);

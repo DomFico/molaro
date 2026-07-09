@@ -114,7 +114,7 @@ test("parse errors: quotes, depth, refs, term joins", () => {
   assert.match(parseErr(`"ab"cd`), /after a quoted string/);
   assert.match(parseErr("a.b.c.d.e"), /at most 4/);
   assert.match(parseErr("@"), /selection name/);
-  assert.match(parseErr("@name.x"), /unexpected "\."/);
+  assert.match(parseErr("@name..x"), /empty segment/); // @name.x itself is now a legal filter
   assert.match(parseErr("alpha beta"), /joined with "\+"/);
   assert.match(parseErr("+alpha"), /term before "\+"/);
   assert.match(parseErr("alpha +"), /term after "\+"/);
@@ -225,6 +225,60 @@ test("quoted literals are exact — no glob, no range", () => {
   assert.deepEqual(keys(`alpha."g-1".s1`), ["subgroup:100"]);
   assert.deepEqual(keys(`alpha."g*"`), []); // no group literally named "g*"
   assert.deepEqual(keys(`"1-5"`), []); // no category literally named "1-5"
+});
+
+// -- @name.<leaf-pred>: filter a committed selection by ONE leaf predicate -----------
+
+/** mix = subgroup 100 ∪ point 5 → points {0,1,5} with types {tH,t2,tH};
+ *  env = category 2 → points {8..11}, all type "w". */
+const FNAMES = new Map<string, readonly Entry[]>([
+  ["mix", [{ level: "subgroup", id: 100 }, { level: "point", id: 5 }]],
+  ["env", [{ level: "category", id: 2 }]],
+]);
+
+test("@sel.#N is a containment check against the selection's point set", () => {
+  assert.deepEqual(keys("@mix.#1", FNAMES), ["point:1"]);
+  assert.deepEqual(keys("@mix.#7", FNAMES), []); // 7 ∉ {0,1,5} → nomatch
+  assert.deepEqual(keys("@mix.#0-9", FNAMES), ["point:0", "point:1", "point:5"]);
+});
+
+test("@sel.<literal>/<glob> filter by the point type string", () => {
+  assert.deepEqual(keys("@mix.tH", FNAMES), ["point:0", "point:5"]);
+  assert.deepEqual(keys("@mix.t2", FNAMES), ["point:1"]);
+  assert.deepEqual(keys("@mix.t*", FNAMES), ["point:0", "point:1", "point:5"]);
+  assert.deepEqual(keys("@mix.w", FNAMES), []); // type exists globally, not in sel
+  assert.deepEqual(keys("@env.w", FNAMES), ["point:10", "point:11", "point:8", "point:9"]);
+});
+
+test("@sel lists union within the filter; @sel.* ≡ @sel's points (flattened)", () => {
+  assert.deepEqual(keys("@mix.t2,#5", FNAMES), ["point:1", "point:5"]);
+  assert.deepEqual(keys("@mix.tH,#1", FNAMES), ["point:0", "point:1", "point:5"]);
+  // the filtered form is ALWAYS point-level — the stored entry levels
+  // (here a subgroup + a point) are not preserved
+  assert.deepEqual(keys("@mix.*", FNAMES), ["point:0", "point:1", "point:5"]);
+  assert.deepEqual(keys("@mix", FNAMES), ["point:5", "subgroup:100"]); // unfiltered: stored levels
+});
+
+test("the trailing predicate binds tighter than + (two independent filters)", () => {
+  const ast = parseTarget("@mix.tH + @env.w") as TargetAst;
+  assert.equal(ast.terms.length, 2);
+  assert.equal((ast.terms[0] as { filter?: unknown }).filter !== undefined, true);
+  assert.equal((ast.terms[1] as { filter?: unknown }).filter !== undefined, true);
+  assert.deepEqual(keys("@mix.tH + @env.w", FNAMES),
+    ["point:0", "point:10", "point:11", "point:5", "point:8", "point:9"]);
+});
+
+test("@name.a.b is a parse error — a committed selection has no sub-levels", () => {
+  assert.match(parseErr("@mix.a.b"), /at most one leaf predicate/);
+  assert.match(parseErr("@mix.#1.b"), /at most one leaf predicate/);
+});
+
+test("malformed @ filters are parse errors; a missing selection is a nomatch", () => {
+  assert.match(parseErr("@mix."), /empty segment/);
+  assert.match(parseErr("@mix.#"), /expected an integer after "#"/);
+  assert.match(parseErr("@mix.a?"), /reserved character/);
+  assert.deepEqual(keys("@nope.#1", FNAMES), []); // nonexistent selection → empty match
+  assert.deepEqual(keys("@nope", FNAMES), []);
 });
 
 // -- the #N point-index axis ----------------------------------------------------------
@@ -374,6 +428,7 @@ const VERBS = ["view", "hide"];
 const NAMES = new Map<string, readonly Entry[]>([
   ["solvent", [{ level: "category", id: 2 }]],
   ["sol2", [{ level: "group", id: 13 }]],
+  ["picks", [{ level: "subgroup", id: 100 }]],
   ["my picks", [{ level: "subgroup", id: 100 }]],
 ]);
 /** Complete at the END of `text` against the main fixture (cursor omitted). */
@@ -425,7 +480,7 @@ test("completion: leaf point types under the scoped subgroup — no dot ever", (
 });
 
 test("completion: @ completes committed-selection names", () => {
-  assert.deepEqual(comp("view @").candidates, ["my picks", "sol2", "solvent"]);
+  assert.deepEqual(comp("view @").candidates, ["my picks", "picks", "sol2", "solvent"]);
   assert.deepEqual(comp("view @sol"), { start: 6, candidates: ["sol2", "solvent"], applied: "" });
   assert.deepEqual(comp("view @solv"), { start: 6, candidates: ["solvent"], applied: "ent" });
 });
@@ -453,6 +508,17 @@ test("completion: #-prefixed tokens are inert (indices aren't enumerable)", () =
   assert.deepEqual(comp("view #"), { start: 5, candidates: [], applied: "" });
   assert.deepEqual(comp("view #16").candidates, []);
   assert.deepEqual(comp("view alpha.g-1.s1.#1").candidates, []);
+});
+
+test("completion after @name. is scoped to the SELECTION's own type tokens", () => {
+  // NAMES: picks = subgroup 100 (types tH, t2); solvent = category 2 (type w)
+  assert.deepEqual(comp("view @picks."), { start: 12, candidates: ["t2", "tH"], applied: "t" });
+  assert.deepEqual(comp("view @picks.t").candidates, ["t2", "tH"]);
+  assert.deepEqual(comp("view @solvent."), { start: 14, candidates: ["w"], applied: "w" });
+  assert.deepEqual(comp(`view @"my picks".`).candidates, ["t2", "tH"]); // quoted names too
+  assert.deepEqual(comp("view @picks.#1").candidates, []); // # stays inert
+  assert.deepEqual(comp("view @nope.").candidates, []); // unknown selection
+  assert.deepEqual(comp("view @picks.x.").candidates, []); // no second level
 });
 
 test("completion: total on junk — empty candidates, never a throw", () => {

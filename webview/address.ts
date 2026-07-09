@@ -4,7 +4,10 @@
  * (webview/commands.ts) feeds verb arguments through here.
  *
  *   target-expr := term ("+" term)*             union across subtrees
- *   term        := path | "@" name | index-term @name = a committed selection
+ *   term        := path | at-term | index-term
+ *   at-term     := "@" name ("." leaf-pred)?    @name = a committed selection,
+ *                                               optionally FILTERED by ONE
+ *                                               leaf predicate (a "," list)
  *   index-term  := "#" index-spec ("," "#" index-spec)*
  *   index-spec  := INT | INT "-" INT            the CONTRACT POINT INDEX
  *   path        := segment ("." segment)*       1–4 segments, top-down;
@@ -21,6 +24,14 @@
  * in segments 1–3 is a parse error. The bare range `44-55` keeps its label
  * trailing-integer meaning; the `#` is the sole distinguisher. Out-of-range
  * indices resolve to nothing (nomatch), not an error.
+ *
+ * `@name.<leaf-pred>` filters a committed selection: the selection's resolved
+ * POINT SET intersected with one leaf predicate (index, #-range, literal,
+ * glob, or a "," list of those — the exact predicates a path's leaf accepts).
+ * A committed selection is a FLAT set with no sub-levels, so this is an
+ * intersection, never a positional descent; `@name.a.b` is a parse error.
+ * The trailing predicate binds tighter than `+` — `@a.H + @b.O` is two
+ * independently filtered terms unioned.
  *
  * Matching is SCOPED RECURSIVE DESCENT over the VISIBLE TREE — the same
  * `classification.ts buildTree` model the bottom panel renders — so a path
@@ -62,7 +73,7 @@ export interface Segment {
 
 export type Term =
   | { kind: "path"; segments: Segment[] }
-  | { kind: "ref"; name: string }
+  | { kind: "ref"; name: string; filter?: Segment } // "@name" / "@name.<leaf-pred>"
   | { kind: "points"; specs: { lo: number; hi: number }[] }; // standalone "#…"
 
 export interface TargetAst {
@@ -126,11 +137,21 @@ class Parser {
       this.i++;
       const name = this.s[this.i] === '"' ? this.quoted() : this.token();
       if (name === "") throw new Failure(`expected a selection name after "@"`);
+      let filter: Segment | undefined;
+      if (this.s[this.i] === ".") {
+        this.i++;
+        filter = this.segment(4); // leaf-level predicates only ("#" included)
+        if (this.s[this.i] === ".") {
+          throw new Failure(
+            `@name accepts at most one leaf predicate — a committed selection has no sub-levels`,
+          );
+        }
+      }
       const c = this.s[this.i];
       if (this.i < this.s.length && c !== "+" && !/\s/.test(c)) {
         throw new Failure(`unexpected "${c}" after "@${name}"`);
       }
-      return { kind: "ref", name };
+      return filter ? { kind: "ref", name, filter } : { kind: "ref", name };
     }
     if (this.s[this.i] === "#") {
       // standalone index term: "#N" / "#lo-hi", optionally a "#"-only list
@@ -286,7 +307,21 @@ export function resolveTarget(
   };
   for (const term of ast.terms) {
     if (term.kind === "ref") {
-      for (const e of committedNames.get(term.name) ?? []) add(e);
+      const stored = committedNames.get(term.name) ?? [];
+      if (!term.filter) {
+        for (const e of stored) add(e);
+        continue;
+      }
+      // "@name.<leaf-pred>": INTERSECT the selection's resolved point set
+      // with one leaf predicate. Unlike path resolution — where segment
+      // count sets the entry level — the result here is ALWAYS point-level:
+      // a set of points reduced to a subset of points. The stored entries'
+      // own levels are deliberately not preserved.
+      const inSel = new Set<number>();
+      for (const e of stored) for (const p of hierarchy.pointsOf(e)) inSel.add(p);
+      for (const p of inSel) {
+        if (leafHit(term.filter, p, types[p] ?? "")) add({ level: "point", id: p });
+      }
       continue;
     }
     if (term.kind === "points") {
@@ -324,10 +359,7 @@ export function resolveTarget(
     // scope (an out-of-scope index simply doesn't match)
     for (const s of subs) {
       for (const p of hierarchy.subgroupPoints(s.subgroupId)) {
-        const hit = segs[3].predicates.some((pr) =>
-          pr.kind === "index" ? p >= pr.lo && p <= pr.hi : predicateMatches(pr, types[p] ?? ""),
-        );
-        if (hit) add({ level: "point", id: p });
+        if (leafHit(segs[3], p, types[p] ?? "")) add({ level: "point", id: p });
       }
     }
   }
@@ -377,7 +409,8 @@ const TOKEN_DELIMS = new Set([".", ",", "+", "@", '"']);
  * category-scoped descent `resolveTarget` performs over the visible tree
  * (completing `cat.group.` offers only that branch's subgroups); at the leaf
  * it offers the distinct point-type tokens under the scoped subgroups; after
- * `@` the committed-selection names; after `+` a fresh term. A unique
+ * `@` the committed-selection names; after `@name.` the distinct type tokens
+ * of THAT selection's point set; after `+` a fresh term. A unique
  * category/group completion appends "." so tabbing flows down levels; leaf,
  * subgroup, and name completions append nothing.
  *
@@ -429,6 +462,32 @@ export function completeTarget(
     termBefore = m[1];
   }
   termBefore = termBefore.trim();
+
+  // "@name." → the selection's OWN distinct type tokens (scoped to the
+  // selection's point set, mirroring how path-leaf completion scopes to its
+  // parent). Anything deeper or malformed after "@" is inert.
+  if (termBefore.startsWith("@")) {
+    if (!termBefore.endsWith(".")) return none;
+    const nameText = termBefore.slice(1, -1);
+    let selName: string | null = null;
+    if (/^"[^"]*"$/.test(nameText)) selName = nameText.slice(1, -1);
+    else if (!/[."]/.test(nameText)) selName = nameText;
+    if (selName === null) return none; // a second level, or junk
+    const stored = committedNames.get(selName);
+    if (!stored) return none;
+    const pool: string[] = [];
+    const seenPts = new Set<number>();
+    for (const e of stored) {
+      for (const p of hierarchy.pointsOf(e)) {
+        if (seenPts.has(p)) continue;
+        seenPts.add(p);
+        const t = types[p];
+        if (t) pool.push(t);
+      }
+    }
+    return finish(ts, token, pool, "");
+  }
+
   if (/[@"\s]/.test(termBefore)) return none; // refs/quotes/spaces → not a completable path
 
   // completed segments = everything before the segment the token belongs to
@@ -492,6 +551,14 @@ function finish(
 
 function segmentMatches(seg: Segment, name: string): boolean {
   return seg.predicates.some((p) => predicateMatches(p, name));
+}
+
+/** Leaf matching, shared by path leaves and @name filters: "#" predicates
+ * match the point INDEX, everything else the opaque type string. */
+function leafHit(seg: Segment, pointId: number, typeName: string): boolean {
+  return seg.predicates.some((pr) =>
+    pr.kind === "index" ? pointId >= pr.lo && pointId <= pr.hi : predicateMatches(pr, typeName),
+  );
 }
 
 export function predicateMatches(p: Predicate, name: string): boolean {
