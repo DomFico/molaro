@@ -184,6 +184,7 @@ export function mountCommitted(
 
     let built = false;
     let hideMode = true; // per-drag direction, set at secondaryTrailStart
+    const hideStrokeTouched = new Set<string>(); // rows THIS stroke changed
     const buildBody = (): void => {
       if (built) return;
       built = true;
@@ -205,20 +206,32 @@ export function mountCommitted(
           },
           secondaryClick: (e) => actions.toggleEntryHidden(sel.id, e),
           // right-drag hides (or, starting on a hidden member, shows) row by
-          // row AS THE POINTER CROSSES — the purple state sticks immediately
-          // and the whole drag is one undo unit
+          // row AS THE POINTER CROSSES; dragging BACK shortens the trail and
+          // reverts exactly what this stroke changed. One undo unit.
           secondaryTrailStart: (start) => {
             hideMode = !model.entryHidden(sel.id, start);
+            hideStrokeTouched.clear();
             actions.beginStroke();
           },
-          secondaryTrailAdd: (e) => actions.setEntryHidden(sel.id, e, hideMode),
+          secondaryTrailAdd: (e) => {
+            if (model.entryHidden(sel.id, e) !== hideMode) {
+              hideStrokeTouched.add(`${e.level}:${e.id}`);
+              actions.setEntryHidden(sel.id, e, hideMode);
+            }
+          },
+          secondaryTrailRemove: (e) => {
+            if (hideStrokeTouched.delete(`${e.level}:${e.id}`)) {
+              actions.setEntryHidden(sel.id, e, !hideMode);
+            }
+          },
           secondaryTrailEnd: () => actions.endStroke(),
         },
         {
           flashOnPrimary: true,
-          // no transient flash for hides: the persistent purple state IS the
-          // feedback, applied per row as the drag crosses
-          flashOnSecondary: false,
+          // purple flash/hold acknowledges the gesture and BLENDS over any
+          // state color (the persistent purple state carries the meaning)
+          flashOnSecondary: true,
+          secondaryFlashClass: "row-flash-purple",
           decorate: (e, row) => {
             row.classList.toggle("hidden-entry-row", model.entryHidden(sel.id, e));
             // the shared static-green selected state (edit-mode members)

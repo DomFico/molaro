@@ -169,11 +169,21 @@ export const HUD_CSS = /* css */ `
     background-color: rgba(185, 139, 224, 0.30); color: #c9a6ec; }
   .tree-row.hidden-entry-row:hover { background-color: rgba(185, 139, 224, 0.42); }
 
-  /* a flash over an already-green row blends the two families (mirrors the
-     3D overlay blend) instead of swapping colors */
+  /* a flash landing on an already-colored row BLENDS the two families
+     (mirrors the 3D overlay blend) instead of swapping colors — for every
+     flash color over every state color */
   .tree-row.sel-covered.row-flash, .tree-row.sel-covered.row-flash:hover,
   .tree-row.sel-covered.row-flash-hold, .tree-row.sel-covered.row-flash-hold:hover {
-    background-color: rgba(223, 244, 198, 0.38); }
+    background-color: rgba(223, 244, 198, 0.38); } /* yellow ⊕ green */
+  .tree-row.sel-covered.row-flash-purple, .tree-row.sel-covered.row-flash-purple:hover,
+  .tree-row.sel-covered.row-flash-purple-hold, .tree-row.sel-covered.row-flash-purple-hold:hover {
+    background-color: rgba(188, 197, 226, 0.40); } /* purple ⊕ green */
+  .tree-row.hidden-entry-row.row-flash, .tree-row.hidden-entry-row.row-flash:hover,
+  .tree-row.hidden-entry-row.row-flash-hold, .tree-row.hidden-entry-row.row-flash-hold:hover {
+    background-color: rgba(220, 186, 196, 0.40); } /* yellow ⊕ purple */
+  .tree-row.hidden-entry-row.row-flash-purple, .tree-row.hidden-entry-row.row-flash-purple:hover,
+  .tree-row.hidden-entry-row.row-flash-purple-hold, .tree-row.hidden-entry-row.row-flash-purple-hold:hover {
+    background-color: rgba(185, 139, 224, 0.55); } /* purple ⊕ purple: deeper */
   .caret { width: 10px; flex: none; display: inline-block; color: #888; cursor: pointer; }
   /* expandable carets get a big forgiving hit box (reaches left into the
      indent) so a near-miss expands instead of selecting */

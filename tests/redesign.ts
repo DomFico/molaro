@@ -301,6 +301,15 @@ async function S1(): Promise<void> {
     check("S1: region focus pulses BOTH rows' points", (await flashCount(d)) >= 800,
       `flash=${await flashCount(d)}`);
     check("S1: right-drag changes no selection", (await pendingEntries(d)) === 0);
+
+    // ...and dragging BACK shortens the region (same as the left trail)
+    await d.mouse("mousePressed", beta.x, beta.y, { button: "right", buttons: 2 });
+    await d.mouse("mouseMoved", gamma.x, gamma.y, { buttons: 2 });
+    await d.mouse("mouseMoved", beta.x, beta.y, { buttons: 2 });
+    await d.mouse("mouseReleased", beta.x, beta.y, { button: "right" });
+    await sleep(600);
+    check("S1: right-drag back SHORTENS the region (only the surviving row focuses)",
+      (await flashCount(d)) === 400, `flash=${await flashCount(d)}`);
   });
 }
 
@@ -953,6 +962,26 @@ async function S8(): Promise<void> {
     await d.ctrlZ();
     await sleep(150);
     check("S8: the drag-hide undoes as one unit", (await visibleCount(d)) === visAll);
+
+    // dragging BACK mid-gesture shortens the hide: the reverted row un-hides
+    // before release (same shorten semantics as every other trail)
+    await d.mouse("mousePressed", memberA2.x, memberA2.y, { button: "right", buttons: 2 });
+    await d.mouse("mouseMoved", memberG.x, memberG.y, { buttons: 2 });
+    await sleep(120);
+    check("S8: mid-drag both members hidden", (await visibleCount(d)) === visAll - 800,
+      `visible=${await visibleCount(d)}`);
+    await d.mouse("mouseMoved", memberA2.x, memberA2.y, { buttons: 2 });
+    await sleep(120);
+    check("S8: dragging back un-hides the popped row BEFORE release",
+      (await visibleCount(d)) === visAll - 400, `visible=${await visibleCount(d)}`);
+    await d.mouse("mouseReleased", memberA2.x, memberA2.y, { button: "right" });
+    await sleep(150);
+    check("S8: release keeps only the surviving hide",
+      (await visibleCount(d)) === visAll - 400, `visible=${await visibleCount(d)}`);
+    await d.ctrlZ();
+    await sleep(150);
+    check("S8: the shortened stroke still undoes as one unit",
+      (await visibleCount(d)) === visAll, `visible=${await visibleCount(d)}`);
 
     // whole-selection hide via the header still works (with the same sweep)
     const head = (await selHead(d, "/selection_1/"))!;

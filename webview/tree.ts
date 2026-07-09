@@ -45,7 +45,10 @@ export interface TreeGestures {
   /** Right trail moved onto a row not yet in the trail — fired PER ROW while
    * dragging so state (e.g. hide) can stick as the pointer crosses. */
   secondaryTrailAdd?(e: Entry): void;
-  /** Right drag released; `entries` is the trail in order. */
+  /** Right trail backtracked off a row (dragging back shortens the trail and
+   * reverts that row — same semantics as the left trail). */
+  secondaryTrailRemove?(e: Entry): void;
+  /** Right drag released; `entries` is the surviving trail in order. */
   secondaryTrailEnd?(entries: Entry[]): void;
 }
 
@@ -191,10 +194,21 @@ function createRowEngine(
   const enterRight = (entry: Entry, row: HTMLElement): void => {
     if (!right) return;
     const key = entryKey(entry);
-    if (right.trail.some((it) => it.key === key)) return;
-    right.trail.push({ key, entry, row });
-    if (opts.flashOnSecondary) holdOn(row, sCls);
-    gestures.secondaryTrailAdd?.(entry);
+    const t = right.trail;
+    if (t.length > 0 && t[t.length - 1].key === key) return;
+    const at = t.findIndex((it) => it.key === key);
+    if (at >= 0) {
+      // dragged back onto an earlier trail row: shorten — revert the tail
+      while (t.length - 1 > at) {
+        const popped = t.pop()!;
+        if (opts.flashOnSecondary && popped.row) holdOff(popped.row, sCls);
+        gestures.secondaryTrailRemove?.(popped.entry);
+      }
+    } else {
+      t.push({ key, entry, row });
+      if (opts.flashOnSecondary) holdOn(row, sCls);
+      gestures.secondaryTrailAdd?.(entry);
+    }
   };
 
   const onMove = (e: PointerEvent): void => {
