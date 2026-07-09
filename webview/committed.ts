@@ -228,11 +228,10 @@ export function mountCommitted(
         },
         {
           flashOnPrimary: true,
-          // purple holds mark the drag's extent; a plain right-CLICK skips
-          // the flash — the persistent state change IS the feedback there
-          flashOnSecondary: true,
-          secondaryFlashClass: "row-flash-purple",
-          secondaryClickFlash: false,
+          // no overlay for right gestures: the purple STATE appearing (hide)
+          // or disappearing (un-hide) row by row IS the feedback — same as
+          // the green paint in the bottom section, never brighter on removal
+          flashOnSecondary: false,
           decorate: (e, row) => {
             row.classList.toggle("hidden-entry-row", model.entryHidden(sel.id, e));
             // the shared static-green selected state (edit-mode members)

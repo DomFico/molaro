@@ -1023,6 +1023,32 @@ async function S8(): Promise<void> {
     check("S8: the shortened stroke still undoes as one unit",
       (await visibleCount(d)) === visAll, `visible=${await visibleCount(d)}`);
 
+    // UN-hide by dragging: starting on a hidden row, the purple DISAPPEARS
+    // row by row as the pointer crosses — never brighter, no hold overlay
+    // (mirrors how the green paint-remove reads in the bottom section)
+    await d.drag(memberA2.x, memberA2.y, memberG.x, memberG.y, 4, { button: "right" });
+    await sleep(150); // both hidden again
+    await d.mouse("mousePressed", memberA2.x, memberA2.y, { button: "right", buttons: 2 });
+    await d.mouse("mouseMoved", memberG.x, memberG.y, { buttons: 2 });
+    await sleep(200);
+    const unhide = await d.evaluate<{ purple: number; holds: number }>(`(()=>{
+      const rows=[...document.querySelectorAll('#selections .tree-row.selectable')];
+      return { purple: rows.filter(r=>r.classList.contains('hidden-entry-row')).length,
+               holds: rows.filter(r=>r.classList.contains('row-flash-purple-hold')).length };
+    })()`);
+    check("S8: un-hide drag clears the purple row by row MID-drag, no overlay",
+      (await visibleCount(d)) === visAll && unhide.purple === 0 && unhide.holds === 0,
+      `visible=${await visibleCount(d)} purple=${unhide.purple} holds=${unhide.holds}`);
+    await d.mouse("mouseReleased", memberG.x, memberG.y, { button: "right" });
+    await sleep(150);
+    await d.ctrlZ(); // undo the un-hide stroke
+    await sleep(120);
+    check("S8: un-hide stroke undoes as one unit", (await visibleCount(d)) === visAll - 800,
+      `visible=${await visibleCount(d)}`);
+    await d.ctrlZ(); // undo the hide stroke
+    await sleep(120);
+    check("S8: back to fully visible", (await visibleCount(d)) === visAll);
+
     // whole-selection hide via the header still works (with the same sweep)
     const head = (await selHead(d, "/selection_1/"))!;
     await d.rightClick(head.x, head.y);
