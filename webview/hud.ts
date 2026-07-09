@@ -108,7 +108,7 @@ export const HUD_CSS = /* css */ `
   .sel-block.hidden-sel { border-left-color: #b98be0; }
   .sel-block.editing { border-left-color: #9fe8cd; background: rgba(159,232,205,0.06); }
   .sel-head { display: flex; align-items: center; gap: 6px; padding: 1px 4px;
-    position: relative; border-radius: 3px; }
+    position: relative; border-radius: 3px; transition: background-color 320ms ease; }
   .sel-name { flex: 1 1 auto; min-width: 0; cursor: pointer;
     overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .hidden-sel .sel-name { color: #c9a6ec; }
@@ -126,9 +126,6 @@ export const HUD_CSS = /* css */ `
   .rename-input.rename-bad { border-color: #ff6060; }
   .entry-remove { flex: none; cursor: pointer; color: #888; padding: 0 4px; }
   .entry-remove:hover { color: #fff; }
-  /* individually hidden member (right-click a row): persistent purple state */
-  .tree-row.hidden-entry-row { background: rgba(185, 139, 224, 0.16); color: #c9a6ec; }
-  .tree-row.hidden-entry-row .tree-label { text-decoration: line-through; }
 
   /* ---- bottom section: build tree + bracket overlay ------------------------- */
   #tree-hint { color: #7a7a7a; padding: 0 4px 8px; line-height: 1.5; }
@@ -142,45 +139,41 @@ export const HUD_CSS = /* css */ `
   .cat-block > div > .tree-row { position: sticky; top: 18px; z-index: 3; background: #252526; }
   .tree-row.selectable { cursor: pointer; }
   .tree-row.selectable:hover { background: #2f3a42; }
-  /* selected rows: STATIC light green — they arrive with one soft swell that
-     settles into the steady color (same feel as the focus flash, but the
-     color stays); partial (path-to-entry) rows get a subtle edge tick */
-  .tree-row.sel-covered { background-color: rgba(191, 255, 228, 0.20);
-    animation: selIn 520ms ease-out 1; }
-  @keyframes selIn {
-    0%   { background-color: rgba(191, 255, 228, 0); }
-    55%  { background-color: rgba(191, 255, 228, 0.34); }
-    100% { background-color: rgba(191, 255, 228, 0.20); }
-  }
+  /* ---- ONE standard feedback motion --------------------------------------
+     Every state and flash color arrives and leaves through the SAME
+     background-color transition. Because transitions only run on style
+     CHANGES, rows that mount already-stateful (scrolling back into view,
+     expanding a subtree) render their color STATICALLY — no replay; removing
+     a state plays the exact same motion in reverse (bright → dark); and a
+     color landing on an already-colored row cross-fades smoothly. Persistent
+     states (green selected, purple hidden) stay; transient flashes (yellow
+     focus, purple hide feedback) are timed classes that rise and fall. */
+  .tree-row { transition: background-color 320ms ease; }
   .tree-row.sel-partial { box-shadow: inset 2px 0 0 rgba(191, 255, 228, 0.45); }
-  /* focus feedback: one soft light-yellow swell */
-  .tree-row.row-flash { animation: rowFlash 900ms ease-out 1; }
-  @keyframes rowFlash {
-    0%   { background-color: rgba(255, 233, 168, 0); }
-    22%  { background-color: rgba(255, 233, 168, 0.35); }
-    100% { background-color: rgba(255, 233, 168, 0); }
-  }
-  /* hide feedback: the same swell, in purple */
-  .row-flash-purple { animation: rowFlashPurple 900ms ease-out 1; }
-  @keyframes rowFlashPurple {
-    0%   { background-color: rgba(185, 139, 224, 0); }
-    22%  { background-color: rgba(185, 139, 224, 0.4); }
-    100% { background-color: rgba(185, 139, 224, 0); }
-  }
-  /* trail feedback HOLDS while the button is down, then fades out on release
-     — the color stays present for the whole drag, never mid-fading */
-  .row-flash-hold { background-color: rgba(255, 233, 168, 0.35); }
-  .row-flash-out { animation: rowFlashOut 450ms ease-out 1; }
-  @keyframes rowFlashOut {
-    from { background-color: rgba(255, 233, 168, 0.35); }
-    to   { background-color: rgba(255, 233, 168, 0); }
-  }
-  .row-flash-purple-hold { background-color: rgba(185, 139, 224, 0.4); }
-  .row-flash-purple-out { animation: rowFlashPurpleOut 450ms ease-out 1; }
-  @keyframes rowFlashPurpleOut {
-    from { background-color: rgba(185, 139, 224, 0.4); }
-    to   { background-color: rgba(185, 139, 224, 0); }
-  }
+
+  /* transient flashes + held trail colors (same swatches, timed or held) */
+  .tree-row.row-flash, .tree-row.row-flash:hover,
+  .tree-row.row-flash-hold, .tree-row.row-flash-hold:hover {
+    background-color: rgba(255, 233, 168, 0.35); }
+  .sel-head.row-flash-purple,
+  .tree-row.row-flash-purple, .tree-row.row-flash-purple:hover,
+  .tree-row.row-flash-purple-hold, .tree-row.row-flash-purple-hold:hover {
+    background-color: rgba(185, 139, 224, 0.40); }
+
+  /* persistent states — they win over a passing flash (hover = brighter) */
+  .tree-row.sel-covered, .tree-row.sel-covered:hover { background-color: rgba(191, 255, 228, 0.20); }
+  .tree-row.sel-covered:hover { background-color: rgba(191, 255, 228, 0.30); }
+  /* individually hidden member: a plain purple highlight (no strikethrough);
+     wins over the green when a row is both selected and hidden */
+  .tree-row.hidden-entry-row, .tree-row.hidden-entry-row:hover {
+    background-color: rgba(185, 139, 224, 0.30); color: #c9a6ec; }
+  .tree-row.hidden-entry-row:hover { background-color: rgba(185, 139, 224, 0.42); }
+
+  /* a flash over an already-green row blends the two families (mirrors the
+     3D overlay blend) instead of swapping colors */
+  .tree-row.sel-covered.row-flash, .tree-row.sel-covered.row-flash:hover,
+  .tree-row.sel-covered.row-flash-hold, .tree-row.sel-covered.row-flash-hold:hover {
+    background-color: rgba(223, 244, 198, 0.38); }
   .caret { width: 10px; flex: none; display: inline-block; color: #888; cursor: pointer; }
   /* expandable carets get a big forgiving hit box (reaches left into the
      indent) so a near-miss expands instead of selecting */

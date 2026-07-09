@@ -173,7 +173,18 @@ async function S1(): Promise<void> {
     const sc = await selCount(d);
     check("S1: green footprint = the entry's points", sc > 0, `selCount=${sc}`);
     const alphaAfter = (await bottomRow(d, "/^▸?\\s*alpha/"))!;
-    check("S1: row is marked covered (green pulse class)", /sel-covered/.test(alphaAfter.cls), alphaAfter.cls);
+    check("S1: row is marked covered (static green class)", /sel-covered/.test(alphaAfter.cls), alphaAfter.cls);
+    // ONE standard motion: state colors are static (no keyframe animation to
+    // replay on scroll-in/expand) and move through the shared bg transition
+    const motion = await d.evaluate<{ anim: string; trans: string }>(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.sel-covered')];
+      const s=getComputedStyle(rows[0]);
+      return {anim:s.animationName, trans:s.transitionProperty+" "+s.transitionDuration};
+    })()`);
+    check("S1: selected rows are STATIC (no animation to replay on remount)",
+      motion.anim === "none", motion.anim);
+    check("S1: ...and enter/leave via the standard transition",
+      /background-color|all/.test(motion.trans), motion.trans);
     const pendingBracket = await d.evaluate<boolean>(`!!document.querySelector('.bracket.pending')`);
     check("S1: pending bracket appears in the tree gutter", pendingBracket);
     await d.screenshot(`${REPORT}/S1_pending_green.png`);
@@ -900,11 +911,16 @@ async function S8(): Promise<void> {
     await sleep(150);
     check("S8: member right-click hides only that member",
       (await visibleCount(d)) === visAll - 400, `${visAll}→${await visibleCount(d)}`);
-    const purple = await d.evaluate<boolean>(`(()=>{
-      const rows=[...document.querySelectorAll('#selections .tree-row.selectable')];
-      return rows.some(r=>r.classList.contains('hidden-entry-row'));
+    const purple = await d.evaluate<{ state: boolean; strike: string } | null>(`(()=>{
+      const row=[...document.querySelectorAll('#selections .tree-row.selectable')]
+        .find(r=>r.classList.contains('hidden-entry-row'));
+      if(!row) return null;
+      return { state: true,
+        strike: getComputedStyle(row.querySelector('.tree-label')).textDecorationLine };
     })()`);
-    check("S8: hidden member is marked purple immediately", purple);
+    check("S8: hidden member is marked purple immediately", purple !== null);
+    check("S8: purple highlight only — no strikethrough", purple?.strike === "none",
+      purple?.strike ?? "missing");
     const countLabel = await d.evaluate<string>(`(()=>{
       const blocks=[...document.querySelectorAll('#selections .sel-block')];
       const b=blocks.find(x=>/selection_1/.test(x.querySelector('.sel-name').textContent));

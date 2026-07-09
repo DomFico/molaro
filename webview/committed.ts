@@ -278,14 +278,10 @@ export function mountCommitted(
     el.addEventListener("contextmenu", (e) => {
       e.preventDefault();
       e.stopPropagation();
-      head.classList.remove("row-flash-purple");
-      void head.offsetWidth;
+      // transient purple: the standard background transition swells it in,
+      // and the timed removal rides the same transition back out
       head.classList.add("row-flash-purple");
-      head.addEventListener(
-        "animationend",
-        () => head.classList.remove("row-flash-purple"),
-        { once: true },
-      );
+      window.setTimeout(() => head.classList.remove("row-flash-purple"), 480);
       actions.toggleHidden(sel.id);
     });
 

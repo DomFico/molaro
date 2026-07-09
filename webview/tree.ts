@@ -60,8 +60,8 @@ export interface TreeOptions {
   onLayout?: () => void;
   /** Flash rows touched by secondary gestures (focus feedback). */
   flashOnSecondary?: boolean;
-  /** CSS class the secondary flash uses (default "row-flash" — the yellow
-   * swell; the top section passes the purple right-to-left sweep). */
+  /** CSS class the secondary flash uses (default "row-flash", the yellow
+   * swatch; pass "row-flash-purple" for hide feedback). */
   secondaryFlashClass?: string;
   /** Flash rows touched by primary click/trail (focus feedback, top section). */
   flashOnPrimary?: boolean;
@@ -93,11 +93,25 @@ function entryOf(row: HTMLElement): Entry {
   return { level: row.dataset.level as Entry["level"], id: Number(row.dataset.id) };
 }
 
+/** How long a transient flash class stays before the shared background
+ * transition fades it back out. */
+const FLASH_HOLD_MS = 480;
+const flashTimers = new WeakMap<HTMLElement, number>();
+
+/** Transient flash: add the color class, let the standard background
+ * transition swell it in, then remove it after a beat so the same transition
+ * fades it back out (re-flashes just extend the hold). */
 function flashRow(row: HTMLElement, cls = "row-flash"): void {
-  row.classList.remove(cls);
-  void row.offsetWidth; // restart the animation
+  const prev = flashTimers.get(row);
+  if (prev) clearTimeout(prev);
   row.classList.add(cls);
-  row.addEventListener("animationend", () => row.classList.remove(cls), { once: true });
+  flashTimers.set(
+    row,
+    window.setTimeout(() => {
+      row.classList.remove(cls);
+      flashTimers.delete(row);
+    }, FLASH_HOLD_MS),
+  );
 }
 
 function createRowEngine(
@@ -129,21 +143,15 @@ function createRowEngine(
   let right: Arm | null = null;
 
   // Trail feedback HOLDS while the button is down (the color stays present
-  // until release), then fades out — never disappearing mid-drag.
+  // until release); removing the class rides the standard background
+  // transition back out — never disappearing mid-drag.
   const pCls = "row-flash";
   const sCls = opts.secondaryFlashClass ?? "row-flash";
   const holdOn = (row: HTMLElement, cls: string): void => {
-    row.classList.remove(`${cls}-out`);
     row.classList.add(`${cls}-hold`);
   };
-  const holdOff = (row: HTMLElement, cls: string, fade: boolean): void => {
+  const holdOff = (row: HTMLElement, cls: string): void => {
     row.classList.remove(`${cls}-hold`);
-    if (fade) {
-      row.classList.add(`${cls}-out`);
-      row.addEventListener("animationend", () => row.classList.remove(`${cls}-out`), {
-        once: true,
-      });
-    }
   };
 
   /** Visit every row along the segment from the arm's last position to
@@ -171,7 +179,7 @@ function createRowEngine(
       // dragged back onto an earlier trail row: revert everything after it
       while (t.length - 1 > at) {
         const popped = t.pop()!;
-        if (opts.flashOnPrimary && popped.row) holdOff(popped.row, pCls, false);
+        if (opts.flashOnPrimary && popped.row) holdOff(popped.row, pCls);
         gestures.trailRemove?.(popped.entry);
       }
     } else {
@@ -217,7 +225,7 @@ function createRowEngine(
       clearTimeout(a.holdTimer);
       if (a.moved) {
         if (opts.flashOnPrimary) {
-          for (const it of a.trail) if (it.row) holdOff(it.row, pCls, true);
+          for (const it of a.trail) if (it.row) holdOff(it.row, pCls);
         }
         gestures.trailEnd?.(a.trail.map((t) => t.entry));
       } else if (!a.holdFired) {
@@ -232,7 +240,7 @@ function createRowEngine(
       right = null;
       if (a.moved && a.trail.length > 0) {
         if (opts.flashOnSecondary) {
-          for (const it of a.trail) if (it.row) holdOff(it.row, sCls, true);
+          for (const it of a.trail) if (it.row) holdOff(it.row, sCls);
         }
         (gestures.secondaryTrailEnd ?? ((entries: Entry[]) => gestures.secondaryClick(entries[0])))(
           a.trail.map((t) => t.entry),
