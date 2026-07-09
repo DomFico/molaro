@@ -128,7 +128,6 @@ export const HUD_CSS = /* css */ `
   .entry-remove:hover { color: #fff; }
 
   /* ---- bottom section: build tree + bracket overlay ------------------------- */
-  #tree-hint { color: #7a7a7a; padding: 0 4px 8px; line-height: 1.5; }
   #tree-host { position: relative; }
   .vlist { position: relative; }
   .tree-row { display: flex; align-items: center; gap: 4px; height: 18px; padding: 0 4px;
@@ -213,7 +212,6 @@ export const HUD_CSS = /* css */ `
     border-right: 1px solid #3a3a3a; margin-bottom: 0; padding-right: 8px; }
   #root[data-dock="top"] #tree-host, #root[data-dock="bottom"] #tree-host {
     flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; }
-  #root[data-dock="top"] #tree-hint, #root[data-dock="bottom"] #tree-hint { display: none; }
   #root[data-dock="top"] .tree, #root[data-dock="bottom"] .tree {
     display: flex; flex-direction: row; align-items: flex-start; gap: 18px; height: 100%; }
   #root[data-dock="top"] .cat-block, #root[data-dock="bottom"] .cat-block {
@@ -233,7 +231,6 @@ export const HUD_BODY = /* html */ `
         </div>
         <div id="sidebar-content">
           <div id="selections"></div>
-          <div id="tree-hint">left-click/drag: build (drag from a selected row removes) · right-click/drag: focus a region<br>3D: Ctrl+left = subgroups · Ctrl+right = points · click empty space: zoom out</div>
           <div id="tree-host"></div>
         </div>
       </div>
