@@ -28,3 +28,4 @@ contract/SPEC.md
 tsconfig.json
 *.vsix
 producer/CONTRACT_FIT_AUDIT.md
+HANDOFF*.md
