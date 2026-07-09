@@ -152,10 +152,14 @@ class SyntheticSource(DataSource):
 
         self.mass = rng.uniform(0.5, 5.0, size=n_points).astype(np.float32)
 
-        # First point of each subgroup is an "anchor", the rest are "tracers".
+        # First point of each subgroup is an "anchor"; the rest cycle through a
+        # small spread of tracer types ("t0".."t3") so the leaf level carries
+        # enough variety for type matching (literals, globs, trailing-int ranges).
         first_of_subgroup = np.zeros(n_points, dtype=bool)
         first_of_subgroup[np.unique(self.subgroup_id, return_index=True)[1]] = True
-        self.point_type = ["anchor" if a else "tracer" for a in first_of_subgroup]
+        self.point_type = [
+            "anchor" if first_of_subgroup[p] else f"t{p % 4}" for p in range(n_points)
+        ]
         # Polyline threads structured anchors only (never the bulk population).
         struct_first = first_of_subgroup.copy()
         struct_first[n_struct:] = False

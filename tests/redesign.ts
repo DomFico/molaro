@@ -10,6 +10,8 @@
  *   S4  undo (Ctrl+Z) & Escape chains
  *   S5  visuals: green pulse, yellow flash, hidden-wins, brackets (+ drag)
  *   S6  layout sanity: docking preserved, no auto-scroll from 3D actions
+ *   S9  command layer: `view <expr>` is INDISTINGUISHABLE from the equivalent
+ *       focus gesture (same camera tween, same flash, same row feedback)
  *
  * Screenshots + [PASS]/[FAIL] lines; evidence in reports/redesign/.
  * Run from viewer/ (after npm run build):  node tests/redesign.ts [S0 S1 ...]
@@ -1178,9 +1180,192 @@ async function S8(): Promise<void> {
   });
 }
 
+// ============================ S9: command parity ==============================
+async function S9(): Promise<void> {
+  console.log("S9 — command layer: view <expr> ≡ the equivalent focus gesture");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    // camera pose = position + target (6 numbers); parity compares both
+    const camState = () =>
+      d.evaluate<number[]>(
+        `[...${V}.camera.position.toArray(), ...${V}.controls.target.toArray()]`,
+      );
+    const closeCam = (a: number[], b: number[]) => a.every((v, i) => Math.abs(v - b[i]) < 0.01);
+    const dist = () => d.evaluate<number>(`${V}.camera.position.distanceTo(${V}.controls.target)`);
+    const reset = async () => {
+      await d.evaluate(`${V}.resetCamera()`);
+      await sleep(700);
+    };
+    const rowFlashed = (re: string) =>
+      d.evaluate<boolean>(`(()=>{
+        const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+          .filter(r=>r.getBoundingClientRect().height>0);
+        const el=rows.find(r=>${re}.test(r.textContent));
+        return !!el && el.classList.contains('row-flash');
+      })()`);
+    const d0 = await dist(); // home framing distance
+
+    // -- single-entry parity: `view <subgroup path>` vs right-click on its row --
+    await expandBottomCategory(d, "/alpha/");
+    await sleep(150);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const grp=rows.find(r=>r.dataset.level==='group');
+      grp?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(300);
+    const home = await camState();
+    const rA = await cmd("view alpha.group-0.subgroup-0");
+    check("S9: view <path> resolves and reports the point count",
+      rA.status === "ok" && rA.message === "focused 100 points", JSON.stringify(rA));
+    await sleep(150);
+    check("S9: command pulses exactly the entry's points", (await flashCount(d)) === 100,
+      `flash=${await flashCount(d)}`);
+    check("S9: command flashes the mounted matching row (same row feedback)",
+      await rowFlashed("/subgroup-0\\b/"));
+    await sleep(500);
+    const camCmd = await camState();
+    check("S9: command moved the camera off home", !closeCam(home, camCmd));
+
+    await reset();
+    const subRow = (await bottomRow(d, "/subgroup-0\\b/"))!;
+    check("S9: subgroup row still mounted for the gesture half", subRow !== null);
+    await d.rightClick(subRow.x, subRow.y);
+    await sleep(150);
+    check("S9: gesture pulses the same points", (await flashCount(d)) === 100,
+      `flash=${await flashCount(d)}`);
+    check("S9: gesture flashes the same row class", await rowFlashed("/subgroup-0\\b/"));
+    await sleep(500);
+    const camGesture = await camState();
+    check("S9: command and gesture land the camera on the SAME pose",
+      closeCam(camCmd, camGesture),
+      `cmd=${camCmd.map((v) => v.toFixed(3))} gesture=${camGesture.map((v) => v.toFixed(3))}`);
+
+    // a range addressing the same subgroup frames the same 100 points
+    const rRange = await cmd("view alpha.group-0.0-0");
+    check("S9: trailing-int range addresses the same subgroup",
+      rRange.status === "ok" && rRange.message === "focused 100 points", JSON.stringify(rRange));
+
+    // -- multi-match parity: `view <glob>` vs a right-drag over the same rows --
+    await expandBottomCategory(d, "/alpha/"); // collapse back → category rows adjacent
+    await sleep(200);
+    await reset();
+    const rG = await cmd("view *a*"); // alpha + beta + gamma (solvent has no 'a')
+    check("S9: glob resolves the union across subtrees",
+      rG.status === "ok" && rG.message === "focused 1200 points", JSON.stringify(rG));
+    await sleep(150);
+    check("S9: glob command pulses the whole union", (await flashCount(d)) === 1200,
+      `flash=${await flashCount(d)}`);
+    check("S9: glob command flashes every mounted matching row",
+      (await rowFlashed("/alpha/")) && (await rowFlashed("/beta/")) && (await rowFlashed("/gamma/")));
+    await sleep(500);
+    const camGlob = await camState();
+
+    await reset();
+    const alpha = (await bottomRow(d, "/alpha/"))!;
+    const gamma = (await bottomRow(d, "/gamma/"))!;
+    await d.drag(alpha.x, alpha.y, gamma.x, gamma.y, 4, { button: "right" });
+    await sleep(150);
+    check("S9: right-drag over the same rows pulses the same union",
+      (await flashCount(d)) === 1200, `flash=${await flashCount(d)}`);
+    await sleep(500);
+    const camDrag = await camState();
+    check("S9: glob command frames the SAME union a right-drag frames",
+      closeCam(camGlob, camDrag),
+      `cmd=${camGlob.map((v) => v.toFixed(3))} drag=${camDrag.map((v) => v.toFixed(3))}`);
+
+    // -- @name parity: `view @solvent` vs clicking the committed selection name --
+    await reset();
+    const rAt = await cmd("view @solvent");
+    check("S9: @name resolves the committed selection",
+      rAt.status === "ok" && rAt.message === "focused 4800 points", JSON.stringify(rAt));
+    await sleep(650);
+    const camAt = await camState();
+    await reset();
+    const nm = (await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const blocks=[...document.querySelectorAll('#selections .sel-block')];
+      const el=blocks.find(b=>/solvent/.test(b.querySelector('.sel-name')?.textContent ?? ''));
+      if(!el) return null; const r=el.querySelector('.sel-name').getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2};
+    })()`))!;
+    await d.click(nm.x, nm.y); // name click = focus the whole selection
+    await sleep(650);
+    const camName = await camState();
+    check("S9: @name frames the selection exactly like the name-click gesture",
+      closeCam(camAt, camName),
+      `cmd=${camAt.map((v) => v.toFixed(3))} click=${camName.map((v) => v.toFixed(3))}`);
+
+    // -- commands are camera-only: no state, no undo entries -------------------
+    check("S9: commands change no selection state",
+      (await pendingEntries(d)) === 0 && (await committed(d)).length === 1);
+    check("S9: commands push nothing onto the undo stack",
+      !(await d.evaluate<boolean>(`${V}.model.canUndo`)));
+
+    // -- leaf-level (type) matching --------------------------------------------
+    const rLeaf = await cmd("view alpha.group-0.subgroup-0.t*");
+    check("S9: leaf glob matches point types (anchor excluded)",
+      rLeaf.status === "ok" && rLeaf.message === "focused 99 points", JSON.stringify(rLeaf));
+    const rLeafRange = await cmd("view alpha.group-0.subgroup-0.1-2");
+    check("S9: leaf range matches trailing ints of point types",
+      rLeafRange.status === "ok" && rLeafRange.message === "focused 50 points",
+      JSON.stringify(rLeafRange));
+
+    // -- nomatch: no camera move, one-line message ------------------------------
+    await sleep(1000); // let the last flash fade fully
+    const camBeforeMiss = await camState();
+    const rMiss = await cmd("view alpha.group-0.subgroup-99");
+    await sleep(400);
+    check("S9: empty match is nomatch, not an error", rMiss.status === "nomatch",
+      JSON.stringify(rMiss));
+    check("S9: nomatch moves nothing", closeCam(camBeforeMiss, await camState()) &&
+      (await flashCount(d)) === 0);
+
+    // -- hidden filtering (show-wins): an entirely hidden target is a nomatch ---
+    const solHead = (await selHead(d, "/solvent/"))!;
+    await d.rightClick(solHead.x, solHead.y); // hide the bulk selection
+    await sleep(200);
+    const rHidden = await cmd("view @solvent");
+    const rHiddenCat = await cmd("view solvent");
+    check("S9: an entirely hidden target is a nomatch (@name and path alike)",
+      rHidden.status === "nomatch" && rHiddenCat.status === "nomatch",
+      JSON.stringify([rHidden, rHiddenCat]));
+    check("S9: hidden nomatch moves nothing", closeCam(camBeforeMiss, await camState()));
+    const solHead2 = (await selHead(d, "/solvent/"))!;
+    await d.rightClick(solHead2.x, solHead2.y); // un-hide again
+    await sleep(200);
+
+    // -- malformed syntax & unknown verbs ---------------------------------------
+    const rE1 = await cmd("view alpha..x");
+    const rE2 = await cmd("view a[0]");
+    const rE3 = await cmd('view "unclosed');
+    check("S9: malformed syntax returns the parse message",
+      rE1.status === "error" && /empty segment/.test(rE1.message) &&
+        rE2.status === "error" && /reserved character/.test(rE2.message) &&
+        rE3.status === "error" && /unbalanced quote/.test(rE3.message),
+      JSON.stringify([rE1.message, rE2.message, rE3.message]));
+    const rV = await cmd("frobnicate alpha");
+    check("S9: unknown verb", rV.status === "error" && rV.message === "unknown command: frobnicate",
+      JSON.stringify(rV));
+    const rEmpty = await cmd("   ");
+    check("S9: blank input is an error", rEmpty.status === "error", JSON.stringify(rEmpty));
+
+    // -- `view` with no argument = the empty-space-click framing ---------------
+    await cmd("view alpha.group-0.subgroup-0"); // zoom in first
+    await sleep(700);
+    check("S9: (setup) zoomed in", (await dist()) < d0 * 0.8, `${(await dist()).toFixed(1)}`);
+    const rHome = await cmd("view");
+    await sleep(700);
+    check("S9: bare view frames the visible scene", rHome.status === "ok" &&
+      Math.abs((await dist()) - d0) < d0 * 0.1, `dist=${(await dist()).toFixed(1)} vs ${d0.toFixed(1)}`);
+    await d.screenshot(`${REPORT}/S9_command_parity.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

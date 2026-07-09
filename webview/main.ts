@@ -36,10 +36,11 @@ import { StreamingPlayer } from "./playback.ts";
 import { Transport, rejectIfErrorPayload } from "./transport.ts";
 import { RepresentationLayer } from "./representation.ts";
 import { bulkCategories, buildTree } from "./classification.ts";
-import { mountTree, type TreeHandle } from "./tree.ts";
+import { flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
-import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
+import { createCommandRegistry } from "./commands.ts";
+import { entryKey, Hierarchy, SelectionModel, type Entry } from "./sets.ts";
 import { pickPoint, selectionBounds } from "./picking.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
@@ -684,6 +685,37 @@ async function main(): Promise<void> {
     ? mountCommitted(selectionsHost, model, hierarchy, committedActions)
     : null;
 
+  // -- command layer: typed verbs drive the SAME action paths as the gestures --
+  // Flash every currently-mounted row matching one of the entries — bottom
+  // tree AND committed member lists — through the same flashRow the gesture
+  // feedback uses. Collapsed-away rows simply don't flash (no forced expand).
+  const flashEntryRows = (entries: Entry[]): void => {
+    const keys = new Set(entries.map((e) => entryKey(e)));
+    for (const row of document.querySelectorAll<HTMLElement>(
+      "#tree-host .tree-row.selectable, #selections .tree-row.selectable",
+    )) {
+      if (!keys.has(`${row.dataset.level}:${row.dataset.id}`)) continue;
+      if (row.getBoundingClientRect().height === 0) continue; // collapsed away
+      flashRow(row);
+    }
+  };
+  const commands = createCommandRegistry({
+    hierarchy,
+    pointTypes: header.points.type,
+    committedEntries: () => {
+      const byName = new Map<string, readonly Entry[]>();
+      for (const c of model.committed()) byName.set(c.name, c.set.listEntries());
+      return byName;
+    },
+    isPointHidden: (p) => model.isPointHidden(p),
+    focusPoints,
+    frameVisible: () => {
+      if (!model.editing) frameVisible(); // parked while editing, like the gesture
+    },
+    flashEntryRows,
+  });
+  const runCommand = (text: string) => commands.runCommand(text);
+
   model.onChange(() => {
     targetTouch = model.touchKeys(model.target);
     bottomTree?.refresh();
@@ -995,6 +1027,7 @@ async function main(): Promise<void> {
       hierarchy,
       model,
       actions: committedActions,
+      command: runCommand,
       refreshPoints,
       focusPoints,
       focusEntry,

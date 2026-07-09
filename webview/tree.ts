@@ -107,8 +107,9 @@ const flashTimers = new WeakMap<HTMLElement, number>();
 
 /** Transient flash: add the color class, let the standard background
  * transition swell it in, then remove it after a beat so the same transition
- * fades it back out (re-flashes just extend the hold). */
-function flashRow(row: HTMLElement, cls = "row-flash"): void {
+ * fades it back out (re-flashes just extend the hold). Exported so the
+ * command layer can play the EXACT row feedback the gestures play. */
+export function flashRow(row: HTMLElement, cls = "row-flash"): void {
   const prev = flashTimers.get(row);
   if (prev) clearTimeout(prev);
   row.classList.add(cls);

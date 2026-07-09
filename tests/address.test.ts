@@ -1,0 +1,238 @@
+/**
+ * Unit tests for the address grammar (webview/address.ts): parseTarget's AST
+ * and errors, and resolveTarget's scoped recursive descent over a hand-built
+ * Hierarchy. Pure, no DOM. Run from viewer/:  node --test tests/address.test.ts
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+
+import type { Header } from "../contract/contract.ts";
+import { Hierarchy, type Entry } from "../webview/sets.ts";
+import {
+  globMatch,
+  parseTarget,
+  resolveTarget,
+  type ParseError,
+  type TargetAst,
+} from "../webview/address.ts";
+
+/**
+ * Fixture tree (labels chosen to exercise every predicate kind per level):
+ *
+ *   cat 0 "alpha"  group 10 "g-1"  sub 100 "s1"  pts 0 "tH", 1 "t2"
+ *                                  sub 101 "s2"  pt  2 "anchor"
+ *                  group 11 "g-2"  sub 102 "s1"  pts 3 "t2", 4 "aX"   ← duplicate
+ *   cat 1 "beta"   group 12 "g-7"  sub 103 "s7"  pts 5 "tH", 6 "t9", 7 "anchor"
+ *   cat 2 "env3"   group 13 "bath" sub 104 "w1"  pts 8, 9  "w"
+ *                                  sub 105 "w2"  pts 10,11 "w"
+ *
+ * Subgroups 100 and 102 share the LABEL "s1" under different groups — the
+ * scoped-descent leak probe.
+ */
+function makeHeader(): Header {
+  const category = [0, 0, 0, 0, 0, 1, 1, 1, 2, 2, 2, 2];
+  const group_id = [10, 10, 10, 11, 11, 12, 12, 12, 13, 13, 13, 13];
+  const subgroup_id = [100, 100, 101, 102, 102, 103, 103, 103, 104, 104, 105, 105];
+  const type = ["tH", "t2", "anchor", "t2", "aX", "tH", "t9", "anchor", "w", "w", "w", "w"];
+  return {
+    version: "0.1.0", name: "t", n_points: category.length, n_frames: 1, units: "m", bbox: null,
+    points: { type, group_id, subgroup_id, category },
+    categories: ["alpha", "beta", "env3"],
+    groups: { "10": "g-1", "11": "g-2", "12": "g-7", "13": "bath" },
+    subgroups: { "100": "s1", "101": "s2", "102": "s1", "103": "s7", "104": "w1", "105": "w2" },
+    edges: [], polylines: [], channels: [],
+  };
+}
+
+const header = makeHeader();
+const hier = new Hierarchy(header);
+const none = new Map<string, readonly Entry[]>();
+
+function resolve(expr: string, committed: ReadonlyMap<string, readonly Entry[]> = none): Entry[] {
+  const ast = parseTarget(expr);
+  assert.equal(ast.kind, "target", `parse failed for "${expr}": ${(ast as ParseError).message}`);
+  return resolveTarget(ast as TargetAst, hier, header.points.type, committed);
+}
+/** Sorted "level:id" keys — resolution results are sets, order-insensitive here. */
+function keys(expr: string, committed?: ReadonlyMap<string, readonly Entry[]>): string[] {
+  return resolve(expr, committed).map((e) => `${e.level}:${e.id}`).sort();
+}
+function parseErr(expr: string): string {
+  const r = parseTarget(expr);
+  assert.equal(r.kind, "error", `expected a parse error for "${expr}"`);
+  return (r as ParseError).message;
+}
+
+// -- parsing: AST shapes -------------------------------------------------------
+
+test("parseTarget classifies predicates: star / glob / range / literal / quoted", () => {
+  const ast = parseTarget(`*.a*b.3-9."3-9",lit`) as TargetAst;
+  assert.equal(ast.kind, "target");
+  const segs = (ast.terms[0] as { segments: { predicates: unknown[] }[] }).segments;
+  assert.deepEqual(segs[0].predicates, [{ kind: "star" }]);
+  assert.deepEqual(segs[1].predicates, [{ kind: "glob", pattern: "a*b" }]);
+  assert.deepEqual(segs[2].predicates, [{ kind: "range", lo: 3, hi: 9 }]);
+  assert.deepEqual(segs[3].predicates, [
+    { kind: "literal", value: "3-9" }, // quoted — never a range
+    { kind: "literal", value: "lit" },
+  ]);
+});
+
+test("parseTarget: terms, refs, and whitespace around '+'", () => {
+  const ast = parseTarget(`  alpha.g-1.*.t2 + @x + @"my picks"  `) as TargetAst;
+  assert.equal(ast.terms.length, 3);
+  assert.equal((ast.terms[0] as { segments: unknown[] }).segments.length, 4);
+  assert.deepEqual(ast.terms[1], { kind: "ref", name: "x" });
+  assert.deepEqual(ast.terms[2], { kind: "ref", name: "my picks" });
+});
+
+// -- parsing: errors -------------------------------------------------------------
+
+test("parse errors: empty input, empty segments, empty list elements", () => {
+  assert.match(parseErr(""), /empty target expression/);
+  assert.match(parseErr("   "), /empty target expression/);
+  assert.match(parseErr("alpha..s1"), /empty segment/);
+  assert.match(parseErr(".alpha"), /empty segment/);
+  assert.match(parseErr("alpha."), /empty segment/);
+  assert.match(parseErr("a,,b"), /empty predicate/);
+  assert.match(parseErr("a,"), /empty predicate/);
+});
+
+test("parse errors: reserved characters produce clear messages", () => {
+  assert.match(parseErr("a[0]"), /reserved character "\["/);
+  assert.match(parseErr("a]"), /reserved character "\]"/);
+  assert.match(parseErr("wh?t"), /reserved character "\?"/);
+  assert.match(parseErr("?"), /reserved character "\?"/);
+});
+
+test("parse errors: quotes, depth, refs, term joins", () => {
+  assert.match(parseErr(`"unclosed`), /unbalanced quote/);
+  assert.match(parseErr(`ab"cd"`), /quote/);
+  assert.match(parseErr(`"ab"cd`), /after a quoted string/);
+  assert.match(parseErr("a.b.c.d.e"), /at most 4/);
+  assert.match(parseErr("@"), /selection name/);
+  assert.match(parseErr("@name.x"), /unexpected "\."/);
+  assert.match(parseErr("alpha beta"), /joined with "\+"/);
+  assert.match(parseErr("+alpha"), /term before "\+"/);
+  assert.match(parseErr("alpha +"), /term after "\+"/);
+});
+
+// -- resolution: literals & stars at every level ---------------------------------
+
+test("literal matches at each level; segment count = target level", () => {
+  assert.deepEqual(keys("alpha"), ["category:0"]);
+  assert.deepEqual(keys("alpha.g-1"), ["group:10"]);
+  assert.deepEqual(keys("alpha.g-1.s2"), ["subgroup:101"]);
+  assert.deepEqual(keys("alpha.g-1.s1.t2"), ["point:1"]);
+  // a k-segment path never auto-descends
+  const groupOnly = resolve("alpha.g-1");
+  assert.equal(groupOnly.length, 1);
+  assert.equal(groupOnly[0].level, "group");
+});
+
+test("star matches at each level", () => {
+  assert.deepEqual(keys("*"), ["category:0", "category:1", "category:2"]);
+  assert.deepEqual(keys("alpha.*"), ["group:10", "group:11"]);
+  assert.deepEqual(keys("alpha.g-1.*"), ["subgroup:100", "subgroup:101"]);
+  assert.deepEqual(keys("alpha.g-1.s1.*"), ["point:0", "point:1"]);
+  assert.equal(resolve("*.*.*.*").length, 12);
+  assert.ok(resolve("*.*.*.*").every((e) => e.level === "point"));
+});
+
+// -- resolution: globs -----------------------------------------------------------
+
+test("glob matches at each level (starts / ends / contains / A*C), case-sensitive", () => {
+  assert.deepEqual(keys("a*"), ["category:0"]); // starts-with
+  assert.deepEqual(keys("*a"), ["category:0", "category:1"]); // ends-with
+  assert.deepEqual(keys("*n*"), ["category:2"]); // contains
+  assert.deepEqual(keys("alpha.g*"), ["group:10", "group:11"]);
+  assert.deepEqual(keys("*.*.*.*H"), ["point:0", "point:5"]); // type ends "H"
+  assert.deepEqual(keys("*.*.*.a*X"), ["point:4"]); // starts-a-ends-X
+  assert.deepEqual(keys("ALPHA"), []); // case-sensitive
+  assert.deepEqual(keys("*.*.*.*h*"), ["point:2", "point:7"]); // 'h' only in "anchor"
+});
+
+test("scoped descent: a glob under one parent never leaks to siblings", () => {
+  // both groups have a subgroup LABELED "s1"; scope decides which resolves
+  assert.deepEqual(keys("alpha.g-1.s1"), ["subgroup:100"]);
+  assert.deepEqual(keys("alpha.g-2.s1"), ["subgroup:102"]);
+  assert.deepEqual(keys("alpha.g-1.s*"), ["subgroup:100", "subgroup:101"]);
+  assert.deepEqual(keys("alpha.g-2.s*"), ["subgroup:102"]);
+  // ...and a subtree glob under beta never reaches alpha's subgroups
+  assert.deepEqual(keys("beta.*.s*"), ["subgroup:103"]);
+});
+
+// -- resolution: ranges ----------------------------------------------------------
+
+test("range matches the trailing integer, inclusive, at every level", () => {
+  assert.deepEqual(keys("1-5"), ["category:2"]); // env3 → 3
+  assert.deepEqual(keys("alpha.1-1"), ["group:10"]); // g-1
+  assert.deepEqual(keys("alpha.1-2"), ["group:10", "group:11"]);
+  assert.deepEqual(keys("*.2-7"), ["group:11", "group:12"]); // g-2, g-7
+  assert.deepEqual(keys("alpha.*.1-1"), ["subgroup:100", "subgroup:102"]); // both "s1"s
+  assert.deepEqual(keys("beta.g-7.s7.2-9"), ["point:6"]); // t9
+});
+
+test("range: no trailing integer ⇒ no match; inverted bounds match nothing", () => {
+  assert.deepEqual(keys("env3.0-99"), []); // "bath" has no trailing int
+  assert.deepEqual(keys("beta.g-7.s7.0-8"), []); // tH/anchor no int; t9 out of range
+  assert.deepEqual(keys("alpha.9-2"), []); // lo > hi
+});
+
+// -- resolution: lists -----------------------------------------------------------
+
+test("list = union of element predicates within the same parent scope", () => {
+  assert.deepEqual(keys("alpha.g-1.s1,s2"), ["subgroup:100", "subgroup:101"]);
+  assert.deepEqual(keys("alpha.g-1,g-2"), ["group:10", "group:11"]);
+  assert.deepEqual(keys("alpha,beta"), ["category:0", "category:1"]);
+  // mixed element kinds: literal + range + glob in one list
+  assert.deepEqual(keys("alpha.g-1.s2,1-1"), ["subgroup:100", "subgroup:101"]);
+  assert.deepEqual(keys("beta.g-7.s7.anchor,t*"), ["point:5", "point:6", "point:7"]);
+  // overlapping elements don't duplicate a child
+  assert.deepEqual(keys("alpha.g*,g-1,1-2"), ["group:10", "group:11"]);
+});
+
+// -- resolution: + union ----------------------------------------------------------
+
+test("+ unions terms across subtrees, deduplicated", () => {
+  assert.deepEqual(keys("alpha + beta"), ["category:0", "category:1"]);
+  assert.deepEqual(keys("alpha + alpha"), ["category:0"]);
+  assert.deepEqual(keys("alpha.g-1.* + alpha.g-1.s1"), ["subgroup:100", "subgroup:101"]);
+  assert.deepEqual(keys("alpha.g-1 + beta.g-7.s7.t*"), ["group:10", "point:5", "point:6"]);
+});
+
+// -- resolution: @name -------------------------------------------------------------
+
+test("@name yields a committed selection's stored entries at their stored levels", () => {
+  const committed = new Map<string, readonly Entry[]>([
+    ["picks", [{ level: "subgroup", id: 100 }, { level: "point", id: 5 }]],
+    ["solvent", [{ level: "category", id: 2 }]],
+    ["my picks", [{ level: "group", id: 12 }]],
+  ]);
+  assert.deepEqual(keys("@picks", committed), ["point:5", "subgroup:100"]);
+  assert.deepEqual(keys("@solvent + env3", committed), ["category:2"]); // dedup across term kinds
+  assert.deepEqual(keys(`@"my picks"`, committed), ["group:12"]);
+  assert.deepEqual(keys("@nope", committed), []); // unknown name = empty match, not an error
+  assert.deepEqual(keys("alpha.g-1.3-9 + @picks", committed), ["point:5", "subgroup:100"]);
+});
+
+// -- resolution: quoting ------------------------------------------------------------
+
+test("quoted literals are exact — no glob, no range", () => {
+  assert.deepEqual(keys(`alpha."g-1".s1`), ["subgroup:100"]);
+  assert.deepEqual(keys(`alpha."g*"`), []); // no group literally named "g*"
+  assert.deepEqual(keys(`"1-5"`), []); // no category literally named "1-5"
+});
+
+// -- glob matcher edge cases ---------------------------------------------------------
+
+test("globMatch edge cases", () => {
+  assert.ok(globMatch("t*", "t")); // * matches empty
+  assert.ok(globMatch("*t*", "t"));
+  assert.ok(globMatch("s*1", "s1"));
+  assert.ok(globMatch("a*b*c", "aXbYc"));
+  assert.ok(!globMatch("a*a", "a")); // the two ends can't overlap
+  assert.ok(!globMatch("a*b*c", "acb"));
+  assert.ok(globMatch("*", ""));
+  assert.ok(!globMatch("ab", "abc")); // no-star pattern = exact equality
+});

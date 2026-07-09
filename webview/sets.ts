@@ -106,6 +106,12 @@ export class Hierarchy {
     return 0;
   }
 
+  /** All category entries — the tree roots (the address grammar's descent
+   * seeds), in category-index order. */
+  categoryEntries(): Entry[] {
+    return this.header.categories.map((_, id) => ({ level: "category" as const, id }));
+  }
+
   /** Direct children of a node (for carving finer holes out of coarse entries). */
   childrenOf(e: Entry): Entry[] {
     switch (e.level) {
