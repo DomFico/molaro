@@ -151,30 +151,45 @@ try {
 
   // @name.<leaf-pred>: filter the seeded selection through the real relay.
   // The solvent seed at this harness's N=6000 holds 1,600 tiny subgroups,
-  // one anchor each.
-  await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
-  await clickInput();
-  await d.insertText("view @solvent.anchor");
-  await d.key("Enter", "Enter", 13);
-  await sleep(500);
-  lines2 = await logLines();
-  lastLine = lines2[lines2.length - 1];
-  check("view @name.<literal> filters the committed selection via the relay",
+  // one anchor each; "solvent-bath" is its group label (match-anywhere).
+  const runLine = async (text: string) => {
+    await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
+    await clickInput();
+    await d.insertText(text);
+    await d.key("Enter", "Enter", 13);
+    await sleep(500);
+    const all = await logLines();
+    return all[all.length - 1];
+  };
+  lastLine = await runLine("view @solvent.anchor");
+  check("view @name.<type literal> filters the committed selection via the relay",
     /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "focused 1600 points",
     JSON.stringify(lastLine));
-  // Tab after @name. lists the SELECTION's own type tokens
+  lastLine = await runLine("view @solvent.solvent-bath");
+  check("view @name.<ancestor label> matches anywhere (group label = whole seed)",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "focused 4800 points",
+    JSON.stringify(lastLine));
+  lastLine = await runLine("view @solvent.x:y");
+  check("':' in a @name filter is the reserved-syntax parse error",
+    /term-err/.test(lastLine?.cls ?? "") && /level qualifiers/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  // Tab after @name. draws from the MERGED identity pool (types + labels):
+  // a type token completes…
   await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
   await clickInput();
-  await d.insertText("view @solvent.");
+  await d.insertText("view @solvent.an");
   await d.key("Tab", "Tab", 9);
   await sleep(400);
-  lines2 = await logLines();
-  lastLine = lines2[lines2.length - 1];
-  check("Tab after @name. prints the selection-scoped type tokens",
-    /term-echo/.test(lastLine?.cls ?? "") && lastLine?.text === "anchor  t0  t1  t2  t3",
-    JSON.stringify(lastLine));
-  check("…leaving the input unchanged (no common prefix)",
-    (await inputValue()) === "view @solvent.");
+  check("Tab after @name. completes a selection type token",
+    (await inputValue()) === "view @solvent.anchor", JSON.stringify(await inputValue()));
+  // …and so does an ancestor label from the same pool
+  await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
+  await clickInput();
+  await d.insertText("view @solvent.solvent-b");
+  await d.key("Tab", "Tab", 9);
+  await sleep(400);
+  check("Tab after @name. completes a selection ancestor label",
+    (await inputValue()) === "view @solvent.solvent-bath", JSON.stringify(await inputValue()));
 
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {

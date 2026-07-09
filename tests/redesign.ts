@@ -1441,6 +1441,41 @@ async function S9(): Promise<void> {
         rSelMiss.status === "nomatch",
       JSON.stringify([rSelLit.message, rSelList.message, rSelMiss.status]));
 
+    // match-anywhere: an ANCESTOR label now filters too (this exact form was
+    // a nomatch before) — pose parity vs a manual pick of those member rows
+    await reset();
+    const rSelSub = await cmd(`view @selection_1."subgroup-0"`);
+    check("S9: @sel.\"<subgroup label>\" resolves the selection's points under it",
+      rSelSub.status === "ok" && rSelSub.message === "focused 3 points",
+      JSON.stringify(rSelSub));
+    await sleep(650);
+    const camSelSub = await camState();
+    await reset();
+    const rows03 = await d.evaluate<{ x: number; y: number }[]>(`(()=>{
+      const ids=[${firstPointRows.map((r) => r.id).join(",")}];
+      return ids.map(id=>{
+        const el=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+          .find(r=>r.dataset.level==='point' && Number(r.dataset.id)===id
+            && r.getBoundingClientRect().height>0);
+        const b=el.getBoundingClientRect();
+        return {x:b.left+b.width/2, y:b.top+b.height/2};});
+    })()`);
+    await d.drag(rows03[0].x, rows03[0].y, rows03[2].x, rows03[2].y, 4, { button: "right" });
+    await sleep(150);
+    check("S9: the manual pick pulses the same 3 points", (await flashCount(d)) === 3,
+      `flash=${await flashCount(d)}`);
+    await sleep(500);
+    check("S9: @sel.\"<subgroup label>\" ≡ manually picking those member rows",
+      closeCam(camSelSub, await camState()),
+      `cmd=${camSelSub.map((v) => v.toFixed(3))}`);
+    const rSelGrp = await cmd("view @selection_1.group-0");
+    const rSelWrongCat = await cmd("view @selection_1.beta");
+    const rSeedSub = await cmd("view @solvent.solvent-0"); // one bulk subgroup by label
+    check("S9: ancestor filters — group hit, wrong-category nomatch, seed subgroup subset",
+      rSelGrp.message === "focused 3 points" && rSelWrongCat.status === "nomatch" &&
+        rSeedSub.message === "focused 3 points",
+      JSON.stringify([rSelGrp.message, rSelWrongCat.status, rSeedSub.message]));
+
     // unwind the detour (3 build clicks + 1 commit) so the state-purity
     // checks below still see the untouched startup state
     for (let i = 0; i < 4; i++) {

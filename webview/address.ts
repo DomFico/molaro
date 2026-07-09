@@ -28,10 +28,14 @@
  * `@name.<leaf-pred>` filters a committed selection: the selection's resolved
  * POINT SET intersected with one leaf predicate (index, #-range, literal,
  * glob, or a "," list of those — the exact predicates a path's leaf accepts).
- * A committed selection is a FLAT set with no sub-levels, so this is an
- * intersection, never a positional descent; `@name.a.b` is a parse error.
- * The trailing predicate binds tighter than `+` — `@a.H + @b.O` is two
- * independently filtered terms unioned.
+ * The predicate matches ANYWHERE on a point's identity: its leaf type token
+ * OR its subgroup / group / category label — multi-level hits union (broad by
+ * design; refine by typing a narrower predicate). A committed selection is a
+ * FLAT set with no sub-levels, so this is an intersection, never a positional
+ * descent; `@name.a.b` is a parse error. The trailing predicate binds tighter
+ * than `+` — `@a.H + @b.O` is two independently filtered terms unioned.
+ * RESERVED: `:` inside a filter predicate is a parse error, keeping the
+ * syntax free for a future explicit level qualifier (`@sel.<level>:<pred>`).
  *
  * Matching is SCOPED RECURSIVE DESCENT over the VISIBLE TREE — the same
  * `classification.ts buildTree` model the bottom panel renders — so a path
@@ -140,7 +144,12 @@ class Parser {
       let filter: Segment | undefined;
       if (this.s[this.i] === ".") {
         this.i++;
+        const filterStart = this.i;
         filter = this.segment(4); // leaf-level predicates only ("#" included)
+        if (this.s.slice(filterStart, this.i).includes(":")) {
+          // reserved for a future explicit field pin (@sel.<level>:<pred>)
+          throw new Failure(`level qualifiers (":") are not yet supported in @name filters`);
+        }
         if (this.s[this.i] === ".") {
           throw new Failure(
             `@name accepts at most one leaf predicate — a committed selection has no sub-levels`,
@@ -313,14 +322,39 @@ export function resolveTarget(
         continue;
       }
       // "@name.<leaf-pred>": INTERSECT the selection's resolved point set
-      // with one leaf predicate. Unlike path resolution — where segment
-      // count sets the entry level — the result here is ALWAYS point-level:
-      // a set of points reduced to a subset of points. The stored entries'
-      // own levels are deliberately not preserved.
+      // with one leaf predicate, matched ANYWHERE on each point's identity —
+      // its leaf type OR its subgroup / group / category label (a point hits
+      // if any field matches; multi-level hits union, deliberately broad).
+      // Unlike path resolution — where segment count sets the entry level —
+      // the result here is ALWAYS point-level: a set of points reduced to a
+      // subset of points. The stored entries' own levels are deliberately
+      // not preserved. "#" predicates match the point index, as everywhere.
       const inSel = new Set<number>();
       for (const e of stored) for (const p of hierarchy.pointsOf(e)) inSel.add(p);
+      const filter = term.filter;
+      const labelsBySub = new Map<number, string[]>(); // ancestor labels, cached per subgroup
+      const identityLabels = (p: number): string[] => {
+        const sid = hierarchy.subgroupOfPoint(p);
+        let labels = labelsBySub.get(sid);
+        if (!labels) {
+          labels = [hierarchy.label({ level: "subgroup", id: sid })];
+          const a = hierarchy.ancestorsOfSubgroup(sid);
+          if (a) {
+            labels.push(hierarchy.label({ level: "group", id: a.group }));
+            labels.push(hierarchy.label({ level: "category", id: a.category }));
+          }
+          labelsBySub.set(sid, labels);
+        }
+        return labels;
+      };
       for (const p of inSel) {
-        if (leafHit(term.filter, p, types[p] ?? "")) add({ level: "point", id: p });
+        const hit = filter.predicates.some((pr) =>
+          pr.kind === "index"
+            ? p >= pr.lo && p <= pr.hi
+            : predicateMatches(pr, types[p] ?? "") ||
+              identityLabels(p).some((l) => predicateMatches(pr, l)),
+        );
+        if (hit) add({ level: "point", id: p });
       }
       continue;
     }
@@ -463,9 +497,10 @@ export function completeTarget(
   }
   termBefore = termBefore.trim();
 
-  // "@name." → the selection's OWN distinct type tokens (scoped to the
-  // selection's point set, mirroring how path-leaf completion scopes to its
-  // parent). Anything deeper or malformed after "@" is inert.
+  // "@name." → the selection's OWN identity tokens: the distinct types AND
+  // the distinct subgroup/group/category labels represented among its points
+  // (match-anywhere completion, scoped to the selection — never the global
+  // label space). Anything deeper or malformed after "@" is inert.
   if (termBefore.startsWith("@")) {
     if (!termBefore.endsWith(".")) return none;
     const nameText = termBefore.slice(1, -1);
@@ -477,12 +512,22 @@ export function completeTarget(
     if (!stored) return none;
     const pool: string[] = [];
     const seenPts = new Set<number>();
+    const seenSubs = new Set<number>();
     for (const e of stored) {
       for (const p of hierarchy.pointsOf(e)) {
         if (seenPts.has(p)) continue;
         seenPts.add(p);
         const t = types[p];
         if (t) pool.push(t);
+        const sid = hierarchy.subgroupOfPoint(p);
+        if (seenSubs.has(sid)) continue;
+        seenSubs.add(sid);
+        pool.push(hierarchy.label({ level: "subgroup", id: sid }));
+        const a = hierarchy.ancestorsOfSubgroup(sid);
+        if (a) {
+          pool.push(hierarchy.label({ level: "group", id: a.group }));
+          pool.push(hierarchy.label({ level: "category", id: a.category }));
+        }
       }
     }
     return finish(ts, token, pool, "");

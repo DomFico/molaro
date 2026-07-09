@@ -242,12 +242,45 @@ test("@sel.#N is a containment check against the selection's point set", () => {
   assert.deepEqual(keys("@mix.#0-9", FNAMES), ["point:0", "point:1", "point:5"]);
 });
 
-test("@sel.<literal>/<glob> filter by the point type string", () => {
+test("@sel.<literal>/<glob> filter by the point type string (regression: leaf half)", () => {
   assert.deepEqual(keys("@mix.tH", FNAMES), ["point:0", "point:5"]);
   assert.deepEqual(keys("@mix.t2", FNAMES), ["point:1"]);
   assert.deepEqual(keys("@mix.t*", FNAMES), ["point:0", "point:1", "point:5"]);
   assert.deepEqual(keys("@mix.w", FNAMES), []); // type exists globally, not in sel
   assert.deepEqual(keys("@env.w", FNAMES), ["point:10", "point:11", "point:8", "point:9"]);
+});
+
+test("@sel.<pred> matches ANY ancestor label too — the previously-empty cases", () => {
+  // mix = {p0,p1 under s1/g-1/alpha; p5 under s7/g-7/beta}
+  assert.deepEqual(keys("@mix.s1", FNAMES), ["point:0", "point:1"]); // subgroup label
+  assert.deepEqual(keys(`@mix."s1"`, FNAMES), ["point:0", "point:1"]); // quoted too
+  assert.deepEqual(keys("@mix.g-7", FNAMES), ["point:5"]); // group label
+  assert.deepEqual(keys("@mix.alpha", FNAMES), ["point:0", "point:1"]); // category label
+  assert.deepEqual(keys("@mix.beta", FNAMES), ["point:5"]);
+  // globs across ancestor labels
+  assert.deepEqual(keys("@mix.g-*", FNAMES), ["point:0", "point:1", "point:5"]);
+  assert.deepEqual(keys("@mix.*7", FNAMES), ["point:5"]); // s7 / g-7
+  assert.deepEqual(keys("@env.w1", FNAMES), ["point:8", "point:9"]); // one subgroup of env
+  assert.deepEqual(keys("@env.bath", FNAMES), ["point:10", "point:11", "point:8", "point:9"]);
+});
+
+test("multi-level hits union — matches at different fields never conflict", () => {
+  // p2: type "anchor" (and category "alpha"); p8: type "w", group "bath" —
+  // one glob hits p2 via its TYPE and p8 via its LABELS; the result unions
+  const duo = new Map<string, readonly Entry[]>([
+    ["duo", [{ level: "point", id: 2 }, { level: "point", id: 8 }]],
+  ]);
+  assert.deepEqual(keys("@duo.*a*", duo), ["point:2", "point:8"]);
+  assert.deepEqual(keys("@duo.anchor", duo), ["point:2"]); // type-only hit
+  assert.deepEqual(keys("@duo.bath", duo), ["point:8"]); // label-only hit
+});
+
+test(':" is reserved in @name filters (future level qualifier) — paths unaffected', () => {
+  assert.match(parseErr("@mix.x:y"), /level qualifiers .* not yet supported/);
+  assert.match(parseErr(`@mix."x:y"`), /level qualifiers .* not yet supported/);
+  // a colon inside a PATH token stays an ordinary literal character
+  assert.equal(parseTarget("x:y").kind, "target");
+  assert.equal(parseTarget("a.b.c.x:y").kind, "target");
 });
 
 test("@sel lists union within the filter; @sel.* ≡ @sel's points (flattened)", () => {
@@ -510,12 +543,15 @@ test("completion: #-prefixed tokens are inert (indices aren't enumerable)", () =
   assert.deepEqual(comp("view alpha.g-1.s1.#1").candidates, []);
 });
 
-test("completion after @name. is scoped to the SELECTION's own type tokens", () => {
-  // NAMES: picks = subgroup 100 (types tH, t2); solvent = category 2 (type w)
-  assert.deepEqual(comp("view @picks."), { start: 12, candidates: ["t2", "tH"], applied: "t" });
+test("completion after @name. merges the selection's types AND ancestor labels", () => {
+  // picks = subgroup 100 (points 0,1): types tH,t2 under s1 / g-1 / alpha
+  assert.deepEqual(comp("view @picks."),
+    { start: 12, candidates: ["alpha", "g-1", "s1", "t2", "tH"], applied: "" });
   assert.deepEqual(comp("view @picks.t").candidates, ["t2", "tH"]);
-  assert.deepEqual(comp("view @solvent."), { start: 14, candidates: ["w"], applied: "w" });
-  assert.deepEqual(comp(`view @"my picks".`).candidates, ["t2", "tH"]); // quoted names too
+  // solvent = category 2 (points 8-11): type w under w1,w2 / bath / env3
+  assert.deepEqual(comp("view @solvent.").candidates, ["bath", "env3", "w", "w1", "w2"]);
+  assert.deepEqual(comp("view @solvent.w").candidates, ["w", "w1", "w2"]);
+  assert.deepEqual(comp(`view @"my picks".`).candidates, ["alpha", "g-1", "s1", "t2", "tH"]);
   assert.deepEqual(comp("view @picks.#1").candidates, []); // # stays inert
   assert.deepEqual(comp("view @nope.").candidates, []); // unknown selection
   assert.deepEqual(comp("view @picks.x.").candidates, []); // no second level
