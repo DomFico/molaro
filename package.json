@@ -22,6 +22,10 @@
       {
         "command": "viewer.openFile",
         "title": "Open in Point Viewer"
+      },
+      {
+        "command": "viewer.openTerminal",
+        "title": "Point Viewer: Open Terminal"
       }
     ],
     "menus": {
@@ -37,7 +41,7 @@
   "scripts": {
     "build": "npm run build:extension && npm run build:webview",
     "build:extension": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=dist/extension.cjs",
-    "build:webview": "esbuild webview/main.ts --bundle --format=iife --minify --outfile=dist/webview/main.js",
+    "build:webview": "esbuild webview/main.ts webview/terminal.ts --bundle --format=iife --minify --outdir=dist/webview",
     "typecheck": "tsc --noEmit",
     "fixtures": "python3 -m tests.make_fixtures && python3 tests/make_webview_fixture.py",
     "test": "node --test tests/contract.test.ts tests/geometry.test.ts tests/framing.test.ts tests/playback.test.ts tests/producer_protocol.test.ts tests/classification.test.ts tests/picking.test.ts tests/sets.test.ts tests/address.test.ts"

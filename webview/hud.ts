@@ -70,6 +70,8 @@ export const HUD_CSS = /* css */ `
   #clear-btn:hover:not(:disabled) { background: #4a4a4a; }
   #clear-btn:disabled { color: #71817c; border-color: #47524e; cursor: default; }
   #clear-btn.confirm { color: #3a1010; background: #e8a9a9; border-color: #b96c6c; }
+  #terminal-btn { color: #ccc; background: #3a3a3a; border: 1px solid #555; }
+  #terminal-btn:hover { background: #4a4a4a; }
 
   /* collapsed: hide the panel + divider; a reopen tab sits at the last dock edge */
   #root.panel-collapsed #sidebar, #root.panel-collapsed #divider { display: none; }
@@ -237,6 +239,7 @@ export const HUD_BODY = /* html */ `
       <div id="divider" title="drag to resize the panel"></div>
       <div id="app">
         <div id="viewer-actions">
+          <button id="terminal-btn" title="Open the command terminal">Terminal</button>
           <button id="clear-btn" disabled>Clear</button>
           <button id="commit-btn" disabled>Create selection</button>
         </div>

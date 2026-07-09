@@ -25,6 +25,7 @@ import { parseArgs } from "node:util";
 
 import { ProducerBroker } from "../src/broker.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
+import { TERMINAL_BODY, TERMINAL_CSS } from "../webview/terminalhud.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const { values: args } = parseArgs({
@@ -95,7 +96,7 @@ const TINY_PNG = Buffer.from(
   "base64",
 );
 
-const harnessHtml = (hold: boolean, selftest = false) => /* html */ `<!DOCTYPE html>
+const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* html */ `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -129,7 +130,16 @@ const harnessHtml = (hold: boolean, selftest = false) => /* html */ `<!DOCTYPE h
       };
       window.acquireVsCodeApi = () => ({
         postMessage(msg) {
-          if (!msg || msg.type !== "toProducer") return;
+          if (!msg) return;
+          // HOST LOOPBACK: the real extension host relays these verbatim
+          // between the viewer and terminal panels; in the single-page
+          // harness both live in one document, so re-dispatch as an incoming
+          // message (async, mirroring postMessage delivery).
+          if (msg.type === "command" || msg.type === "commandResult" || msg.type === "openTerminal") {
+            setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: msg })), 0);
+            return;
+          }
+          if (msg.type !== "toProducer") return;
           const seq = sendSeq++;
           fetch("/rpc", {
             method: "POST",
@@ -172,6 +182,12 @@ const harnessHtml = (hold: boolean, selftest = false) => /* html */ `<!DOCTYPE h
       } catch (e) { log("ERROR", e && e.message); }
     }, 3000);
   </script>` : ""}
+  ${terminal ? `
+  <!-- terminal smoke surface: the REAL terminal bundle over the REAL viewer,
+       host routing emulated by the shim's loopback above -->
+  <style nonce="${NONCE}">${TERMINAL_CSS}</style>
+  ${TERMINAL_BODY}
+  <script nonce="${NONCE}" src="/terminal.js"></script>` : ""}
 </body>
 </html>`;
 
@@ -190,9 +206,12 @@ const server = http.createServer((req, res) => {
         res.end(String(err));
       }
     });
-  } else if (req.url === "/" || req.url === "/harness.html" || req.url === "/hold" || req.url === "/selftest") {
+  } else if (
+    req.url === "/" || req.url === "/harness.html" || req.url === "/hold" ||
+    req.url === "/selftest" || req.url === "/terminal"
+  ) {
     res.writeHead(200, { "content-type": "text/html" });
-    res.end(harnessHtml(req.url === "/hold", req.url === "/selftest"));
+    res.end(harnessHtml(req.url === "/hold", req.url === "/selftest", req.url === "/terminal"));
   } else if (req.url === "/slow.png") {
     setTimeout(() => {
       res.writeHead(200, { "content-type": "image/png" });
@@ -201,6 +220,9 @@ const server = http.createServer((req, res) => {
   } else if (req.url === "/main.js") {
     res.writeHead(200, { "content-type": "text/javascript" });
     res.end(readFileSync(join(root, "dist", "webview", "main.js")));
+  } else if (req.url === "/terminal.js") {
+    res.writeHead(200, { "content-type": "text/javascript" });
+    res.end(readFileSync(join(root, "dist", "webview", "terminal.js")));
   } else {
     res.writeHead(404);
     res.end();

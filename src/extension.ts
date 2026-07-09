@@ -21,6 +21,7 @@ import { randomBytes } from "node:crypto";
 
 import { ProducerBroker } from "./broker.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
+import { TERMINAL_BODY, TERMINAL_CSS } from "../webview/terminalhud.ts";
 
 const DEFAULT_N_POINTS = 20_000;
 const DEFAULT_N_FRAMES = 600;
@@ -74,6 +75,18 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
+  // viewer.openTerminal — the command terminal for the most recently active
+  // viewer panel (the panel's own "Terminal" button is the primary entry).
+  context.subscriptions.push(
+    vscode.commands.registerCommand("viewer.openTerminal", () => {
+      if (!lastViewerSession) {
+        void vscode.window.showInformationMessage("Open a Point Viewer panel first.");
+        return;
+      }
+      lastViewerSession.openTerminal();
+    }),
+  );
+
   // viewer.openFile — open the viewer directly on a data file (Increment 4.6),
   // invokable from the Explorer context menu. The data-source layer resolves a
   // companion topology for trajectory files; structure files open standalone.
@@ -108,6 +121,13 @@ interface PanelOpts {
   pythonPath?: string;
 }
 
+/** The viewer panel the `viewer.openTerminal` command targets — the most
+ * recently created or focused one. */
+interface ViewerSession {
+  openTerminal(): void;
+}
+let lastViewerSession: ViewerSession | null = null;
+
 function openPanel(
   context: vscode.ExtensionContext,
   producerLog: vscode.OutputChannel,
@@ -141,6 +161,40 @@ function openPanel(
     },
   );
 
+  // Command terminal — a sibling webview panel per viewer. The host is a dumb
+  // relay: terminal → viewer {type:"command", id, text}; viewer → terminal
+  // {type:"commandResult", id, status, message}. All resolution/execution is
+  // viewer-side (webview/commands.ts).
+  let terminal: vscode.WebviewPanel | null = null;
+  const openTerminal = (): void => {
+    if (terminal) {
+      terminal.reveal(undefined, true);
+      return;
+    }
+    terminal = vscode.window.createWebviewPanel(
+      "viewerTerminal",
+      `${opts.title} — Terminal`,
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
+      {
+        enableScripts: true,
+        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist", "webview")],
+      },
+    );
+    terminal.webview.html = renderTerminalHtml(terminal.webview, context.extensionUri);
+    terminal.webview.onDidReceiveMessage((msg: { type?: string }) => {
+      if (msg?.type === "command") void panel.webview.postMessage(msg);
+    });
+    terminal.onDidDispose(() => {
+      terminal = null;
+    });
+  };
+
+  const session: ViewerSession = { openTerminal };
+  lastViewerSession = session;
+  panel.onDidChangeViewState((e) => {
+    if (e.webviewPanel.active) lastViewerSession = session;
+  });
+
   panel.webview.onDidReceiveMessage((msg: { type?: string; request?: unknown }) => {
     if (msg?.type === "toProducer" && msg.request) {
       try {
@@ -151,10 +205,18 @@ function openPanel(
           message: err instanceof Error ? err.message : String(err),
         });
       }
+    } else if (msg?.type === "openTerminal") {
+      openTerminal();
+    } else if (msg?.type === "commandResult") {
+      void terminal?.webview.postMessage(msg);
     }
   });
 
-  panel.onDidDispose(() => broker.dispose());
+  panel.onDidDispose(() => {
+    broker.dispose();
+    terminal?.dispose();
+    if (lastViewerSession === session) lastViewerSession = null;
+  });
   broker.start();
   panel.webview.html = renderHtml(panel.webview, context.extensionUri);
 }
@@ -197,6 +259,34 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 <body>
   ${HUD_BODY}
   <script nonce="${nonce}">window.__VIEWER__ = { autoplay: false };</script>
+  <script nonce="${nonce}" src="${scriptUri}"></script>
+</body>
+</html>`;
+}
+
+function renderTerminalHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+  const nonce = randomBytes(16).toString("base64");
+  const scriptUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, "dist", "webview", "terminal.js"),
+  );
+
+  const csp = [
+    "default-src 'none'",
+    `script-src 'nonce-${nonce}' ${webview.cspSource}`,
+    `style-src ${webview.cspSource} 'nonce-${nonce}'`,
+  ].join("; ");
+
+  return /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="${csp}">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Point Viewer Terminal</title>
+  <style nonce="${nonce}">${TERMINAL_CSS}</style>
+</head>
+<body>
+  ${TERMINAL_BODY}
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

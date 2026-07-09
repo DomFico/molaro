@@ -39,7 +39,7 @@ import { bulkCategories, buildTree } from "./classification.ts";
 import { flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
-import { createCommandRegistry } from "./commands.ts";
+import { createCommandRegistry, type CommandResult } from "./commands.ts";
 import { entryKey, Hierarchy, SelectionModel, type Entry } from "./sets.ts";
 import { pickPoint, selectionBounds } from "./picking.ts";
 
@@ -364,7 +364,21 @@ async function main(): Promise<void> {
   const cfg: ViewerConfig = (window as unknown as { __VIEWER__?: ViewerConfig }).__VIEWER__ ?? {};
   const host = acquireVsCodeApi();
   const transport = new Transport((msg) => host.postMessage(msg));
-  window.addEventListener("message", (e: MessageEvent) => transport.handleMessage(e.data));
+  // Commands from the terminal panel (routed through the host) run through the
+  // SAME dispatcher the test seam uses; rebound once the registry exists below.
+  let runCommand: (text: string) => CommandResult = () => ({
+    status: "error",
+    message: "viewer is still loading",
+  });
+  window.addEventListener("message", (e: MessageEvent) => {
+    const msg = e.data as { type?: string; id?: number; text?: string };
+    if (msg?.type === "command") {
+      const result = runCommand(String(msg.text ?? ""));
+      host.postMessage({ type: "commandResult", id: msg.id, ...result });
+      return;
+    }
+    transport.handleMessage(e.data);
+  });
 
   setStatus("requesting header…");
   const headerBytes = await transport.request({ type: "header" });
@@ -714,7 +728,10 @@ async function main(): Promise<void> {
     },
     flashEntryRows,
   });
-  const runCommand = (text: string) => commands.runCommand(text);
+  runCommand = (text: string) => commands.runCommand(text);
+  document.getElementById("terminal-btn")?.addEventListener("click", () => {
+    host.postMessage({ type: "openTerminal" });
+  });
 
   model.onChange(() => {
     targetTouch = model.touchKeys(model.target);
