@@ -12,6 +12,9 @@
  *   S6  layout sanity: docking preserved, no auto-scroll from 3D actions
  *   S9  command layer: `view <expr>` is INDISTINGUISHABLE from the equivalent
  *       focus gesture (same camera tween, same flash, same row feedback)
+ *   S10 flash-parity matrix: for every command shape (term count/kind/level,
+ *       both panel surfaces) the flashed rows == mounted rows intersecting
+ *       the resolved point set — exactly, no missing term, no extra rows
  *
  * Screenshots + [PASS]/[FAIL] lines; evidence in reports/redesign/.
  * Run from viewer/ (after npm run build):  node tests/redesign.ts [S0 S1 ...]
@@ -1637,9 +1640,139 @@ async function S9(): Promise<void> {
   });
 }
 
+// ============================ S10: flash-parity matrix ========================
+async function S10(): Promise<void> {
+  console.log("S10 — flash-parity: flashed rows == mounted rows ∩ resolved set, all shapes");
+  await withDriver(async (d) => {
+    // -- setup: a committed selection with MIXED-LEVEL members (a subgroup
+    // entry + two point entries of different types), its member list open,
+    // and the bottom tree expanded alpha → group-0 → subgroup-0 drilled —
+    // so both surfaces carry mounted rows at several levels
+    await d.evaluate(`(()=>{
+      const v = ${V};
+      v.refreshPoints(v.model.addToTarget({level:'subgroup', id:0}));
+      v.refreshPoints(v.model.addToTarget({level:'point', id:301}));
+      v.refreshPoints(v.model.addToTarget({level:'point', id:302}));
+      const sel = v.model.commit();
+      v.refreshPoints(sel.set.resolvedPoints());
+    })()`);
+    await sleep(250);
+    await d.evaluate(`(()=>{
+      const b=[...document.querySelectorAll('#selections .sel-block')]
+        .find(x=>/selection_1/.test(x.querySelector('.sel-name').textContent));
+      b.querySelector('.caret').click();
+    })()`);
+    await sleep(200);
+    await expandBottomCategory(d, "/alpha/");
+    await sleep(200);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      rows.find(r=>r.dataset.level==='group')?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(250);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      rows.find(r=>r.dataset.level==='subgroup')?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(300);
+    const undoBase = await d.evaluate<number>(`${V}.model.undoDepth`);
+
+    // -- the invariant audit, evaluated in ONE tick right after the command:
+    // for every mounted row, does (row's points ∩ resolved set ≠ ∅) equal
+    // (row flashed)? Reports exact misses both ways.
+    const audit = (expr: string) =>
+      d.evaluate<{ status: string; expected: number; flashed: number; missing: number; extra: number }>(
+        `(()=>{
+          const v = ${V};
+          const res = v.command(${JSON.stringify("view ")} + ${JSON.stringify(expr)});
+          const pts = new Set(v.debug.resolvePoints(${JSON.stringify(expr)}));
+          let expected=0, flashed=0, missing=0, extra=0;
+          for (const r of document.querySelectorAll('#tree-host .tree-row.selectable, #selections .tree-row.selectable')) {
+            if (r.getBoundingClientRect().height === 0) continue; // unmounted: must not flash
+            const level=r.dataset.level, id=Number(r.dataset.id);
+            const hit = level==='point' ? pts.has(id)
+              : v.hierarchy.pointsOf({level, id}).some((p)=>pts.has(p));
+            const fl = r.classList.contains('row-flash');
+            if (hit) expected++;
+            if (fl) flashed++;
+            if (hit && !fl) missing++;
+            if (!hit && fl) extra++;
+          }
+          return { status: res.status, expected, flashed, missing, extra };
+        })()`,
+      );
+
+    const matrix: [string, string][] = [
+      // single term, one per level
+      ["path→category", "alpha"],
+      ["path→group", "alpha.group-0"],
+      ["path→subgroup", "alpha.group-0.subgroup-0"],
+      ["path→point (#)", "alpha.group-0.subgroup-0.#5"],
+      // leaf shapes
+      ["leaf glob", "alpha.group-0.*.t*"],
+      ["leaf list", "alpha.group-0.subgroup-0.t1,t2"],
+      ["numeric label range", "alpha.group-0.0-0"],
+      ["#index", "#5"],
+      ["#index range", "#5-25"],
+      // @name whole + filtered at every identity level
+      ["@name whole", "@selection_1"],
+      ["@name.type", "@selection_1.t1"],
+      ["@name.subgroup-label", `@selection_1."subgroup-0"`],
+      ["@name.group-label", "@selection_1.group-0"],
+      ["@name.category-label", "@selection_1.alpha"],
+      // cross-level unions — the two REPORTED regressions first
+      ["REPORTED @label + @type", `@selection_1."subgroup-0" + @selection_1.t1`],
+      ["REPORTED path + path.type", "alpha.group-0.subgroup-0 + alpha.group-0.subgroup-0.t1"],
+      ["path + #index", "alpha.group-0.subgroup-3 + #5"],
+      ["3-term cross-level", "beta + @selection_1.t2 + #5-10"],
+      // collapsed surfaces: only the mounted intersecting rows may flash
+      ["collapsed branch", "gamma"],
+      ["collapsed bulk", "solvent"],
+    ];
+    for (const [label, expr] of matrix) {
+      const r = await audit(expr);
+      check(`S10 [${label}]: flashed == mounted ∩ resolved (${r.expected} rows)`,
+        r.status === "ok" && r.expected > 0 && r.missing === 0 && r.extra === 0 &&
+          r.flashed === r.expected,
+        JSON.stringify(r));
+      await sleep(650); // let this case's flashes expire before the next
+    }
+
+    // camera frames the FULL union: command pose == focusPoints(resolved set)
+    for (const expr of [`@selection_1."subgroup-0" + @selection_1.t1`,
+                        "alpha.group-0.subgroup-3 + #5"]) {
+      await d.evaluate(`${V}.resetCamera()`);
+      await sleep(700);
+      await d.evaluate(`${V}.focusPoints(${V}.debug.resolvePoints(${JSON.stringify(expr)}))`);
+      await sleep(650);
+      const direct = await d.evaluate<number[]>(
+        `[...${V}.camera.position.toArray(), ...${V}.controls.target.toArray()]`);
+      await d.evaluate(`${V}.resetCamera()`);
+      await sleep(700);
+      await d.evaluate(`${V}.command(${JSON.stringify("view " + expr)})`);
+      await sleep(650);
+      const viaCmd = await d.evaluate<number[]>(
+        `[...${V}.camera.position.toArray(), ...${V}.controls.target.toArray()]`);
+      check(`S10: camera frames the full union — ${expr}`,
+        direct.every((v, i) => Math.abs(v - viaCmd[i]) < 0.01),
+        `direct=${direct.map((v) => v.toFixed(2))} cmd=${viaCmd.map((v) => v.toFixed(2))}`);
+    }
+
+    // read-only: the whole matrix mutated nothing
+    check("S10: the matrix changed no state and pushed no undo entries",
+      (await pendingEntries(d)) === 0 && (await committed(d)).length === 2 &&
+        (await d.evaluate<number>(`${V}.model.undoDepth`)) === undoBase &&
+        (await editingName(d)) === null,
+      `undo=${await d.evaluate<number>(`${V}.model.undoDepth`)} vs base=${undoBase}`);
+    await d.screenshot(`${REPORT}/S10_flash_parity.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

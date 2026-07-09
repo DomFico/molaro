@@ -417,3 +417,32 @@ test("undo of delete restores the selection with its hidden flag", () => {
   assert.equal(m.committed().length, 1);
   assert.ok(m.isPointHidden(2), "restored still hidden");
 });
+
+// -- entryIntersects: the point-set row matching behind command flash-parity --
+
+test("entryIntersects: any level vs a resolved point set (early-exit scan)", () => {
+  const h = new Hierarchy(makeHeader());
+  const set = new Set([1, 4]); // one point under sub0/grp0/cat0, one under sub2/grp1/cat1
+  assert.ok(h.entryIntersects(pt(1), set));
+  assert.ok(!h.entryIntersects(pt(0), set));
+  assert.ok(h.entryIntersects(sub(0), set)); // {0,1} ∋ 1
+  assert.ok(!h.entryIntersects(sub(1), set)); // {2}
+  assert.ok(h.entryIntersects(grp(1), set)); // {3,4,5} ∋ 4
+  assert.ok(h.entryIntersects(cat(0), set) && h.entryIntersects(cat(1), set));
+  assert.ok(!h.entryIntersects(cat(0), new Set<number>())); // empty set matches nothing
+});
+
+test("point-set row selection: rows chosen to flash = rows intersecting the set", () => {
+  // a mounted-row simulation across every level; a MULTI-LEVEL resolved set
+  // (a whole subgroup's points + one stray point) selects exactly the rows
+  // whose coverage intersects — entry identity plays no part
+  const h = new Hierarchy(makeHeader());
+  const mounted: Entry[] = [cat(0), cat(1), grp(0), grp(1), sub(0), sub(1), sub(2), pt(0), pt(2), pt(5)];
+  const resolved = new Set([...h.pointsOf(sub(0)), 5]); // {0,1} ∪ {5}
+  const flashed = mounted.filter((e) => h.entryIntersects(e, resolved));
+  assert.deepEqual(
+    flashed.map((e) => entryKey(e)),
+    ["category:0", "category:1", "group:0", "group:1", "subgroup:0", "subgroup:2", "point:0", "point:5"],
+    "sub(1) {2} and pt(2) don't intersect; everything covering 0,1,5 does",
+  );
+});

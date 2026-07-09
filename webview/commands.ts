@@ -42,8 +42,10 @@ export interface CommandContext {
   focusPoints(points: number[]): void;
   /** The empty-space-click path: frame the visible scene (parked while editing). */
   frameVisible(): void;
-  /** Flash every currently-mounted row for these entries (tree.ts flashRow). */
-  flashEntryRows(entries: Entry[]): void;
+  /** Flash every currently-mounted row whose points intersect this resolved
+   * set — point-set matching, so term kind/level never changes which rows
+   * light (main.ts flashPointRows; rides the gesture flashRow). */
+  flashPointRows(points: readonly number[]): void;
 }
 
 export class CommandRegistry {
@@ -105,7 +107,7 @@ export function makeViewHandler(ctx: CommandContext): CommandHandler {
       return { status: "nomatch", message: `nothing matches "${args}"` };
     }
     ctx.focusPoints(points); // the same call the right-drag union-focus makes
-    ctx.flashEntryRows(entries);
+    ctx.flashPointRows(points); // the FULL union — term count/kind/level irrelevant
     return { status: "ok", message: `focused ${points.length} points` };
   };
 }

@@ -40,8 +40,8 @@ import { flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
 import { createCommandRegistry, makeRunComplete, type CommandResult } from "./commands.ts";
-import type { Completion } from "./address.ts";
-import { entryKey, Hierarchy, SelectionModel, type Entry } from "./sets.ts";
+import { parseTarget, resolveTarget, type Completion } from "./address.ts";
+import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
 import { pickPoint, selectionBounds } from "./picking.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
@@ -712,17 +712,27 @@ async function main(): Promise<void> {
     : null;
 
   // -- command layer: typed verbs drive the SAME action paths as the gestures --
-  // Flash every currently-mounted row matching one of the entries — bottom
-  // tree AND committed member lists — through the same flashRow the gesture
-  // feedback uses. Collapsed-away rows simply don't flash (no forced expand).
-  const flashEntryRows = (entries: Entry[]): void => {
-    const keys = new Set(entries.map((e) => entryKey(e)));
+  // FLASH-PARITY INVARIANT: for any command-driven focus, every currently-
+  // mounted row whose covered points intersect the resolved set flashes — in
+  // the bottom tree AND the committed member lists — and no other row does,
+  // independent of how many terms the expression had, which term contributed
+  // a point, or what level each term resolved at. Matching is POINT-SET
+  // based, never entry-identity based (a subgroup-derived and a leaf-derived
+  // term over the same points light the same rows). Unmounted rows
+  // (collapsed branch, scrolled out of a virtual list) don't flash — the
+  // no-force-expand rule stands. Flashing rides the same flashRow the
+  // gesture feedback uses.
+  const flashPointRows = (points: readonly number[]): void => {
+    const set = new Set(points);
     for (const row of document.querySelectorAll<HTMLElement>(
       "#tree-host .tree-row.selectable, #selections .tree-row.selectable",
     )) {
-      if (!keys.has(`${row.dataset.level}:${row.dataset.id}`)) continue;
-      if (row.getBoundingClientRect().height === 0) continue; // collapsed away
-      flashRow(row);
+      if (row.getBoundingClientRect().height === 0) continue; // not mounted
+      const entry: Entry = {
+        level: row.dataset.level as Entry["level"],
+        id: Number(row.dataset.id),
+      };
+      if (hierarchy.entryIntersects(entry, set)) flashRow(row);
     }
   };
   const commandContext = {
@@ -738,7 +748,7 @@ async function main(): Promise<void> {
     frameVisible: () => {
       if (!model.editing) frameVisible(); // parked while editing, like the gesture
     },
-    flashEntryRows,
+    flashPointRows,
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);
@@ -1080,6 +1090,26 @@ async function main(): Promise<void> {
           let s = 0;
           for (let i = 0; i < visible.length; i++) if (visible[i] > 0.5) s++;
           return s;
+        },
+        /** resolved point union for a target expression — lets flash-parity
+         * audits compare flashed rows against the set a command resolves. */
+        resolvePoints: (expr: string): number[] => {
+          const ast = parseTarget(expr);
+          if (ast.kind === "error") return [];
+          const entries = resolveTarget(
+            ast, fullTree, hierarchy, header.points.type, commandContext.committedEntries(),
+          );
+          const seen = new Set<number>();
+          const out: number[] = [];
+          for (const e of entries) {
+            for (const p of hierarchy.pointsOf(e)) {
+              if (!seen.has(p)) {
+                seen.add(p);
+                out.push(p);
+              }
+            }
+          }
+          return out;
         },
         /** number of points VISIBLY pulsing in the active focus flash —
          * hidden points carry the flag but the overlay gates them out, so

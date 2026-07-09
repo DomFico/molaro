@@ -189,6 +189,14 @@ export class Hierarchy {
     return this.bySubgroup.get(subgroupId) ?? [];
   }
 
+  /** Does the entry cover at least one of these points? Early-exit scan —
+   * the point-set row matching the command layer's flash-parity relies on. */
+  entryIntersects(e: Entry, points: ReadonlySet<number>): boolean {
+    if (e.level === "point") return points.has(e.id);
+    for (const p of this.pointsOf(e)) if (points.has(p)) return true;
+    return false;
+  }
+
   label(e: Entry): string {
     const h = this.header;
     switch (e.level) {
