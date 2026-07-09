@@ -49,15 +49,20 @@ export interface CommandContext {
 }
 
 export class CommandRegistry {
-  private readonly handlers = new Map<string, CommandHandler>();
+  private readonly entries = new Map<string, { handler: CommandHandler; description: string }>();
 
-  register(verb: string, handler: CommandHandler): void {
-    this.handlers.set(verb, handler);
+  register(verb: string, handler: CommandHandler, description = ""): void {
+    this.entries.set(verb, { handler, description });
   }
 
   /** Registered verb names (completion pool — grows with every new verb). */
   verbs(): string[] {
-    return [...this.handlers.keys()];
+    return [...this.entries.keys()];
+  }
+
+  /** The one-line description a verb registered with (`help <verb>`). */
+  describe(verb: string): string | undefined {
+    return this.entries.get(verb)?.description;
   }
 
   /** Dispatch: leading token = verb, remainder = the handler's argument. */
@@ -67,9 +72,9 @@ export class CommandRegistry {
     const space = trimmed.search(/\s/);
     const verb = space < 0 ? trimmed : trimmed.slice(0, space);
     const args = space < 0 ? "" : trimmed.slice(space + 1).trim();
-    const handler = this.handlers.get(verb);
-    if (!handler) return { status: "error", message: `unknown command: ${verb}` };
-    return handler(args);
+    const entry = this.entries.get(verb);
+    if (!entry) return { status: "error", message: `unknown command: ${verb}` };
+    return entry.handler(args);
   }
 }
 
@@ -112,11 +117,49 @@ export function makeViewHandler(ctx: CommandContext): CommandHandler {
   };
 }
 
+/**
+ * The `help` summary. KEEP IN SYNC with the quick-reference table at the top
+ * of docs/COMMANDS.md — the two carry the same content for different surfaces
+ * and must be updated together.
+ */
+export const HELP_TEXT = [
+  "address grammar — category.group.subgroup.point-type (segment count = level)",
+  "  predicates   exact label · * · glob (ab*, *z, *m*) · lo-hi (label integer) · a,b,c list",
+  '  "…"          quote labels containing spaces or other delimiter characters',
+  "  #N  #lo-hi   point(s) by contract index — bare lo-hi is a LABEL range; # means index",
+  "  @name        a committed selection; @name.<pred> keeps points whose type OR any",
+  "               ancestor label matches (one trailing predicate only)",
+  "  a + b        union of terms",
+  "  view <expr>  frame it (hidden points included); bare view frames the visible scene",
+  'errors: a parse error = malformed syntax · "nothing matches" = valid syntax, empty result',
+  "full reference: docs/COMMANDS.md",
+].join("\n");
+
+/** `help` / `?` — the grammar summary; `help <verb>` describes one verb. */
+export function makeHelpHandler(registry: CommandRegistry): CommandHandler {
+  return (args: string): CommandResult => {
+    if (args === "") return { status: "ok", message: HELP_TEXT };
+    const verb = args.split(/\s+/)[0];
+    const description = registry.describe(verb);
+    if (description === undefined) {
+      return { status: "nomatch", message: `no such command: ${verb}` };
+    }
+    return { status: "ok", message: `${verb} — ${description}` };
+  };
+}
+
 /** The viewer's registry with the built-in verbs installed — through the same
  * `register` mechanism any future verb will use. */
 export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   const registry = new CommandRegistry();
-  registry.register("view", makeViewHandler(ctx));
+  registry.register(
+    "view",
+    makeViewHandler(ctx),
+    "frame the resolved target (hidden points included); bare view frames the visible scene",
+  );
+  const help = makeHelpHandler(registry);
+  registry.register("help", help, "this grammar summary; help <verb> describes one verb");
+  registry.register("?", help, "alias of help");
   return registry;
 }
 

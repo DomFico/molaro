@@ -35,6 +35,17 @@ Open source under the [MIT License](LICENSE).
 
 ---
 
+## Documentation
+
+- [docs/COMMANDS.md](docs/COMMANDS.md) — the terminal command reference: the
+  full address grammar (paths, globs, ranges, `#` point indices, `@name`
+  selection filters, `+` union), with worked examples and the parse-error vs
+  nomatch debugging guide. Also the context a command-generation layer
+  consumes.
+- [docs/COMMAND_LAYER.md](docs/COMMAND_LAYER.md) — the command layer's
+  architecture note: layering and purity fences, the registry, tree-parity and
+  flash-parity invariants, reserved syntax, deferrals, and test topology.
+
 ## Architecture — a VS Code extension in two decoupled halves
 
 Molaro visualizes large time-series 3D point datasets, built as two decoupled

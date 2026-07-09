@@ -191,6 +191,27 @@ try {
   check("Tab after @name. completes a selection ancestor label",
     (await inputValue()) === "view @solvent.solvent-bath", JSON.stringify(await inputValue()));
 
+  // help through the real relay, and verb autocomplete offering it
+  lastLine = await runLine("help");
+  check("help prints the grammar summary through the relay",
+    /term-ok/.test(lastLine?.cls ?? "") && /docs\/COMMANDS\.md/.test(lastLine?.text ?? "") &&
+      /@name/.test(lastLine?.text ?? "") && /#N/.test(lastLine?.text ?? ""),
+    (lastLine?.text ?? "").slice(0, 80));
+  lastLine = await runLine("? view");
+  check("? is the help alias; help <verb> prints the verb's one-liner",
+    /term-ok/.test(lastLine?.cls ?? "") && /^view — /.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
+  await clickInput();
+  await d.key("Tab", "Tab", 9); // empty prompt → the verb list
+  await sleep(400);
+  lines2 = await logLines();
+  lastLine = lines2[lines2.length - 1];
+  check("Tab at an empty prompt lists the verbs, help included",
+    /term-echo/.test(lastLine?.cls ?? "") && /\bhelp\b/.test(lastLine?.text ?? "") &&
+      /\bview\b/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();
