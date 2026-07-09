@@ -227,6 +227,61 @@ test("quoted literals are exact — no glob, no range", () => {
   assert.deepEqual(keys(`"1-5"`), []); // no category literally named "1-5"
 });
 
+// -- the #N point-index axis ----------------------------------------------------------
+
+test("#N parses as a standalone points term; #lo-hi as a range of indices", () => {
+  const one = parseTarget("#161") as TargetAst;
+  assert.deepEqual(one.terms, [{ kind: "points", specs: [{ lo: 161, hi: 161 }] }]);
+  const range = parseTarget("#156-187") as TargetAst;
+  assert.deepEqual(range.terms, [{ kind: "points", specs: [{ lo: 156, hi: 187 }] }]);
+  const list = parseTarget("#3,#7-8") as TargetAst;
+  assert.deepEqual(list.terms, [{ kind: "points", specs: [{ lo: 3, hi: 3 }, { lo: 7, hi: 8 }] }]);
+});
+
+test("standalone #N resolves point entries unconditionally (no scope)", () => {
+  assert.deepEqual(keys("#5"), ["point:5"]);
+  assert.deepEqual(keys("#3-6"), ["point:3", "point:4", "point:5", "point:6"]);
+  assert.deepEqual(keys("#5,#7"), ["point:5", "point:7"]);
+  assert.deepEqual(keys("#5 + beta"), ["category:1", "point:5"]); // + composes
+});
+
+test("out-of-range indices are an empty match (nomatch), never an error", () => {
+  assert.deepEqual(keys("#500"), []); // n_points = 12
+  assert.deepEqual(keys("#10-500"), ["point:10", "point:11"]); // clamped
+  assert.deepEqual(keys("#9-2"), []); // inverted bounds
+});
+
+test("scoped leaf #N INTERSECTS the scope — a containment check", () => {
+  assert.deepEqual(keys("alpha.g-1.s1.#1"), ["point:1"]); // 1 ∈ s1 {0,1}
+  assert.deepEqual(keys("alpha.g-1.s1.#5"), []); // 5 lives under beta — no match
+  assert.deepEqual(keys("alpha.*.*.#0-99"), ["point:0", "point:1", "point:2", "point:3", "point:4"]);
+  // mixed leaf list: a type literal and an index union within the segment
+  assert.deepEqual(keys("beta.g-7.s7.anchor,#5"), ["point:5", "point:7"]);
+});
+
+test("#lo-hi is the INDEX range; bare lo-hi keeps the label-trailing-int meaning", () => {
+  assert.deepEqual(keys("beta.g-7.s7.2-9"), ["point:6"]); // matches type "t9" by trailing int
+  assert.deepEqual(keys("beta.g-7.s7.#2-9"), ["point:5", "point:6", "point:7"]); // indices 5..7 ∩ [2,9]
+  assert.deepEqual(keys("beta.g-7.s7.#6"), ["point:6"]); // by index, not type
+});
+
+test("misplaced # (segments 1–3, or a dot after a standalone #) is a parse error", () => {
+  assert.match(parseErr("#5.x"), /standalone term or in a path's final/);
+  assert.match(parseErr("alpha.#5"), /standalone term or in a path's final/);
+  assert.match(parseErr("alpha.g-1.#5"), /standalone term or in a path's final/);
+  assert.match(parseErr("#5,alpha"), /expected "#" to start each index/);
+});
+
+test("malformed # forms are parse errors", () => {
+  assert.match(parseErr("#"), /expected an integer after "#"/);
+  assert.match(parseErr("#abc"), /expected an integer after "#"/);
+  assert.match(parseErr("#*"), /expected an integer after "#"/);
+  assert.match(parseErr("#-5"), /expected an integer after "#"/);
+  assert.match(parseErr("#5-"), /expected an integer after "-"/);
+  assert.match(parseErr("#5x"), /unexpected "x" after a "#" index/);
+  assert.match(parseErr("ab#c"), /must start an index specifier/);
+});
+
 // -- category-spanning groups: the resolver mirrors the VISIBLE tree -----------------
 
 /**
@@ -235,7 +290,7 @@ test("quoted literals are exact — no glob, no range", () => {
  * each branch listing only that category's subgroups:
  *
  *   left  → span { sA: pts 0,1 } + { sD: pt 5 }    right → span { sB: pts 2,3 } + { sD: pt 6 }
- *   lone  → solo { sC: pt 4 }
+ *   lone  → solo { "s C": pt 4 }                   ← spaced label (quoting probe)
  *
  * sD (pts 5,6) even spans categories itself — the defensive shape buildTree
  * renders under both branches; drilling it shows ALL its points either way.
@@ -250,7 +305,7 @@ function makeSpanningHeader(): Header {
     points: { type, group_id, subgroup_id, category },
     categories: ["left", "right", "lone"],
     groups: { "20": "span", "21": "solo" },
-    subgroups: { "200": "sA", "201": "sB", "202": "sC", "203": "sD" },
+    subgroups: { "200": "sA", "201": "sB", "202": "s C", "203": "sD" },
     edges: [], polylines: [], channels: [],
   };
 }
@@ -293,6 +348,15 @@ test("a path TERMINATING at a spanning group yields the bare group entry (click 
   assert.deepEqual(spanKeys("left.span"), ["group:20"]);
   assert.deepEqual(spanKeys("right.span"), ["group:20"]);
   assert.deepEqual(spanHier.pointsOf({ level: "group", id: 20 }).sort(), [0, 1, 2, 3, 5, 6]);
+});
+
+test("quoted spaced labels parse and resolve to the row the tree denotes", () => {
+  // "s C" is subgroup 202 — the entry its tree row carries
+  assert.deepEqual(spanKeys(`lone.solo."s C"`), ["subgroup:202"]);
+  assert.deepEqual(spanKeys(`lone.solo."s C".*`), ["point:4"]);
+  assert.deepEqual(spanKeys(`lone.*."s C" + left.span.sA`), ["subgroup:200", "subgroup:202"]);
+  // unquoted, the space splits the term — a parse error, not a silent miss
+  assert.match((parseTarget("lone.solo.s C") as ParseError).message, /joined with "\+"/);
 });
 
 test("a category-spanning SUBGROUP mirrors its rows too (defensive shape)", () => {
@@ -383,6 +447,12 @@ test("completion: no-op inside globs and ranges — but dashes in labels still w
   assert.deepEqual(comp("view alpha.3-9").candidates, []); // complete range
   // a dash inside an ordinary label is NOT a range — completion keeps working
   assert.deepEqual(comp("view alpha.g-"), { start: 11, candidates: ["g-1", "g-2"], applied: "" });
+});
+
+test("completion: #-prefixed tokens are inert (indices aren't enumerable)", () => {
+  assert.deepEqual(comp("view #"), { start: 5, candidates: [], applied: "" });
+  assert.deepEqual(comp("view #16").candidates, []);
+  assert.deepEqual(comp("view alpha.g-1.s1.#1").candidates, []);
 });
 
 test("completion: total on junk — empty candidates, never a throw", () => {

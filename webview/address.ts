@@ -4,12 +4,23 @@
  * (webview/commands.ts) feeds verb arguments through here.
  *
  *   target-expr := term ("+" term)*             union across subtrees
- *   term        := path | "@" name              @name = a committed selection
+ *   term        := path | "@" name | index-term @name = a committed selection
+ *   index-term  := "#" index-spec ("," "#" index-spec)*
+ *   index-spec  := INT | INT "-" INT            the CONTRACT POINT INDEX
  *   path        := segment ("." segment)*       1–4 segments, top-down;
  *                                               segment COUNT = target level
  *   segment     := predicate ("," predicate)*   list = union within the parent
- *   predicate   := "*" | glob | range | literal
+ *   predicate   := "*" | glob | range | literal | "#" index-spec (leaf only)
  *   range       := INT "-" INT                  trailing integer in [lo, hi]
+ *
+ * `#N` addresses points by their contract index — the one always-unique axis
+ * — so it is inherently point-level: legal only as a standalone term
+ * (`#161`, `#156-187`, unconditional) or as a predicate in a path's FINAL
+ * (4th) segment, where it INTERSECTS the scope (`cat.grp.sub.#161` matches
+ * only if point 161 lies under that subgroup — a containment check). A `#`
+ * in segments 1–3 is a parse error. The bare range `44-55` keeps its label
+ * trailing-integer meaning; the `#` is the sole distinguisher. Out-of-range
+ * indices resolve to nothing (nomatch), not an error.
  *
  * Matching is SCOPED RECURSIVE DESCENT over the VISIBLE TREE — the same
  * `classification.ts buildTree` model the bottom panel renders — so a path
@@ -42,7 +53,8 @@ export type Predicate =
   | { kind: "star" }
   | { kind: "literal"; value: string }
   | { kind: "glob"; pattern: string }
-  | { kind: "range"; lo: number; hi: number };
+  | { kind: "range"; lo: number; hi: number }
+  | { kind: "index"; lo: number; hi: number }; // "#N" / "#lo-hi" — leaf only
 
 export interface Segment {
   predicates: Predicate[];
@@ -50,7 +62,8 @@ export interface Segment {
 
 export type Term =
   | { kind: "path"; segments: Segment[] }
-  | { kind: "ref"; name: string };
+  | { kind: "ref"; name: string }
+  | { kind: "points"; specs: { lo: number; hi: number }[] }; // standalone "#…"
 
 export interface TargetAst {
   kind: "target";
@@ -76,6 +89,8 @@ export function parseTarget(expr: string): TargetAst | ParseError {
 class Failure extends Error {}
 
 const RESERVED = new Set(["[", "]", "?"]);
+const PLACEMENT_MSG =
+  `"#" addresses points — valid only as a standalone term or in a path's final (4th) segment`;
 
 class Parser {
   private readonly s: string;
@@ -117,26 +132,39 @@ class Parser {
       }
       return { kind: "ref", name };
     }
-    const segments: Segment[] = [this.segment()];
+    if (this.s[this.i] === "#") {
+      // standalone index term: "#N" / "#lo-hi", optionally a "#"-only list
+      const specs = [this.indexSpec()];
+      while (this.s[this.i] === ",") {
+        this.i++;
+        if (this.s[this.i] !== "#") {
+          throw new Failure(`expected "#" to start each index in the list`);
+        }
+        specs.push(this.indexSpec());
+      }
+      if (this.s[this.i] === ".") throw new Failure(PLACEMENT_MSG);
+      return { kind: "points", specs };
+    }
+    const segments: Segment[] = [this.segment(1)];
     while (this.s[this.i] === ".") {
       this.i++;
       if (segments.length === 4) {
         throw new Failure("too many segments — a path has at most 4 (category.group.subgroup.point)");
       }
-      segments.push(this.segment());
+      segments.push(this.segment(segments.length + 1));
     }
     return { kind: "path", segments };
   }
 
-  private segment(): Segment {
-    const first = this.predicate();
+  private segment(level: number): Segment {
+    const first = this.predicate(level);
     if (!first) {
       throw new Failure(`empty segment — ".." and leading/trailing "." are not allowed`);
     }
     const predicates = [first];
     while (this.s[this.i] === ",") {
       this.i++;
-      const p = this.predicate();
+      const p = this.predicate(level);
       if (!p) throw new Failure(`empty predicate in a "," list`);
       predicates.push(p);
     }
@@ -145,8 +173,14 @@ class Parser {
 
   /** One predicate, or null when the input yields no token here (the caller
    * knows whether that means an empty segment or an empty list element). */
-  private predicate(): Predicate | null {
+  private predicate(level: number): Predicate | null {
     if (this.s[this.i] === '"') return { kind: "literal", value: this.quoted() };
+    if (this.s[this.i] === "#") {
+      // "#" is point-level by nature; enforce the placement rule here
+      if (level !== 4) throw new Failure(PLACEMENT_MSG);
+      const spec = this.indexSpec();
+      return { kind: "index", lo: spec.lo, hi: spec.hi };
+    }
     const tok = this.token();
     if (tok === "") return null;
     if (tok === "*") return { kind: "star" };
@@ -156,6 +190,29 @@ class Parser {
     return { kind: "literal", value: tok };
   }
 
+  /** "#" INT ("-" INT)? — the point-index specifier. */
+  private indexSpec(): { lo: number; hi: number } {
+    this.i++; // the "#"
+    const lo = this.integer(`expected an integer after "#"`);
+    let hi = lo;
+    if (this.s[this.i] === "-") {
+      this.i++;
+      hi = this.integer(`expected an integer after "-" in a "#" range`);
+    }
+    const c = this.s[this.i];
+    if (this.i < this.s.length && c !== "." && c !== "," && c !== "+" && !/\s/.test(c)) {
+      throw new Failure(`unexpected "${c}" after a "#" index`);
+    }
+    return { lo, hi };
+  }
+
+  private integer(missingMsg: string): number {
+    const start = this.i;
+    while (this.i < this.s.length && this.s[this.i] >= "0" && this.s[this.i] <= "9") this.i++;
+    if (this.i === start) throw new Failure(missingMsg);
+    return Number(this.s.slice(start, this.i));
+  }
+
   private token(): string {
     const start = this.i;
     while (this.i < this.s.length) {
@@ -163,6 +220,9 @@ class Parser {
       if (RESERVED.has(c)) throw new Failure(`reserved character "${c}"`);
       if (c === '"' && this.i > start) {
         throw new Failure("unexpected quote — quotes must wrap a whole predicate");
+      }
+      if (c === "#") {
+        throw new Failure(`"#" must start an index specifier like "#161" (quote a label containing "#")`);
       }
       if (c === "." || c === "," || c === "+" || c === '"' || /\s/.test(c)) break;
       this.i++;
@@ -229,6 +289,15 @@ export function resolveTarget(
       for (const e of committedNames.get(term.name) ?? []) add(e);
       continue;
     }
+    if (term.kind === "points") {
+      // standalone "#…": unconditional point entries, clamped to the contract
+      // range — a well-formed but out-of-range index is an empty match
+      for (const spec of term.specs) {
+        const hi = Math.min(spec.hi, hierarchy.n - 1);
+        for (let p = Math.max(0, spec.lo); p <= hi; p++) add({ level: "point", id: p });
+      }
+      continue;
+    }
     const segs = term.segments;
     const cats = catsMatching(segs[0], tree);
     if (segs.length === 1) {
@@ -250,10 +319,15 @@ export function resolveTarget(
       for (const s of subs) add({ level: "subgroup", id: s.subgroupId });
       continue;
     }
-    // level 4: the subgroup's drilled point rows, matched on the type string
+    // level 4: the subgroup's drilled point rows — type predicates match the
+    // type string; "#" predicates match the point index, INTERSECTED with the
+    // scope (an out-of-scope index simply doesn't match)
     for (const s of subs) {
       for (const p of hierarchy.subgroupPoints(s.subgroupId)) {
-        if (segmentMatches(segs[3], types[p] ?? "")) add({ level: "point", id: p });
+        const hit = segs[3].predicates.some((pr) =>
+          pr.kind === "index" ? p >= pr.lo && p <= pr.hi : predicateMatches(pr, types[p] ?? ""),
+        );
+        if (hit) add({ level: "point", id: p });
       }
     }
   }
@@ -330,8 +404,9 @@ export function completeTarget(
   const token = head.slice(ts);
   const none: Completion = { start: ts, candidates: [], applied: "" };
 
-  // pattern-in-progress → completion opts out (globs, numeric ranges, junk)
-  if (/[*[\]?"]/.test(token)) return none;
+  // pattern-in-progress → completion opts out (globs, numeric ranges, junk),
+  // and "#" indices are an unbounded integer space — nothing to enumerate
+  if (/[*[\]?"#]/.test(token)) return none;
   if (/^\d+-\d*$/.test(token)) return none;
 
   const before = head.slice(0, ts);
@@ -431,6 +506,10 @@ export function predicateMatches(p: Predicate, name: string): boolean {
       const n = trailingInt(name);
       return n !== null && n >= p.lo && n <= p.hi;
     }
+    case "index":
+      // "#" matches point INDICES, never labels; the parser confines it to
+      // the leaf, where resolution handles it against the index directly
+      return false;
   }
 }
 

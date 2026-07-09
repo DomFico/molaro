@@ -185,6 +185,11 @@ class SyntheticSource(DataSource):
         subgroups = {}
         for s in range(self._n_sub_struct):
             subgroups[s] = f"subgroup-{s}"
+        # One structured subgroup carries an EMBEDDED SPACE in its label so the
+        # grammar's quoted-literal path ('"subgroup 11"') stays exercised against
+        # producer data — labels with spaces are routine in real datasets.
+        if self._n_sub_struct >= 12:
+            subgroups[11] = "subgroup 11"
         for s in range(self._n_sub_struct, self.n_subgroups):
             subgroups[s] = f"solvent-{s - self._n_sub_struct}"
 

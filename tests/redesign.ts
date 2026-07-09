@@ -1306,6 +1306,55 @@ async function S9(): Promise<void> {
         rAllBranches.message === "focused 400 points",
       JSON.stringify([rBeta.message, rAllBranches.message]));
 
+    // -- #index parity: view #N ≡ a real right-click on that point's row -------
+    await reset();
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const sub=rows.find(r=>r.dataset.level==='subgroup');
+      sub?.querySelector('.caret')?.click(); // drill subgroup-0 to its points
+    })()`);
+    await sleep(300);
+    const ptRow = (await d.evaluate<{ x: number; y: number; id: number } | null>(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      const el=rows.find(r=>r.dataset.level==='point');
+      if(!el) return null; const r=el.getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2, id:Number(el.dataset.id)};
+    })()`))!;
+    check("S9: drilled to a point row", ptRow !== null);
+    const rIdx = await cmd(`view #${ptRow.id}`);
+    check("S9: standalone #index resolves exactly that point",
+      rIdx.status === "ok" && rIdx.message === "focused 1 points", JSON.stringify(rIdx));
+    await sleep(150);
+    check("S9: #index pulses one point", (await flashCount(d)) === 1,
+      `flash=${await flashCount(d)}`);
+    await sleep(500);
+    const camIdxCmd = await camState();
+    await reset();
+    await d.rightClick(ptRow.x, ptRow.y);
+    await sleep(150);
+    check("S9: the real point-row click pulses the same single point",
+      (await flashCount(d)) === 1, `flash=${await flashCount(d)}`);
+    await sleep(500);
+    const camIdxClick = await camState();
+    check("S9: view #N ≡ clicking that point's row (same camera pose)",
+      closeCam(camIdxCmd, camIdxClick),
+      `cmd=${camIdxCmd.map((v) => v.toFixed(3))} click=${camIdxClick.map((v) => v.toFixed(3))}`);
+    // the scoped-leaf form is a containment check: hit inside, nomatch outside
+    const rScopedIdx = await cmd(`view alpha.group-0.subgroup-0.#${ptRow.id}`);
+    const rWrongScope = await cmd(`view beta.*.*.#${ptRow.id}`);
+    const rOutOfRange = await cmd("view #987654");
+    check("S9: scoped #N hits inside its branch, nomatch outside, nomatch out-of-range",
+      rScopedIdx.message === "focused 1 points" && rWrongScope.status === "nomatch" &&
+        rOutOfRange.status === "nomatch",
+      JSON.stringify([rScopedIdx, rWrongScope, rOutOfRange]));
+    // quoted spaced label straight from the producer (real-data property)
+    const rQuoted = await cmd(`view gamma.group-2."subgroup 11"`);
+    check("S9: a quoted spaced label resolves against producer data",
+      rQuoted.status === "ok" && rQuoted.message === "focused 100 points",
+      JSON.stringify(rQuoted));
+
     // -- multi-match parity: `view <glob>` vs a right-drag over the same rows --
     await expandBottomCategory(d, "/alpha/"); // collapse back → category rows adjacent
     await sleep(200);

@@ -132,6 +132,23 @@ try {
   check("…printing the scoped candidates (alpha's subgroups only)",
     lastLine?.text === "subgroup-0  subgroup-3", JSON.stringify(lastLine));
 
+  // #index through the real relay: frames one point; Tab on a #-token is inert
+  await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
+  await clickInput();
+  await d.insertText("view #42");
+  const logLenBefore = (await logLines()).length;
+  await d.key("Tab", "Tab", 9);
+  await sleep(400);
+  check("Tab on a #-prefixed token is inert (input and log unchanged)",
+    (await inputValue()) === "view #42" && (await logLines()).length === logLenBefore);
+  await d.key("Enter", "Enter", 13);
+  await sleep(400);
+  lines2 = await logLines();
+  lastLine = lines2[lines2.length - 1];
+  check("view #N frames a single point through the real relay",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "focused 1 points",
+    JSON.stringify(lastLine));
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();
