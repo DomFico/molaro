@@ -46,6 +46,10 @@ export class Hierarchy {
 
   private readonly groupsOfCat = new Map<number, number[]>();
   private readonly subsOfGrp = new Map<number, number[]>();
+  /** position of a group within its category / a subgroup within its group,
+   * in first-appearance order — the order the bottom tree renders them. */
+  private readonly orderOfGroup = new Map<number, number>();
+  private readonly orderOfSub = new Map<number, number>();
 
   constructor(header: Header) {
     this.header = header;
@@ -58,13 +62,48 @@ export class Hierarchy {
       push(this.bySubgroup, subgroup_id[p], p);
       if (!this.ancestorOfSub.has(subgroup_id[p])) {
         this.ancestorOfSub.set(subgroup_id[p], { category: category[p], group: group_id[p] });
+        this.orderOfSub.set(subgroup_id[p], this.subsOfGrp.get(group_id[p])?.length ?? 0);
         push(this.subsOfGrp, group_id[p], subgroup_id[p]);
       }
       if (!this.catOfGroup.has(group_id[p])) {
         this.catOfGroup.set(group_id[p], category[p]);
+        this.orderOfGroup.set(group_id[p], this.groupsOfCat.get(category[p])?.length ?? 0);
         push(this.groupsOfCat, category[p], group_id[p]);
       }
     }
+  }
+
+  /** Sort key placing an entry at its position in the bottom tree's traversal
+   * (category asc → groups → subgroups in first-appearance order → point
+   * index); -1 at unused levels puts a parent entry before its descendants. */
+  private entryOrder(e: Entry): [number, number, number, number] {
+    switch (e.level) {
+      case "category":
+        return [e.id, -1, -1, -1];
+      case "group":
+        return [this.catOfGroup.get(e.id) ?? -1, this.orderOfGroup.get(e.id) ?? -1, -1, -1];
+      case "subgroup": {
+        const a = this.ancestorOfSub.get(e.id);
+        return a
+          ? [a.category, this.orderOfGroup.get(a.group) ?? -1, this.orderOfSub.get(e.id) ?? -1, -1]
+          : [-1, -1, this.orderOfSub.get(e.id) ?? -1, -1];
+      }
+      case "point": {
+        const s = this.subOfPoint[e.id];
+        const a = this.ancestorOfSub.get(s);
+        return a
+          ? [a.category, this.orderOfGroup.get(a.group) ?? -1, this.orderOfSub.get(s) ?? -1, e.id]
+          : [-1, -1, -1, e.id];
+      }
+    }
+  }
+
+  /** Comparator ordering entries the way the full hierarchy renders them. */
+  compareEntries(a: Entry, b: Entry): number {
+    const ka = this.entryOrder(a);
+    const kb = this.entryOrder(b);
+    for (let i = 0; i < 4; i++) if (ka[i] !== kb[i]) return ka[i] - kb[i];
+    return 0;
   }
 
   /** Direct children of a node (for carving finer holes out of coarse entries). */

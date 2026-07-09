@@ -188,14 +188,15 @@ export function mountCommitted(
     const buildBody = (): void => {
       if (built) return;
       built = true;
-      // flat member list: exactly the stored entries, at their own level.
+      // flat member list: exactly the stored entries, at their own level,
+      // ORDERED the way the full hierarchy renders (not insertion order).
       // Left click/drag FOCUSES members (temporary yellow flash); right
       // click/drag hides INDIVIDUAL members (persistent purple state) — the
       // whole-selection hide stays on the header.
       const list = mountEntryList(
         body,
         hierarchy,
-        sel.set.listEntries(),
+        [...sel.set.listEntries()].sort((a, b) => hierarchy.compareEntries(a, b)),
         {
           primaryClick: (e) => actions.focusEntry(e),
           primaryHold: () => actions.focusPoints(sel.set.resolvedPoints()),

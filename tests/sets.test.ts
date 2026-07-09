@@ -42,6 +42,18 @@ test("Hierarchy resolves entries to points at each level", () => {
   assert.deepEqual(h.subgroupPoints(0).sort(), [0, 1]);
 });
 
+test("compareEntries orders entries the way the full hierarchy renders", () => {
+  const h = new Hierarchy(makeHeader());
+  // insertion order deliberately scrambled
+  const scrambled: Entry[] = [pt(4), sub(1), cat(1), pt(1), sub(0), grp(1), cat(0)];
+  const sorted = [...scrambled].sort((a, b) => h.compareEntries(a, b));
+  assert.deepEqual(
+    sorted,
+    [cat(0), sub(0), pt(1), sub(1), cat(1), grp(1), pt(4)],
+    "category before its descendants, siblings in tree order, points by index",
+  );
+});
+
 test("NodeSet union across mixed-level entries, ref-counted removal", () => {
   const h = new Hierarchy(makeHeader());
   const s = new NodeSet(h);

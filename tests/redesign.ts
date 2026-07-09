@@ -901,9 +901,11 @@ async function S8(): Promise<void> {
     check("S8: expandable carets have a generous hit box", caretW >= 18, `${caretW}px`);
 
     // non-contiguous coverage → the bracket SPLITS into segments
-    await d.click(alpha.x, alpha.y);
+    // (clicked DELIBERATELY out of hierarchy order: gamma first, then alpha —
+    // the committed member list must still sort into tree order)
+    await d.click(gamma.x, gamma.y);
     await sleep(80);
-    await d.click(gamma.x, gamma.y); // beta (unselected) sits between
+    await d.click(alpha.x, alpha.y); // beta (unselected) sits between
     await sleep(200);
     const pendingSegs = await d.evaluate<number>(
       `document.querySelectorAll('.bracket.pending').length`);
@@ -942,6 +944,14 @@ async function S8(): Promise<void> {
       b.querySelector('.caret').click();
     })()`);
     await sleep(150);
+
+    // members list in HIERARCHY order (alpha before gamma), not click order
+    const memberLabels = await d.evaluate<string[]>(`
+      [...document.querySelectorAll('#selections .tree-row.selectable')]
+        .map(r=>r.querySelector('.tree-label').textContent)`);
+    check("S8: members ordered by the hierarchy, not by selection order",
+      memberLabels.length === 2 && /alpha/.test(memberLabels[0]) && /gamma/.test(memberLabels[1]),
+      JSON.stringify(memberLabels));
 
     // top-section left-click: temporary YELLOW flash + focus, no state change
     const memberA = (await topRow(d, "/alpha/"))!;
