@@ -98,6 +98,39 @@ property every earlier suite missed while the bug was live.
   Bare `view` = `frameVisible`, the empty-space-click analog, parked during
   edit mode. Commands are read-only: no selection state, no undo entries.
 
+## The mutation template (`create_sele`)
+
+`create_sele` is the first state-mutating verb and the shape every future one
+inherits (`commitTargetEntries` in main.ts):
+
+- **Route through the existing model, never a parallel path**: the wiring
+  parks edit mode (`endEdit`/`beginEdit` — mode flips are deliberately not
+  undoable), stashes any in-progress pending target out, adds the resolved
+  entries via `addToTarget`, calls the SAME `SelectionModel.commit()` the
+  button uses (whose undo swaps the original set object back), renames if a
+  `[name]` was given, restores the stash — **all inside one stroke**, so a
+  single Ctrl+Z reverts the entire command with no residue. Model gap found
+  and routed around (not forked): `commit()` returns null during edit mode,
+  hence the park/restore.
+- **Entry-level parity**: the verb commits exactly the resolved entries at
+  their natural levels — never expanding a coarse entry to points, never
+  collapsing fine entries. Unions produce mixed-level member lists; correct.
+  Finding: the auto-seeded bulk selections store ONE coarse category entry,
+  so `… + @<seed>` adds a single member row — the large-member-list cost only
+  arises for fine-grained user selections (accepted per the handoff; do not
+  "fix" by collapsing entries).
+- **`[name]` parsing** is `splitTrailingName` in address.ts (pure): the
+  trailing bracketed run is the literal name; `[ ]` remain reserved inside
+  the target expression. Explicit-name collision is checked before any
+  mutation and errors; auto-names come from the model's `selection_N` namer.
+- **The green commit pulse**: a manual create shows green while building,
+  then commits neutral. The verb reproduces that beat by pulsing the
+  committed rows with the EXISTING `sel-covered` class through the EXISTING
+  `flashRow` mechanism (`flashPointRows(points, "sel-covered")`) — no new
+  visual style. S11 asserts the pulse plays and settles.
+- S11 is the parity suite: gesture-built and command-built selections must
+  snapshot identically (entries, levels, member rows, brackets).
+
 ## Completion
 
 `completeTarget` is resolution's inverse over the SAME descent helpers
@@ -119,7 +152,7 @@ deliberate decisions:
 
 | Char | Enforced in | Site |
 |---|---|---|
-| `[` `]` `?` | any expression token | `RESERVED` set in the tokenizer (`address.ts`) |
+| `[` `]` `?` | any expression token — but `[ ]` double as the trailing `[name]` delimiter of mutating verbs (`splitTrailingName` strips the name BEFORE parseTarget sees the expression) | `RESERVED` set in the tokenizer (`address.ts`) |
 | `..` (empty segment) | any path | `segment()` empty-predicate check |
 | `#` misplacement | segments 1–3 | `predicate(level)` placement rule |
 | `:` | `@name` filter span only | raw-span check after the filter parses |
@@ -152,8 +185,11 @@ deliberate decisions:
   @name filters, quoting against the producer); **S10** is the flash-parity
   matrix — the exactness check (flashed == mounted ∩ resolved) across term
   count/kind/level and both panel surfaces, using the `debug.resolvePoints`
-  seam. The harness runs the synthetic producer at **N=6000** (the extension
-  default is 20000 — counts differ).
+  seam; **S11** is the mutation template — create_sele vs the real
+  build+Create-selection gesture must snapshot identically, one undo removes
+  cleanly, edit mode is independent, collisions mutate nothing. The harness
+  runs the synthetic producer at **N=6000** (the extension default is 20000 —
+  counts differ).
 - **Terminal smoke** (`node tests/terminal_smoke.ts`): the real terminal
   bundle + real viewer in one page, host relay emulated by the bridge shim's
   loopback; commands, completion, history, help.

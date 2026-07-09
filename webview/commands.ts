@@ -13,7 +13,13 @@
  * same state mutations, same camera tween, same flashes, same row feedback.
  * Commands get no rendering or camera code of their own.
  */
-import { completeTarget, parseTarget, resolveTarget, type Completion } from "./address.ts";
+import {
+  completeTarget,
+  parseTarget,
+  resolveTarget,
+  splitTrailingName,
+  type Completion,
+} from "./address.ts";
 import type { TreeModel } from "./classification.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
 
@@ -44,8 +50,19 @@ export interface CommandContext {
   frameVisible(): void;
   /** Flash every currently-mounted row whose points intersect this resolved
    * set — point-set matching, so term kind/level never changes which rows
-   * light (main.ts flashPointRows; rides the gesture flashRow). */
-  flashPointRows(points: readonly number[]): void;
+   * light (main.ts flashPointRows; rides the gesture flashRow). `cls` picks
+   * the swatch (default the yellow focus flash; "sel-covered" = the pending
+   * green, used for the create_sele commit pulse). */
+  flashPointRows(points: readonly number[], cls?: string): void;
+  /** THE MUTATION ROUTE (create_sele; future mutating verbs inherit it):
+   * commit these entries as a new selection through the exact
+   * SelectionModel path the "Create selection" button uses — one stroke, so
+   * a single undo removes the whole command with no residue. Returns the
+   * created name + point count, or an error (name collision). */
+  commitEntries(
+    entries: Entry[],
+    name: string | null,
+  ): { name: string; points: number } | { error: string };
 }
 
 export class CommandRegistry {
@@ -118,6 +135,38 @@ export function makeViewHandler(ctx: CommandContext): CommandHandler {
 }
 
 /**
+ * `create_sele <target-expr> [name]` — the first state-mutating verb, and the
+ * template every future one inherits: resolve with the SAME resolveTarget
+ * view uses, then route through the existing SelectionModel commit path (via
+ * ctx.commitEntries — no parallel commit machinery).
+ *
+ * ENTRY-LEVEL PARITY (every mutating verb inherits this): the target is
+ * committed as exactly the resolved entries, at their natural levels — a
+ * group-level path stays ONE coarse group entry, a leaf/#index target stays
+ * point entries, and @name contributes its stored entries unflattened. This
+ * mirrors what clicking those rows and pressing "Create selection" would
+ * store, entry-for-entry; unions may therefore produce mixed-level member
+ * lists, which is correct. Never expand a coarse entry into points and never
+ * collapse fine entries into a coarser one here.
+ */
+export function makeCreateSeleHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const split = splitTrailingName(args);
+    if ("kind" in split) return { status: "error", message: split.message };
+    const ast = parseTarget(split.expr);
+    if (ast.kind === "error") return { status: "error", message: ast.message };
+    const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
+    if (entries.length === 0) {
+      // an empty target commits nothing — nomatch, no mutation
+      return { status: "nomatch", message: `nothing matches "${split.expr}"` };
+    }
+    const result = ctx.commitEntries(entries, split.name);
+    if ("error" in result) return { status: "error", message: result.error };
+    return { status: "ok", message: `created "${result.name}" — ${result.points} points` };
+  };
+}
+
+/**
  * The `help` summary. KEEP IN SYNC with the quick-reference table at the top
  * of docs/COMMANDS.md — the two carry the same content for different surfaces
  * and must be updated together.
@@ -131,6 +180,8 @@ export const HELP_TEXT = [
   "               ancestor label matches (one trailing predicate only)",
   "  a + b        union of terms",
   "  view <expr>  frame it (hidden points included); bare view frames the visible scene",
+  "  create_sele <expr> [name]   commit the target as a new selection",
+  "               (auto-named selection_N without [name]; entries keep their level)",
   'errors: a parse error = malformed syntax · "nothing matches" = valid syntax, empty result',
   "full reference: docs/COMMANDS.md",
 ].join("\n");
@@ -156,6 +207,11 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "view",
     makeViewHandler(ctx),
     "frame the resolved target (hidden points included); bare view frames the visible scene",
+  );
+  registry.register(
+    "create_sele",
+    makeCreateSeleHandler(ctx),
+    "commit the resolved target as a new selection: create_sele <target> [name]",
   );
   const help = makeHelpHandler(registry);
   registry.register("help", help, "this grammar summary; help <verb> describes one verb");

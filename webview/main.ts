@@ -722,18 +722,55 @@ async function main(): Promise<void> {
   // (collapsed branch, scrolled out of a virtual list) don't flash — the
   // no-force-expand rule stands. Flashing rides the same flashRow the
   // gesture feedback uses.
-  const flashPointRows = (points: readonly number[]): void => {
+  const flashPointRows = (points: readonly number[], cls = "row-flash"): void => {
     const set = new Set(points);
     for (const row of document.querySelectorAll<HTMLElement>(
       "#tree-host .tree-row.selectable, #selections .tree-row.selectable",
     )) {
       if (row.getBoundingClientRect().height === 0) continue; // not mounted
+      if (row.classList.contains(cls)) continue; // already carrying the state/flash
       const entry: Entry = {
         level: row.dataset.level as Entry["level"],
         id: Number(row.dataset.id),
       };
-      if (hierarchy.entryIntersects(entry, set)) flashRow(row);
+      if (hierarchy.entryIntersects(entry, set)) flashRow(row, cls);
     }
+  };
+
+  // THE MUTATION TEMPLATE (create_sele; every future mutating verb inherits
+  // this shape): route through the EXACT SelectionModel mutators the gestures
+  // call — never a parallel commit path — wrapped in ONE stroke so a single
+  // Ctrl+Z reverts the whole command with no residue (the stroke coalesces
+  // the target adds, the commit's own undo op, and the rename). Edit mode is
+  // parked and restored around it (mode flips are deliberately not undoable),
+  // so create_sele always builds a NEW selection and never touches the one
+  // being edited. Any in-progress pending target is stashed out and restored
+  // inside the same stroke, so the command commits exactly its own entries.
+  const commitTargetEntries = (
+    entries: Entry[],
+    name: string | null,
+  ): { name: string; points: number } | { error: string } => {
+    if (name !== null && model.committed().some((c) => c.name === name)) {
+      return { error: `a selection named "${name}" already exists` };
+    }
+    const editId = model.editing?.id ?? null;
+    if (editId !== null) refreshPoints(model.endEdit());
+    const stashed = model.pending.listEntries();
+    model.beginStroke();
+    for (const e of stashed) refreshPoints(model.removeFromTarget(e));
+    for (const e of entries) refreshPoints(model.addToTarget(e));
+    const sel = model.commit(); // pushes its usual single undo op INTO the stroke
+    if (sel && name !== null) model.rename(sel.id, name);
+    for (const e of stashed) refreshPoints(model.addToTarget(e));
+    model.endStroke();
+    if (editId !== null) refreshPoints(model.beginEdit(editId));
+    if (!sel) return { error: "nothing to commit" };
+    refreshPoints(sel.set.resolvedPoints());
+    // the build→commit green beat in one shot: the committed rows pulse with
+    // the EXISTING pending-green look through the EXISTING flash mechanism,
+    // then settle into the neutral committed block
+    flashPointRows(sel.set.resolvedPoints(), "sel-covered");
+    return { name: sel.name, points: sel.set.pointCount };
   };
   const commandContext = {
     hierarchy,
@@ -749,6 +786,7 @@ async function main(): Promise<void> {
       if (!model.editing) frameVisible(); // parked while editing, like the gesture
     },
     flashPointRows,
+    commitEntries: commitTargetEntries,
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);

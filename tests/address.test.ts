@@ -14,6 +14,7 @@ import {
   globMatch,
   parseTarget,
   resolveTarget,
+  splitTrailingName,
   type ParseError,
   type TargetAst,
 } from "../webview/address.ts";
@@ -569,6 +570,27 @@ test("completion: only text before the cursor counts", () => {
   // cursor after "view a" with trailing text present — completes the category
   const r = comp("view aXXXX", 6);
   assert.deepEqual(r, { start: 5, candidates: ["alpha"], applied: "lpha." });
+});
+
+// -- splitTrailingName: the mutating verbs' [name] argument ---------------------------
+
+test("splitTrailingName: trailing [name] is the literal name; absent → null", () => {
+  assert.deepEqual(splitTrailingName("alpha.g-1 [my sel]"), { expr: "alpha.g-1", name: "my sel" });
+  assert.deepEqual(splitTrailingName("alpha.g-1"), { expr: "alpha.g-1", name: null });
+  assert.deepEqual(splitTrailingName("alpha [x]  "), { expr: "alpha", name: "x" });
+  // grammar tokens inside the brackets are LITERAL name characters
+  assert.deepEqual(splitTrailingName("alpha [a+b.c #5 @x]"), { expr: "alpha", name: "a+b.c #5 @x" });
+});
+
+test("splitTrailingName: malformed names are parse errors; expr keeps [ ] reserved", () => {
+  assert.equal((splitTrailingName("alpha []") as ParseError).kind, "error");
+  assert.match((splitTrailingName("alpha [  ]") as ParseError).message, /empty selection name/);
+  assert.match((splitTrailingName("alpha ]") as ParseError).message, /unbalanced "\]"/);
+  // no trailing bracket → the whole string is the expr, and [ ] inside it
+  // still hit the grammar's reserved-character error downstream
+  const s = splitTrailingName("a[b]c") as { expr: string; name: string | null };
+  assert.deepEqual(s, { expr: "a[b]c", name: null });
+  assert.match(parseErr(s.expr), /reserved character "\["/);
 });
 
 // -- glob matcher edge cases ---------------------------------------------------------

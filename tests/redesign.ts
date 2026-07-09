@@ -15,6 +15,10 @@
  *   S10 flash-parity matrix: for every command shape (term count/kind/level,
  *       both panel surfaces) the flashed rows == mounted rows intersecting
  *       the resolved point set — exactly, no missing term, no extra rows
+ *   S11 create_sele — the mutation template: commits are structurally
+ *       IDENTICAL to the equivalent build+Create-selection gesture (entries,
+ *       levels, members, brackets), one undo removes them cleanly, edit mode
+ *       is irrelevant, collisions error without mutating
  *
  * Screenshots + [PASS]/[FAIL] lines; evidence in reports/redesign/.
  * Run from viewer/ (after npm run build):  node tests/redesign.ts [S0 S1 ...]
@@ -1770,9 +1774,176 @@ async function S10(): Promise<void> {
   });
 }
 
+// ============================ S11: create_sele ================================
+async function S11(): Promise<void> {
+  console.log("S11 — create_sele: the mutation template (parity with the gesture commit)");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const committedCount = async () => (await committed(d)).length;
+
+    // structure of the LAST committed selection: entries at their levels, the
+    // rendered member rows, and its bracket segments (block expanded to look)
+    const lastSelSnapshot = () =>
+      d.evaluate<{ name: string; pts: number; entries: string[]; members: string[]; brackets: number }>(
+        `(async ()=>{
+          const v=${V};
+          const list=v.model.committed();
+          const c=list[list.length-1];
+          const block=[...document.querySelectorAll('#selections .sel-block')]
+            .find(b=>b.querySelector('.sel-name')?.textContent===c.name);
+          const body=block.querySelector('.sel-body');
+          if (body.style.display==='none' || !body.hasChildNodes()) {
+            block.querySelector('.caret').click();
+          }
+          await new Promise(r=>setTimeout(r, 150));
+          const members=[...block.querySelectorAll('.tree-row.selectable')]
+            .map(r=>r.dataset.level+':'+r.dataset.id+':'+r.querySelector('.tree-label').textContent);
+          const brackets=document.querySelectorAll('.bracket[title="'+c.name+'"]').length;
+          return { name:c.name, pts:c.set.pointCount,
+            entries:c.set.listEntries().map(e=>e.level+':'+e.id).sort(),
+            members, brackets };
+        })()`);
+
+    // -- setup: expand alpha → group-0 → drill subgroup-0 (gesture surface) --
+    await expandBottomCategory(d, "/alpha/");
+    await sleep(200);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      rows.find(r=>r.dataset.level==='group')?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(250);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      rows.find(r=>r.dataset.level==='subgroup')?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(300);
+    const rowByEntry = (level: string, id: number) =>
+      d.evaluate<{ x: number; y: number } | null>(`(()=>{
+        const el=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+          .find(r=>r.dataset.level===${JSON.stringify(level)} && Number(r.dataset.id)===${id}
+            && r.getBoundingClientRect().height>0);
+        if(!el) return null; const b=el.getBoundingClientRect();
+        return {x:b.left+b.width/2, y:b.top+b.height/2};
+      })()`);
+    const commitBtn = async () => {
+      const b = await d.evaluate<{ x: number; y: number }>(`(()=>{
+        const r=document.getElementById('commit-btn').getBoundingClientRect();
+        return {x:r.left+r.width/2, y:r.top+r.height/2};
+      })()`);
+      await d.click(b.x, b.y);
+      await sleep(200);
+    };
+
+    // -- gesture↔command structural parity across representative targets ------
+    const cases: { label: string; clicks: [string, number][]; expr: string }[] = [
+      { label: "coarse path", clicks: [["subgroup", 0]], expr: "alpha.group-0.subgroup-0" },
+      // point first, then the coarse entry — the reverse would carve; the
+      // committed membership is genuinely mixed-level (a subgroup + a point)
+      { label: "mixed-level union", clicks: [["point", 2], ["subgroup", 0]],
+        expr: "alpha.group-0.subgroup-0 + #2" },
+      { label: "#index", clicks: [["point", 5]], expr: "#5" },
+    ];
+    for (const c of cases) {
+      const baseCommitted = await committedCount();
+      const baseUndo = await undoDepth();
+      // GESTURE half: click the rows, press Create selection
+      for (const [level, id] of c.clicks) {
+        const r = (await rowByEntry(level, id))!;
+        await d.click(r.x, r.y);
+        await sleep(100);
+      }
+      await commitBtn();
+      const gSnap = await lastSelSnapshot();
+      for (let i = 0; i < c.clicks.length + 1; i++) {
+        await d.ctrlZ();
+        await sleep(80);
+      }
+      check(`S11 [${c.label}]: gesture detour fully undone`,
+        (await committedCount()) === baseCommitted && (await undoDepth()) === baseUndo);
+      // COMMAND half — with the commit green pulse sampled in the same tick
+      const run = await d.evaluate<{ status: string; message: string; pulse: number }>(`(()=>{
+        const res=${V}.command(${JSON.stringify("create_sele " + c.expr)});
+        const pulse=document.querySelectorAll('#tree-host .tree-row.sel-covered').length;
+        return { status: res.status, message: res.message, pulse };
+      })()`);
+      check(`S11 [${c.label}]: create_sele commits ok`,
+        run.status === "ok" && /^created "selection_1" — \d+ points$/.test(run.message),
+        JSON.stringify(run));
+      check(`S11 [${c.label}]: the green build→commit pulse plays`, run.pulse > 0,
+        `pulse=${run.pulse}`);
+      const cSnap = await lastSelSnapshot();
+      check(`S11 [${c.label}]: command ≡ gesture (entries/levels/members/brackets)`,
+        JSON.stringify(cSnap) === JSON.stringify(gSnap),
+        `cmd=${JSON.stringify(cSnap)} gesture=${JSON.stringify(gSnap)}`);
+      await sleep(700); // pulse fades
+      check(`S11 [${c.label}]: the pulse settles (no lingering green)`,
+        (await d.evaluate<number>(
+          `document.querySelectorAll('#tree-host .tree-row.sel-covered').length`)) === 0);
+      await d.ctrlZ(); // ONE undo removes a create_sele selection cleanly
+      await sleep(120);
+      check(`S11 [${c.label}]: one Ctrl+Z removes it with no residue`,
+        (await committedCount()) === baseCommitted && (await undoDepth()) === baseUndo &&
+          (await pendingEntries(d)) === 0 && (await selCount(d)) === 0);
+    }
+
+    // -- @name filter target: point-level entries, exactly the filter's set --
+    await cmd("create_sele alpha.group-0.subgroup-0 [base]");
+    const rFine = await cmd("create_sele @base.t1 [fine]");
+    check("S11: @name-filter target commits point entries",
+      rFine.status === "ok" && /^created "fine" — \d+ points$/.test(rFine.message),
+      JSON.stringify(rFine));
+    const fine = await d.evaluate<{ levels: string[]; pts: number[]; expect: number[] }>(`(()=>{
+      const v=${V};
+      const c=v.model.committed().find(x=>x.name==='fine');
+      return { levels: [...new Set(c.set.listEntries().map(e=>e.level))],
+               pts: c.set.resolvedPoints().sort((a,b)=>a-b),
+               expect: v.debug.resolvePoints('@base.t1').sort((a,b)=>a-b) };
+    })()`);
+    check("S11: ...at point level, matching the filter's resolved set exactly",
+      fine.levels.length === 1 && fine.levels[0] === "point" &&
+        JSON.stringify(fine.pts) === JSON.stringify(fine.expect),
+      JSON.stringify(fine.levels));
+
+    // -- edit-mode independence: a NEW selection, the edited one untouched ----
+    check("S11: (setup) entered edit mode", await clickSelCtl(d, "/^base$/", "edit"));
+    await sleep(150);
+    const baseEntriesBefore = await d.evaluate<string>(
+      `${V}.model.committed().find(c=>c.name==='base').set.listEntries().map(e=>e.level+':'+e.id).join(',')`);
+    const rDuringEdit = await cmd("create_sele alpha.group-0.subgroup-3 [extra]");
+    check("S11: create_sele during edit creates a NEW selection",
+      rDuringEdit.status === "ok" && /created "extra"/.test(rDuringEdit.message),
+      JSON.stringify(rDuringEdit));
+    check("S11: ...edit mode and the edited selection are untouched",
+      (await editingName(d)) === "base" &&
+        (await d.evaluate<string>(
+          `${V}.model.committed().find(c=>c.name==='base').set.listEntries().map(e=>e.level+':'+e.id).join(',')`)) === baseEntriesBefore &&
+        (await btnText(d)) === "Done");
+    await d.escape(); // leave edit mode
+    await sleep(120);
+
+    // -- explicit-name collision errors and mutates nothing -------------------
+    const preCount = await committedCount();
+    const preUndo = await undoDepth();
+    const clash = await cmd("create_sele alpha [solvent]"); // the seed's name
+    check("S11: explicit-name collision is a specific error",
+      clash.status === "error" && clash.message === `a selection named "solvent" already exists`,
+      JSON.stringify(clash));
+    const miss = await cmd("create_sele zzz [ghost]");
+    check("S11: empty target is a nomatch and commits nothing",
+      miss.status === "nomatch" && (await committedCount()) === preCount &&
+        (await undoDepth()) === preUndo,
+      JSON.stringify(miss));
+    await d.screenshot(`${REPORT}/S11_create_sele.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

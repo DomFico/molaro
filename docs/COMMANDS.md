@@ -30,6 +30,7 @@ point types `anchor` and `t0`–`t3`).
 | `@name.<pred>` | Filter the selection: keep points whose **type or any ancestor label** matches | `view @selection_1.anchor` |
 | `a + b` | Union of terms (the only cross-subtree operator) | `view alpha + @selection_1.t0` |
 | `view` | Frame the visible scene (no argument) | `view` |
+| `create_sele <expr> [name]` | Commit the target as a new selection (auto-named without `[name]`) | `create_sele alpha.group-0.* [ring]` |
 | `help` / `?` | This summary; `help <verb>` describes one verb | `help view` |
 
 ## The mental model: one segment per level
@@ -186,6 +187,49 @@ Results are always de-duplicated.
 - **Bare `view`** (no argument) frames the visible scene — the empty-space
   click analog.
 
+## Creating selections: `create_sele`
+
+```
+create_sele <target-expr> [name]
+```
+
+Commits the resolved target as a new committed selection — the text mirror of
+"build this target, then press **Create selection**". `<target-expr>` is the
+full address grammar above (any term kind, any union); no new syntax.
+
+- **`[name]`** — optional. Square brackets are the delimiter, and the text
+  inside is the **literal** name: grammar tokens (`.` `+` `#` `@`, spaces)
+  carry no meaning there. `create_sele alpha.group-0.* [my ring #1]` names
+  the selection `my ring #1`. Without `[name]`, the selection auto-names to
+  the smallest free `selection_N`, exactly like the button. The name is the
+  *trailing* bracketed run; inside the target expression itself `[` `]`
+  remain reserved (parse error).
+- **Entries keep their level.** The target commits as exactly the entries it
+  resolves to — a group-level path stores **one group entry** (the member
+  list shows that single coarse row), a leaf or `#` target stores point
+  entries, and `@name` contributes its stored entries unflattened. A union
+  can therefore produce a mixed-level member list (a subgroup entry plus a
+  lone point entry, say) — that is correct, and mirrors what clicking those
+  rows would store, entry-for-entry.
+
+  ```
+  create_sele alpha.group-0            one group entry (many points, one row)
+  create_sele alpha.group-0.*.t0       point entries
+  create_sele alpha.group-0.subgroup-0 + #301 [mix]   a subgroup + a point
+  ```
+- **Feedback**: the matching mounted rows pulse the pending-green once as the
+  selection commits — the build→commit rhythm in a single call — then the
+  named block appears in the top section with its brackets in the tree
+  gutter. `created "<name>" — N points` prints in the terminal.
+- **Undo**: one `Ctrl+Z` removes a `create_sele` selection completely.
+- **Edit mode is irrelevant**: `create_sele` always creates a *new* selection
+  and never touches the one being edited (it is a distinct verb, not the
+  context-sensitive button that reads "Done" mid-edit).
+- **Errors**: an explicit `[name]` that already exists is an error
+  (`a selection named "<name>" already exists`) and nothing changes; an empty
+  target is a *nomatch* and commits nothing; `[]` / an unbalanced `]` are
+  parse errors.
+
 ## Parse error vs. nomatch — how to self-diagnose
 
 This is the key debugging distinction:
@@ -217,7 +261,7 @@ changing any existing command:
 
 | Syntax | Today | Possible future |
 |---|---|---|
-| `[` `]` | parse error: `reserved character "["` | set/slice syntax |
+| `[` `]` | parse error: `reserved character "["` **inside a target expression**; in the *trailing name position* of a mutating verb they are the `[name]` delimiter (an intentional dual role, not a collision) | set/slice syntax |
 | `?` | parse error inside expressions (as a bare verb it is the `help` alias) | single-character wildcard |
 | `..` | parse error: `empty segment` | range/descent sugar |
 | `:` | parse error **inside `@name` filters** (`level qualifiers … not yet supported`); inside path labels it is currently an ordinary character | explicit level qualifier (`@sel.<level>:<pred>`) |

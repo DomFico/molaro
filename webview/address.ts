@@ -90,6 +90,31 @@ export interface ParseError {
   message: string;
 }
 
+/**
+ * Split a mutating verb's argument into `<target-expr>` and an optional
+ * trailing `[name]`. In this TRAILING position, `[ ]` are the name delimiter
+ * — the bracketed text is the literal selection name, so grammar tokens
+ * inside it (`.` `+` `#` `@` spaces) carry no meaning. Inside the target
+ * expression itself `[ ]` stay reserved (parseTarget errors on them), so the
+ * old reservation still holds everywhere except this one argument slot.
+ * Total — malformed input returns a ParseError, never throws.
+ */
+export function splitTrailingName(
+  args: string,
+): { expr: string; name: string | null } | ParseError {
+  const trimmed = args.trimEnd();
+  if (!trimmed.endsWith("]")) return { expr: trimmed, name: null };
+  const open = trimmed.lastIndexOf("[");
+  if (open < 0) {
+    return { kind: "error", message: `unbalanced "]" — a selection name is written [like this]` };
+  }
+  const name = trimmed.slice(open + 1, -1).trim();
+  if (name === "") {
+    return { kind: "error", message: "empty selection name — [ ] must contain a name" };
+  }
+  return { expr: trimmed.slice(0, open).trim(), name };
+}
+
 /** Parse a target expression. Total — malformed input returns a ParseError,
  * never throws. */
 export function parseTarget(expr: string): TargetAst | ParseError {

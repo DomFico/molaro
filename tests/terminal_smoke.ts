@@ -212,6 +212,20 @@ try {
       /\bview\b/.test(lastLine?.text ?? ""),
     JSON.stringify(lastLine));
 
+  // create_sele through the real relay: commit, top-section block, collision
+  lastLine = await runLine("create_sele alpha.group-0.subgroup-0 [picked]");
+  check("create_sele commits through the relay with the created line",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === `created "picked" — 100 points`,
+    JSON.stringify(lastLine));
+  check("…and the new block renders in the top section",
+    await d.evaluate<boolean>(`[...document.querySelectorAll('#selections .sel-name')]
+      .some(n=>n.textContent==='picked')`));
+  lastLine = await runLine("create_sele beta [picked]");
+  check("an explicit-name collision is the specific error line",
+    /term-err/.test(lastLine?.cls ?? "") &&
+      lastLine?.text === `a selection named "picked" already exists`,
+    JSON.stringify(lastLine));
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();
