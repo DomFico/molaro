@@ -96,14 +96,11 @@ export function mountBrackets(
       }
     }
 
-    // pending brackets (green, innermost lane, unnamed);
-    // pulse phase-locked to the global clock (unison with the rows)
+    // pending brackets (green, innermost lane, unnamed, static)
     const target = model.target;
     if (target.entryCount > 0) {
       for (const span of spansFor(target)) {
-        const b = bracketEl(PENDING_X, span, "pending", null);
-        b.style.animationDelay = `-${performance.now() % 1600}ms`;
-        layer.appendChild(b);
+        layer.appendChild(bracketEl(PENDING_X, span, "pending", null));
       }
     }
 

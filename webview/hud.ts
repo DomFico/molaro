@@ -142,13 +142,15 @@ export const HUD_CSS = /* css */ `
   .cat-block > div > .tree-row { position: sticky; top: 18px; z-index: 3; background: #252526; }
   .tree-row.selectable { cursor: pointer; }
   .tree-row.selectable:hover { background: #2f3a42; }
-  /* pending target: covered rows pulse — in UNISON — to a light green (the
-     phase is locked to the global clock via an inline animation-delay);
-     partial (path-to-entry) rows get a subtle edge tick */
-  .tree-row.sel-covered { animation: rowPulse 1.6s ease-in-out infinite; }
-  @keyframes rowPulse {
-    0%, 100% { background-color: rgba(191, 255, 228, 0.09); }
-    50%      { background-color: rgba(191, 255, 228, 0.30); }
+  /* selected rows: STATIC light green — they arrive with one soft swell that
+     settles into the steady color (same feel as the focus flash, but the
+     color stays); partial (path-to-entry) rows get a subtle edge tick */
+  .tree-row.sel-covered { background-color: rgba(191, 255, 228, 0.20);
+    animation: selIn 520ms ease-out 1; }
+  @keyframes selIn {
+    0%   { background-color: rgba(191, 255, 228, 0); }
+    55%  { background-color: rgba(191, 255, 228, 0.34); }
+    100% { background-color: rgba(191, 255, 228, 0.20); }
   }
   .tree-row.sel-partial { box-shadow: inset 2px 0 0 rgba(191, 255, 228, 0.45); }
   /* focus feedback: one soft light-yellow swell */
@@ -158,18 +160,26 @@ export const HUD_CSS = /* css */ `
     22%  { background-color: rgba(255, 233, 168, 0.35); }
     100% { background-color: rgba(255, 233, 168, 0); }
   }
-  /* hide feedback: a PURPLE sweep that runs right-to-left, then fades */
-  .row-flash-purple { overflow: hidden; }
-  .row-flash-purple::after {
-    content: ""; position: absolute; inset: 0; border-radius: 3px;
-    background: rgba(185, 139, 224, 0.4); pointer-events: none;
-    transform-origin: right center;
-    animation: sweepLeft 520ms cubic-bezier(0.25, 0.7, 0.3, 1) 1 both;
+  /* hide feedback: the same swell, in purple */
+  .row-flash-purple { animation: rowFlashPurple 900ms ease-out 1; }
+  @keyframes rowFlashPurple {
+    0%   { background-color: rgba(185, 139, 224, 0); }
+    22%  { background-color: rgba(185, 139, 224, 0.4); }
+    100% { background-color: rgba(185, 139, 224, 0); }
   }
-  @keyframes sweepLeft {
-    0%   { transform: scaleX(0); opacity: 0.95; }
-    55%  { transform: scaleX(1); opacity: 0.85; }
-    100% { transform: scaleX(1); opacity: 0; }
+  /* trail feedback HOLDS while the button is down, then fades out on release
+     — the color stays present for the whole drag, never mid-fading */
+  .row-flash-hold { background-color: rgba(255, 233, 168, 0.35); }
+  .row-flash-out { animation: rowFlashOut 450ms ease-out 1; }
+  @keyframes rowFlashOut {
+    from { background-color: rgba(255, 233, 168, 0.35); }
+    to   { background-color: rgba(255, 233, 168, 0); }
+  }
+  .row-flash-purple-hold { background-color: rgba(185, 139, 224, 0.4); }
+  .row-flash-purple-out { animation: rowFlashPurpleOut 450ms ease-out 1; }
+  @keyframes rowFlashPurpleOut {
+    from { background-color: rgba(185, 139, 224, 0.4); }
+    to   { background-color: rgba(185, 139, 224, 0); }
   }
   .caret { width: 10px; flex: none; display: inline-block; color: #888; cursor: pointer; }
   /* expandable carets get a big forgiving hit box (reaches left into the
@@ -188,9 +198,7 @@ export const HUD_CSS = /* css */ `
     border-left: 2px solid #8f8f8f; border-top: 2px solid #8f8f8f; border-bottom: 2px solid #8f8f8f;
     border-radius: 2px 0 0 2px; }
   .bracket.hidden { border-color: #b98be0; }
-  .bracket.pending { border-color: #9fe8cd; pointer-events: none;
-    animation: bracketPulse 1.6s ease-in-out infinite; }
-  @keyframes bracketPulse { 0%, 100% { opacity: 0.9; } 50% { opacity: 0.45; } }
+  .bracket.pending { border-color: #9fe8cd; pointer-events: none; }
 
   /* top/bottom dock: the whole content flows LEFT-TO-RIGHT. #sidebar-content
      becomes a row: the selections section is a fixed left column, the tree host

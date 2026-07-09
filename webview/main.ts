@@ -130,6 +130,56 @@ function basePointsMaterial(pixelRatio: number): THREE.ShaderMaterial {
 }
 
 /**
+ * Focus-flash overlay: like the highlight overlay, but points that are ALSO
+ * in the pending selection render the flash BLENDED toward the selection
+ * tint — a focus pulse passing over green points shifts smoothly within the
+ * same color family instead of hard-swapping to yellow (no splotches).
+ */
+function focusFlashMaterial(
+  pixelRatio: number,
+  size: number,
+  color: number,
+  selColor: number,
+): THREE.ShaderMaterial {
+  return new THREE.ShaderMaterial({
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+    uniforms: {
+      uPixelRatio: { value: pixelRatio },
+      uSize: { value: size },
+      uColor: { value: new THREE.Color(color) },
+      uSelColor: { value: new THREE.Color(selColor) },
+      uStrength: { value: 0 },
+    },
+    vertexShader: `
+      attribute float aVisible; attribute float aFlag; attribute float aSel;
+      uniform float uPixelRatio; uniform float uSize; uniform float uStrength;
+      varying float vShow; varying float vK; varying float vSel;
+      void main() {
+        vK = uStrength;
+        vSel = aSel;
+        vShow = (aFlag > 0.5 && aVisible > 0.5 && vK > 0.01) ? 1.0 : 0.0;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        gl_PointSize = vShow > 0.5 ? uSize * uPixelRatio : 0.0;
+      }`,
+    fragmentShader: `
+      uniform vec3 uColor; uniform vec3 uSelColor;
+      varying float vShow; varying float vK; varying float vSel;
+      void main() {
+        if (vShow < 0.5) discard;
+        vec2 pc = gl_PointCoord * 2.0 - 1.0;
+        float d = length(pc);
+        if (d > 1.0) discard;
+        float a = 0.88 * vK * smoothstep(1.0, 0.82, d);
+        if (a < 0.02) discard;
+        vec3 c = vSel > 0.5 ? mix(uColor, uSelColor, 0.5) : uColor;
+        gl_FragColor = vec4(c, a);
+      }`,
+  });
+}
+
+/**
  * Highlight overlay: a Points pass tinting points whose `aFlag` is set AND
  * that are visible (hidden wins) toward a light highlight color. No glow, no
  * halo, no size change — the point simply pulses to the new color and back.
@@ -259,11 +309,12 @@ function buildScene(
   drawables.push(overlay);
 
   // Focus flash: a brief light-yellow tint over the last-focused region.
-  const flashMat = highlightMaterial(pixelRatio, 7, FOCUS_COLOR, 0);
+  const flashMat = focusFlashMaterial(pixelRatio, 7, FOCUS_COLOR, SELECTION_COLOR);
   const flashGeo = new THREE.BufferGeometry();
   flashGeo.setAttribute("position", positionAttr);
   flashGeo.setAttribute("aVisible", visibleAttr);
   flashGeo.setAttribute("aFlag", flashAttr);
+  flashGeo.setAttribute("aSel", selAttr); // blend the flash on selected points
   const flash = new THREE.Points(flashGeo, flashMat);
   flash.renderOrder = 12;
   drawables.push(flash);
@@ -556,9 +607,6 @@ async function main(): Promise<void> {
     const covered = model.targetCoversEntry(e);
     row.classList.toggle("sel-covered", covered);
     row.classList.toggle("sel-partial", !covered && targetTouch.has(`${e.level}:${e.id}`));
-    // phase-lock the row pulse to the global clock so every covered row (and
-    // the 3D tint, same period) pulses in unison — never sequentially
-    row.style.animationDelay = covered ? `-${performance.now() % GREEN_PULSE_PERIOD_MS}ms` : "";
   };
 
   let bottomTree: TreeHandle | null = null;
@@ -622,8 +670,9 @@ async function main(): Promise<void> {
     focusPoints,
     toggleHidden: (id) => refreshPoints(model.toggleHidden(id)),
     toggleEntryHidden: (id, e) => refreshPoints(model.toggleEntryHidden(id, e)),
-    setEntriesHidden: (id, entries, hidden) =>
-      refreshPoints(model.setEntriesHidden(id, entries, hidden)),
+    setEntryHidden: (id, e, hidden) => refreshPoints(model.setEntryHidden(id, e, hidden)),
+    beginStroke: () => model.beginStroke(),
+    endStroke: () => model.endStroke(),
     beginEdit: (id) => refreshPoints(model.beginEdit(id)),
     endEdit: () => refreshPoints(model.endEdit()),
     rename: (id, name) => model.rename(id, name),

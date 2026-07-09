@@ -900,13 +900,11 @@ async function S8(): Promise<void> {
     await sleep(150);
     check("S8: member right-click hides only that member",
       (await visibleCount(d)) === visAll - 400, `${visAll}→${await visibleCount(d)}`);
-    const purple = await d.evaluate<{ state: boolean; sweep: boolean }>(`(()=>{
+    const purple = await d.evaluate<boolean>(`(()=>{
       const rows=[...document.querySelectorAll('#selections .tree-row.selectable')];
-      return { state: rows.some(r=>r.classList.contains('hidden-entry-row')),
-               sweep: rows.some(r=>r.classList.contains('row-flash-purple')) };
+      return rows.some(r=>r.classList.contains('hidden-entry-row'));
     })()`);
-    check("S8: hidden member is marked purple", purple.state);
-    check("S8: hide plays the purple right-to-left sweep", purple.sweep);
+    check("S8: hidden member is marked purple immediately", purple);
     const countLabel = await d.evaluate<string>(`(()=>{
       const blocks=[...document.querySelectorAll('#selections .sel-block')];
       const b=blocks.find(x=>/selection_1/.test(x.querySelector('.sel-name').textContent));
@@ -918,11 +916,22 @@ async function S8(): Promise<void> {
     await sleep(150);
     check("S8: member right-click again un-hides", (await visibleCount(d)) === visAll);
 
-    // right-DRAG across members hides them all (one undo unit)
+    // right-DRAG hides ROW BY ROW as the pointer crosses — the purple state
+    // sticks mid-drag (before release), and the whole drag is one undo unit
     const memberA2 = (await topRow(d, "/alpha/"))!;
     const memberG = (await topRow(d, "/gamma/"))!;
-    await d.drag(memberA2.x, memberA2.y, memberG.x, memberG.y, 4, { button: "right" });
+    await d.mouse("mousePressed", memberA2.x, memberA2.y, { button: "right", buttons: 2 });
+    await d.mouse("mouseMoved", memberG.x, memberG.y, { buttons: 2 });
     await sleep(200);
+    const midDrag = await d.evaluate<{ purple: number }>(`(()=>{
+      const rows=[...document.querySelectorAll('#selections .tree-row.selectable')];
+      return { purple: rows.filter(r=>r.classList.contains('hidden-entry-row')).length };
+    })()`);
+    check("S8: colors stick one by one WHILE dragging (before release)",
+      (await visibleCount(d)) === visAll - 800 && midDrag.purple === 2,
+      `visible=${await visibleCount(d)} purple=${midDrag.purple}`);
+    await d.mouse("mouseReleased", memberG.x, memberG.y, { button: "right" });
+    await sleep(150);
     check("S8: right-drag hides the dragged members",
       (await visibleCount(d)) === visAll - 800, `visible=${await visibleCount(d)}`);
     await d.ctrlZ();

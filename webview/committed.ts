@@ -29,8 +29,11 @@ export interface CommittedActions {
   toggleHidden(id: number): void;
   /** Hide/show ONE member entry (right-click on a member row). */
   toggleEntryHidden(id: number, e: Entry): void;
-  /** Hide/show several member entries at once (right-drag over rows). */
-  setEntriesHidden(id: number, entries: Entry[], hidden: boolean): void;
+  /** Hide/show one member entry mid-drag (right-drag applies row by row). */
+  setEntryHidden(id: number, e: Entry, hidden: boolean): void;
+  /** Coalesce the following per-entry ops into ONE undo unit (a drag). */
+  beginStroke(): void;
+  endStroke(): void;
   beginEdit(id: number): void;
   endEdit(): void;
   rename(id: number, name: string): boolean;
@@ -180,6 +183,7 @@ export function mountCommitted(
     blockRefs.set(sel.id, refs);
 
     let built = false;
+    let hideMode = true; // per-drag direction, set at secondaryTrailStart
     const buildBody = (): void => {
       if (built) return;
       built = true;
@@ -200,22 +204,25 @@ export function mountCommitted(
             actions.focusPoints(pts);
           },
           secondaryClick: (e) => actions.toggleEntryHidden(sel.id, e),
-          secondaryTrailEnd: (entries) => {
-            // hide (or, starting on a hidden member, show) all dragged rows
-            const hide = !model.entryHidden(sel.id, entries[0]);
-            actions.setEntriesHidden(sel.id, entries, hide);
+          // right-drag hides (or, starting on a hidden member, shows) row by
+          // row AS THE POINTER CROSSES — the purple state sticks immediately
+          // and the whole drag is one undo unit
+          secondaryTrailStart: (start) => {
+            hideMode = !model.entryHidden(sel.id, start);
+            actions.beginStroke();
           },
+          secondaryTrailAdd: (e) => actions.setEntryHidden(sel.id, e, hideMode),
+          secondaryTrailEnd: () => actions.endStroke(),
         },
         {
           flashOnPrimary: true,
-          flashOnSecondary: true,
-          secondaryFlashClass: "row-flash-purple", // hide feedback: purple sweep
+          // no transient flash for hides: the persistent purple state IS the
+          // feedback, applied per row as the drag crosses
+          flashOnSecondary: false,
           decorate: (e, row) => {
             row.classList.toggle("hidden-entry-row", model.entryHidden(sel.id, e));
-            // the shared target pulse: edited members breathe in unison
-            const covered = model.targetCoversEntry(e);
-            row.classList.toggle("sel-covered", covered);
-            row.style.animationDelay = covered ? `-${performance.now() % 1600}ms` : "";
+            // the shared static-green selected state (edit-mode members)
+            row.classList.toggle("sel-covered", model.targetCoversEntry(e));
             row.querySelector(".entry-remove")?.remove();
             if (editingThis) {
               const rm = document.createElement("span");

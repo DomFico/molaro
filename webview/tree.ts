@@ -40,7 +40,12 @@ export interface TreeGestures {
   trailEnd?(entries: Entry[]): void;
   /** Right click on a row. */
   secondaryClick(e: Entry): void;
-  /** Right drag released over rows — a region gesture (optional). */
+  /** A right drag-trail begins (movement passed the threshold). */
+  secondaryTrailStart?(startEntry: Entry): void;
+  /** Right trail moved onto a row not yet in the trail — fired PER ROW while
+   * dragging so state (e.g. hide) can stick as the pointer crosses. */
+  secondaryTrailAdd?(e: Entry): void;
+  /** Right drag released; `entries` is the trail in order. */
   secondaryTrailEnd?(entries: Entry[]): void;
 }
 
@@ -118,10 +123,28 @@ function createRowEngine(
     moved: boolean;
     holdFired: boolean;
     holdTimer: number;
-    trail: { key: string; entry: Entry }[];
+    trail: { key: string; entry: Entry; row: HTMLElement | null }[];
   }
   let left: Arm | null = null;
   let right: Arm | null = null;
+
+  // Trail feedback HOLDS while the button is down (the color stays present
+  // until release), then fades out — never disappearing mid-drag.
+  const pCls = "row-flash";
+  const sCls = opts.secondaryFlashClass ?? "row-flash";
+  const holdOn = (row: HTMLElement, cls: string): void => {
+    row.classList.remove(`${cls}-out`);
+    row.classList.add(`${cls}-hold`);
+  };
+  const holdOff = (row: HTMLElement, cls: string, fade: boolean): void => {
+    row.classList.remove(`${cls}-hold`);
+    if (fade) {
+      row.classList.add(`${cls}-out`);
+      row.addEventListener("animationend", () => row.classList.remove(`${cls}-out`), {
+        once: true,
+      });
+    }
+  };
 
   /** Visit every row along the segment from the arm's last position to
    * (x1,y1) — pointermove samples are sparse, so a fast drag would otherwise
@@ -148,11 +171,12 @@ function createRowEngine(
       // dragged back onto an earlier trail row: revert everything after it
       while (t.length - 1 > at) {
         const popped = t.pop()!;
+        if (opts.flashOnPrimary && popped.row) holdOff(popped.row, pCls, false);
         gestures.trailRemove?.(popped.entry);
       }
     } else {
-      t.push({ key, entry });
-      if (opts.flashOnPrimary && row) flashRow(row);
+      t.push({ key, entry, row: row ?? null });
+      if (opts.flashOnPrimary && row) holdOn(row, pCls);
       gestures.trailAdd?.(entry);
     }
   };
@@ -160,8 +184,9 @@ function createRowEngine(
     if (!right) return;
     const key = entryKey(entry);
     if (right.trail.some((it) => it.key === key)) return;
-    right.trail.push({ key, entry });
-    if (opts.flashOnSecondary) flashRow(row, opts.secondaryFlashClass);
+    right.trail.push({ key, entry, row });
+    if (opts.flashOnSecondary) holdOn(row, sCls);
+    gestures.secondaryTrailAdd?.(entry);
   };
 
   const onMove = (e: PointerEvent): void => {
@@ -178,6 +203,7 @@ function createRowEngine(
       if (!right.moved) {
         if (Math.hypot(e.clientX - right.x, e.clientY - right.y) <= DRAG_THRESHOLD_PX) return;
         right.moved = true;
+        gestures.secondaryTrailStart?.(right.entry);
         const startRow = rowUnder(right.x, right.y);
         if (startRow) enterRight(right.entry, startRow);
       }
@@ -189,8 +215,12 @@ function createRowEngine(
       const a = left;
       left = null;
       clearTimeout(a.holdTimer);
-      if (a.moved) gestures.trailEnd?.(a.trail.map((t) => t.entry));
-      else if (!a.holdFired) {
+      if (a.moved) {
+        if (opts.flashOnPrimary) {
+          for (const it of a.trail) if (it.row) holdOff(it.row, pCls, true);
+        }
+        gestures.trailEnd?.(a.trail.map((t) => t.entry));
+      } else if (!a.holdFired) {
         if (opts.flashOnPrimary) {
           const row = rowUnder(e.clientX, e.clientY);
           if (row) flashRow(row);
@@ -201,6 +231,9 @@ function createRowEngine(
       const a = right;
       right = null;
       if (a.moved && a.trail.length > 0) {
+        if (opts.flashOnSecondary) {
+          for (const it of a.trail) if (it.row) holdOff(it.row, sCls, true);
+        }
         (gestures.secondaryTrailEnd ?? ((entries: Entry[]) => gestures.secondaryClick(entries[0])))(
           a.trail.map((t) => t.entry),
         );
