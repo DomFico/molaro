@@ -276,6 +276,19 @@ export class E2EDriver {
     await this.mouse("mouseReleased", x1, y1, { clickCount: 1, button, modifiers });
   }
 
+  /** A mouse-wheel tick at (x,y); `buttons: 1` = while left button held. */
+  async wheel(x: number, y: number, deltaY: number, buttons = 0): Promise<void> {
+    await this.send("Input.dispatchMouseEvent", {
+      type: "mouseWheel",
+      x,
+      y,
+      deltaX: 0,
+      deltaY,
+      buttons,
+      modifiers: 0,
+    });
+  }
+
   /** A key tap (keydown+keyup). `modifiers: 2` = Ctrl. */
   async key(key: string, code: string, keyCode: number, modifiers = 0): Promise<void> {
     await this.send("Input.dispatchKeyEvent", {

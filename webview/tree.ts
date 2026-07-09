@@ -66,6 +66,10 @@ export interface TreeOptions {
   /** CSS class the secondary flash uses (default "row-flash", the yellow
    * swatch; pass "row-flash-purple" for hide feedback). */
   secondaryFlashClass?: string;
+  /** Also flash on a secondary CLICK (default true). Set false when the
+   * click toggles a persistent state — the state change IS the feedback, and
+   * a lingering flash would delay seeing it (drag holds are unaffected). */
+  secondaryClickFlash?: boolean;
   /** Flash rows touched by primary click/trail (focus feedback, top section). */
   flashOnPrimary?: boolean;
 }
@@ -260,7 +264,7 @@ function createRowEngine(
           a.trail.map((t) => t.entry),
         );
       } else {
-        if (opts.flashOnSecondary) {
+        if (opts.flashOnSecondary && (opts.secondaryClickFlash ?? true)) {
           const row = rowUnder(e.clientX, e.clientY);
           if (row) flashRow(row, opts.secondaryFlashClass);
         }
@@ -274,9 +278,63 @@ function createRowEngine(
     e.preventDefault();
     e.stopPropagation();
   };
+
+  // Hold + WHEEL: scrolling slides rows under a stationary pointer without any
+  // pointermove, so the trail extends from the SCROLL delta instead — visiting
+  // the rows that crossed the pointer in order, exactly like a drag would.
+  const lastScrollTops = new WeakMap<Element, number>();
+  const seedScrollTops = (el: Element | null): void => {
+    for (let n = el; n; n = n.parentElement) {
+      if (n.scrollHeight > n.clientHeight) lastScrollTops.set(n, n.scrollTop);
+    }
+  };
+  let pendingScroll = 0;
+  let scrollRAF = 0;
+  const processScroll = (): void => {
+    scrollRAF = 0;
+    const delta = pendingScroll;
+    pendingScroll = 0;
+    const arm = left ?? right;
+    if (!arm || delta === 0) return;
+    const isLeft = arm === left;
+    if (!arm.moved) {
+      // holding while the content moves counts as starting the drag
+      arm.moved = true;
+      clearTimeout(arm.holdTimer);
+      if (isLeft) {
+        gestures.trailStart?.(arm.entry);
+        enterLeft(arm.entry, rowUnder(arm.lastX, arm.lastY));
+      } else {
+        gestures.secondaryTrailStart?.(arm.entry);
+        const r = rowUnder(arm.lastX, arm.lastY);
+        if (r) enterRight(entryOf(r), r);
+      }
+    }
+    // rows that slid past sit between (lastY - delta) and lastY: visit them in
+    // crossing order at half-row steps so nothing skips
+    const steps = Math.max(1, Math.ceil(Math.abs(delta) / (ROW_H / 2)));
+    for (let i = steps; i >= 0; i--) {
+      const row = rowUnder(arm.lastX, arm.lastY - (delta * i) / steps);
+      if (!row) continue;
+      if (isLeft) enterLeft(entryOf(row), row);
+      else enterRight(entryOf(row), row);
+    }
+  };
+  const onScrollCapture = (e: Event): void => {
+    const el = e.target as Element | null;
+    if (!el || !(el instanceof Element) || (!left && !right)) return;
+    const prev = lastScrollTops.get(el);
+    lastScrollTops.set(el, el.scrollTop);
+    if (prev === undefined) return;
+    pendingScroll += el.scrollTop - prev;
+    // after the virtual lists have re-windowed for this scroll tick
+    if (!scrollRAF) scrollRAF = requestAnimationFrame(processScroll);
+  };
+
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
   container.addEventListener("contextmenu", onContext);
+  document.addEventListener("scroll", onScrollCapture, true);
 
   const makeRow = (
     depth: number,
@@ -304,8 +362,22 @@ function createRowEngine(
       row.classList.add("selectable");
       row.dataset.level = entry.level;
       row.dataset.id = String(entry.id);
+      // a virtualized row re-mounting mid-gesture (scroll) re-takes its held
+      // color and re-links the trail to the live element
+      const k = entryKey(entry);
+      const relink = (arm: Arm | null, cls: string, enabled: boolean | undefined): void => {
+        if (!arm || !enabled) return;
+        const it = arm.trail.find((t) => t.key === k);
+        if (it) {
+          it.row = row;
+          row.classList.add(`${cls}-hold`);
+        }
+      };
+      relink(left, pCls, opts.flashOnPrimary);
+      relink(right, sCls, opts.flashOnSecondary);
       row.addEventListener("pointerdown", (e) => {
         if ((e.target as HTMLElement).closest(".row-ctl")) return;
+        seedScrollTops(row); // so a wheel tick mid-hold has a scroll baseline
         if (e.button === 0) {
           e.preventDefault();
           left = {
@@ -351,6 +423,8 @@ function createRowEngine(
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
       container.removeEventListener("contextmenu", onContext);
+      document.removeEventListener("scroll", onScrollCapture, true);
+      if (scrollRAF) cancelAnimationFrame(scrollRAF);
     },
   };
 }
@@ -388,6 +462,9 @@ export function mountTree(
       childHost.style.display = open ? "" : "none";
       caret.textContent = open ? "▾" : "▸";
       opts.onLayout?.();
+      // virtual lists below re-window against the shifted layout (otherwise a
+      // re-expansion after a deep-scroll collapse shows a stale window)
+      window.dispatchEvent(new Event("panelrelayout"));
     });
   };
 
@@ -426,6 +503,7 @@ export function mountTree(
         }
         vlist.setCount(flat.length);
         opts.onLayout?.();
+        window.dispatchEvent(new Event("panelrelayout"));
       });
       return row;
     };

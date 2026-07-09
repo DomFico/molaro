@@ -821,6 +821,46 @@ async function S7(): Promise<void> {
       [...document.querySelectorAll('#tree-host .tree-row.selectable')]
         .filter(r=>r.getBoundingClientRect().height>0).length`);
     check("S7: pinned caret collapses the subtree", rowsAfter <= 6, `${rowsAfter} rows visible`);
+
+    // hold + WHEEL: scrolling while holding extends the paint smoothly — the
+    // rows sliding under the stationary pointer join the trail, none skipped
+    await expandBottomCategory(d, "/solvent/");
+    await sleep(150);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      if (rows.some(r=>r.dataset.level==='subgroup')) return; // already open
+      const grp=rows.find(r=>r.dataset.level==='group');
+      grp?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(300);
+    const subRow = await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const sc=document.getElementById('sidebar-content').getBoundingClientRect();
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>{const b=r.getBoundingClientRect();
+          return b.height>0 && b.top>=sc.top+40 && b.bottom<=sc.bottom-40;});
+      const el=rows.find(r=>r.dataset.level==='subgroup');
+      if(!el) return null; const r=el.getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2};
+    })()`);
+    check("S7: found an on-screen subgroup row to scroll-paint from", subRow !== null);
+    await d.mouse("mousePressed", subRow!.x, subRow!.y, { clickCount: 1 });
+    await d.wheel(subRow!.x, subRow!.y, 54, 1); // ≈3 rows slide under the pointer
+    await sleep(250);
+    const midScroll = await pendingEntries(d);
+    check("S7: rows joining under the pointer paint WHILE scrolling",
+      midScroll >= 3, `entries=${midScroll}`);
+    await d.wheel(subRow!.x, subRow!.y, 54, 1);
+    await sleep(250);
+    await d.mouse("mouseReleased", subRow!.x, subRow!.y, { clickCount: 1 });
+    await sleep(150);
+    const afterScroll = await pendingEntries(d);
+    check("S7: a second wheel tick keeps extending the same stroke",
+      afterScroll > midScroll, `entries=${afterScroll}`);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S7: the whole scroll-paint undoes as one stroke",
+      (await pendingEntries(d)) === 0, `entries=${await pendingEntries(d)}`);
   });
 }
 

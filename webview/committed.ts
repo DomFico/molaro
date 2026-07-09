@@ -228,10 +228,11 @@ export function mountCommitted(
         },
         {
           flashOnPrimary: true,
-          // purple flash/hold acknowledges the gesture and BLENDS over any
-          // state color (the persistent purple state carries the meaning)
+          // purple holds mark the drag's extent; a plain right-CLICK skips
+          // the flash — the persistent state change IS the feedback there
           flashOnSecondary: true,
           secondaryFlashClass: "row-flash-purple",
+          secondaryClickFlash: false,
           decorate: (e, row) => {
             row.classList.toggle("hidden-entry-row", model.entryHidden(sel.id, e));
             // the shared static-green selected state (edit-mode members)

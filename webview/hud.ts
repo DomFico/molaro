@@ -158,7 +158,7 @@ export const HUD_CSS = /* css */ `
   .sel-head.row-flash-purple,
   .tree-row.row-flash-purple, .tree-row.row-flash-purple:hover,
   .tree-row.row-flash-purple-hold, .tree-row.row-flash-purple-hold:hover {
-    background-color: rgba(185, 139, 224, 0.40); }
+    background-color: rgba(185, 139, 224, 0.35); }
 
   /* persistent states — they win over a passing flash (hover = brighter) */
   .tree-row.sel-covered, .tree-row.sel-covered:hover { background-color: rgba(191, 255, 228, 0.20); }
@@ -181,9 +181,8 @@ export const HUD_CSS = /* css */ `
   .tree-row.hidden-entry-row.row-flash, .tree-row.hidden-entry-row.row-flash:hover,
   .tree-row.hidden-entry-row.row-flash-hold, .tree-row.hidden-entry-row.row-flash-hold:hover {
     background-color: rgba(220, 186, 196, 0.40); } /* yellow ⊕ purple */
-  .tree-row.hidden-entry-row.row-flash-purple, .tree-row.hidden-entry-row.row-flash-purple:hover,
-  .tree-row.hidden-entry-row.row-flash-purple-hold, .tree-row.hidden-entry-row.row-flash-purple-hold:hover {
-    background-color: rgba(185, 139, 224, 0.55); } /* purple ⊕ purple: deeper */
+  /* purple over purple stays AT the state color — no brighter overshoot that
+     would make the hide feedback read slower than the other colors */
   .caret { width: 10px; flex: none; display: inline-block; color: #888; cursor: pointer; }
   /* expandable carets get a big forgiving hit box (reaches left into the
      indent) so a near-miss expands instead of selecting */
