@@ -2398,9 +2398,213 @@ async function S13(): Promise<void> {
   });
 }
 
+async function S14(): Promise<void> {
+  console.log("S14 — add/remove: membership mutation at whole-member granularity");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const entriesOf = (name: string) =>
+      d.evaluate<{ level: string; id: number }[] | null>(
+        `${V}.model.committed().find(c=>c.name===${JSON.stringify(name)})?.set.listEntries() ?? null`,
+      );
+    const openBlock = (name: string) =>
+      d.evaluate(`(()=>{
+        const b=[...document.querySelectorAll('#selections .sel-block')]
+          .find(x=>x.querySelector('.sel-name')?.textContent===${JSON.stringify(name)});
+        if(!b) return;
+        const body=b.querySelector('.sel-body');
+        if (!body || body.style.display==='none' || !body.hasChildNodes())
+          b.querySelector('.caret').click();
+      })()`);
+    // setup: one selection + the visible tree expanded to subgroup rows
+    await cmd("create_sele alpha.group-0.subgroup-0 [mix]");
+    await expandBottomCategory(d, "/alpha/");
+    await sleep(200);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      rows.find(r=>r.dataset.level==='group')?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(250);
+    const baseline = JSON.stringify(await entriesOf("mix"));
+    const baseUndo = await undoDepth();
+
+    // -- ADD: the edit-mode gesture arm ----------------------------------------
+    await clickSelCtl(d, "/^mix$/", "edit");
+    await sleep(200);
+    const sub3 = (await bottomRow(d, "/subgroup-3/"))!;
+    await d.click(sub3.x, sub3.y); // edit-mode row click = addToTarget
+    await sleep(150);
+    await clickSelCtl(d, "/^mix$/", "done");
+    await sleep(200);
+    const gEntries = JSON.stringify(await entriesOf("mix"));
+    check("S14: (gesture) edit-click adds the subgroup as ONE member",
+      (await entriesOf("mix"))!.length === 2 && (await undoDepth()) === baseUndo + 1,
+      gEntries);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S14: (gesture) one Ctrl+Z reverts the member add",
+      JSON.stringify(await entriesOf("mix")) === baseline && (await undoDepth()) === baseUndo);
+
+    // -- ADD: the command arm — identical membership, panel update, one undo ---
+    let r = await cmd("add @mix alpha.group-0.subgroup-3");
+    check("S14: add @name <path> reports member + points",
+      r.status === "ok" && r.message === `added 1 members to "mix" — 100 points`,
+      JSON.stringify(r));
+    check("S14: command membership ≡ the edit-mode gesture's, byte-identical",
+      JSON.stringify(await entriesOf("mix")) === gEntries);
+    check("S14: ...one undo op", (await undoDepth()) === baseUndo + 1);
+    await openBlock("mix");
+    await sleep(200);
+    check("S14: ...the member row appears in the panel without edit mode",
+      await d.evaluate<boolean>(`(()=>{
+        const b=[...document.querySelectorAll('#selections .sel-block')]
+          .find(x=>x.querySelector('.sel-name')?.textContent==='mix');
+        return !!b && [...b.querySelectorAll('.tree-row.selectable')]
+          .some(r=>r.dataset.level==='subgroup' && Number(r.dataset.id)===3);
+      })()`));
+
+    // -- ADD: natural level + idempotence + tree-only right side ----------------
+    r = await cmd("add @mix alpha.group-0");
+    check("S14: a group-level address adds ONE group entry (natural level)",
+      r.status === "ok" && (await entriesOf("mix"))!.some((e) => e.level === "group") &&
+        (await entriesOf("mix"))!.length === 3,
+      JSON.stringify(r));
+    const depthG = await undoDepth();
+    r = await cmd("add @mix alpha.group-0");
+    check("S14: re-adding an exact member is an honest no-op (no undo entry)",
+      r.message === `already members — nothing to add to "mix"` &&
+        (await undoDepth()) === depthG,
+      JSON.stringify(r));
+    r = await cmd("add @mix @solvent");
+    check("S14: add rejects @ terms on the right (no member transfer)",
+      r.status === "error" && /no @ terms on the right/.test(r.message), JSON.stringify(r));
+    await d.ctrlZ(); // revert the group add → mix = subgroup-0 + subgroup-3
+    await sleep(120);
+
+    // -- REMOVE: the member-✕ gesture arm vs the command ------------------------
+    const with3 = JSON.stringify(await entriesOf("mix"));
+    const depthWith3 = await undoDepth();
+    await clickSelCtl(d, "/^mix$/", "edit");
+    await sleep(200);
+    await openBlock("mix");
+    await sleep(150);
+    check("S14: (gesture) the member ✕ removes exactly that member",
+      await d.evaluate<boolean>(`(()=>{
+        const b=[...document.querySelectorAll('#selections .sel-block')]
+          .find(x=>x.querySelector('.sel-name')?.textContent==='mix');
+        const row=[...b.querySelectorAll('.tree-row.selectable')]
+          .find(r=>r.dataset.level==='subgroup' && Number(r.dataset.id)===3);
+        const rm=row?.querySelector('.entry-remove');
+        if(!rm) return false; rm.click(); return true;
+      })()`));
+    await sleep(150);
+    await clickSelCtl(d, "/^mix$/", "done");
+    await sleep(150);
+    check("S14: (gesture) membership back to baseline, one undo op",
+      JSON.stringify(await entriesOf("mix")) === baseline &&
+        (await undoDepth()) === depthWith3 + 1);
+    await d.ctrlZ(); // back to with3
+    await sleep(120);
+    r = await cmd("remove @mix subgroup-3");
+    check("S14: remove @name <label> ≡ the member-✕ gesture (state + one undo)",
+      r.message === `removed 1 members from "mix" — 100 points` &&
+        JSON.stringify(await entriesOf("mix")) === baseline &&
+        (await undoDepth()) === depthWith3 + 1,
+      JSON.stringify(r));
+
+    // -- REMOVE: no carve — sub-member predicates nomatch -----------------------
+    const depthNC = await undoDepth();
+    const rT = await cmd("remove @mix t0"); // a type INSIDE the coarse member
+    const rI = await cmd("remove @mix #5"); // an index inside it
+    check("S14: predicates below a coarse member NOMATCH — no carve, no mutation",
+      rT.status === "nomatch" && rI.status === "nomatch" &&
+        JSON.stringify(await entriesOf("mix")) === baseline &&
+        (await undoDepth()) === depthNC,
+      JSON.stringify([rT.message, rI.message]));
+
+    // -- REMOVE @name all / last-member predicate: empty STANDS -----------------
+    r = await cmd("remove @mix all");
+    check("S14: remove @name all empties the membership",
+      r.message === `removed 1 members from "mix" — 100 points (now empty — the selection remains)`,
+      JSON.stringify(r));
+    check("S14: the empty selection STANDS as a panel block",
+      !!(await selHead(d, "/^mix$/")) &&
+        (await committed(d)).find((c) => c.name === "mix")!.pts === 0);
+    await d.ctrlZ();
+    await sleep(120);
+    r = await cmd("remove @mix subgroup-*"); // incidental last-member predicate
+    check("S14: an incidental empty behaves identically — it stays",
+      /now empty — the selection remains/.test(r.message) &&
+        !!(await selHead(d, "/^mix$/")),
+      JSON.stringify(r));
+    await d.ctrlZ();
+    await sleep(120);
+
+    // -- bare remove @name: DELETE (the ✕ analog), one-undo restore -------------
+    // (subgroup-3: alpha's branch of the spanning group-0 holds only 0 and 3)
+    await cmd("create_sele alpha.group-0.subgroup-3 [tmp]");
+    const countBefore = (await committed(d)).length;
+    const depthDel = await undoDepth();
+    r = await cmd("remove @tmp");
+    check("S14: bare remove @name deletes the selection",
+      r.message === `deleted "tmp" — 100 points` &&
+        (await committed(d)).length === countBefore - 1 &&
+        !(await selHead(d, "/^tmp$/")),
+      JSON.stringify(r));
+    check("S14: ...one undo op", (await undoDepth()) === depthDel + 1);
+    await d.ctrlZ();
+    await sleep(150);
+    check("S14: Ctrl+Z restores the deleted selection intact",
+      (await committed(d)).some((c) => c.name === "tmp" && c.pts === 100));
+    await cmd("remove @tmp"); // drop it again for the blocks below
+
+    // -- remove @all: everything gone, ONE undo restores everything -------------
+    const namesBefore = (await committed(d)).map((c) => c.name).sort();
+    const depthAll = await undoDepth();
+    r = await cmd("remove @all");
+    check("S14: remove @all deletes EVERY selection",
+      /^deleted \d+ selections — \d+ points$/.test(r.message) &&
+        (await committed(d)).length === 0,
+      JSON.stringify(r));
+    check("S14: ...as one undo op", (await undoDepth()) === depthAll + 1);
+    await d.ctrlZ();
+    await sleep(200);
+    check("S14: one Ctrl+Z restores them ALL",
+      JSON.stringify((await committed(d)).map((c) => c.name).sort()) ===
+        JSON.stringify(namesBefore));
+    r = await cmd("remove @all s0");
+    check("S14: remove @all takes no second argument",
+      r.status === "error" && /takes no second argument/.test(r.message), JSON.stringify(r));
+
+    // -- edit-mode independence + round-trip + others untouched -----------------
+    const solventBefore = JSON.stringify(
+      (await committed(d)).find((c) => c.name === "solvent"));
+    await clickSelCtl(d, "/solvent/", "edit");
+    await sleep(150);
+    r = await cmd("add @mix alpha.group-0.subgroup-3");
+    check("S14: add is edit-mode independent — lands on @mix mid-edit of another",
+      r.status === "ok" &&
+        (await entriesOf("mix"))!.some((e) => e.level === "subgroup" && e.id === 3) &&
+        (await editingName(d)) === "solvent",
+      JSON.stringify(r));
+    await clickSelCtl(d, "/solvent/", "done");
+    await sleep(120);
+    r = await cmd("remove @mix subgroup-3");
+    check("S14: add-then-remove round-trips to baseline membership",
+      r.status === "ok" && JSON.stringify(await entriesOf("mix")) === baseline,
+      JSON.stringify(r));
+    check("S14: the untargeted selection was never touched",
+      JSON.stringify((await committed(d)).find((c) => c.name === "solvent")) ===
+        solventBefore);
+    await d.screenshot(`${REPORT}/S14_membership.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

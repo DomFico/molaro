@@ -18,6 +18,7 @@ import {
   completeTarget,
   parseTarget,
   resolveTarget,
+  splitLeadingRef,
   splitTrailingName,
   type Completion,
   type Segment,
@@ -101,6 +102,25 @@ export interface CommandContext {
   showPointsCovering(points: readonly number[]): number;
   /** Bare show: clear ALL hidden state (one undo op). */
   showAll(): number;
+  /** add/remove: mutate a committed selection's MEMBERSHIP through the same
+   * gesture mutators edit mode drives (addToTarget/removeFromTarget), all
+   * inside ONE stroke = one undo op; edit mode is parked onto the selection
+   * and the prior mode restored around it. add inserts entries at their
+   * natural level (idempotent per entry); remove drops EXACT stored members
+   * only — the wiring skips anything else, so the model's carve path is
+   * structurally unreachable from the terminal (principle 4). Returns the
+   * points whose membership changed and the selection's remaining entry
+   * count, or null when the named selection doesn't exist. */
+  mutateMembers(
+    name: string,
+    mode: "add" | "remove",
+    entries: Entry[],
+  ): { points: number; remaining: number } | null;
+  /** Bare `remove @name` / `remove @all`: delete whole selections through
+   * the SAME model op the panel's ✕ button uses, all in ONE stroke — a
+   * single Ctrl+Z restores every deleted selection intact (members, hidden
+   * state, lane). null = a named selection doesn't exist. */
+  deleteSelections(names: string[]): { deleted: number; points: number } | null;
 }
 
 export class CommandRegistry {
@@ -493,6 +513,199 @@ export function makeRenameHandler(ctx: CommandContext): CommandHandler {
   };
 }
 
+/** Shared FIRST-argument validation for the membership-mutation pair:
+ * exactly one lone committed `@name` (add/remove edit ONE selection at a
+ * time — matching the UI, which cannot edit two selections at once), then
+ * the verb's own right-side expression. */
+function leadingSelection(
+  verb: "add" | "remove",
+  args: string,
+  ctx: CommandContext,
+  usage: string,
+): { name: string; rest: string } | CommandResult {
+  const split = splitTrailingName(args);
+  if ("kind" in split) return { status: "error", message: split.message };
+  if (split.name !== null) {
+    return { status: "error", message: `${verb} takes no [name] — it edits an existing selection` };
+  }
+  const lead = splitLeadingRef(split.expr);
+  if (lead.kind === "error") return { status: "error", message: lead.message };
+  if (lead.kind === "none") {
+    return { status: "error", message: `${verb} needs a committed selection first — ${usage}` };
+  }
+  if (lead.kind === "multi" || lead.rest.startsWith("+")) {
+    return {
+      status: "error",
+      message: `${verb} edits ONE selection at a time — a single @name comes first (${usage})`,
+    };
+  }
+  if (lead.filtered) {
+    return { status: "error", message: `${verb} takes a lone @name first — no filter (${usage})` };
+  }
+  return { name: lead.name, rest: lead.rest };
+}
+
+/**
+ * `add @name <tree-target>` — insert tree-addressed entries as MEMBERS at
+ * their natural level (entry-level parity). The right side is a TREE
+ * address (full grammar: paths, globs, ranges, #, lists, + unions) because
+ * the things being added are not yet members and must be named from the
+ * tree; `@` terms are a usage error — the UI cannot transfer members
+ * between selections, and neither can add.
+ */
+export function makeAddHandler(ctx: CommandContext): CommandHandler {
+  const USAGE = "add @name <tree-target>";
+  return (args: string): CommandResult => {
+    const lead = leadingSelection("add", args, ctx, USAGE);
+    if ("status" in lead) return lead;
+    if (lead.name === "all") {
+      return {
+        status: "error",
+        message: `add edits ONE selection at a time — @all is not a single selection`,
+      };
+    }
+    if (!ctx.committedEntries().has(lead.name)) {
+      return { status: "nomatch", message: `no selection named "${lead.name}"` };
+    }
+    if (lead.rest === "") {
+      return { status: "error", message: `add needs something to add — ${USAGE}` };
+    }
+    const ast = parseTarget(lead.rest);
+    if (ast.kind === "error") return { status: "error", message: ast.message };
+    if (ast.terms.some((t) => t.kind === "ref")) {
+      return {
+        status: "error",
+        message: `add takes TREE addresses — members can't be transferred from another selection (no @ terms on the right)`,
+      };
+    }
+    const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
+    if (entries.length === 0) {
+      return { status: "nomatch", message: `nothing matches "${lead.rest}"` };
+    }
+    // idempotence at the entry level: exact members are already there
+    const stored = new Set(
+      (ctx.committedEntries().get(lead.name) ?? []).map((e) => `${e.level}:${e.id}`),
+    );
+    const fresh = entries.filter((e) => !stored.has(`${e.level}:${e.id}`));
+    if (fresh.length === 0) {
+      return { status: "ok", message: `already members — nothing to add to "${lead.name}"` };
+    }
+    const r = ctx.mutateMembers(lead.name, "add", fresh);
+    if (!r) return { status: "nomatch", message: `no selection named "${lead.name}"` };
+    return {
+      status: "ok",
+      message: `added ${fresh.length} members to "${lead.name}" — ${r.points} points`,
+    };
+  };
+}
+
+/**
+ * `remove` — four forms, one asymmetric verb:
+ *   remove @name <member-pred>  drop the matched STORED members
+ *   remove @name all            drop every member; the selection REMAINS
+ *   remove @name                DELETE the selection (the panel's ✕)
+ *   remove @all                 DELETE every committed selection
+ * Member predicates (labels, types, globs, ranges, #index, "," lists, +
+ * unions) go through the SAME matcher as `@name.<pred>` filtering — no
+ * tree paths, because you're already scoped to the member list. A predicate
+ * naming something below a coarse member matches nothing (flat-to-members):
+ * carving is structurally impossible from here (principle 4). Emptying a
+ * selection — via `all` or an incidental last-member predicate — always
+ * leaves it standing; DELETION happens only through the bare forms.
+ */
+export function makeRemoveHandler(ctx: CommandContext): CommandHandler {
+  const USAGE = "remove @name <member-predicates>";
+  return (args: string): CommandResult => {
+    const lead = leadingSelection("remove", args, ctx, USAGE);
+    if ("status" in lead) return lead;
+    if (lead.name === "all") {
+      // remove @all — the one deliberate bulk delete: the selection OBJECTS
+      // go, not their members. One stroke = one Ctrl+Z restores everything.
+      if (lead.rest !== "") {
+        return {
+          status: "error",
+          message:
+            `remove @all takes no second argument — it deletes EVERY committed ` +
+            `selection (to empty one selection's members: remove @name all)`,
+        };
+      }
+      const info = ctx.selectionsInfo();
+      if (info.length === 0) return { status: "nomatch", message: "no committed selections" };
+      const r = ctx.deleteSelections(info.map((s) => s.name));
+      if (!r) return { status: "nomatch", message: "no committed selections" };
+      return { status: "ok", message: `deleted ${r.deleted} selections — ${r.points} points` };
+    }
+    if (!ctx.committedEntries().has(lead.name)) {
+      return { status: "nomatch", message: `no selection named "${lead.name}"` };
+    }
+    if (lead.rest === "") {
+      // bare remove @name — the command analog of the panel's ✕ button
+      const r = ctx.deleteSelections([lead.name]);
+      if (!r) return { status: "nomatch", message: `no selection named "${lead.name}"` };
+      return { status: "ok", message: `deleted "${lead.name}" — ${r.points} points` };
+    }
+    if (lead.rest.includes(":")) {
+      return {
+        status: "error",
+        message: `level qualifiers (":") are not yet supported in member predicates`,
+      };
+    }
+    const ast = parseTarget(lead.rest);
+    if (ast.kind === "error") return { status: "error", message: ast.message };
+    // each + term must be MEMBER-shaped: one leaf segment, or a "#" term;
+    // the sole bare `all` empties the membership (a star over the members)
+    const filters: Segment[] = [];
+    if (ast.terms.length === 1 && ast.terms[0].kind === "all") {
+      filters.push({ predicates: [{ kind: "star" }] });
+    } else {
+      for (const t of ast.terms) {
+        if (t.kind === "path" && t.segments.length === 1) {
+          filters.push(t.segments[0]);
+        } else if (t.kind === "points") {
+          filters.push({
+            predicates: t.specs.map((s) => ({ kind: "index" as const, lo: s.lo, hi: s.hi })),
+          });
+        } else {
+          return {
+            status: "error",
+            message:
+              `remove names the selection's OWN members — a member's label, or a point ` +
+              `member's type/#index (globs, ranges, "," and "+" compose); no paths, no @ ` +
+              `terms. remove @name all empties it; bare remove @name deletes it; to ` +
+              `operate on finer pieces, commit a finer selection`,
+          };
+        }
+      }
+    }
+    // the @name.<pred> matcher itself — remove and filtering cannot diverge
+    const matched: Entry[] = [];
+    const seen = new Set<string>();
+    for (const f of filters) {
+      const sub: TargetAst = {
+        kind: "target",
+        terms: [{ kind: "ref", name: lead.name, filter: f }],
+      };
+      for (const e of resolveTarget(sub, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries())) {
+        const key = `${e.level}:${e.id}`;
+        if (!seen.has(key)) {
+          seen.add(key);
+          matched.push(e);
+        }
+      }
+    }
+    if (matched.length === 0) {
+      return { status: "nomatch", message: `no members of "${lead.name}" match "${lead.rest}"` };
+    }
+    const r = ctx.mutateMembers(lead.name, "remove", matched);
+    if (!r) return { status: "nomatch", message: `no selection named "${lead.name}"` };
+    const empty = r.remaining === 0 ? " (now empty — the selection remains)" : "";
+    return {
+      status: "ok",
+      message: `removed ${matched.length} members from "${lead.name}" — ${r.points} points${empty}`,
+    };
+  };
+}
+
 /**
  * The `help` summary. KEEP IN SYNC with the quick-reference table at the top
  * of docs/COMMANDS.md — the two carry the same content for different surfaces
@@ -518,6 +731,10 @@ export const HELP_TEXT = [
   "               bare show reveals everything",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  rename @name [new]  rename a selection · clear  wipe the terminal log",
+  "  add @name <tree-target>     add tree entries as members (natural level)",
+  "  remove @name <member-pred>  drop matched STORED members (never carves);",
+  "               remove @name all = empty it (it remains) · remove @name =",
+  "               delete it · remove @all = delete EVERY selection",
   'errors: a parse error = malformed syntax · "nothing matches" = valid syntax, empty result',
   "full reference: docs/COMMANDS.md",
 ].join("\n");
@@ -568,6 +785,17 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "rename",
     makeRenameHandler(ctx),
     "rename a committed selection: rename @name [new-name]",
+  );
+  registry.register(
+    "add",
+    makeAddHandler(ctx),
+    "add tree-addressed entries to a selection's members (natural level): add @name <tree-target>",
+  );
+  registry.register(
+    "remove",
+    makeRemoveHandler(ctx),
+    "drop matched STORED members (never carves): remove @name <member-pred> · " +
+      "remove @name all empties it · bare remove @name deletes it · remove @all deletes every selection",
   );
   registry.register(
     "clear",

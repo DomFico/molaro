@@ -837,6 +837,59 @@ async function main(): Promise<void> {
     return { ok: true };
   };
 
+  /** add/remove verbs: membership mutation through the SAME gesture
+   * mutators edit mode drives (addToTarget/removeFromTarget on the edited
+   * set). Edit mode is parked onto the named selection and the prior mode
+   * restored after (mode flips are deliberately not undoable), with every
+   * mutation inside ONE stroke = one undo op. remove only ever receives
+   * exact stored members from the @name.<pred> matcher, and the has() guard
+   * here skips anything else — removeFromTarget's carve branch is
+   * structurally unreachable from the terminal (principle 4). An emptied
+   * selection stays in place (the UI never auto-deletes; only the ✕ button
+   * deletes). */
+  const mutateMembers = (
+    name: string,
+    mode: "add" | "remove",
+    entries: Entry[],
+  ): { points: number; remaining: number } | null => {
+    const sel = selByName(name);
+    if (!sel) return null;
+    const prevEditId = model.editing?.id ?? null;
+    if (prevEditId !== sel.id) {
+      if (prevEditId !== null) refreshPoints(model.endEdit());
+      refreshPoints(model.beginEdit(sel.id));
+    }
+    model.beginStroke();
+    const affected: number[] = [];
+    for (const e of entries) {
+      if (mode === "add") affected.push(...model.addToTarget(e));
+      else if (sel.set.has(e)) affected.push(...model.removeFromTarget(e));
+    }
+    model.endStroke();
+    if (prevEditId !== sel.id) {
+      refreshPoints(model.endEdit());
+      if (prevEditId !== null) refreshPoints(model.beginEdit(prevEditId));
+    }
+    refreshPoints(affected);
+    return { points: affected.length, remaining: sel.set.entryCount };
+  };
+
+  /** Bare remove @name / remove @all: delete selections through the SAME
+   * model.deleteSelection the panel's ✕ uses — one stroke, so remove @all
+   * restores EVERY deleted selection with a single Ctrl+Z. */
+  const deleteSelections = (
+    names: string[],
+  ): { deleted: number; points: number } | null => {
+    const sels = names.map(selByName);
+    if (sels.some((s) => !s)) return null;
+    model.beginStroke();
+    const affected: number[] = [];
+    for (const s of sels) affected.push(...model.deleteSelection(s!.id));
+    model.endStroke();
+    refreshPoints(affected);
+    return { deleted: sels.length, points: new Set(affected).size };
+  };
+
   /** WHOLE-MEMBER hide/show for @name.<pred> — the filter resolves stored
    * members, and this hides/shows exactly those member entries through the
    * same setEntriesHidden the member-row drag uses (one stroke = one undo).
@@ -927,6 +980,8 @@ async function main(): Promise<void> {
     showAll: showAllHidden,
     selectionsInfo,
     renameSelection,
+    mutateMembers,
+    deleteSelections,
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);

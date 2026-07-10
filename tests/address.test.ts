@@ -14,6 +14,7 @@ import {
   globMatch,
   parseTarget,
   resolveTarget,
+  splitLeadingRef,
   splitTrailingName,
   type ParseError,
   type TargetAst,
@@ -326,6 +327,22 @@ test("@all.<pred> filters the pooled membership — same membership-only rule as
   assert.deepEqual(keys("@all.env3", FNAMES), ["category:2"]);
   assert.deepEqual(keys("@all.#5", FNAMES), ["point:5"]);
   assert.deepEqual(keys("@all.w1", FNAMES), [], "descendants stay out of reach under @all too");
+});
+
+// -- splitLeadingRef: the member-verbs' first-argument SHAPE ---------------------------
+
+test("splitLeadingRef separates a lone leading @name chunk from the rest", () => {
+  assert.deepEqual(splitLeadingRef("@picks alpha.g-1"),
+    { kind: "ref", name: "picks", filtered: false, rest: "alpha.g-1" });
+  assert.deepEqual(splitLeadingRef(`@"my picks" beta + env3`),
+    { kind: "ref", name: "my picks", filtered: false, rest: "beta + env3" });
+  assert.deepEqual(splitLeadingRef("  @picks  "),
+    { kind: "ref", name: "picks", filtered: false, rest: "" }, "bare form: empty rest");
+  assert.equal((splitLeadingRef("@picks.tH s1") as { filtered: boolean }).filtered, true,
+    "a filter on the first chunk is reported, not judged (the verb words the error)");
+  assert.deepEqual(splitLeadingRef("@a+@b x"), { kind: "multi" });
+  assert.deepEqual(splitLeadingRef("alpha @picks"), { kind: "none" });
+  assert.equal(splitLeadingRef(`@"unclosed x`).kind, "error");
 });
 
 test(':" is reserved in @name filters (future level qualifier) — paths unaffected', () => {

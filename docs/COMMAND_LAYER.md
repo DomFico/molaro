@@ -57,6 +57,25 @@ than scattering them.
    commit decided by what the target already is. Future commit-then-act
    verbs inherit this rule.
 
+4. **Carving is not exposed to the terminal.** Membership mutation operates
+   at whole-member granularity only: `add` inserts tree-addressed entries
+   as members at their natural level; `remove` drops entries that are
+   already members. Neither splits a coarse member into its complement (the
+   model's carve operation, which materializes the sibling set — its most
+   expensive op). A remove predicate that names something below a stored
+   coarse member (a descendant, not a member) matches nothing — it does not
+   carve. To operate on finer entries, commit a finer selection so those
+   entries ARE members. This keeps membership mutation cliff-free and
+   consistent with principle 1 (flat-to-members).
+   **Deletion corollary:** deleting a selection happens ONLY through the
+   bare forms — `remove @name` (one selection, the panel-✕ analog) and
+   `remove @all` (every selection; the one deliberate bulk delete, of the
+   selection OBJECTS, not their members). Emptying a membership — via
+   `remove @name all` or an incidental last-member predicate — always
+   leaves the selection standing as an empty block, matching the UI, which
+   never auto-deletes (only its ✕ button deletes). Incidental and explicit
+   empties behave identically.
+
 ## Layering and the purity fence
 
 ```
@@ -263,6 +282,47 @@ inherits (`commitTargetEntries` in main.ts):
   "Clear" button, which discards the pending TARGET (a viewer-state
   operation with a two-step confirm); the shared word is unfortunate but
   each surface's noun is its own.
+
+## `add`, `remove` — membership mutation
+
+The command analog of edit mode; these complete the selection verbs. Both
+take exactly ONE lone `@name` first — `@all` (except remove's bare
+bulk-delete form), filters, unions, and paths on the left are usage errors,
+because the UI cannot edit two selections at once (`splitLeadingRef` in
+address.ts does the argument-shape split; the verbs word the errors). The
+second argument differs IN KIND, and that asymmetry is the design:
+
+- `add @name <tree-target>` — the right side is a TREE address (the full
+  grammar: paths, globs, ranges, `#`, lists, `+` unions, resolved by the
+  same `resolveTarget` view/create_sele use) because the entries being
+  added are not yet members and must be named from the tree. `@` terms are
+  a usage error: the UI cannot transfer members between selections, so
+  neither can add. Resolved entries join at their NATURAL level
+  (entry-level parity); entries already stored are filtered out first, so
+  re-adding is an honest no-op that pushes no undo entry.
+- `remove @name <member-pred>` — the right side is MEMBER predicates
+  (labels, types, globs, ranges, `#index`, lists, `+` unions), each term
+  resolved by the SAME `@name.<pred>` matcher (built as a synthetic
+  single-ref TargetAst), so remove and filtering cannot diverge on what "a
+  member matches" means. No tree paths — you are already scoped to the
+  member list. The other forms: `remove @name all` = a star over the
+  members (empties it; the selection REMAINS); bare `remove @name` =
+  DELETE (the ✕ analog); `remove @all` = delete every selection in one
+  stroke. See principle 4 for the no-carve and deletion rules.
+- Wiring (`mutateMembers` in main.ts): edit mode is PARKED onto the named
+  selection and the prior mode restored after (beginEdit/endEdit — mode
+  flips are deliberately not undoable), with every addToTarget /
+  removeFromTarget call — the exact gesture mutators — inside ONE stroke =
+  one undo op; the verbs are edit-mode independent (mid-edit of another
+  selection they still land on the named one). remove receives only exact
+  stored members, and the wiring's `set.has(e)` guard skips anything else,
+  so `removeFromTarget`'s carve branch is structurally unreachable from
+  the terminal. `deleteSelections` batches the panel-✕'s
+  `model.deleteSelection` in one stroke — `remove @all` restores every
+  selection, intact, with a single Ctrl+Z.
+- Feedback is the model's own onChange cascade — member rows appear and
+  disappear in the block exactly as edit-mode gestures make them; no new
+  styles, no flash.
 
 ## Completion
 

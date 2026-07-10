@@ -128,6 +128,34 @@ export function splitTrailingName(
   return { expr: trimmed.slice(0, open).trim(), name };
 }
 
+/** The shape of a member-mutation verb's FIRST argument (add/remove take
+ * exactly one lone committed-selection reference before their expression). */
+export type LeadingRef =
+  | { kind: "ref"; name: string; filtered: boolean; rest: string }
+  | { kind: "none" } // the args don't start with an @ reference
+  | { kind: "multi" } // "@a+@b …" — more than one term in the first chunk
+  | { kind: "error"; message: string };
+
+/** Split a leading whitespace-delimited `@name` chunk (quotes respected)
+ * from the rest of a verb's arguments. Pure argument-SHAPE parsing — the
+ * verb decides what each shape means and words its own usage errors. */
+export function splitLeadingRef(args: string): LeadingRef {
+  const s = args.trimStart();
+  if (s[0] !== "@") return { kind: "none" };
+  let i = 0;
+  let inQuote = false;
+  while (i < s.length && (inQuote || !/\s/.test(s[i]))) {
+    if (s[i] === '"') inQuote = !inQuote;
+    i++;
+  }
+  const ast = parseTarget(s.slice(0, i));
+  if (ast.kind === "error") return { kind: "error", message: ast.message };
+  if (ast.terms.length !== 1) return { kind: "multi" };
+  const t = ast.terms[0];
+  if (t.kind !== "ref") return { kind: "none" };
+  return { kind: "ref", name: t.name, filtered: t.filter !== undefined, rest: s.slice(i).trim() };
+}
+
 /** Parse a target expression. Total — malformed input returns a ParseError,
  * never throws. */
 export function parseTarget(expr: string): TargetAst | ParseError {

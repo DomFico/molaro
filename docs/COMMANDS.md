@@ -37,6 +37,9 @@ point types `anchor` and `t0`–`t3`).
 | `show [<expr>` / `@name[.pred]]` | Clear hidden state (never commits); bare `show` reveals everything | `show @selection_1` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |
 | `rename @name [new]` | Rename a committed selection | `rename @selection_1 [ring]` |
+| `add @name <tree-target>` | Add tree-addressed entries as **members** at their natural level (no `@` on the right) | `add @ring alpha.group-0` |
+| `remove @name <member-pred>` | Drop matched **stored members** (never carves) | `remove @ring subgroup-3` |
+| `remove @name all` / `remove @name` / `remove @all` | Empty its members (it remains) / **delete** it / delete **every** selection | `remove @ring` |
 | `clear` | Wipe the terminal's own log (viewer state untouched) | `clear` |
 | `help` / `?` | This summary; `help <verb>` describes one verb | `help view` |
 
@@ -342,6 +345,75 @@ op**, and the same collision error if `new-name` is taken. The target must
 be exactly one unfiltered `@name` (`@all`, predicates, paths, and unions
 are usage errors), the new name must be bracketed, and `all` is refused
 (reserved so `@all` always means the union of every selection).
+
+## Membership mutation: `add` / `remove`
+
+The command analog of the panel's **edit mode** — growing and shrinking an
+existing selection's member list. Both verbs take exactly **one** committed
+selection first, as a lone `@name`: a `+` union on the left, `@all` (except
+the bulk-delete form below), a filter (`@name.<pred>`), or a path there is
+a usage error — they edit one selection at a time, just like the UI. Both
+work in any UI mode (being in edit mode on another selection doesn't
+matter), and each command is **one undo op**.
+
+The second argument differs in kind between the two, and the asymmetry is
+deliberate:
+
+### `add @name <tree-target>` — the right side is a TREE address
+
+What you're adding **isn't a member yet**, so it must be named from the
+tree — the full address grammar applies (paths, globs, ranges, `#index`,
+lists, `+` unions):
+
+```
+add @ring alpha.group-0.subgroup-3        one subgroup member
+add @ring alpha.group-0                   ONE group-level member (natural level)
+add @ring alpha.group-0.* + beta          several at once
+```
+
+Entries join at their **natural level** — a group-level address adds a
+group entry, never its expanded points. Adding something already a member
+is an honest no-op (`already members — nothing to add`). **`@` terms are
+not allowed on the right**: the UI cannot transfer members between
+selections, and neither can `add` — address the geometry from the tree
+instead.
+
+### `remove @name <member-pred>` — the right side is MEMBER predicates
+
+What you're removing **is already a member**, so you name it directly — a
+member's own label, or a point member's type/`#index` (globs, ranges, `,`
+lists, and `+` unions compose); no tree path needed, because you're already
+scoped to the selection:
+
+```
+remove @ring subgroup-3          a member, by its own label
+remove @ring t0 + anchor         point members, by type
+remove @ring subgroup-*          every member the glob matches
+```
+
+Matching is exactly `@name.<pred>` filtering (the stored-members rule):
+whole members only. A predicate naming something *below* a coarse member —
+a descendant label, a type or index inside it — **matches nothing**:
+`remove` never splits a coarse member into its complement (no carving from
+the terminal). To operate on finer pieces, commit a finer selection first.
+
+### Emptying vs. deleting
+
+- `remove @name all` — drop **every member**; the selection **remains** as
+  an empty block.
+- A predicate that happens to remove the last member behaves identically —
+  the selection stays, empty. The message says so: `(now empty — the
+  selection remains)`.
+- **`remove @name`** (bare, no second argument) — **delete** the selection
+  entirely: the command analog of the block's ✕ button.
+- **`remove @all`** — delete **every** committed selection (the one
+  deliberate bulk delete — it removes the selection objects, not their
+  members). One `Ctrl+Z` restores them all. `remove @a + @b` stays a usage
+  error: bulk deletion is exactly one selection or, explicitly, all of
+  them — never an arbitrary union.
+
+Deletion happens **only** through the bare forms; every member-targeting
+form leaves the selection standing.
 
 ## `clear` — wipe the terminal log
 

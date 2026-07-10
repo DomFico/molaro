@@ -383,6 +383,39 @@ try {
       blocksBefore + 1);
   await runLine("show");
 
+  // ---- add / remove: membership mutation through the relay ---------------------
+  lastLine = await runLine("add @x2 alpha.group-0.subgroup-3");
+  check("add @name <tree-target> lands through the relay",
+    /term-ok/.test(lastLine?.cls ?? "") &&
+      lastLine?.text === `added 1 members to "x2" — 100 points`,
+    JSON.stringify(lastLine));
+  lastLine = await runLine("add @x2 @fine");
+  check("an @ term on add's right side is the transfer usage error",
+    /term-err/.test(lastLine?.cls ?? "") && /no @ terms on the right/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  lastLine = await runLine("remove @x2 subgroup-3");
+  check("remove @name <member-pred> drops the matched member",
+    lastLine?.text === `removed 1 members from "x2" — 100 points`, JSON.stringify(lastLine));
+  lastLine = await runLine("remove @x2 t0");
+  check("a non-member predicate (inside the coarse member) is an honest nomatch",
+    /term-nomatch|term-err/.test(lastLine?.cls ?? "") &&
+      /no members of "x2" match "t0"/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  lastLine = await runLine("remove @sixty all");
+  check("remove @name all empties the membership but keeps the block",
+    lastLine?.text === `removed 60 members from "sixty" — 180 points (now empty — the selection remains)` &&
+      (await d.evaluate<boolean>(`[...document.querySelectorAll('#selections .sel-name')]
+        .some(n=>n.textContent==='sixty')`)),
+    JSON.stringify(lastLine));
+  const blocksBeforeDel = await d.evaluate<number>(
+    `document.querySelectorAll('#selections .sel-block').length`);
+  lastLine = await runLine("remove @selection_2");
+  check("bare remove @name deletes the selection (the ✕ analog)",
+    lastLine?.text === `deleted "selection_2" — 6000 points` &&
+      (await d.evaluate<number>(`document.querySelectorAll('#selections .sel-block').length`)) ===
+        blocksBeforeDel - 1,
+    JSON.stringify(lastLine));
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();

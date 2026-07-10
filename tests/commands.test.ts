@@ -37,6 +37,7 @@ function makeRegistry() {
     ["second", [{ level: "subgroup", id: 1 }]],
   ]);
   const refOps: { names: string[]; hidden: boolean }[] = [];
+  const memberOps: { name: string; mode: "add" | "remove"; entries: Entry[] }[] = [];
   const ctx: CommandContext = {
     hierarchy,
     tree: buildTree(header),
@@ -98,6 +99,40 @@ function makeRegistry() {
       sels.delete(oldName);
       return { ok: true };
     },
+    mutateMembers: (name, mode, entries) => {
+      const stored = sels.get(name);
+      if (!stored) return null;
+      memberOps.push({ name, mode, entries });
+      const keys = new Set(stored.map((e) => `${e.level}:${e.id}`));
+      let next = [...stored];
+      let points = 0;
+      for (const e of entries) {
+        const key = `${e.level}:${e.id}`;
+        if (mode === "add") {
+          if (keys.has(key)) continue; // idempotent, like addToTarget
+          keys.add(key);
+          next.push(e);
+          points += hierarchy.pointsOf(e).length;
+        } else {
+          if (!keys.has(key)) continue; // exact members only — never carves
+          keys.delete(key);
+          next = next.filter((x) => `${x.level}:${x.id}` !== key);
+          points += hierarchy.pointsOf(e).length;
+        }
+      }
+      sels.set(name, next);
+      return { points, remaining: next.length };
+    },
+    deleteSelections: (names) => {
+      if (names.some((n) => !sels.has(n))) return null;
+      const pts = new Set<number>();
+      for (const n of names) {
+        for (const e of sels.get(n)!) for (const p of hierarchy.pointsOf(e)) pts.add(p);
+        sels.delete(n);
+        hiddenState.whole.delete(n);
+      }
+      return { deleted: names.length, points: pts.size };
+    },
     setMembersHiddenIn: (name, entries, hidden) => {
       // whole-MEMBER stub: tracks member keys; affected = points of changed members
       let affected = 0;
@@ -139,7 +174,7 @@ function makeRegistry() {
       return n;
     },
   };
-  return { registry: createCommandRegistry(ctx), calls, commits, hiddenState, refOps, sels };
+  return { registry: createCommandRegistry(ctx), calls, commits, hiddenState, refOps, memberOps, sels };
 }
 
 test("help and ? return a non-empty ok summary pointing at the full reference", () => {
@@ -415,6 +450,135 @@ test("clear is a registered verb (the terminal surface intercepts it locally)", 
   assert.equal(registry.runCommand("clear").status, "ok");
   assert.match(registry.runCommand("help clear").message, /terminal/);
   assert.equal(commits.length + refOps.length, 0, "clear never reaches viewer state");
+});
+
+// -- add / remove: membership mutation (whole-member granularity, no carve) -----------
+
+test("add: tree-addressed entries join as members at their NATURAL level", () => {
+  const { registry, sels } = makeRegistry();
+  // a group-level address adds ONE group entry, never its points
+  let res = registry.runCommand("add @second c0.g0");
+  assert.deepEqual(res, { status: "ok", message: `added 1 members to "second" — 2 points` });
+  assert.deepEqual(sels.get("second"),
+    [{ level: "subgroup", id: 1 }, { level: "group", id: 0 }]);
+  // a point-level address adds point members
+  res = registry.runCommand("add @second c1.g1.s1.c");
+  assert.equal(res.status, "ok");
+  assert.ok(sels.get("second")!.some((e) => e.level === "point" && e.id === 2));
+  // multi-term: both sides of the + join in one command
+  const { registry: r2, sels: s2 } = makeRegistry();
+  res = r2.runCommand("add @second c0.g0 + c1.g1.s1.c");
+  assert.equal(res.message, `added 2 members to "second" — 3 points`);
+  assert.equal(s2.get("second")!.length, 3);
+});
+
+test("add: idempotent at the entry level — exact members are never duplicated", () => {
+  const { registry, sels, memberOps } = makeRegistry();
+  // subgroup:0 is already a stored member of "stored"
+  let res = registry.runCommand("add @stored c0.g0.s0");
+  assert.deepEqual(res, { status: "ok", message: `already members — nothing to add to "stored"` });
+  assert.equal(sels.get("stored")!.length, 2, "no mutation");
+  assert.equal(memberOps.length, 0, "the mutator was never called");
+  // mixed: only the fresh entry goes through
+  res = registry.runCommand("add @stored c0.g0.s0 + c0.g0");
+  assert.equal(res.message, `added 1 members to "stored" — 2 points`);
+  assert.deepEqual(memberOps.at(-1)?.entries, [{ level: "group", id: 0 }]);
+});
+
+test("add: usage errors — one lone @name on the left, tree-only on the right", () => {
+  const { registry, memberOps } = makeRegistry();
+  assert.match(registry.runCommand("add @stored @second").message,
+    /add takes TREE addresses .*no @ terms on the right/);
+  assert.match(registry.runCommand("add @stored @all").message, /no @ terms on the right/);
+  assert.match(registry.runCommand("add @stored + @second c0").message,
+    /ONE selection at a time/);
+  assert.match(registry.runCommand("add @all c0").message,
+    /@all is not a single selection/);
+  assert.match(registry.runCommand("add c0 @stored").message,
+    /needs a committed selection first/);
+  assert.match(registry.runCommand("add @stored.c c0").message, /no filter/);
+  assert.match(registry.runCommand("add @stored").message, /needs something to add/);
+  assert.match(registry.runCommand("add @stored c0 [x]").message, /takes no \[name\]/);
+  assert.equal(registry.runCommand("add @nope c0").status, "nomatch");
+  assert.equal(registry.runCommand("add @stored zzz").status, "nomatch");
+  assert.equal(memberOps.length, 0, "no error path mutated anything");
+});
+
+test("remove <member-pred>: drops matched STORED members via the @name.<pred> matcher", () => {
+  const { registry, sels } = makeRegistry();
+  // a member's own label
+  let res = registry.runCommand("remove @stored s0");
+  assert.deepEqual(res, { status: "ok", message: `removed 1 members from "stored" — 2 points` });
+  assert.deepEqual(sels.get("stored"), [{ level: "point", id: 2 }]);
+  // a point member's type; the LAST member leaves the selection standing
+  res = registry.runCommand("remove @stored c");
+  assert.equal(res.message,
+    `removed 1 members from "stored" — 1 points (now empty — the selection remains)`);
+  assert.ok(sels.has("stored"), "emptied, NOT deleted");
+  assert.equal(sels.get("stored")!.length, 0);
+  // multi-term union in one command
+  const { registry: r2, sels: s2 } = makeRegistry();
+  res = r2.runCommand("remove @stored s0 + #2");
+  assert.match(res.message, /removed 2 members .*now empty/);
+  assert.ok(s2.has("stored"));
+});
+
+test("remove: a predicate below a coarse member NOMATCHES — carving is impossible", () => {
+  const { registry, sels, memberOps } = makeRegistry();
+  // "a" is the TYPE of point 0 INSIDE stored's coarse member s0 — not a member
+  assert.equal(registry.runCommand("remove @stored a").status, "nomatch");
+  assert.equal(registry.runCommand("remove @stored #0").status, "nomatch",
+    "an index inside the coarse member is not a member");
+  assert.equal(registry.runCommand("remove @stored g0").status, "nomatch",
+    "an ancestor label is not a member");
+  assert.equal(sels.get("stored")!.length, 2, "member list untouched — no complement materialized");
+  assert.equal(memberOps.length, 0);
+  // paths are rejected outright: members are named by their OWN label
+  assert.match(registry.runCommand("remove @stored c0.g0").message,
+    /OWN members .* no paths/s);
+});
+
+test("remove @name all: empties the membership — the selection REMAINS", () => {
+  const { registry, sels } = makeRegistry();
+  const res = registry.runCommand("remove @stored all");
+  assert.equal(res.message,
+    `removed 2 members from "stored" — 3 points (now empty — the selection remains)`);
+  assert.ok(sels.has("stored"), "all empties; it never deletes");
+  assert.equal(sels.get("stored")!.length, 0);
+  assert.ok(sels.has("second"), "other selections untouched");
+});
+
+test("bare remove @name: DELETES the selection (the panel's ✕)", () => {
+  const { registry, sels } = makeRegistry();
+  const res = registry.runCommand("remove @second");
+  assert.deepEqual(res, { status: "ok", message: `deleted "second" — 1 points` });
+  assert.ok(!sels.has("second"), "gone from the committed list");
+  assert.deepEqual(sels.get("stored")!.length, 2, "the other selection untouched");
+  assert.equal(registry.runCommand("remove @second").status, "nomatch");
+});
+
+test("remove @all: deletes EVERY committed selection (the one bulk delete)", () => {
+  const { registry, sels } = makeRegistry();
+  const res = registry.runCommand("remove @all");
+  assert.deepEqual(res, { status: "ok", message: `deleted 2 selections — 3 points` });
+  assert.equal(sels.size, 0);
+  assert.equal(registry.runCommand("remove @all").status, "nomatch");
+  // @all with a second argument is a usage error, not a member form
+  const { registry: r2 } = makeRegistry();
+  assert.match(r2.runCommand("remove @all s0").message,
+    /remove @all takes no second argument/);
+});
+
+test("remove: left-side guards match add's — one @name, no unions, no filter", () => {
+  const { registry, sels } = makeRegistry();
+  assert.match(registry.runCommand("remove @stored + @second").message,
+    /ONE selection at a time/);
+  assert.match(registry.runCommand("remove @stored.c s0").message, /no filter/);
+  assert.match(registry.runCommand("remove c0 s0").message, /needs a committed selection first/);
+  assert.match(registry.runCommand("remove @stored s0 [x]").message, /takes no \[name\]/);
+  assert.equal(registry.runCommand("remove @nope s0").status, "nomatch");
+  assert.equal(sels.size, 2, "nothing deleted by the error paths");
+  assert.ok(registry.verbs().includes("add") && registry.verbs().includes("remove"));
 });
 
 test("view still dispatches through the same registry (bare view = frameVisible)", () => {
