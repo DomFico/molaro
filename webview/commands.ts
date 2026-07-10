@@ -26,6 +26,7 @@ import {
   type TargetAst,
 } from "./address.ts";
 import type { TreeModel } from "./classification.ts";
+import { getRecipe } from "./recipes.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
 
 export type CommandStatus = "ok" | "nomatch" | "error";
@@ -129,6 +130,11 @@ export interface CommandContext {
    * system). Points never colored keep the uniform base look. Returns the
    * count written. */
   colorPoints(points: readonly number[], rgb: [number, number, number]): number;
+  /** colorPoints' PER-ELEMENT sibling — the recipe write path: `rgb` is a
+   * flat 3×points.length array giving EACH point its own RGB (0..1), in the
+   * points' order. Same buffer, same one-stroke recordOp discipline, same
+   * LWW and GPU sync as colorPoints; only the value shape differs. */
+  colorPointsEach(points: readonly number[], rgb: readonly number[]): number;
   /** The contract's edge list — endpoint point-index pairs, in header order.
    * colorbonds/colorbondsof test these endpoints against the resolved point
    * set; edge ids (indexes into this list) key the edge-color buffer. */
@@ -564,7 +570,22 @@ function resolveRepArgs<T>(
   }
   const value = parse(split.word);
   if (value === null) return { status: "error", message: badValue(split.word) };
-  const ast = parseTarget(split.expr);
+  const r = resolveTargetPoints(ctx, split.expr);
+  if ("status" in r) return r;
+  return { points: r.points, value, expr: split.expr, word: split.word };
+}
+
+/** The resolve-and-dedupe core the whole representation family targets
+ * through — parse, resolve, and union the entries' points (hidden ones
+ * included): view's EXACT resolution and dedupe, factored out of
+ * resolveRepArgs so verbs WITHOUT a trailing value token (the recipes) hit
+ * the same code, never a re-implementation. Errors/nomatch come back as the
+ * CommandResult. */
+function resolveTargetPoints(
+  ctx: CommandContext,
+  expr: string,
+): { points: number[] } | CommandResult {
+  const ast = parseTarget(expr);
   if (ast.kind === "error") return { status: "error", message: ast.message };
   const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
   // Union the entries' points, hidden ones included — view's exact dedupe.
@@ -578,9 +599,9 @@ function resolveRepArgs<T>(
     }
   }
   if (points.length === 0) {
-    return { status: "nomatch", message: `nothing matches "${split.expr}"` };
+    return { status: "nomatch", message: `nothing matches "${expr}"` };
   }
-  return { points, value, expr: split.expr, word: split.word };
+  return { points };
 }
 
 function resolveColorArgs(ctx: CommandContext, verb: string, args: string) {
@@ -852,6 +873,60 @@ export function makeTraceOpacityHandler(ctx: CommandContext): CommandHandler {
     }
     const n = ctx.opacityTrace(vertexIds, r.value.opacity);
     return { status: "ok", message: opacityMsg(n, "trace vertices", r.value) };
+  };
+}
+
+/** The recipes' mapping-and-write step, SOURCE-AGNOSTIC on purpose: it takes
+ * an array of per-element scalars (it never knows which recipe — or future
+ * scalar source — computed them), maps each through the colormap, and writes
+ * the point-color buffer through the per-element writer (one recordOp
+ * stroke, LWW, GPU sync — colorPoints' exact discipline). This split is the
+ * reason the recipe contract is scalar-then-colormap rather than a direct
+ * RGB function; do not collapse it. */
+export function applyColorScalars(
+  ctx: CommandContext,
+  points: readonly number[],
+  scalars: readonly number[],
+  colormap: (t: number) => [number, number, number],
+): number {
+  const rgb = new Array<number>(points.length * 3);
+  for (let i = 0; i < points.length; i++) {
+    const [r, g, b] = colormap(scalars[i]);
+    rgb[i * 3] = r;
+    rgb[i * 3 + 1] = g;
+    rgb[i * 3 + 2] = b;
+  }
+  return ctx.colorPointsEach(points, rgb);
+}
+
+/**
+ * `rainbow <target>` — the FIRST RECIPE verb: where the twelve fixed verbs
+ * write one constant, a recipe COMPUTES a per-element value from the
+ * resolved set (rainbow: an even 0→1 ramp across the points in resolution
+ * order, through the built-in hue sweep). No trailing value token — the
+ * whole argument is the target expression, resolved through the SAME
+ * resolve-and-dedupe core the fixed verbs use (view's exact point set).
+ * The handler resolves the recipe BY NAME from the recipe registry and runs
+ * it — never a hardcoded compute — so the recipe object is the invocable
+ * unit later recipes clone. Same family invariants: one undo stroke, LWW,
+ * nomatch/error writes nothing, message reports the action and count.
+ */
+export function makeRainbowHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const expr = args.trim();
+    if (expr === "") {
+      return {
+        status: "error",
+        message: "rainbow needs a target — rainbow <target> (e.g. rainbow alpha.group-0)",
+      };
+    }
+    const recipe = getRecipe("rainbow");
+    if (!recipe) return { status: "error", message: 'no recipe named "rainbow"' };
+    const r = resolveTargetPoints(ctx, expr);
+    if ("status" in r) return r;
+    const scalars = recipe.compute(r.points);
+    const n = applyColorScalars(ctx, r.points, scalars, recipe.colormap);
+    return { status: "ok", message: `colored ${n} points rainbow` };
   };
 }
 
@@ -1202,6 +1277,9 @@ export const HELP_TEXT = [
   "               PRESENT, never a hide; out-of-range clamps to 0/1)",
   "  bondopacity / bondopacityof / traceopacity <expr> <a>   the same shapes",
   "               on the OPACITY axis (overlap compositing is draw-order naive)",
+  "  rainbow <expr>              color those points an even hue ramp in",
+  "               resolution order (the first recipe: per-point values,",
+  "               not one constant; one undo stroke)",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  rename @name [new]  rename a selection · clear  wipe the terminal log",
   "  add @name <tree-target>     add tree entries as members (natural level)",
@@ -1308,6 +1386,11 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "traceopacity",
     makeTraceOpacityHandler(ctx),
     "fade polyline vertices whose subgroup contains a resolved point (contained at subgroup grain): traceopacity <target> <opacity>",
+  );
+  registry.register(
+    "rainbow",
+    makeRainbowHandler(ctx),
+    "color the target's points an even hue ramp in resolution order (the first recipe — per-point values, one undo stroke): rainbow <target>",
   );
   registry.register(
     "ls",

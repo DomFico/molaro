@@ -46,6 +46,7 @@ function makeRegistry() {
   const refOps: { names: string[]; hidden: boolean }[] = [];
   const memberOps: { name: string; mode: "add" | "remove"; entries: Entry[] }[] = [];
   const colorOps: { points: number[]; rgb: [number, number, number] }[] = [];
+  const colorEachOps: { points: number[]; rgb: number[] }[] = [];
   const edgeOps: { edgeIds: number[]; rgb: [number, number, number] }[] = [];
   // a chain over the 3 points: edge 0 sits inside c0 ({0,1}); edge 1 crosses
   // the category boundary (point 1 in c0, point 2 in c1) — the contained-vs-
@@ -197,6 +198,10 @@ function makeRegistry() {
       colorOps.push({ points: [...points], rgb });
       return points.length;
     },
+    colorPointsEach: (points, rgb) => {
+      colorEachOps.push({ points: [...points], rgb: [...rgb] });
+      return points.length;
+    },
     edges,
     colorEdges: (edgeIds, rgb) => {
       edgeOps.push({ edgeIds: [...edgeIds], rgb });
@@ -235,7 +240,7 @@ function makeRegistry() {
   return {
     registry: createCommandRegistry(ctx),
     calls, commits, hiddenState, refOps, memberOps,
-    colorOps, edgeOps, traceOps, sizeOps, opacityOps, sels,
+    colorOps, colorEachOps, edgeOps, traceOps, sizeOps, opacityOps, sels,
   };
 }
 
@@ -1019,4 +1024,48 @@ test("colorpoints: nomatch / bad color / usage / parse errors write NOTHING", ()
   const parseErr = registry.runCommand("colorpoints c0.[x] red"); // [ reserved in expressions
   assert.equal(parseErr.status, "error");
   assert.equal(colorOps.length, 0, "no path wrote anything");
+});
+
+test("rainbow: the value VARIES per element — one write, resolution order, ramp ends", () => {
+  const { registry, colorEachOps, colorOps } = makeRegistry();
+  // c0 = {0,1}: a 2-point ramp — t = 0 then 1 → hue 0 (red) then 300 (magenta)
+  const res = registry.runCommand("rainbow c0");
+  assert.equal(res.status, "ok");
+  assert.equal(res.message, "colored 2 points rainbow");
+  assert.equal(colorEachOps.length, 1, "one invocation = one per-element write (one stroke)");
+  assert.deepEqual(colorEachOps[0].points, [0, 1], "view's exact resolution and order");
+  assert.equal(colorEachOps[0].rgb.length, 6, "flat 3×N — each point carries its OWN RGB");
+  assert.deepEqual(colorEachOps[0].rgb.slice(0, 3), [1, 0, 0], "t=0 → hue 0 (red)");
+  assert.deepEqual(colorEachOps[0].rgb.slice(3, 6), [1, 0, 1], "t=1 → hue 300 (magenta)");
+  assert.notDeepEqual(colorEachOps[0].rgb.slice(0, 3), colorEachOps[0].rgb.slice(3, 6),
+    "the per-element values DIFFER — the recipe/constant-verb distinction");
+  assert.equal(colorOps.length, 0, "never the broadcast writer — recipes are per-element");
+});
+
+test("rainbow: full grammar rides the shared resolve core (@name, all, leaf)", () => {
+  const { registry, colorEachOps } = makeRegistry();
+  // @stored = subgroup s0 (0,1) + point 2 → a 3-point ramp: t = 0, 0.5, 1
+  assert.equal(registry.runCommand("rainbow @stored").message, "colored 3 points rainbow");
+  assert.deepEqual(colorEachOps[0].points, [0, 1, 2]);
+  assert.deepEqual(colorEachOps[0].rgb.slice(0, 3), [1, 0, 0], "t=0 → red");
+  assert.deepEqual(colorEachOps[0].rgb.slice(3, 6), [0, 1, 0.5], "t=0.5 → hue 150");
+  assert.deepEqual(colorEachOps[0].rgb.slice(6, 9), [1, 0, 1], "t=1 → magenta");
+  // a single-point target is the [0] ramp — no divide-by-zero, plain red
+  assert.equal(registry.runCommand("rainbow c0.g0.s0.a").message, "colored 1 points rainbow");
+  assert.deepEqual(colorEachOps[1], { points: [0], rgb: [1, 0, 0] });
+  assert.equal(registry.runCommand("rainbow all").message, "colored 3 points rainbow");
+});
+
+test("rainbow: nomatch / usage / parse errors write NOTHING", () => {
+  const { registry, colorEachOps } = makeRegistry();
+  const nomatch = registry.runCommand("rainbow nothere");
+  assert.equal(nomatch.status, "nomatch");
+  assert.match(nomatch.message, /nothing matches "nothere"/);
+  const bare = registry.runCommand("rainbow");
+  assert.equal(bare.status, "error");
+  assert.match(bare.message, /rainbow <target>/);
+  const parseErr = registry.runCommand("rainbow c0.[x]"); // [ reserved in expressions
+  assert.equal(parseErr.status, "error");
+  assert.equal(colorEachOps.length, 0, "no path wrote anything");
+  assert.ok(registry.verbs().includes("rainbow"), "registered like every verb");
 });

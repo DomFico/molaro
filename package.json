@@ -45,7 +45,7 @@
     "build:webview": "esbuild webview/main.ts webview/terminal.ts --bundle --format=iife --minify --outdir=dist/webview",
     "typecheck": "tsc --noEmit",
     "fixtures": "python3 -m tests.make_fixtures && python3 tests/make_webview_fixture.py",
-    "test": "node --test tests/contract.test.ts tests/geometry.test.ts tests/framing.test.ts tests/playback.test.ts tests/producer_protocol.test.ts tests/classification.test.ts tests/picking.test.ts tests/sets.test.ts tests/address.test.ts tests/commands.test.ts"
+    "test": "node --test tests/contract.test.ts tests/geometry.test.ts tests/framing.test.ts tests/playback.test.ts tests/producer_protocol.test.ts tests/classification.test.ts tests/picking.test.ts tests/sets.test.ts tests/address.test.ts tests/commands.test.ts tests/recipes.test.ts"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",

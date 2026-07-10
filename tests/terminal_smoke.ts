@@ -600,6 +600,33 @@ try {
       lastLine?.text === "set 400 points to opacity 1 (clamped to 1)",
     JSON.stringify(lastLine));
 
+  // the first recipe through the real relay: per-point values, one write
+  lastLine = await runLine("rainbow beta.group-1.subgroup-4");
+  check("rainbow <target> lands through the relay (the first recipe verb)",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "colored 100 points rainbow",
+    JSON.stringify(lastLine));
+  check("…and the buffer carries a VARYING ramp: red start, magenta end, distinct middle",
+    await d.evaluate<boolean>(`(()=>{
+      const v=window.__viewer; const c=v.rep.state.color;
+      const pts=v.debug.resolvePoints("beta.group-1.subgroup-4");
+      const rgb=p=>[c[3*p],c[3*p+1],c[3*p+2]];
+      const a=rgb(pts[0]), b=rgb(pts[pts.length-1]), m=rgb(pts[Math.floor(pts.length/2)]);
+      return a[0]===1&&a[1]===0&&a[2]===0 &&
+             b[0]===1&&b[1]===0&&b[2]===1 &&
+             (m[0]!==a[0]||m[1]!==a[1]||m[2]!==a[2]) &&
+             (m[0]!==b[0]||m[1]!==b[1]||m[2]!==b[2]);
+    })()`));
+  lastLine = await runLine("rainbow beta.nonexistent");
+  check("a rainbow nomatch is the standard no-write line",
+    /term-nomatch/.test(lastLine?.cls ?? "") &&
+      lastLine?.text === `nothing matches "beta.nonexistent"`,
+    JSON.stringify(lastLine));
+  lastLine = await runLine("rainbow");
+  check("bare rainbow is the usage error",
+    /term-err/.test(lastLine?.cls ?? "") &&
+      lastLine?.text === "rainbow needs a target — rainbow <target> (e.g. rainbow alpha.group-0)",
+    JSON.stringify(lastLine));
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();

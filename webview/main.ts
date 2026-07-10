@@ -1097,39 +1097,61 @@ async function main(): Promise<void> {
    * re-copy through fillEdges; trace color/opacity write through
    * syncTraceSlots; edge/trace SIZE is state-only pending impostor
    * geometry (GL lines rasterize at 1px), so its onWrite is a no-op. */
+  const writeRepValues = (
+    buf: Float32Array,
+    stride: number,
+    onWrite: (ids: readonly number[]) => void,
+    ids: readonly number[],
+    valueAt: (i: number, c: number) => number,
+  ): number => {
+    if (ids.length === 0) return 0;
+    const list = [...ids];
+    const prev = new Float32Array(list.length * stride);
+    for (let i = 0; i < list.length; i++) {
+      const at = list[i] * stride;
+      for (let c = 0; c < stride; c++) {
+        prev[i * stride + c] = buf[at + c];
+        buf[at + c] = valueAt(i, c);
+      }
+    }
+    onWrite(list);
+    model.recordOp(() => {
+      for (let i = 0; i < list.length; i++) {
+        const at = list[i] * stride;
+        for (let c = 0; c < stride; c++) buf[at + c] = prev[i * stride + c];
+      }
+      onWrite(list);
+      return [];
+    });
+    return list.length;
+  };
   const makeRepWriter = (
     buf: Float32Array,
     stride: number,
     onWrite: (ids: readonly number[]) => void,
   ) =>
     (ids: readonly number[], value: number | readonly number[]): number => {
-      if (ids.length === 0) return 0;
       const vals = typeof value === "number" ? [value] : value;
-      const list = [...ids];
-      const prev = new Float32Array(list.length * stride);
-      for (let i = 0; i < list.length; i++) {
-        const at = list[i] * stride;
-        for (let c = 0; c < stride; c++) {
-          prev[i * stride + c] = buf[at + c];
-          buf[at + c] = vals[c];
-        }
-      }
-      onWrite(list);
-      model.recordOp(() => {
-        for (let i = 0; i < list.length; i++) {
-          const at = list[i] * stride;
-          for (let c = 0; c < stride; c++) buf[at + c] = prev[i * stride + c];
-        }
-        onWrite(list);
-        return [];
-      });
-      return list.length;
+      return writeRepValues(buf, stride, onWrite, ids, (_i, c) => vals[c]);
     };
+  /** makeRepWriter's PER-ELEMENT sibling for the recipe write path: `values`
+   * is flat stride×ids.length, each element carrying its OWN value — the one
+   * place a computed-per-element value function meets the buffers. Same
+   * core, so capture/LWW/recordOp/GPU-sync cannot diverge from the
+   * broadcast writers. */
+  const makeRepEachWriter = (
+    buf: Float32Array,
+    stride: number,
+    onWrite: (ids: readonly number[]) => void,
+  ) =>
+    (ids: readonly number[], values: readonly number[]): number =>
+      writeRepValues(buf, stride, onWrite, ids, (i, c) => values[i * stride + c]);
   const repDirty = (): void => {
     rep.dirty = true; // the render loop re-uploads every per-point attribute
   };
   const fillEdgesHook = (): void => parts.fillEdges();
   const colorPoints = makeRepWriter(rep.state.color, 3, repDirty);
+  const colorPointsEach = makeRepEachWriter(rep.state.color, 3, repDirty);
   const sizePoints = makeRepWriter(rep.state.size, 1, repDirty);
   const opacityPoints = makeRepWriter(rep.state.opacity, 1, repDirty);
   const colorEdges = makeRepWriter(rep.state.edgeColor, 3, fillEdgesHook);
@@ -1164,6 +1186,7 @@ async function main(): Promise<void> {
     mutateMembers,
     deleteSelections,
     colorPoints,
+    colorPointsEach,
     edges: header.edges,
     colorEdges,
     traceVertices,

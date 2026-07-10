@@ -3710,9 +3710,137 @@ async function S20(): Promise<void> {
   });
 }
 
+async function S21(): Promise<void> {
+  console.log("S21 — rainbow: the first recipe (per-element values through the recipe registry)");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const snap = (slot: string) =>
+      d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.color))`);
+    const buffersEqual = (slot: string) =>
+      d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.color, s=window.${slot};
+        if (c.length !== s.length) return false;
+        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) return false;
+        return true;
+      })()`);
+
+    await snap("__pristine");
+    const baseDepth = await undoDepth();
+
+    // -- (a) resolution parity + the recipe distinction: values VARY per element
+    const r1 = await cmd("rainbow alpha");
+    const audit = await d.evaluate<{
+      changed: number; match: boolean; first: number[]; last: number[]; mid: number[];
+    }>(`(()=>{
+      const v=${V}; const c=v.rep.state.color; const s=window.__pristine;
+      const changed=[];
+      for (let p=0;p<c.length/3;p++) {
+        if (c[3*p]!==s[3*p]||c[3*p+1]!==s[3*p+1]||c[3*p+2]!==s[3*p+2]) changed.push(p);
+      }
+      // resolvePoints runs the handler's exact union loop — same ORDER, so the
+      // ramp's ends are its first/last elements
+      const pts=v.debug.resolvePoints("alpha");
+      const sorted=[...new Set(pts)].sort((a,b)=>a-b);
+      const rgb=(p)=>[c[3*p],c[3*p+1],c[3*p+2]];
+      return { changed: changed.length,
+               match: changed.length===sorted.length && changed.every((p,i)=>p===sorted[i]),
+               first: rgb(pts[0]), last: rgb(pts[pts.length-1]),
+               mid: rgb(pts[Math.floor(pts.length/2)]) };
+    })()`);
+    check("S21: rainbow alpha — writes EXACTLY the set view resolves",
+      r1.status === "ok" && audit.match && audit.changed === 400,
+      `${JSON.stringify(r1)} changed=${audit.changed}`);
+    check("S21: ...message reports the action and count, colorpoints' shape",
+      r1.message === `colored ${audit.changed} points rainbow`, r1.message);
+    check("S21: ...as exactly ONE undo stroke", (await undoDepth()) === baseDepth + 1);
+    check("S21: the ramp's t=0 end is hue 0 (red)",
+      audit.first[0] === 1 && audit.first[1] === 0 && audit.first[2] === 0,
+      JSON.stringify(audit.first));
+    check("S21: the ramp's t=1 end is hue 300 (magenta) — the sweep never wraps",
+      audit.last[0] === 1 && audit.last[1] === 0 && audit.last[2] === 1,
+      JSON.stringify(audit.last));
+    check("S21: the written value VARIES per element — the recipe/constant distinction",
+      JSON.stringify(audit.mid) !== JSON.stringify(audit.first) &&
+        JSON.stringify(audit.mid) !== JSON.stringify(audit.last),
+      JSON.stringify(audit.mid));
+
+    // -- (b) LWW + undo: recipe strokes compose with the fixed verbs' ---------
+    await snap("__postRainbow");
+    await cmd("colorpoints alpha.group-0.subgroup-0 white");
+    check("S21: a later constant write overwrites ramp colors (LWW per element)",
+      !(await buffersEqual("__postRainbow")));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S21: undo restores the RAMP values, not the base look",
+      await buffersEqual("__postRainbow"));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S21: a second undo pops the whole rainbow stroke — pristine buffer",
+      (await buffersEqual("__pristine")) && (await undoDepth()) === baseDepth);
+
+    // -- (c) pixel proof: the VARYING colors reach the GPU ---------------------
+    // (buffer-level checks cannot see an attribute-upload miss — the repAttrs
+    // trap — so sample two rendered points and demand they differ.)
+    await cmd("hide @solvent"); // clear the bulk so the samples can't be occluded
+    await cmd("rainbow alpha.group-0.subgroup-0");
+    // fade the subgroup's own edge chain and the polyline: a 1px line crossing
+    // a sprite's center pixel would pollute the sample with the line's color
+    await cmd("bondopacity alpha.group-0.subgroup-0 0");
+    await cmd("traceopacity alpha 0");
+    await cmd("view alpha.group-0.subgroup-0"); // frame the ramp
+    await sleep(1400); // camera tween settles
+    const pts = await d.evaluate<number[]>(
+      `${V}.debug.resolvePoints("alpha.group-0.subgroup-0")`);
+    const pA = pts[0]; // t=0 → red
+    const pB = pts[Math.floor(pts.length * 0.4)]; // t≈0.4 → pure green
+    await cmd(`pointsize #${pA} 12`); // fat sprites so the center sample is robust
+    await cmd(`pointsize #${pB} 12`);
+    const proj = await d.evaluate<{ a: { x: number; y: number; front: boolean }; b: { x: number; y: number; front: boolean } }>(
+      `({ a: ${V}.debug.projectPoint(${pA}), b: ${V}.debug.projectPoint(${pB}) })`);
+    check("S21: both sample points project on-screen, apart from each other",
+      proj.a.front && proj.b.front &&
+        Math.hypot(proj.a.x - proj.b.x, proj.a.y - proj.b.y) > 12,
+      JSON.stringify(proj));
+    await sleep(200); // one more rAF: the size/color attrs upload
+    const shot = await d.captureB64(`${REPORT}/S21_pixels.png`);
+    const px = await d.evaluate<{ a: number[]; b: number[] }>(`(async () => {
+      const img = new Image();
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${shot}"; });
+      const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+      const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+      const at = (x, y) => [...g.getImageData(Math.round(x), Math.round(y), 1, 1).data.slice(0, 3)];
+      return { a: at(${proj.a.x}, ${proj.a.y}), b: at(${proj.b.x}, ${proj.b.y}) };
+    })()`);
+    check("S21: the ramp's start RENDERS red-dominant",
+      px.a[0] > px.a[1] + 60 && px.a[0] > px.a[2] + 60, JSON.stringify(px));
+    check("S21: the mid-ramp point RENDERS green-dominant — a DIFFERENT color",
+      px.b[1] > px.b[0] + 60 && px.b[1] > px.b[2] + 40, JSON.stringify(px));
+
+    // -- (d) nomatch / usage / parse errors write nothing, push no stroke ------
+    await snap("__noWrite");
+    const depthQuiet = await undoDepth();
+    for (const [text, status] of [
+      ["rainbow alpha.nonexistent", "nomatch"],
+      ["rainbow @nosuch", "nomatch"],
+      ["rainbow", "error"],
+      ["rainbow alpha.[x]", "error"], // [ reserved in expressions
+    ] as const) {
+      const r = await cmd(text);
+      check(`S21: ${text} → ${status}`, r.status === status, JSON.stringify(r));
+    }
+    check("S21: ...none of them wrote a single component",
+      await buffersEqual("__noWrite"));
+    check("S21: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet);
+
+    await d.screenshot(`${REPORT}/S21_rainbow.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

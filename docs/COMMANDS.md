@@ -47,6 +47,7 @@ point types `anchor` and `t0`–`t3`).
 | `bondopacity <expr> <a>` | Alpha for edges with **both** endpoints in the target | `bondopacity beta.group-0.subgroup-0 0` |
 | `bondopacityof <expr> <a>` | Alpha for edges **touching** the target (either endpoint — the incident reach) | `bondopacityof #124 0.3` |
 | `traceopacity <expr> <a>` | Alpha for polyline vertices whose **subgroup** contains a resolved point | `traceopacity alpha 0.7` |
+| `rainbow <expr>` | Color those points an even hue ramp in resolution order (the first **recipe**: per-point values, not one constant; one undo stroke) | `rainbow alpha.group-0` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |
 | `rename @name [new]` | Rename a committed selection | `rename @selection_1 [ring]` |
 | `add @name <tree-target>` | Add tree-addressed entries as **members** at their natural level (no `@` on the right) | `add @ring alpha.group-0` |
@@ -457,12 +458,45 @@ Shared rules (identical across the twelve verbs):
   (e.g. a contained edge verb on a single point, a trace verb on bulk
   subgroups) is a nomatch too. A bare verb (or a single argument) is a
   usage error — it needs both a target and a value.
-- Constant values only, deliberately: *mappings* (rainbow, by-channel) and
-  shape/primitive-type verbs are future work that will clone this family's
-  template. (The trace shapes' boundary interpolation is a rendering
-  consequence of per-vertex state, not a mapping feature; size-0 and
-  opacity-0 are distinct literal values on distinct channels, and neither
-  is a hide.)
+- Constant values only, deliberately, within this family: each of the
+  twelve verbs writes ONE value across its elements. Values that *vary* per
+  element are the **recipes'** job (see `rainbow` below); by-channel
+  mappings and shape/primitive-type verbs remain future work. (The trace
+  shapes' boundary interpolation is a rendering consequence of per-vertex
+  state, not a mapping feature; size-0 and opacity-0 are distinct literal
+  values on distinct channels, and neither is a hide.)
+
+## Recipes: `rainbow`
+
+```
+rainbow alpha.group-0
+rainbow alpha.group-0.subgroup-0
+rainbow @selection_1
+rainbow alpha.group-0 + beta.group-2
+```
+
+A **recipe** is a stored, named function over a resolved target that writes
+a representation buffer — the generalization of the twelve fixed verbs
+(one *constant* value) into verbs whose written value **varies per element**
+as a function of the resolved set. `rainbow` is the first: it spreads an
+even 0→1 ramp across the resolved points **in resolution order** and colors
+them through one built-in hue sweep (red at the start of the set, magenta
+at the end; a single-point target is plain red). Under the hood the recipe
+computes a per-point scalar and a colormap turns scalars into colors — the
+two stages stay separate so future scalar sources reuse the same
+color-mapping step.
+
+- `rainbow <target>` takes **no value token and no `[name]`** — the whole
+  argument is the target expression, resolved exactly like `view` (full
+  grammar, hidden points included, never commits).
+- It writes the same per-point color buffer `colorpoints` writes, with all
+  the family's shared rules: **one undo stroke** per invocation,
+  **last-write-wins per element** (a later `colorpoints` overwrites ramp
+  colors and vice versa), hidden points written too, message reports the
+  action and count (`colored N points rainbow`), and a nomatch or error
+  writes nothing and pushes no stroke.
+- Recipes live in an in-memory registry (name → recipe) the verb resolves
+  through; listing/parameters/other axes are future work.
 
 ## Listing: `ls`
 
