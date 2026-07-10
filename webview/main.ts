@@ -789,40 +789,33 @@ async function main(): Promise<void> {
     return { affected: affected.length };
   };
 
-  /** Member-subset hide/show for @name.<pred> (a resolved point set).
-   * Hiding consolidates: stored members FULLY inside the set hide as member
-   * entries (row-purple, exactly like the member right-click); the remainder
-   * hides as point entries inside coarser members (visible via the hidden
-   * count). Showing clears the hiddenPart entries the set intersects —
-   * whole-entry granularity, like every un-hide. One undo op either way. */
+  /** Member-subset hide/show for @name.<pred> — delegates to the model's
+   * setPointsHidden (one stroke; hide consolidates, show SPLITS partially-
+   * named coarse entries so exactly the named points reveal). `affected` is
+   * the honest delta: named points whose part-hidden state actually changed;
+   * `wholeHidden` lets the handler explain a whole-flag hide honestly. */
   const setPointsHiddenIn = (
     name: string,
     points: readonly number[],
     hidden: boolean,
-  ): { affected: number } | null => {
+  ): { affected: number; wholeHidden: boolean } | null => {
     const sel = selByName(name);
     if (!sel) return null;
-    const named = new Set(points);
-    let entries: Entry[];
-    if (hidden) {
-      entries = [];
-      const claimed = new Set<number>();
-      for (const e of sel.set.listEntries()) {
-        const pts = hierarchy.pointsOf(e);
-        if (pts.length > 0 && pts.every((p) => named.has(p))) {
-          entries.push(e);
-          for (const p of pts) claimed.add(p);
-        }
-      }
-      for (const p of points) if (!claimed.has(p)) entries.push({ level: "point", id: p });
-    } else {
-      entries = sel.hiddenPart
-        .listEntries()
-        .filter((e) => hierarchy.pointsOf(e).some((p) => named.has(p)));
-    }
-    const affected = model.setEntriesHidden(sel.id, entries, hidden); // one stroke
+    const delta = hidden
+      ? points.filter((p) => !sel.hiddenPart.contains(p)).length
+      : points.filter((p) => sel.hiddenPart.contains(p)).length;
+    refreshPoints(model.setPointsHidden(sel.id, points, hidden));
+    return { affected: delta, wholeHidden: sel.hidden };
+  };
+
+  /** show @name: clear ALL hidden state on the selection (whole flag AND
+   * member hides) — the reliable inverse of any hiding on it. One undo op. */
+  const clearSelectionHidden = (name: string): { affected: number } | null => {
+    const sel = selByName(name);
+    if (!sel) return null;
+    const affected = model.clearAllHidden(sel.id);
     refreshPoints(affected);
-    return { affected: affected.length };
+    return { affected: new Set(affected).size };
   };
 
   /** show <path>: clear hidden state wherever these points are hidden —
@@ -881,6 +874,7 @@ async function main(): Promise<void> {
     commitEntries: commitTargetEntries,
     setSelectionHidden,
     setPointsHiddenIn,
+    clearSelectionHidden,
     showPointsCovering,
     showAll: showAllHidden,
   };

@@ -55,13 +55,22 @@ function makeRegistry() {
       hiddenState.whole.set(name, hidden);
       return { affected: 4 };
     },
-    setPointsHiddenIn: (_name, points, hidden) => {
+    setPointsHiddenIn: (name, points, hidden) => {
       const delta = points.filter((p) => hiddenState.pts.has(p) !== hidden);
       for (const p of delta) {
         if (hidden) hiddenState.pts.add(p);
         else hiddenState.pts.delete(p);
       }
-      return { affected: delta.length };
+      return { affected: delta.length, wholeHidden: hiddenState.whole.get(name) ?? false };
+    },
+    clearSelectionHidden: (name) => {
+      let n = hiddenState.pts.size;
+      hiddenState.pts.clear();
+      if (hiddenState.whole.get(name)) {
+        n += 4;
+        hiddenState.whole.set(name, false);
+      }
+      return { affected: n };
     },
     showPointsCovering: (points) => {
       const delta = points.filter((p) => hiddenState.pts.has(p));
@@ -217,6 +226,22 @@ test("show: never commits — clears whole/member/covering state, honest no-ops"
   assert.equal(registry.runCommand("show @nope").status, "nomatch");
   assert.equal(commits.length, 0, "show committed nothing, ever");
   assert.ok(registry.verbs().includes("hide") && registry.verbs().includes("show"));
+});
+
+test("show @name clears whole AND member state; subset shows explain a whole-flag hide", () => {
+  const { registry } = makeRegistry();
+  // member hides no longer hide behind "already visible"
+  registry.runCommand("hide @stored.a");
+  assert.deepEqual(registry.runCommand("show @stored"),
+    { status: "ok", message: `showed "stored" — 1 points` });
+  // a subset show against a WHOLE-hidden selection says so, honestly
+  registry.runCommand("hide @stored");
+  assert.match(registry.runCommand("show @stored.a").message,
+    /hidden whole — show @stored to reveal it/);
+  assert.deepEqual(registry.runCommand("show @stored"),
+    { status: "ok", message: `showed "stored" — 4 points` });
+  assert.deepEqual(registry.runCommand("show @stored"),
+    { status: "ok", message: `"stored" is already visible` });
 });
 
 test("view still dispatches through the same registry (bare view = frameVisible)", () => {

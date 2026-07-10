@@ -567,7 +567,7 @@ export function completeTarget(
   if (before.endsWith("@")) {
     if (token !== "" && committedNames.has(token)) {
       const next = [...new Set(selectionPool(token) ?? [])].sort();
-      return { start: ts, candidates: next, applied: "." };
+      return capped(ts, next, ".", ".");
     }
     return finish(ts, token, committedNames.keys(), "");
   }
@@ -626,7 +626,7 @@ export function completeTarget(
     if (token !== "" && pool.includes(token)) {
       if (!descend) return { start: ts, candidates: [], applied: "" }; // exact leaf: terminal
       const next = [...new Set(descend())].filter((c) => c !== "").sort();
-      return { start: ts, candidates: next, applied: "." };
+      return capped(ts, next, ".", ".");
     }
     return finish(ts, token, pool, ""); // settle the token — never a "."
   };
@@ -681,6 +681,29 @@ export function completeTarget(
   return pathStage(leafTypes, null);
 }
 
+/** DISPLAY-VOLUME CAP (one rule, applied uniformly wherever a completion
+ * would print a candidate list): above this many candidates, return a
+ * count-and-hint pair instead of the full list, and complete nothing until
+ * a typed prefix narrows it. The POOL is unchanged — every withheld token
+ * still matches when typed; only the at-once printing is limited, keeping
+ * completion consistent with resolution. */
+export const COMPLETION_LIST_CAP = 50;
+
+function capped(
+  start: number,
+  candidates: string[],
+  applied: string,
+  appliedWhenCapped = "", // descend sites keep their "." — the dot is the
+  // stage-two ACTION, only the list display is capped
+): Completion {
+  if (candidates.length <= COMPLETION_LIST_CAP) return { start, candidates, applied };
+  return {
+    start,
+    candidates: [`${candidates.length} matches`, `— type to narrow`],
+    applied: appliedWhenCapped,
+  };
+}
+
 function finish(
   start: number,
   token: string,
@@ -698,7 +721,7 @@ function finish(
     while (i < common.length && i < c.length && common[i] === c[i]) i++;
     common = common.slice(0, i);
   }
-  return { start, candidates, applied: common.slice(token.length) };
+  return capped(start, candidates, common.slice(token.length));
 }
 
 function segmentMatches(seg: Segment, name: string): boolean {

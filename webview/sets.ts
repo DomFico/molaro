@@ -681,6 +681,73 @@ export class SelectionModel {
     return affected;
   }
 
+  /**
+   * Hide/show an ARBITRARY POINT-SUBSET of a committed selection — the
+   * command layer's `hide/show @name.<pred>` route. Composed purely of the
+   * existing per-entry mutators inside ONE stroke (one undo op); no new
+   * state semantics.
+   *
+   * Hiding consolidates: stored members whose points all lie in the subset
+   * hide as MEMBER entries (row-purple parity with the member gesture); the
+   * remainder hides as point entries inside coarser members.
+   *
+   * Showing is the exact inverse (SYMMETRY): every hiddenPart entry the
+   * subset touches is cleared, and a PARTIALLY-named entry SPLITS — cleared,
+   * then its unnamed remainder re-hidden as point entries — so exactly the
+   * named points become visible, never a whole-entry superset.
+   */
+  setPointsHidden(id: number, points: readonly number[], hidden: boolean): number[] {
+    const sel = this.byId(id);
+    if (!sel) return [];
+    const named = new Set(points);
+    const affected: number[] = [];
+    this.beginStroke();
+    if (hidden) {
+      const claimed = new Set<number>();
+      const entries: Entry[] = [];
+      for (const e of sel.set.listEntries()) {
+        const pts = this.hierarchy.pointsOf(e);
+        if (pts.length > 0 && pts.every((p) => named.has(p))) {
+          entries.push(e);
+          for (const p of pts) claimed.add(p);
+        }
+      }
+      for (const p of points) {
+        if (!claimed.has(p)) entries.push({ level: "point", id: p });
+      }
+      for (const e of entries) affected.push(...this.setEntryHidden(id, e, true));
+    } else {
+      for (const e of sel.hiddenPart.listEntries()) {
+        const pts = this.hierarchy.pointsOf(e);
+        if (!pts.some((p) => named.has(p))) continue;
+        affected.push(...this.setEntryHidden(id, e, false));
+        for (const p of pts) {
+          if (!named.has(p)) {
+            affected.push(...this.setEntryHidden(id, { level: "point", id: p }, true));
+          }
+        }
+      }
+    }
+    this.endStroke();
+    return affected;
+  }
+
+  /** Clear ALL hidden state on one selection — the whole-selection flag AND
+   * every per-member hide — as ONE undo op. "Show the whole selection" means
+   * make all of it visible, whatever granularity hid it. */
+  clearAllHidden(id: number): number[] {
+    const sel = this.byId(id);
+    if (!sel) return [];
+    const affected: number[] = [];
+    this.beginStroke();
+    affected.push(...this.setHidden(id, false));
+    for (const e of sel.hiddenPart.listEntries()) {
+      affected.push(...this.setEntryHidden(id, e, false));
+    }
+    this.endStroke();
+    return affected;
+  }
+
   /** Rename (unique names enforced). Returns false if rejected. */
   rename(id: number, name: string): boolean {
     const sel = this.byId(id);

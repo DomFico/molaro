@@ -69,14 +69,19 @@ export interface CommandContext {
   /** Whole-selection hide/show flag (model.setHidden). affected 0 = already
    * in that state (idempotent); null = no such selection. One undo op. */
   setSelectionHidden(name: string, hidden: boolean): { affected: number } | null;
-  /** Member-subset hide/show for @name.<pred> — a resolved point set, hidden
-   * or shown through the per-member path (main.ts consolidates members vs
-   * covered points). affected 0 = nothing to change. One undo op. */
+  /** Member-subset hide/show for @name.<pred> — a resolved point set through
+   * the model's setPointsHidden (hide consolidates; show SPLITS partially-
+   * named coarse entries so exactly the named points reveal). affected =
+   * named points whose state changed (0 = nothing to change); wholeHidden
+   * reports a whole-selection flag the subset op cannot touch. One undo op. */
   setPointsHiddenIn(
     name: string,
     points: readonly number[],
     hidden: boolean,
-  ): { affected: number } | null;
+  ): { affected: number; wholeHidden: boolean } | null;
+  /** show @name: clear ALL hidden state on the selection — whole flag AND
+   * member hides — one undo op. affected 0 = nothing was hidden. */
+  clearSelectionHidden(name: string): { affected: number } | null;
   /** show <path>: clear hidden state wherever these points are hidden —
    * never commits. Returns distinct affected points (0 = nothing hidden). */
   showPointsCovering(points: readonly number[]): number;
@@ -275,7 +280,9 @@ export function makeShowHandler(ctx: CommandContext): CommandHandler {
         return { status: "nomatch", message: `no selection named "${soleRef.name}"` };
       }
       if (!soleRef.filter) {
-        const r = ctx.setSelectionHidden(soleRef.name, false)!;
+        // "show the whole selection" = make ALL of it visible: whole flag
+        // AND member hides (the reliable inverse of any hiding on it)
+        const r = ctx.clearSelectionHidden(soleRef.name)!;
         return r.affected === 0
           ? { status: "ok", message: `"${soleRef.name}" is already visible` }
           : { status: "ok", message: `showed "${soleRef.name}" — ${r.affected} points` };
@@ -285,9 +292,12 @@ export function makeShowHandler(ctx: CommandContext): CommandHandler {
         return { status: "nomatch", message: `nothing matches "${split.expr}"` };
       }
       const r = ctx.setPointsHiddenIn(soleRef.name, entries.map((e) => e.id), false)!;
-      return r.affected === 0
-        ? { status: "ok", message: `nothing hidden there` }
-        : { status: "ok", message: `showed ${r.affected} points in "${soleRef.name}"` };
+      if (r.affected === 0) {
+        return r.wholeHidden
+          ? { status: "ok", message: `"${soleRef.name}" is hidden whole — show @${soleRef.name} to reveal it` }
+          : { status: "ok", message: `nothing hidden there` };
+      }
+      return { status: "ok", message: `showed ${r.affected} points in "${soleRef.name}"` };
     }
     // a plain target: clear hidden state covering those points — NEVER commit
     const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());

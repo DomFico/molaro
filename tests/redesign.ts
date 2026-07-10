@@ -2144,6 +2144,65 @@ async function S12(): Promise<void> {
     check("S12: undoing bare show restores both hides at once",
       (await visibleCount(d)) === 1200);
     await cmd("show");
+
+    // -- member-state SYMMETRY: the reported repros ----------------------------
+    // drop "inner" first — a visible coverer would mask (show-wins) exactly
+    // the state changes this block asserts
+    await d.evaluate(`(()=>{const v=${V};
+      const inner=v.model.committed().find(c=>c.name==='inner');
+      if (inner) v.refreshPoints(v.model.deleteSelection(inner.id));
+    })()`);
+    await sleep(120);
+    await cmd("hide @mix.#*");
+    check("S12: (repro setup) hide @name.#* hides all members",
+      (await visibleCount(d)) === 5899, `visible=${await visibleCount(d)}`);
+    const rShowWhole = await cmd("show @mix");
+    check("S12: show @name now clears member hides too (the reported trap)",
+      rShowWhole.message === `showed "mix" — 101 points` && (await visibleCount(d)) === 6000,
+      JSON.stringify(rShowWhole));
+    await cmd("hide @mix.#*");
+    // t* names the 99 t-typed points of sub-0; p0 and p200 are anchors
+    const rNarrow = await cmd("show @mix.t*");
+    check("S12: a narrower show clears EXACTLY its subset — the coarse entry splits",
+      rNarrow.message === `showed 99 points in "mix"` && (await visibleCount(d)) === 5998,
+      JSON.stringify(rNarrow) + ` visible=${await visibleCount(d)}`);
+    check("S12: ...the unnamed anchors stay hidden",
+      await d.evaluate<boolean>(
+        `${V}.model.isPointHidden(0) && ${V}.model.isPointHidden(200)`));
+    await cmd("show @mix");
+    // narrower round-trip returns to baseline with clean undo depth
+    const depthRT = await undoDepth();
+    await cmd("hide @mix.t1");
+    await cmd("show @mix.t1");
+    check("S12: a narrow hide/show round-trip → baseline, exactly two undo ops",
+      (await visibleCount(d)) === 6000 && (await undoDepth()) === depthRT + 2);
+    // whole flag + member hide clear together, as ONE op, and undo restores both
+    await cmd("hide @mix.#5");
+    await cmd("hide @mix");
+    const depthBoth = await undoDepth();
+    const rBoth = await cmd("show @mix");
+    check("S12: show @name clears whole flag AND member hide as one undo op",
+      (await visibleCount(d)) === 6000 && (await undoDepth()) === depthBoth + 1,
+      JSON.stringify(rBoth));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S12: undoing that show restores both states together",
+      (await visibleCount(d)) === 5899);
+    await cmd("show @mix");
+    // a subset show against a WHOLE-hidden selection explains itself
+    await cmd("hide @mix");
+    const rHint = await cmd("show @mix.t1");
+    check("S12: subset show on a whole-hidden selection points at show @name",
+      /hidden whole — show @mix to reveal it/.test(rHint.message), JSON.stringify(rHint));
+    await cmd("show @mix");
+    // the flat-bag principle is ENFORCED, not just documented
+    const rFB1 = await cmd("view @mix.a.b");
+    const rFB2 = await cmd("create_sele @mix.x.y");
+    check("S12: @name.a.b errors identically for every verb (flat bag, no levels)",
+      rFB1.status === "error" && /at most one leaf predicate/.test(rFB1.message) &&
+        rFB2.status === "error" && /at most one leaf predicate/.test(rFB2.message),
+      JSON.stringify([rFB1.message, rFB2.message]));
+
     // -- errors and empty matches ----------------------------------------------
     const rNoTarget = await cmd("hide");
     const rBadName = await cmd("hide @mix [x]");

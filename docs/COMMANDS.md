@@ -263,12 +263,16 @@ hidden set. That shapes the pair's asymmetry:
   chooses directional clarity). Bare `hide` is an **error** — there is no
   "hide everything".
 - **`show` never commits** — a point in no selection is already visible.
-  `show @name` clears the whole-selection flag only; `show @name.<pred>`
-  clears the member hides the predicate intersects (whole-entry granularity,
-  like every un-hide); `show <target>` clears hidden state *covering* those
-  points wherever it lives — and no-ops honestly (`nothing hidden there`)
-  when nothing is. Bare **`show` reveals everything** (non-destructive, one
-  undo op).
+  `show @name` makes the **whole selection visible**: it clears the
+  whole-selection flag *and* every per-member hide, so it is the reliable
+  inverse of any hiding on that selection. `show @name.<pred>` clears
+  **exactly** the matched subset of the hidden members — hidden state stored
+  at a coarser grain splits as needed, so a narrower predicate never reveals
+  a superset (and if the selection is hidden *whole*, the subset form tells
+  you: `hidden whole — show @name to reveal it`). `show <target>` clears
+  hidden state *covering* those points wherever it lives — and no-ops
+  honestly (`nothing hidden there`) when nothing is. Bare **`show` reveals
+  everything** (non-destructive, one undo op).
 - **Messages report the action, not pixels**: under show-wins, hiding a
   selection whose points are covered by another *visible* selection changes
   nothing on screen until the coverer hides too — the command still reports
@@ -296,7 +300,16 @@ prior presses. The two stages come from the token under the cursor:
   nothing further.
 
 Verb completion appends a space on a unique match; after `@name.` candidates
-are that selection's own identity tokens (types + ancestor labels).
+are that selection's own identity tokens (types + ancestor labels) — the
+exact set a `@name.<token>` filter would match, because a selection is a flat
+set of points with no structure to enter.
+
+**Large lists cap for display**: when a completion would print more than ~50
+candidates, Tab prints `N matches — type to narrow` instead of the list (and
+withholds the common-prefix extension). Nothing is removed from the pool —
+every withheld token still matches when you type it; a prefix narrows the
+list back to normal. The same rule applies to path pools and `@name.` pools
+alike.
 
 ## Parse error vs. nomatch — how to self-diagnose
 

@@ -5,6 +5,25 @@ from the commit history (`82226ce` … `5ba5c83`) into one place. The user-facin
 grammar is documented in [COMMANDS.md](COMMANDS.md); this note is about *why
 the code is shaped the way it is* and which properties must not regress.
 
+## Consistency principles
+
+Invariants that govern the layer. When a change touches one of these areas,
+this section is the check it must pass; add future invariants here rather
+than scattering them.
+
+1. **A committed selection is a flat set of points.** `@name` resolves to
+   points; `@name.<pred>` filters those points by a single flat predicate
+   (match-anywhere: the point's type or any ancestor label). It is *not* a
+   path segment — there is no descent, no sub-levels, no navigable structure.
+   Resolution, error messages, and completion must all tell this same story:
+   `@name.a.b` is an error (no second level, enforced for every verb);
+   `@name.<token>` matches points whose type or any ancestor label equals the
+   token; and completion after `@name.` offers exactly the tokens that would
+   match as such a flat predicate — never a curated "membership" list that
+   implies the selection has structure to enter. (Both hide/show bugs fixed
+   in this layer's history came from a component quietly treating the flat
+   bag as if it had structure.)
+
 ## Layering and the purity fence
 
 ```
@@ -151,12 +170,21 @@ inherits (`commitTargetEntries` in main.ts):
   unaffected. The wiring consolidates: members fully inside the filter hide
   as MEMBER entries (row-purple, gesture parity); the remainder hides as
   point entries (count-only feedback — no row exists for sub-member points).
-- `show` NEVER commits (a point in no selection is already visible): whole
-  flags, intersected hiddenPart entries (whole-entry granularity — un-hiding
-  can reveal more than named when state exists only at a coarser grain), or
-  — path form — every selection covering the named points; bare `show`
-  clears all hidden state. Each action is one stroke = one undo op; empty
-  strokes push nothing, so idempotent calls leave the undo depth untouched.
+- `show` NEVER commits (a point in no selection is already visible).
+  MEMBER-STATE SYMMETRY (`SelectionModel.setPointsHidden`, composed purely of
+  existing mutators in one stroke): `show @name.<pred>` clears exactly the
+  state `hide @name.<pred>` wrote — a hiddenPart entry only PARTIALLY named
+  by the predicate SPLITS (cleared, its unnamed remainder re-hidden as point
+  entries), so a narrower show reveals exactly its subset, never a
+  whole-entry superset. Beware: a split against a huge coarse entry re-hides
+  the remainder point-by-point (thousands of mutator calls) — rare, accepted.
+  `show @name` = `clearAllHidden`: the whole flag AND every member hide (the
+  reliable inverse of any hiding on that selection); the path form clears
+  every selection covering the named points; bare `show` clears all hidden
+  state. Each action is one stroke = one undo op; empty strokes push
+  nothing, so idempotent calls leave the undo depth untouched. A subset show
+  against a WHOLE-hidden selection reports `hidden whole — show @name to
+  reveal it` rather than a misleading "nothing hidden there".
 - `hide` never toggles (idempotent `already hidden`); bare `hide` errors (no
   gesture analog, destructive-feeling). Messages report the ACTION —
   show-wins masking means a hide may change no pixels; that's the accepted
@@ -185,8 +213,15 @@ deliberate decisions:
   would be uncompletable. `#`-tokens are inert (indices aren't enumerable).
 - After `@name.` the pool is the selection's own identity tokens — its
   distinct types AND the subgroup/group/category labels its points sit under —
-  never the global label space. (Bare Tab on a huge selection prints a huge
-  list; that's per spec — prefix first.)
+  never the global label space. Do NOT curate or "membership-scope" this pool
+  (consistency principle 1): it is the exact flat match-anywhere token set.
+- DISPLAY-VOLUME CAP (`COMPLETION_LIST_CAP`, one uniform rule in `capped()`):
+  any completion list over ~50 candidates returns a `N matches — type to
+  narrow` hint pair instead of the list, withholding the common-prefix
+  extension until a typed prefix narrows it. The POOL is unchanged — every
+  withheld token still matches when typed, keeping completion consistent with
+  resolution. Descend sites keep their `.` (the dot is the stage-two action;
+  only the list preview caps). Applies to @-pools and path pools alike.
 
 ## Reserved characters and where each is enforced
 

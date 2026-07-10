@@ -693,6 +693,56 @@ test("splitTrailingName: malformed names are parse errors; expr keeps [ ] reserv
   assert.match(parseErr(s.expr), /reserved character "\["/);
 });
 
+// -- completion display-volume cap -----------------------------------------------------
+
+/** 60 one-point subgroups under one branch — big enough to trip the cap. */
+function makeBigHeader(): Header {
+  const n = 60;
+  return {
+    version: "0.1.0", name: "big", n_points: n, n_frames: 1, units: "m", bbox: null,
+    points: {
+      type: Array.from({ length: n }, (_, i) => `k${i}`),
+      group_id: Array(n).fill(500),
+      subgroup_id: Array.from({ length: n }, (_, i) => 600 + i),
+      category: Array(n).fill(0),
+    },
+    categories: ["big"], groups: { "500": "grp" },
+    subgroups: Object.fromEntries(
+      Array.from({ length: n }, (_, i) => [String(600 + i), `node-${i}`]),
+    ),
+    edges: [], polylines: [], channels: [],
+  };
+}
+const bigHeader = makeBigHeader();
+const bigHier = new Hierarchy(bigHeader);
+const bigTree = buildTree(bigHeader);
+const BIGNAMES = new Map<string, readonly Entry[]>([["broad", [{ level: "category", id: 0 }]]]);
+function compBig(text: string) {
+  return completeTarget(text, text.length, bigTree, bigHier, bigHeader.points.type, BIGNAMES, VERBS);
+}
+
+test("completion cap: an oversized list prints a count-and-hint, never the pool", () => {
+  // @broad. pool = 60 types + 60 subgroup labels + group + category = 122
+  assert.deepEqual(compBig("view @broad."),
+    { start: 12, candidates: ["122 matches", "— type to narrow"], applied: "" });
+  // the exact-@name descend caps its PREVIEW but keeps the descend dot
+  assert.deepEqual(compBig("view @broad"),
+    { start: 6, candidates: ["122 matches", "— type to narrow"], applied: "." });
+  // the same one rule applies to large PATH pools — not an @ special case
+  assert.deepEqual(compBig("view big.grp.").candidates, ["60 matches", "— type to narrow"]);
+  assert.equal(compBig("view big.grp.").applied, "");
+});
+
+test("completion cap: a prefix narrows to a listable set; the POOL is unchanged", () => {
+  const narrowed = compBig("view @broad.node-1");
+  assert.equal(narrowed.candidates.length, 11); // node-1, node-10 … node-19
+  assert.ok(narrowed.candidates.includes("node-13"));
+  // a token the cap withheld from display still RESOLVES — display-only cap
+  const ast = parseTarget("@broad.node-42") as TargetAst;
+  const got = resolveTarget(ast, bigTree, bigHier, bigHeader.points.type, BIGNAMES);
+  assert.deepEqual(got.map((e) => `${e.level}:${e.id}`), ["point:42"]);
+});
+
 // -- glob matcher edge cases ---------------------------------------------------------
 
 test("globMatch edge cases", () => {
