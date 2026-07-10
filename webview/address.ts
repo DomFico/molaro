@@ -26,17 +26,18 @@
  * trailing-integer meaning; the `#` is the sole distinguisher. Out-of-range
  * indices resolve to nothing (nomatch), not an error.
  *
- * `@name.<leaf-pred>` filters a committed selection: the selection's resolved
- * POINT SET intersected with one leaf predicate (index, #-range, literal,
- * glob, or a "," list of those — the exact predicates a path's leaf accepts).
- * The predicate matches ANYWHERE on a point's identity: its leaf type token
- * OR its subgroup / group / category label — multi-level hits union (broad by
- * design; refine by typing a narrower predicate). A committed selection is a
- * FLAT set with no sub-levels, so this is an intersection, never a positional
- * descent; `@name.a.b` is a parse error. The trailing predicate binds tighter
- * than `+` — `@a.H + @b.O` is two independently filtered terms unioned.
- * RESERVED: `:` inside a filter predicate is a parse error, keeping the
- * syntax free for a future explicit level qualifier (`@sel.<level>:<pred>`).
+ * `@name.<leaf-pred>` filters a committed selection's STORED MEMBERSHIP: the
+ * predicate (index, #-range, literal, glob, or a "," list) matches each
+ * stored entry at that entry's OWN level — a member's label (levels 1–3) or
+ * a point member's type/index — and NEVER descends into the ancestry of
+ * points beneath a coarse member. Anything finer than the membership matches
+ * nothing (nomatch): to address finer entries, commit a finer selection
+ * first — depth is a property of how a selection was committed, not of the
+ * filter. Matched results are the WHOLE members, at their stored levels. A
+ * committed selection is flat to its members, so this is one flat filter,
+ * never a positional descent; `@name.a.b` is a parse error. The trailing
+ * predicate binds tighter than `+`. RESERVED: `:` inside a filter predicate
+ * is a parse error, keeping the syntax free for a future qualifier.
  *
  * Matching is SCOPED RECURSIVE DESCENT over the VISIBLE TREE — the same
  * `classification.ts buildTree` model the bottom panel renders — so a path
@@ -362,40 +363,25 @@ export function resolveTarget(
         for (const e of stored) add(e);
         continue;
       }
-      // "@name.<leaf-pred>": INTERSECT the selection's resolved point set
-      // with one leaf predicate, matched ANYWHERE on each point's identity —
-      // its leaf type OR its subgroup / group / category label (a point hits
-      // if any field matches; multi-level hits union, deliberately broad).
-      // Unlike path resolution — where segment count sets the entry level —
-      // the result here is ALWAYS point-level: a set of points reduced to a
-      // subset of points. The stored entries' own levels are deliberately
-      // not preserved. "#" predicates match the point index, as everywhere.
-      const inSel = new Set<number>();
-      for (const e of stored) for (const p of hierarchy.pointsOf(e)) inSel.add(p);
+      // "@name.<leaf-pred>": MEMBERSHIP-ONLY filtering (consistency
+      // principle 1 — this REVERSES the earlier match-anywhere-over-ancestry
+      // rule). The predicate sees the selection's STORED entries at their
+      // own levels: a member's label, or a point member's type; "#"
+      // predicates match only stored POINT members' indices — an index
+      // inside a coarse member matches nothing, no exception. Results are
+      // the WHOLE matched members at their stored levels, so every
+      // downstream operation is whole-member — exactly what the panel
+      // gestures produce, and always reversible in the UI.
       const filter = term.filter;
-      const labelsBySub = new Map<number, string[]>(); // ancestor labels, cached per subgroup
-      const identityLabels = (p: number): string[] => {
-        const sid = hierarchy.subgroupOfPoint(p);
-        let labels = labelsBySub.get(sid);
-        if (!labels) {
-          labels = [hierarchy.label({ level: "subgroup", id: sid })];
-          const a = hierarchy.ancestorsOfSubgroup(sid);
-          if (a) {
-            labels.push(hierarchy.label({ level: "group", id: a.group }));
-            labels.push(hierarchy.label({ level: "category", id: a.category }));
+      for (const e of stored) {
+        const hit = filter.predicates.some((pr) => {
+          if (pr.kind === "index") {
+            return e.level === "point" && inRange(e.id, pr.lo, pr.hi);
           }
-          labelsBySub.set(sid, labels);
-        }
-        return labels;
-      };
-      for (const p of inSel) {
-        const hit = filter.predicates.some((pr) =>
-          pr.kind === "index"
-            ? inRange(p, pr.lo, pr.hi)
-            : predicateMatches(pr, types[p] ?? "") ||
-              identityLabels(p).some((l) => predicateMatches(pr, l)),
-        );
-        if (hit) add({ level: "point", id: p });
+          const name = e.level === "point" ? (types[e.id] ?? "") : hierarchy.label(e);
+          return predicateMatches(pr, name);
+        });
+        if (hit) add(e);
       }
       continue;
     }
@@ -539,33 +525,16 @@ export function completeTarget(
   // verb position: nothing but whitespace before the token
   if (/^\s*$/.test(before)) return finish(ts, token, verbs, " ");
 
-  // the identity-token pool of one committed selection (the "@name." filter
-  // candidates): its distinct point types + the subgroup/group/category
-  // labels its points sit under — deduplicated by finish()
+  // the "@name." filter candidate pool = the selection's STORED MEMBERSHIP
+  // (a member's label, a point member's type) — what the panel's member list
+  // shows, and exactly what a @name.<token> filter can match (consistency
+  // principle 1: no descendant tokens, no ancestry pool). Deduped by finish().
   const selectionPool = (selName: string): string[] | null => {
     const stored = committedNames.get(selName);
     if (!stored) return null;
-    const pool: string[] = [];
-    const seenPts = new Set<number>();
-    const seenSubs = new Set<number>();
-    for (const e of stored) {
-      for (const p of hierarchy.pointsOf(e)) {
-        if (seenPts.has(p)) continue;
-        seenPts.add(p);
-        const t = types[p];
-        if (t) pool.push(t);
-        const sid = hierarchy.subgroupOfPoint(p);
-        if (seenSubs.has(sid)) continue;
-        seenSubs.add(sid);
-        pool.push(hierarchy.label({ level: "subgroup", id: sid }));
-        const a = hierarchy.ancestorsOfSubgroup(sid);
-        if (a) {
-          pool.push(hierarchy.label({ level: "group", id: a.group }));
-          pool.push(hierarchy.label({ level: "category", id: a.category }));
-        }
-      }
-    }
-    return pool;
+    return stored
+      .map((e) => (e.level === "point" ? (types[e.id] ?? "") : hierarchy.label(e)))
+      .filter((t) => t !== "");
   };
 
   // @name: the token hangs directly off an "@". The two-stage rule applies

@@ -241,43 +241,53 @@ const FNAMES = new Map<string, readonly Entry[]>([
   ["env", [{ level: "category", id: 2 }]],
 ]);
 
-test("@sel.#N is a containment check against the selection's point set", () => {
-  assert.deepEqual(keys("@mix.#1", FNAMES), ["point:1"]);
-  assert.deepEqual(keys("@mix.#7", FNAMES), []); // 7 ∉ {0,1,5} → nomatch
-  assert.deepEqual(keys("@mix.#0-9", FNAMES), ["point:0", "point:1", "point:5"]);
+test("REVERSED: @sel.#N matches only STORED point members — no reach inside", () => {
+  // mix stores subgroup:100 (points 0,1) and point:5 — only #5 is a MEMBER
+  assert.deepEqual(keys("@mix.#5", FNAMES), ["point:5"]);
+  assert.deepEqual(keys("@mix.#1", FNAMES), [],
+    "an index INSIDE the coarse member is not a member — nomatch, no exception");
+  assert.deepEqual(keys("@mix.#7", FNAMES), []);
+  assert.deepEqual(keys("@mix.#0-9", FNAMES), ["point:5"]); // stored point members in range
 });
 
-test("@sel.<literal>/<glob> filter by the point type string (regression: leaf half)", () => {
-  assert.deepEqual(keys("@mix.tH", FNAMES), ["point:0", "point:5"]);
-  assert.deepEqual(keys("@mix.t2", FNAMES), ["point:1"]);
-  assert.deepEqual(keys("@mix.t*", FNAMES), ["point:0", "point:1", "point:5"]);
-  assert.deepEqual(keys("@mix.w", FNAMES), []); // type exists globally, not in sel
-  assert.deepEqual(keys("@env.w", FNAMES), ["point:10", "point:11", "point:8", "point:9"]);
+test("REVERSED: @sel.<pred> matches stored members at their OWN levels", () => {
+  // point members match on their TYPE; label members on their LABEL
+  assert.deepEqual(keys("@mix.tH", FNAMES), ["point:5"]); // point 0 is NOT a member
+  assert.deepEqual(keys("@mix.t*", FNAMES), ["point:5"]);
+  assert.deepEqual(keys("@mix.t2", FNAMES), [], "type inside the coarse member: nomatch");
+  assert.deepEqual(keys("@mix.s1", FNAMES), ["subgroup:100"]); // the member's own label
+  assert.deepEqual(keys(`@mix."s1"`, FNAMES), ["subgroup:100"]);
+  assert.deepEqual(keys("@mix.s*", FNAMES), ["subgroup:100"]);
+  assert.deepEqual(keys("@env.env3", FNAMES), ["category:2"]); // its one member's label
+  assert.deepEqual(keys("@env.w", FNAMES), [], "descendant TYPE: nomatch");
 });
 
-test("@sel.<pred> matches ANY ancestor label too — the previously-empty cases", () => {
-  // mix = {p0,p1 under s1/g-1/alpha; p5 under s7/g-7/beta}
-  assert.deepEqual(keys("@mix.s1", FNAMES), ["point:0", "point:1"]); // subgroup label
-  assert.deepEqual(keys(`@mix."s1"`, FNAMES), ["point:0", "point:1"]); // quoted too
-  assert.deepEqual(keys("@mix.g-7", FNAMES), ["point:5"]); // group label
-  assert.deepEqual(keys("@mix.alpha", FNAMES), ["point:0", "point:1"]); // category label
-  assert.deepEqual(keys("@mix.beta", FNAMES), ["point:5"]);
-  // globs across ancestor labels
-  assert.deepEqual(keys("@mix.g-*", FNAMES), ["point:0", "point:1", "point:5"]);
-  assert.deepEqual(keys("@mix.*7", FNAMES), ["point:5"]); // s7 / g-7
-  assert.deepEqual(keys("@env.w1", FNAMES), ["point:8", "point:9"]); // one subgroup of env
-  assert.deepEqual(keys("@env.bath", FNAMES), ["point:10", "point:11", "point:8", "point:9"]);
+test("REVERSED: ancestry never matches — descendant/ancestor tokens nomatch", () => {
+  // the old match-anywhere rule reached into a member's ancestry; now the
+  // filter sees MEMBERSHIP only (consistency principle 1)
+  assert.deepEqual(keys("@mix.g-7", FNAMES), [], "a member's GROUP label: nomatch");
+  assert.deepEqual(keys("@mix.alpha", FNAMES), [], "a member's CATEGORY label: nomatch");
+  assert.deepEqual(keys("@mix.beta", FNAMES), []);
+  assert.deepEqual(keys("@mix.g-*", FNAMES), []);
+  assert.deepEqual(keys("@env.w1", FNAMES), [], "a SUBGROUP under the category member: nomatch");
+  assert.deepEqual(keys("@env.bath", FNAMES), [], "the GROUP under the category member: nomatch");
+  // the route to finer granularity: commit a finer selection whose members
+  // ARE the fine entries — then the same tokens match as member labels
+  const fine = new Map<string, readonly Entry[]>([
+    ["fine", [{ level: "subgroup", id: 104 }, { level: "subgroup", id: 105 }]],
+  ]);
+  assert.deepEqual(keys("@fine.w1", fine), ["subgroup:104"]);
+  assert.deepEqual(keys("@fine.w*", fine), ["subgroup:104", "subgroup:105"]);
 });
 
-test("multi-level hits union — matches at different fields never conflict", () => {
-  // p2: type "anchor" (and category "alpha"); p8: type "w", group "bath" —
-  // one glob hits p2 via its TYPE and p8 via its LABELS; the result unions
+test("REVERSED: point members match on type only — labels of their ancestry don't", () => {
   const duo = new Map<string, readonly Entry[]>([
     ["duo", [{ level: "point", id: 2 }, { level: "point", id: 8 }]],
   ]);
-  assert.deepEqual(keys("@duo.*a*", duo), ["point:2", "point:8"]);
-  assert.deepEqual(keys("@duo.anchor", duo), ["point:2"]); // type-only hit
-  assert.deepEqual(keys("@duo.bath", duo), ["point:8"]); // label-only hit
+  assert.deepEqual(keys("@duo.anchor", duo), ["point:2"]); // its own type
+  assert.deepEqual(keys("@duo.w", duo), ["point:8"]);
+  assert.deepEqual(keys("@duo.*a*", duo), ["point:2"]); // "anchor" only; ancestry ignored
+  assert.deepEqual(keys("@duo.bath", duo), [], "p8's group label is not its membership");
 });
 
 test(':" is reserved in @name filters (future level qualifier) — paths unaffected', () => {
@@ -288,22 +298,18 @@ test(':" is reserved in @name filters (future level qualifier) — paths unaffec
   assert.equal(parseTarget("a.b.c.x:y").kind, "target");
 });
 
-test("@sel lists union within the filter; @sel.* ≡ @sel's points (flattened)", () => {
-  assert.deepEqual(keys("@mix.t2,#5", FNAMES), ["point:1", "point:5"]);
-  assert.deepEqual(keys("@mix.tH,#1", FNAMES), ["point:0", "point:1", "point:5"]);
-  // the filtered form is ALWAYS point-level — the stored entry levels
-  // (here a subgroup + a point) are not preserved
-  assert.deepEqual(keys("@mix.*", FNAMES), ["point:0", "point:1", "point:5"]);
-  assert.deepEqual(keys("@mix", FNAMES), ["point:5", "subgroup:100"]); // unfiltered: stored levels
+test("REVERSED: filter results are WHOLE members at their stored levels; @sel.* ≡ @sel", () => {
+  assert.deepEqual(keys("@mix.s1,#5", FNAMES), ["point:5", "subgroup:100"]); // list over members
+  assert.deepEqual(keys("@mix.*", FNAMES), ["point:5", "subgroup:100"]); // all stored members
+  assert.deepEqual(keys("@mix.*", FNAMES), keys("@mix", FNAMES)); // ≡ the unfiltered form
 });
 
 test("the trailing predicate binds tighter than + (two independent filters)", () => {
-  const ast = parseTarget("@mix.tH + @env.w") as TargetAst;
+  const ast = parseTarget("@mix.tH + @env.env3") as TargetAst;
   assert.equal(ast.terms.length, 2);
   assert.equal((ast.terms[0] as { filter?: unknown }).filter !== undefined, true);
   assert.equal((ast.terms[1] as { filter?: unknown }).filter !== undefined, true);
-  assert.deepEqual(keys("@mix.tH + @env.w", FNAMES),
-    ["point:0", "point:10", "point:11", "point:5", "point:8", "point:9"]);
+  assert.deepEqual(keys("@mix.tH + @env.env3", FNAMES), ["category:2", "point:5"]);
 });
 
 test("@name.a.b is a parse error — a committed selection has no sub-levels", () => {
@@ -350,8 +356,10 @@ test("#* is the all-indices wildcard — equivalent spellings, same point sets",
   assert.deepEqual(keys("alpha.g-1.s1.#*"), ["point:0", "point:1"]);
   assert.deepEqual(keys("alpha.g-1.s1.#*"), keys("alpha.g-1.s1.*"));
   // @name filter: ≡ the selection's whole point set (and ≡ @name.*)
-  assert.deepEqual(keys("@mix.#*", FNAMES), ["point:0", "point:1", "point:5"]);
-  assert.deepEqual(keys("@mix.#*", FNAMES), keys("@mix.*", FNAMES));
+  // REVERSED: #* = the STORED point-level members only (never points inside
+  // a coarse member); a selection with no point members yields nothing
+  assert.deepEqual(keys("@mix.#*", FNAMES), ["point:5"]);
+  assert.deepEqual(keys("@env.#*", FNAMES), [], "no point members → #* is empty");
   // lists and unions compose like any index spec
   assert.deepEqual(keys("alpha.g-1.s1.tH,#*"), ["point:0", "point:1"]);
   assert.equal(resolve("#* + beta").length, 13); // 12 points + the category
@@ -633,11 +641,12 @@ test("completion: #-prefixed tokens are inert (indices aren't enumerable)", () =
 test("an exact @name token is descendable: second Tab appends '.' + the filter pool", () => {
   // stage one: a partial name settles with NO dot
   assert.deepEqual(comp("view @solv"), { start: 6, candidates: ["solvent"], applied: "ent" });
-  // stage two: the exact name descends into its filter level
+  // stage two: the exact name descends into its filter level — offering the
+  // STORED MEMBERSHIP (reversed from the old ancestry pool)
   assert.deepEqual(comp("view @solvent"),
-    { start: 6, candidates: ["bath", "env3", "w", "w1", "w2"], applied: ".", kind: "filter" });
+    { start: 6, candidates: ["env3"], applied: ".", kind: "filter" });
   assert.deepEqual(comp("view @picks"),
-    { start: 6, candidates: ["alpha", "g-1", "s1", "t2", "tH"], applied: ".", kind: "filter" });
+    { start: 6, candidates: ["s1"], applied: ".", kind: "filter" });
   // stateless: same input, same result
   assert.deepEqual(comp("view @solvent"), comp("view @solvent"));
   // a partial with several names still settles (no dot)
@@ -647,20 +656,21 @@ test("an exact @name token is descendable: second Tab appends '.' + the filter p
   assert.deepEqual(comp("view @nope").candidates, []);
 });
 
-test("completion after @name. merges the selection's types AND ancestor labels", () => {
-  // picks = subgroup 100 (points 0,1): types tH,t2 under s1 / g-1 / alpha
+test("REVERSED: @name. completion offers the STORED MEMBERS, not descendants", () => {
+  // picks stores ONE subgroup member (label "s1") — the pool is that member,
+  // never the types/ancestor labels of the points beneath it
   assert.deepEqual(comp("view @picks."),
-    { start: 12, candidates: ["alpha", "g-1", "s1", "t2", "tH"], applied: "", kind: "filter" });
+    { start: 12, candidates: ["s1"], applied: "s1", kind: "filter" });
   // the tag marks FILTER vocabulary; genuine tree navigation stays untagged
-  assert.equal(comp("view @picks.t").kind, "filter");
+  assert.equal(comp("view @picks.s").kind, "filter");
   assert.equal(comp("view alpha.").kind, undefined);
   assert.equal(comp("view alpha").kind, undefined);
   assert.equal(comp("view ").kind, undefined);
-  assert.deepEqual(comp("view @picks.t").candidates, ["t2", "tH"]);
-  // solvent = category 2 (points 8-11): type w under w1,w2 / bath / env3
-  assert.deepEqual(comp("view @solvent.").candidates, ["bath", "env3", "w", "w1", "w2"]);
-  assert.deepEqual(comp("view @solvent.w").candidates, ["w", "w1", "w2"]);
-  assert.deepEqual(comp(`view @"my picks".`).candidates, ["alpha", "g-1", "s1", "t2", "tH"]);
+  assert.deepEqual(comp("view @picks.t").candidates, [], "descendant types not offered");
+  // solvent stores one category member (label "env3")
+  assert.deepEqual(comp("view @solvent.").candidates, ["env3"]);
+  assert.deepEqual(comp("view @solvent.w").candidates, [], "descendant labels not offered");
+  assert.deepEqual(comp(`view @"my picks".`).candidates, ["s1"]);
   assert.deepEqual(comp("view @picks.#1").candidates, []); // # stays inert
   assert.deepEqual(comp("view @nope.").candidates, []); // unknown selection
   assert.deepEqual(comp("view @picks.x.").candidates, []); // no second level
@@ -724,18 +734,21 @@ function makeBigHeader(): Header {
 const bigHeader = makeBigHeader();
 const bigHier = new Hierarchy(bigHeader);
 const bigTree = buildTree(bigHeader);
-const BIGNAMES = new Map<string, readonly Entry[]>([["broad", [{ level: "category", id: 0 }]]]);
+const BIGNAMES = new Map<string, readonly Entry[]>([
+  // 60 subgroup MEMBERS — the membership pool itself is big enough to cap
+  ["broad", Array.from({ length: 60 }, (_, i) => ({ level: "subgroup" as const, id: 600 + i }))],
+]);
 function compBig(text: string) {
   return completeTarget(text, text.length, bigTree, bigHier, bigHeader.points.type, BIGNAMES, VERBS);
 }
 
 test("completion cap: an oversized list prints a count-and-hint, never the pool", () => {
-  // @broad. pool = 60 types + 60 subgroup labels + group + category = 122
+  // @broad. pool = its 60 stored member labels
   assert.deepEqual(compBig("view @broad."),
-    { start: 12, candidates: ["122 matches", "— type to narrow"], applied: "", kind: "filter" });
+    { start: 12, candidates: ["60 matches", "— type to narrow"], applied: "", kind: "filter" });
   // the exact-@name descend caps its PREVIEW but keeps the descend dot
   assert.deepEqual(compBig("view @broad"),
-    { start: 6, candidates: ["122 matches", "— type to narrow"], applied: ".", kind: "filter" });
+    { start: 6, candidates: ["60 matches", "— type to narrow"], applied: ".", kind: "filter" });
   // the same one rule applies to large PATH pools — not an @ special case
   assert.deepEqual(compBig("view big.grp.").candidates, ["60 matches", "— type to narrow"]);
   assert.equal(compBig("view big.grp.").applied, "");
@@ -746,9 +759,10 @@ test("completion cap: a prefix narrows to a listable set; the POOL is unchanged"
   assert.equal(narrowed.candidates.length, 11); // node-1, node-10 … node-19
   assert.ok(narrowed.candidates.includes("node-13"));
   // a token the cap withheld from display still RESOLVES — display-only cap
+  // (to the WHOLE member, at its stored level)
   const ast = parseTarget("@broad.node-42") as TargetAst;
   const got = resolveTarget(ast, bigTree, bigHier, bigHeader.points.type, BIGNAMES);
-  assert.deepEqual(got.map((e) => `${e.level}:${e.id}`), ["point:42"]);
+  assert.deepEqual(got.map((e) => `${e.level}:${e.id}`), ["subgroup:642"]);
 });
 
 // -- glob matcher edge cases ---------------------------------------------------------

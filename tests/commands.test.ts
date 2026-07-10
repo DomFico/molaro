@@ -30,7 +30,7 @@ function makeRegistry() {
   // stateful stubs: record what the handlers asked for and mimic the model's
   // surface (collision error for "taken", auto-name, idempotence via state)
   const commits: { entries: Entry[]; name: string | null; hide: boolean }[] = [];
-  const hiddenState = { whole: new Map<string, boolean>(), pts: new Set<number>() };
+  const hiddenState = { whole: new Map<string, boolean>(), pts: new Set<number>(), members: new Set<string>() };
   const ctx: CommandContext = {
     hierarchy,
     tree: buildTree(header),
@@ -55,17 +55,23 @@ function makeRegistry() {
       hiddenState.whole.set(name, hidden);
       return { affected: 4 };
     },
-    setPointsHiddenIn: (name, points, hidden) => {
-      const delta = points.filter((p) => hiddenState.pts.has(p) !== hidden);
-      for (const p of delta) {
-        if (hidden) hiddenState.pts.add(p);
-        else hiddenState.pts.delete(p);
+    setMembersHiddenIn: (name, entries, hidden) => {
+      // whole-MEMBER stub: tracks member keys; affected = points of changed members
+      let affected = 0;
+      for (const e of entries) {
+        const key = `${e.level}:${e.id}`;
+        if (hiddenState.members.has(key) !== hidden) {
+          if (hidden) hiddenState.members.add(key);
+          else hiddenState.members.delete(key);
+          affected += hierarchy.pointsOf(e).length;
+        }
       }
-      return { affected: delta.length, wholeHidden: hiddenState.whole.get(name) ?? false };
+      return { affected, wholeHidden: hiddenState.whole.get(name) ?? false };
     },
     clearSelectionHidden: (name) => {
-      let n = hiddenState.pts.size;
+      let n = hiddenState.pts.size + hiddenState.members.size;
       hiddenState.pts.clear();
+      hiddenState.members.clear();
       if (hiddenState.whole.get(name)) {
         n += 4;
         hiddenState.whole.set(name, false);
@@ -78,8 +84,9 @@ function makeRegistry() {
       return delta.length;
     },
     showAll: () => {
-      let n = hiddenState.pts.size;
+      let n = hiddenState.pts.size + hiddenState.members.size;
       hiddenState.pts.clear();
+      hiddenState.members.clear();
       for (const [k, v] of hiddenState.whole) {
         if (v) {
           n += 4;
@@ -185,10 +192,18 @@ test("hide: commit-then-hide for plain targets, whole/member for @name, errors",
   assert.deepEqual(res, { status: "ok", message: `hid "stored" — 4 points` });
   assert.deepEqual(registry.runCommand("hide @stored"),
     { status: "ok", message: `"stored" is already hidden` });
-  // @name.<pred> → member subset (types: pts 0,1 = "a","b"; pt 2 = "c")
-  res = registry.runCommand("hide @stored.a");
+  // @name.<pred> → MEMBERSHIP-ONLY (reversed): the filter sees the stored
+  // entries — subgroup:0 (label "s0") and point:2 (type "c") — never the
+  // ancestry of points beneath the coarse member
+  res = registry.runCommand("hide @stored.c"); // a point MEMBER's type
   assert.deepEqual(res, { status: "ok", message: `hid 1 points in "stored"` });
-  assert.match(registry.runCommand("hide @stored.a").message, /already hidden — 1 points/);
+  assert.match(registry.runCommand("hide @stored.c").message, /already hidden — 1 members/);
+  res = registry.runCommand("hide @stored.s0"); // a label MEMBER — whole-member hide
+  assert.deepEqual(res, { status: "ok", message: `hid 2 points in "stored"` });
+  assert.equal(registry.runCommand("hide @stored.a").status, "nomatch",
+    "a type INSIDE the coarse member is not a member — nomatch");
+  assert.equal(registry.runCommand("hide @stored.#0").status, "nomatch",
+    "an index inside a coarse member is not a member — nomatch, no exception");
   // usage errors and empty matches
   assert.match(registry.runCommand("hide @stored [x]").message,
     /applies only when hide commits/);
@@ -208,18 +223,17 @@ test("show: never commits — clears whole/member/covering state, honest no-ops"
   registry.runCommand("hide @stored");
   assert.deepEqual(registry.runCommand("show @stored"),
     { status: "ok", message: `showed "stored" — 4 points` });
-  registry.runCommand("hide @stored.a"); // hides point 0
-  assert.deepEqual(registry.runCommand("show @stored.a"),
+  registry.runCommand("hide @stored.c"); // hides the point MEMBER 2
+  assert.deepEqual(registry.runCommand("show @stored.c"),
     { status: "ok", message: `showed 1 points in "stored"` });
-  assert.deepEqual(registry.runCommand("show @stored.a"),
+  assert.deepEqual(registry.runCommand("show @stored.c"),
     { status: "ok", message: `nothing hidden there` });
-  // path-show clears covering hidden state without committing
-  registry.runCommand("hide @stored.a"); // point 0 hidden again
-  assert.deepEqual(registry.runCommand("show c0"), { status: "ok", message: "showed 1 points" });
+  assert.equal(registry.runCommand("show @stored.a").status, "nomatch",
+    "descendant tokens nomatch on show too — the filter is membership-only");
   // bare show clears everything, in one call
   registry.runCommand("hide @stored");
-  registry.runCommand("hide @stored.a");
-  assert.match(registry.runCommand("show").message, /showed everything — 5 points/);
+  registry.runCommand("hide @stored.c");
+  assert.match(registry.runCommand("show").message, /showed everything — \d+ points/);
   // show never commits and rejects [name]
   assert.match(registry.runCommand("show c0 [x]").message, /show takes no \[name\]/);
   assert.equal(registry.runCommand("show zzz").status, "nomatch");
@@ -231,12 +245,12 @@ test("show: never commits — clears whole/member/covering state, honest no-ops"
 test("show @name clears whole AND member state; subset shows explain a whole-flag hide", () => {
   const { registry } = makeRegistry();
   // member hides no longer hide behind "already visible"
-  registry.runCommand("hide @stored.a");
+  registry.runCommand("hide @stored.c");
   assert.deepEqual(registry.runCommand("show @stored"),
     { status: "ok", message: `showed "stored" — 1 points` });
-  // a subset show against a WHOLE-hidden selection says so, honestly
+  // a MEMBER show against a WHOLE-hidden selection says so, honestly
   registry.runCommand("hide @stored");
-  assert.match(registry.runCommand("show @stored.a").message,
+  assert.match(registry.runCommand("show @stored.c").message,
     /hidden whole — show @stored to reveal it/);
   assert.deepEqual(registry.runCommand("show @stored"),
     { status: "ok", message: `showed "stored" — 4 points` });

@@ -789,23 +789,23 @@ async function main(): Promise<void> {
     return { affected: affected.length };
   };
 
-  /** Member-subset hide/show for @name.<pred> — delegates to the model's
-   * setPointsHidden (one stroke; hide consolidates, show SPLITS partially-
-   * named coarse entries so exactly the named points reveal). `affected` is
-   * the honest delta: named points whose part-hidden state actually changed;
+  /** WHOLE-MEMBER hide/show for @name.<pred> — the filter resolves stored
+   * members, and this hides/shows exactly those member entries through the
+   * same setEntriesHidden the member-row drag uses (one stroke = one undo).
+   * No sub-member state can exist (consistency principle 2), so every
+   * command hide is displayable and reversible by the panel's own gestures.
+   * `affected` = points whose part-hidden state changed (0 = idempotent);
    * `wholeHidden` lets the handler explain a whole-flag hide honestly. */
-  const setPointsHiddenIn = (
+  const setMembersHiddenIn = (
     name: string,
-    points: readonly number[],
+    entries: Entry[],
     hidden: boolean,
   ): { affected: number; wholeHidden: boolean } | null => {
     const sel = selByName(name);
     if (!sel) return null;
-    const delta = hidden
-      ? points.filter((p) => !sel.hiddenPart.contains(p)).length
-      : points.filter((p) => sel.hiddenPart.contains(p)).length;
-    refreshPoints(model.setPointsHidden(sel.id, points, hidden));
-    return { affected: delta, wholeHidden: sel.hidden };
+    const affected = model.setEntriesHidden(sel.id, entries, hidden);
+    refreshPoints(affected);
+    return { affected: affected.length, wholeHidden: sel.hidden };
   };
 
   /** show @name: clear ALL hidden state on the selection (whole flag AND
@@ -873,7 +873,7 @@ async function main(): Promise<void> {
     flashPointRows,
     commitEntries: commitTargetEntries,
     setSelectionHidden,
-    setPointsHiddenIn,
+    setMembersHiddenIn,
     clearSelectionHidden,
     showPointsCovering,
     showAll: showAllHidden,

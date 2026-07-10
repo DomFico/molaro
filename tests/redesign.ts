@@ -1451,40 +1451,38 @@ async function S9(): Promise<void> {
         rSelMiss.status === "nomatch",
       JSON.stringify([rSelLit.message, rSelList.message, rSelMiss.status]));
 
-    // match-anywhere: an ANCESTOR label now filters too (this exact form was
-    // a nomatch before) — pose parity vs a manual pick of those member rows
-    await reset();
+    // REVERSED (membership-only): descendant/ancestor tokens no longer reach
+    // past the stored members — selection_1 stores POINT members, so a
+    // subgroup/group label matches nothing; the seed's descendant subgroup
+    // labels match nothing either
     const rSelSub = await cmd(`view @selection_1."subgroup-0"`);
-    check("S9: @sel.\"<subgroup label>\" resolves the selection's points under it",
-      rSelSub.status === "ok" && rSelSub.message === "focused 3 points",
-      JSON.stringify(rSelSub));
-    await sleep(650);
-    const camSelSub = await camState();
-    await reset();
-    const rows03 = await d.evaluate<{ x: number; y: number }[]>(`(()=>{
-      const ids=[${firstPointRows.map((r) => r.id).join(",")}];
-      return ids.map(id=>{
-        const el=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
-          .find(r=>r.dataset.level==='point' && Number(r.dataset.id)===id
-            && r.getBoundingClientRect().height>0);
-        const b=el.getBoundingClientRect();
-        return {x:b.left+b.width/2, y:b.top+b.height/2};});
-    })()`);
-    await d.drag(rows03[0].x, rows03[0].y, rows03[2].x, rows03[2].y, 4, { button: "right" });
-    await sleep(150);
-    check("S9: the manual pick pulses the same 3 points", (await flashCount(d)) === 3,
-      `flash=${await flashCount(d)}`);
-    await sleep(500);
-    check("S9: @sel.\"<subgroup label>\" ≡ manually picking those member rows",
-      closeCam(camSelSub, await camState()),
-      `cmd=${camSelSub.map((v) => v.toFixed(3))}`);
     const rSelGrp = await cmd("view @selection_1.group-0");
     const rSelWrongCat = await cmd("view @selection_1.beta");
-    const rSeedSub = await cmd("view @solvent.solvent-0"); // one bulk subgroup by label
-    check("S9: ancestor filters — group hit, wrong-category nomatch, seed subgroup subset",
-      rSelGrp.message === "focused 3 points" && rSelWrongCat.status === "nomatch" &&
-        rSeedSub.message === "focused 3 points",
-      JSON.stringify([rSelGrp.message, rSelWrongCat.status, rSeedSub.message]));
+    const rSeedSub = await cmd("view @solvent.solvent-0");
+    check("S9: ancestry tokens nomatch — the filter sees stored members only",
+      rSelSub.status === "nomatch" && rSelGrp.status === "nomatch" &&
+        rSelWrongCat.status === "nomatch" && rSeedSub.status === "nomatch",
+      JSON.stringify([rSelSub.status, rSelGrp.status, rSelWrongCat.status, rSeedSub.status]));
+    // the route to that granularity: a selection whose MEMBER is the subgroup
+    // — then the member's own label matches, and framing it ≡ a real click on
+    // the subgroup row (the same 100 points)
+    await cmd("create_sele alpha.group-0.subgroup-0 [cover]");
+    await reset();
+    const rCover = await cmd("view @cover.subgroup-0");
+    check("S9: the member's OWN label matches — whole-member result",
+      rCover.status === "ok" && rCover.message === "focused 100 points",
+      JSON.stringify(rCover));
+    await sleep(650);
+    const camCover = await camState();
+    await reset();
+    const subRowAgain = (await bottomRow(d, "/subgroup-0\\b/"))!;
+    await d.rightClick(subRowAgain.x, subRowAgain.y);
+    await sleep(650);
+    check("S9: @cover.<member-label> ≡ clicking that subgroup row",
+      closeCam(camCover, await camState()),
+      `cmd=${camCover.map((v) => v.toFixed(3))}`);
+    await d.ctrlZ(); // undo the [cover] commit
+    await sleep(120);
 
     // unwind the detour (3 build clicks + 1 commit) so the state-purity
     // checks below still see the untouched startup state
@@ -1725,10 +1723,10 @@ async function S10(): Promise<void> {
       ["#index range", "#5-25"],
       // @name whole + filtered at every identity level
       ["@name whole", "@selection_1"],
-      ["@name.type", "@selection_1.t1"],
-      ["@name.subgroup-label", `@selection_1."subgroup-0"`],
-      ["@name.group-label", "@selection_1.group-0"],
-      ["@name.category-label", "@selection_1.alpha"],
+      ["@name.point-member-type", "@selection_1.t1"],
+      ["@name.member-label", `@selection_1."subgroup-0"`],
+      ["@name.member-glob", "@selection_1.subgroup-*"],
+      ["@name.member-#range", "@selection_1.#301-302"],
       // cross-level unions — the two REPORTED regressions first
       ["REPORTED @label + @type", `@selection_1."subgroup-0" + @selection_1.t1`],
       ["REPORTED path + path.type", "alpha.group-0.subgroup-0 + alpha.group-0.subgroup-0.t1"],
@@ -1894,7 +1892,8 @@ async function S11(): Promise<void> {
     }
 
     // -- @name filter target: point-level entries, exactly the filter's set --
-    await cmd("create_sele alpha.group-0.subgroup-0 [base]");
+    // membership-only: @base.t1 needs base's MEMBERS to be points — commit fine
+    await cmd("create_sele alpha.group-0.subgroup-0.* [base]");
     const rFine = await cmd("create_sele @base.t1 [fine]");
     check("S11: @name-filter target commits point entries",
       rFine.status === "ok" && /^created "fine" — \d+ points$/.test(rFine.message),
@@ -2089,33 +2088,33 @@ async function S12(): Promise<void> {
     await sleep(150);
     check("S12: the member-row gesture inverts the command's member hide",
       (await visibleCount(d)) === 6000);
-    // a point INSIDE the coarse subgroup-0 member: the widened per-member path
+    // REVERSED: a point INSIDE the coarse member is NOT a member — nomatch,
+    // no state; the route to that granularity is committing it fine
+    const preC = await visibleCount(d);
     const rC = await cmd("hide @mix.#5");
-    check("S12: a coarse-entry point-subset hides exactly the named point",
-      rC.message === `hid 1 points in "mix"` && (await visibleCount(d)) === 5999,
-      JSON.stringify(rC));
-    check("S12: ...reported in the member count, not as a row-purple",
-      await d.evaluate<boolean>(`(()=>{
-        const b=[...document.querySelectorAll('#selections .sel-block')]
-          .find(x=>x.querySelector('.sel-name')?.textContent==='mix');
-        const subRow=[...b.querySelectorAll('.tree-row.selectable')]
-          .find(r=>r.dataset.level==='subgroup');
-        return /1 hidden/.test(b.querySelector('.sel-count').textContent) &&
-          !subRow.classList.contains('hidden-entry-row');
-      })()`));
-    const rShowC = await cmd("show @mix.#5");
-    check("S12: show @name.#N inverts the coarse-subset hide",
-      rShowC.message === `showed 1 points in "mix"` && (await visibleCount(d)) === 6000,
-      JSON.stringify(rShowC));
-    // a type filter names a member subset too
-    const rT = await cmd("hide @mix.t1");
-    check("S12: hide @name.<type> hides the matched subset",
-      rT.message === `hid 25 points in "mix"` && (await visibleCount(d)) === 5975,
+    check("S12: an index inside a coarse member is a nomatch — no reach inside",
+      rC.status === "nomatch" && (await visibleCount(d)) === preC, JSON.stringify(rC));
+    const rFineRoute = await cmd("hide alpha.group-0.subgroup-0.#5 [p5]");
+    check("S12: the sanctioned route — commit the fine target, then it hides",
+      rFineRoute.message === `created and hid "p5" — 1 points` &&
+        (await d.evaluate<boolean>(
+          `${V}.model.committed().find(c=>c.name==='p5')?.hidden === true`)) &&
+        (await visibleCount(d)) === 6000, // masked by the visible "mix" (show-wins)
+      JSON.stringify(rFineRoute));
+    await d.ctrlZ(); // one undo removes the fine selection + its hide
+    await sleep(120);
+    // a member LABEL names the whole member — the exact member-row analog
+    const rT = await cmd("hide @mix.subgroup-0");
+    check("S12: hide @name.<member-label> hides that whole member",
+      rT.message === `hid 100 points in "mix"` && (await visibleCount(d)) === 5900,
       JSON.stringify(rT));
-    const rAll = await cmd("show @mix.#*");
-    check("S12: show @name.#* clears every member hide",
-      rAll.message === `showed 25 points in "mix"` && (await visibleCount(d)) === 6000,
+    const rAll = await cmd("show @mix.subgroup-0");
+    check("S12: show @name.<member-label> is its exact inverse",
+      rAll.message === `showed 100 points in "mix"` && (await visibleCount(d)) === 6000,
       JSON.stringify(rAll));
+    // descendant types nomatch on both verbs (t1 lives under the member)
+    const rDesc = await cmd("hide @mix.t1");
+    check("S12: descendant types nomatch for hide too", rDesc.status === "nomatch");
 
     // -- the show-wins masked hide: state changes, pixels don't ---------------
     await cmd("create_sele alpha.group-0.subgroup-0 [inner]"); // covered by mix (visible)
@@ -2153,31 +2152,65 @@ async function S12(): Promise<void> {
       if (inner) v.refreshPoints(v.model.deleteSelection(inner.id));
     })()`);
     await sleep(120);
-    await cmd("hide @mix.#*");
-    check("S12: (repro setup) hide @name.#* hides all members",
+    // hide every member (@mix.* = both stored members: subgroup-0 + point 200)
+    await cmd("hide @mix.*");
+    check("S12: (repro setup) hide @name.* hides all members",
       (await visibleCount(d)) === 5899, `visible=${await visibleCount(d)}`);
     const rShowWhole = await cmd("show @mix");
-    check("S12: show @name now clears member hides too (the reported trap)",
+    check("S12: show @name clears member hides too (the reported trap)",
       rShowWhole.message === `showed "mix" — 101 points` && (await visibleCount(d)) === 6000,
       JSON.stringify(rShowWhole));
-    await cmd("hide @mix.#*");
-    // t* names the 99 t-typed points of sub-0; p0 and p200 are anchors
-    const rNarrow = await cmd("show @mix.t*");
-    check("S12: a narrower show clears EXACTLY its subset — the coarse entry splits",
-      rNarrow.message === `showed 99 points in "mix"` && (await visibleCount(d)) === 5998,
+    // a NARROWER member predicate clears exactly the matched MEMBERS
+    await cmd("hide @mix.*");
+    const rNarrow = await cmd("show @mix.subgroup-0");
+    check("S12: a narrower show clears exactly the matched members",
+      rNarrow.message === `showed 100 points in "mix"` && (await visibleCount(d)) === 5999,
       JSON.stringify(rNarrow) + ` visible=${await visibleCount(d)}`);
-    check("S12: ...the unnamed anchors stay hidden",
-      await d.evaluate<boolean>(
-        `${V}.model.isPointHidden(0) && ${V}.model.isPointHidden(200)`));
+    check("S12: ...the unmatched point member stays hidden",
+      await d.evaluate<boolean>(`${V}.model.isPointHidden(200)`));
     await cmd("show @mix");
+    // ROUND-TRIP REGRESSION (the motivating bug): every command hide is
+    // member state the UI displays and reverses — no stranded hidden points
+    await cmd("hide @mix.*");
+    await d.evaluate(`(()=>{
+      const b=[...document.querySelectorAll('#selections .sel-block')]
+        .find(x=>x.querySelector('.sel-name')?.textContent==='mix');
+      const body=b.querySelector('.sel-body');
+      if (body.style.display==='none' || !body.hasChildNodes()) b.querySelector('.caret').click();
+    })()`);
+    await sleep(200);
+    check("S12: command hides render as purple MEMBER rows (UI-representable)",
+      await d.evaluate<boolean>(`(()=>{
+        const b=[...document.querySelectorAll('#selections .sel-block')]
+          .find(x=>x.querySelector('.sel-name')?.textContent==='mix');
+        const rows=[...b.querySelectorAll('.tree-row.selectable')];
+        return rows.length === 2 && rows.every(r=>r.classList.contains('hidden-entry-row'));
+      })()`));
+    // clear BOTH via real member right-clicks — the UI reverses everything
+    for (const level of ["subgroup", "point"]) {
+      const rRow = (await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+        const b=[...document.querySelectorAll('#selections .sel-block')]
+          .find(x=>x.querySelector('.sel-name')?.textContent==='mix');
+        const el=[...b.querySelectorAll('.tree-row.selectable')]
+          .find(r=>r.dataset.level===${JSON.stringify(level)});
+        if(!el) return null; const r=el.getBoundingClientRect();
+        return {x:r.left+r.width/2, y:r.top+r.height/2};
+      })()`))!;
+      await d.rightClick(rRow.x, rRow.y);
+      await sleep(150);
+    }
+    check("S12: UI gestures fully reverse the command's hides — nothing stranded",
+      (await visibleCount(d)) === 6000 &&
+        (await d.evaluate<number>(
+          `${V}.model.committed().find(c=>c.name==='mix').hiddenPart.entryCount`)) === 0);
     // narrower round-trip returns to baseline with clean undo depth
     const depthRT = await undoDepth();
-    await cmd("hide @mix.t1");
-    await cmd("show @mix.t1");
-    check("S12: a narrow hide/show round-trip → baseline, exactly two undo ops",
+    await cmd("hide @mix.#200");
+    await cmd("show @mix.#200");
+    check("S12: a member hide/show round-trip → baseline, exactly two undo ops",
       (await visibleCount(d)) === 6000 && (await undoDepth()) === depthRT + 2);
     // whole flag + member hide clear together, as ONE op, and undo restores both
-    await cmd("hide @mix.#5");
+    await cmd("hide @mix.#200");
     await cmd("hide @mix");
     const depthBoth = await undoDepth();
     const rBoth = await cmd("show @mix");
@@ -2189,10 +2222,10 @@ async function S12(): Promise<void> {
     check("S12: undoing that show restores both states together",
       (await visibleCount(d)) === 5899);
     await cmd("show @mix");
-    // a subset show against a WHOLE-hidden selection explains itself
+    // a MEMBER show against a WHOLE-hidden selection explains itself
     await cmd("hide @mix");
-    const rHint = await cmd("show @mix.t1");
-    check("S12: subset show on a whole-hidden selection points at show @name",
+    const rHint = await cmd("show @mix.#200");
+    check("S12: member show on a whole-hidden selection points at show @name",
       /hidden whole — show @mix to reveal it/.test(rHint.message), JSON.stringify(rHint));
     await cmd("show @mix");
     // the flat-bag principle is ENFORCED, not just documented

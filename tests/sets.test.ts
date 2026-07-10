@@ -447,50 +447,32 @@ test("point-set row selection: rows chosen to flash = rows intersecting the set"
   );
 });
 
-test("setEntryHidden accepts entries COVERED by a coarse member (command-layer subsets)", () => {
+test("REVERSED: setEntryHidden refuses entries inside a coarse member (members only)", () => {
+  // a briefly-wider rule accepted covered entries; it let commands create
+  // sub-member hidden state the UI could not display or clear — reversed
   const m = model();
   m.addToTarget(cat(0)); // {0,1,2} stored as ONE coarse entry
   const sel = m.commit()!;
-  const pts = m.setEntryHidden(sel.id, pt(1), true); // a point INSIDE the member
-  assert.deepEqual(pts, [1]);
-  assert.ok(m.isPointHidden(1), "the named point hides");
-  assert.ok(!m.isPointHidden(0) && !m.isPointHidden(2), "its siblings do not");
+  assert.deepEqual(m.setEntryHidden(sel.id, pt(1), true), [],
+    "a point INSIDE the member is not a member — refused");
+  assert.ok(!m.isPointHidden(1), "no state was created");
   assert.deepEqual(m.setEntryHidden(sel.id, pt(4), true), [], "outside the selection: refused");
-  m.undo();
-  assert.ok(!m.isPointHidden(1), "undoable like any member hide");
-});
-
-test("setPointsHidden: hide/show round-trips are symmetric — coarse entries SPLIT", () => {
-  const m = model();
-  m.addToTarget(cat(0)); // {0,1,2} stored as ONE coarse entry
-  const sel = m.commit()!;
-  // hide-all consolidates onto the coarse member entry
-  m.setPointsHidden(sel.id, [0, 1, 2], true);
-  assert.ok(sel.hiddenPart.has(cat(0)), "fully-named member hides as the member entry");
-  // a NARROWER show splits it: exactly point 1 reveals; 0 and 2 stay hidden
-  const depth = m.undoDepth;
-  m.setPointsHidden(sel.id, [1], false);
-  assert.ok(!m.isPointHidden(1) && m.isPointHidden(0) && m.isPointHidden(2),
-    "exactly the named point reveals — never a whole-entry superset");
-  assert.equal(m.undoDepth, depth + 1, "the split is ONE undo op");
-  m.undo();
-  assert.ok(m.isPointHidden(1) && sel.hiddenPart.has(cat(0)), "undo restores the coarse hide");
-  // the same predicate round-trips to fully visible, no residue
-  m.setPointsHidden(sel.id, [0, 1, 2], false);
-  assert.ok(!m.isPointHidden(0) && !m.isPointHidden(1) && !m.isPointHidden(2));
-  assert.equal(sel.hiddenPart.entryCount, 0);
+  assert.ok(m.setEntryHidden(sel.id, cat(0), true).length === 3, "the MEMBER itself hides fine");
 });
 
 test("clearAllHidden clears the whole flag AND member hides as one undo op", () => {
+  // fine members (points committed as members) — the ONLY way to hide a
+  // point-subset is to have committed it at that granularity
   const m = model();
-  m.addToTarget(sub(2)); // {3,4,5}
+  m.addToTarget(pt(3));
+  m.addToTarget(pt(4));
   const sel = m.commit()!;
   m.setHidden(sel.id, true);
-  m.setPointsHidden(sel.id, [4], true);
+  m.setEntryHidden(sel.id, pt(4), true); // a stored point MEMBER
   const depth = m.undoDepth;
   m.clearAllHidden(sel.id);
   assert.ok(!sel.hidden && sel.hiddenPart.entryCount === 0);
-  assert.ok(!m.isPointHidden(3) && !m.isPointHidden(4) && !m.isPointHidden(5));
+  assert.ok(!m.isPointHidden(3) && !m.isPointHidden(4));
   assert.equal(m.undoDepth, depth + 1, "one undo op");
   m.undo();
   assert.ok(sel.hidden && m.isPointHidden(4), "undo restores flag + member together");

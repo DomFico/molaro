@@ -11,26 +11,35 @@ Invariants that govern the layer. When a change touches one of these areas,
 this section is the check it must pass; add future invariants here rather
 than scattering them.
 
-1. **A committed selection is a flat set of points.** `@name` resolves to
-   points; `@name.<pred>` filters those points by a single flat predicate
-   (match-anywhere: the point's type or any ancestor label). It is *not* a
-   path segment — there is no descent, no sub-levels, no navigable structure.
-   The nuance that makes this easy to over-read: the selection's MEMBERSHIP
-   is flat (what it stores and the panel shows), but its points RETAIN FULL
-   ANCESTRY — type, subgroup, group, category — and the filter matches over
-   exactly that retained ancestry. "Filter a flat selection by a subgroup
-   label" is therefore not a contradiction: the bag is flat, the points
-   inside it are not. Resolution, error messages, and completion must all
-   tell this same story: `@name.a.b` is an error (no second level, enforced
-   for every verb, with the message pointing at the reserved `&` for future
-   condition-combining); `@name.<token>` matches points whose type or any
-   ancestor label equals the token; and completion after `@name.` offers
-   exactly the tokens that would match as such a flat predicate — rendered
-   under a "filter by (type or label)" header so the list reads as filter
-   VOCABULARY, never a curated "membership" list that implies the selection
-   has structure to enter. (Both hide/show bugs fixed in this layer's
-   history came from a component quietly treating the flat bag as if it had
-   structure.)
+1. **A committed selection is flat to its MEMBERS.** `@name` resolves to the
+   selection's stored entries; `@name.<pred>` filters those stored entries —
+   matching a predicate against a member's own label (for label-level
+   members) or its type/index (for point-level members) — and does **not**
+   descend into the ancestry of points beneath a member. A predicate that
+   names something below a stored member (a descendant label, or a point
+   index inside a coarse member) matches nothing — that granularity isn't in
+   the selection. To address finer entries, commit a finer selection
+   (`create_sele <deep-path>`); its members then ARE the fine entries: depth
+   is a property of how a selection was committed, not a hidden capability
+   of the filter. This guarantees the terminal never produces state finer
+   than the UI can display and reverse — every filter result is a whole
+   member, every operation on it whole-member, exactly as a panel gesture.
+   `@name.a.b` stays an error (one predicate, no path descent; the message
+   points at the reserved `&`), and completion after `@name.` offers exactly
+   the stored member labels/types under the "filter by" header.
+   **Superseding note:** an earlier version of this principle said the
+   filter matches over the points' retained ancestry (match-anywhere) —
+   that is REVERSED here; the filter sees membership only. The old rule let
+   commands create sub-member hidden state the UI could neither display per
+   row nor clear with its gestures.
+
+2. **The terminal must not create state the UI cannot represent and
+   reverse.** When a command capability would produce selection/visibility/
+   representation state that no UI gesture can display or undo, the
+   capability is wrong, not the UI — resolve it by matching the UI's
+   granularity, never by adding hidden depth. New verbs are checked against
+   this. (This is the second reversal driven by that class of problem; the
+   first was the flash/echo presentation implying structure.)
 
 ## Layering and the purity fence
 
@@ -118,14 +127,15 @@ property every earlier suite missed while the bug was live.
   `[min, max]`; normalization before clamping): a range denotes a set, not a
   direction — `..` stays reserved if an ordered range is ever wanted.
   `#*` is the all-indices wildcard ({lo:0, hi:Infinity} in the spec; clamped
-  like any range) — deliberately redundant with `*` / bare `@name`, kept for
-  axis symmetry; it must always resolve the same point set those do.
+  like any range). Standalone it ≡ `*` in point terms; in a `@name` filter it
+  matches only the stored POINT-level members (membership-only, principle 1).
 - `@name` = the committed selection's stored entries; `@name.<pred>` filters
-  its resolved **point set** — match-anywhere: leaf type OR subgroup/group/
-  category label (via `subgroupOfPoint` → `ancestorsOfSubgroup` → `label`,
-  cached per subgroup). Results are **always point-level** (stored entry
-  levels are not preserved). Exactly one trailing predicate (`@n.a.b` errors);
-  it binds tighter than `+`. Multi-level hits union by design.
+  the STORED MEMBERSHIP — each entry matched at its own level (label-level
+  members by label, point members by type/index) — and never reaches the
+  ancestry of points beneath a member (REVERSED from an earlier
+  match-anywhere rule; see principle 1). Results are the whole matched
+  members at their stored levels. Exactly one trailing predicate (`@n.a.b`
+  errors); it binds tighter than `+`.
 - `view` frames the **full resolved union, hidden points included** (the
   row-click analog; only the pulse is visibility-gated by the overlay).
   Bare `view` = `frameVisible`, the empty-space-click analog, parked during
@@ -179,18 +189,17 @@ inherits (`commitTargetEntries` in main.ts):
   as MEMBER entries (row-purple, gesture parity); the remainder hides as
   point entries (count-only feedback — no row exists for sub-member points).
 - `show` NEVER commits (a point in no selection is already visible).
-  MEMBER-STATE SYMMETRY (`SelectionModel.setPointsHidden`, composed purely of
-  existing mutators in one stroke): `show @name.<pred>` clears exactly the
-  state `hide @name.<pred>` wrote — a hiddenPart entry only PARTIALLY named
-  by the predicate SPLITS (cleared, its unnamed remainder re-hidden as point
-  entries), so a narrower show reveals exactly its subset, never a
-  whole-entry superset. Beware: a split against a huge coarse entry re-hides
-  the remainder point-by-point (thousands of mutator calls) — rare, accepted.
-  `show @name` = `clearAllHidden`: the whole flag AND every member hide (the
-  reliable inverse of any hiding on that selection); the path form clears
-  every selection covering the named points; bare `show` clears all hidden
-  state. Each action is one stroke = one undo op; empty strokes push
-  nothing, so idempotent calls leave the undo depth untouched. A subset show
+  MEMBER-STATE SYMMETRY is now structural: `hide/show @name.<pred>` both
+  resolve WHOLE MEMBERS and route through `setEntriesHidden`, so a show
+  clears exactly the member state the matching hide wrote — no sub-member
+  state exists to split (the old setPointsHidden split machinery was REMOVED
+  with the membership-only reversal; the widened setEntryHidden guard was
+  reverted to members-only, so finer-than-member hides cannot be reached at
+  all). `show @name` = `clearAllHidden`: the whole flag AND every member
+  hide (the reliable inverse of any hiding on that selection); the path form
+  clears every selection covering the named points; bare `show` clears all
+  hidden state. Each action is one stroke = one undo op; empty strokes push
+  nothing, so idempotent calls leave the undo depth untouched. A member show
   against a WHOLE-hidden selection reports `hidden whole — show @name to
   reveal it` rather than a misleading "nothing hidden there".
 - `hide` never toggles (idempotent `already hidden`); bare `hide` errors (no
@@ -219,10 +228,10 @@ deliberate decisions:
 - No-op on `*` tokens and on **range-in-progress** tokens (`^\d+-\d*$`) only —
   deliberately narrower than "contains a dash", or `group-0`-style labels
   would be uncompletable. `#`-tokens are inert (indices aren't enumerable).
-- After `@name.` the pool is the selection's own identity tokens — its
-  distinct types AND the subgroup/group/category labels its points sit under —
-  never the global label space. Do NOT curate or "membership-scope" this pool
-  (consistency principle 1): it is the exact flat match-anywhere token set.
+- After `@name.` the pool is the selection's STORED member labels/types —
+  what the panel's member list shows and exactly what a filter can match
+  (consistency principle 1). Never the descendants' types/labels, never the
+  global label space.
 - `@name.` completions return `kind: "filter"` (pure data on `Completion`);
   the terminal renders them under a `filter by (type or label):` header so
   the tokens read as PREDICATES, not membership — path completions are
@@ -250,12 +259,11 @@ deliberate decisions:
 
 ### Open threads (deliberate deferrals)
 
-- **`:` level qualifier** — match-anywhere `@name` filtering cannot pin a
-  token that legitimately collides across fields (a type equal to an ancestor
-  label). Today that resolves to the safe union; `@sel.<level>:<pred>` would
-  let users pin the field. The character is reserved in the filter span so the
-  syntax can land without ambiguity. Deferred: the collision is visible (an
-  over-large framed set) and refinable by typing a narrower predicate.
+- **`:` level qualifier** — reserved in the filter span for a future
+  explicit field pin (`@sel.<level>:<pred>`). Under membership-only filtering
+  the collision it would resolve (a point member's type equal to a label
+  member's label) is rarer but still possible in mixed-level selections; the
+  reservation stands.
 - **`&` intersection operator** — `+` union plus single-predicate filters
   covered every need so far; intersection was never blocking. The
   `@name.a.b` error message now references `&` as the intended path for

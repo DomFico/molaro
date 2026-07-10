@@ -173,69 +173,81 @@ try {
     const all = await logLines();
     return all[all.length - 1];
   };
+  // REVERSED: the filter sees the seed's stored MEMBERSHIP — one category
+  // member labeled "solvent"; descendant tokens beneath it match nothing
   lastLine = await runLine("view @solvent.anchor");
-  check("view @name.<type literal> filters the committed selection via the relay",
-    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "focused 1600 points",
-    JSON.stringify(lastLine));
-  lastLine = await runLine("view @solvent.solvent-bath");
-  check("view @name.<ancestor label> matches anywhere (group label = whole seed)",
+  check("a descendant token nomatches through the relay (membership-only)",
+    /term-nomatch/.test(lastLine?.cls ?? ""), JSON.stringify(lastLine));
+  lastLine = await runLine("view @solvent.solvent");
+  check("the member's OWN label matches — the whole member",
     /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "focused 4800 points",
     JSON.stringify(lastLine));
   lastLine = await runLine("view @solvent.x:y");
   check("':' in a @name filter is the reserved-syntax parse error",
     /term-err/.test(lastLine?.cls ?? "") && /level qualifiers/.test(lastLine?.text ?? ""),
     JSON.stringify(lastLine));
-  // Tab after @name. draws from the MERGED identity pool (types + labels):
-  // a type token completes…
+  // fine-grained addressing = commit a fine selection; its members ARE points
+  lastLine = await runLine("create_sele alpha.group-0.subgroup-0.* [fine]");
+  check("(setup) a fine selection with point members",
+    lastLine?.text === `created "fine" — 100 points`, JSON.stringify(lastLine));
+  lastLine = await runLine("view @fine.anchor");
+  check("point members match on their own type",
+    lastLine?.text === "focused 1 points", JSON.stringify(lastLine));
   await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
   await clickInput();
-  await d.insertText("view @solvent.an");
+  await d.insertText("view @fine.an");
   await d.key("Tab", "Tab", 9);
   await sleep(400);
-  check("Tab after @name. completes a selection type token",
-    (await inputValue()) === "view @solvent.anchor", JSON.stringify(await inputValue()));
-  // …and so does an ancestor label from the same pool
-  await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
-  await clickInput();
-  await d.insertText("view @solvent.solvent-b");
-  await d.key("Tab", "Tab", 9);
-  await sleep(400);
-  check("Tab after @name. completes a selection ancestor label",
-    (await inputValue()) === "view @solvent.solvent-bath", JSON.stringify(await inputValue()));
+  check("Tab after @name. completes a point MEMBER's type",
+    (await inputValue()) === "view @fine.anchor", JSON.stringify(await inputValue()));
 
-  // #* — the all-indices wildcard: @name.#* ≡ @name through the relay
-  lastLine = await runLine("view @solvent.#*");
-  const wholeSel = await runLine("view @solvent");
-  check("view @name.#* returns the same count as view @name",
-    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "focused 4800 points" &&
+  // #* — the stored point-level members ≡ the whole fine selection
+  lastLine = await runLine("view @fine.#*");
+  const wholeSel = await runLine("view @fine");
+  check("view @name.#* = the stored point members (≡ @name for a fine selection)",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "focused 100 points" &&
       wholeSel?.text === lastLine?.text,
     JSON.stringify([lastLine?.text, wholeSel?.text]));
 
   // an exact @name token descends on the second Tab (stateless two-stage)
   await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
   await clickInput();
-  await d.insertText("view @solv");
+  await d.insertText("view @fin");
   await d.key("Tab", "Tab", 9);
   await sleep(400);
   check("a partial @name settles without a dot",
-    (await inputValue()) === "view @solvent", JSON.stringify(await inputValue()));
+    (await inputValue()) === "view @fine", JSON.stringify(await inputValue()));
   await d.key("Tab", "Tab", 9);
   await sleep(600);
   lines2 = await logLines();
   lastLine = lines2[lines2.length - 1];
-  check("Tab on the exact @name descends — dot kept, capped hint under the FILTER header",
-    (await inputValue()) === "view @solvent." &&
+  check("Tab on the exact @name descends — the MEMBER pool under the filter header",
+    (await inputValue()) === "view @fine." &&
       /term-echo/.test(lastLine?.cls ?? "") &&
-      /^filter by \(type or label\):\n\d+ matches\s+— type to narrow$/.test(lastLine?.text ?? ""),
+      lastLine?.text === "filter by (type or label):\nanchor  t0  t1  t2  t3",
     `input=${JSON.stringify(await inputValue())} line=${JSON.stringify(lastLine)}`);
-  // a typed prefix narrows the same pool back to a listable set — same header
-  await d.insertText("t");
+  // the volume cap still applies when the MEMBERSHIP itself is large
+  lastLine = await runLine("create_sele solvent.solvent-bath.0-59 [sixty]");
+  check("(setup) a 60-member selection", /created "sixty"/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
+  await clickInput();
+  await d.insertText("view @sixty.");
   await d.key("Tab", "Tab", 9);
   await sleep(400);
   lines2 = await logLines();
   lastLine = lines2[lines2.length - 1];
-  check("…and a prefix narrows it to the normal list, still headed as filters",
-    lastLine?.text === "filter by (type or label):\nt0  t1  t2  t3", JSON.stringify(lastLine));
+  check("an oversized MEMBER pool caps to the hint under the header",
+    /^filter by \(type or label\):\n\d+ matches\s+— type to narrow$/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  await d.insertText("solvent-1");
+  await d.key("Tab", "Tab", 9);
+  await sleep(400);
+  lines2 = await logLines();
+  lastLine = lines2[lines2.length - 1];
+  check("…and a prefix narrows it to a listable member set",
+    /^filter by \(type or label\):\nsolvent-1  solvent-10/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
   // repeated Tab on the unchanged input must NOT stack duplicate previews
   const logLenAt = (await logLines()).length;
   await d.key("Tab", "Tab", 9);
@@ -314,11 +326,11 @@ try {
   check("…and no block stays purple",
     await d.evaluate<boolean>(`[...document.querySelectorAll('#selections .sel-block')]
       .every(b=>!b.classList.contains('hidden-sel'))`));
-  // member-state symmetry: show @name reveals what hide @name.#* hid
-  await runLine("hide @solvent.#*");
-  lastLine = await runLine("show @solvent");
-  check("hide @name.#* then show @name leaves the selection fully visible",
-    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === `showed "solvent" — 4800 points`,
+  // member-state symmetry: show @name reveals what member hides hid
+  await runLine("hide @fine.t1");
+  lastLine = await runLine("show @fine");
+  check("hide @name.<member-pred> then show @name leaves the selection fully visible",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === `showed "fine" — 25 points`,
     JSON.stringify(lastLine));
 
   await d.screenshot(`${REPORT}/terminal_smoke.png`);

@@ -69,14 +69,14 @@ export interface CommandContext {
   /** Whole-selection hide/show flag (model.setHidden). affected 0 = already
    * in that state (idempotent); null = no such selection. One undo op. */
   setSelectionHidden(name: string, hidden: boolean): { affected: number } | null;
-  /** Member-subset hide/show for @name.<pred> — a resolved point set through
-   * the model's setPointsHidden (hide consolidates; show SPLITS partially-
-   * named coarse entries so exactly the named points reveal). affected =
-   * named points whose state changed (0 = nothing to change); wholeHidden
-   * reports a whole-selection flag the subset op cannot touch. One undo op. */
-  setPointsHiddenIn(
+  /** WHOLE-MEMBER hide/show for @name.<pred>: the filter resolves stored
+   * member entries and this hides/shows exactly those members (the member
+   * right-click's setEntriesHidden — no sub-member state can exist).
+   * affected = points whose state changed (0 = idempotent); wholeHidden
+   * reports a whole-selection flag the member op cannot touch. One undo op. */
+  setMembersHiddenIn(
     name: string,
-    points: readonly number[],
+    entries: Entry[],
     hidden: boolean,
   ): { affected: number; wholeHidden: boolean } | null;
   /** show @name: clear ALL hidden state on the selection — whole flag AND
@@ -238,13 +238,15 @@ export function makeHideHandler(ctx: CommandContext): CommandHandler {
           ? { status: "ok", message: `"${soleRef.name}" is already hidden` }
           : { status: "ok", message: `hid "${soleRef.name}" — ${r.affected} points` };
       }
+      // the filter resolves whole MEMBERS; hiding them is exactly the
+      // member-row right-click, so the UI can always display and reverse it
       const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
       if (entries.length === 0) {
         return { status: "nomatch", message: `nothing matches "${split.expr}"` };
       }
-      const r = ctx.setPointsHiddenIn(soleRef.name, entries.map((e) => e.id), true)!;
+      const r = ctx.setMembersHiddenIn(soleRef.name, entries, true)!;
       return r.affected === 0
-        ? { status: "ok", message: `already hidden — ${entries.length} points in "${soleRef.name}"` }
+        ? { status: "ok", message: `already hidden — ${entries.length} members in "${soleRef.name}"` }
         : { status: "ok", message: `hid ${r.affected} points in "${soleRef.name}"` };
     }
     // an uncommitted target: commit-then-hide (one undo unit), entry-level
@@ -291,7 +293,7 @@ export function makeShowHandler(ctx: CommandContext): CommandHandler {
       if (entries.length === 0) {
         return { status: "nomatch", message: `nothing matches "${split.expr}"` };
       }
-      const r = ctx.setPointsHiddenIn(soleRef.name, entries.map((e) => e.id), false)!;
+      const r = ctx.setMembersHiddenIn(soleRef.name, entries, false)!;
       if (r.affected === 0) {
         return r.wholeHidden
           ? { status: "ok", message: `"${soleRef.name}" is hidden whole — show @${soleRef.name} to reveal it` }
@@ -332,8 +334,9 @@ export const HELP_TEXT = [
   '  "…"          quote labels containing spaces or other delimiter characters',
   "  #N #lo-hi #* point(s) by contract index (#* = all; either bound order) —",
   "               bare lo-hi is a LABEL range; # means index",
-  "  @name        a committed selection; @name.<pred> keeps points whose type OR any",
-  "               ancestor label matches (one trailing predicate only)",
+  "  @name        a committed selection; @name.<pred> filters its STORED MEMBERS",
+  "               (a member's label, or a point member's type/index; one predicate;",
+  "               finer than the membership = no match — commit a finer selection)",
   "  a + b        union of terms",
   "  view <expr>  frame it (hidden points included); bare view frames the visible scene",
   "  create_sele <expr> [name]   commit the target as a new selection",

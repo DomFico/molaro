@@ -649,18 +649,15 @@ export class SelectionModel {
     return sel ? this.setHidden(id, !sel.hidden) : [];
   }
 
-  /** Hide/show ONE member entry of a committed selection (undoable). The
-   * entry may be an exact stored member OR any node COVERED by one (e.g. a
-   * point inside a group-level member) — hiddenPart already resolves
-   * point-wise and isPointHidden gates on set.contains(point) first, so
-   * finer-than-member hides are sound; gestures still pass exact members
-   * only, the command layer uses the covered form for @name.<pred> subsets. */
+  /** Hide/show ONE member entry of a committed selection (undoable). Only
+   * exact stored MEMBERS can be part-hidden — never a node inside a coarse
+   * member (a briefly-wider rule was reversed: sub-member hides created
+   * state the panel could neither display per row nor clear by gesture —
+   * consistency principle 2). */
   setEntryHidden(id: number, e: Entry, hidden: boolean): number[] {
     const sel = this.byId(id);
     if (!sel) return [];
-    if (hidden && !(sel.set.has(e) || this.coversEntry(sel.set, e))) {
-      return []; // only members (or nodes inside them) can be part-hidden
-    }
+    if (hidden && !sel.set.has(e)) return []; // only members can be part-hidden
     if (sel.hiddenPart.has(e) === hidden) return [];
     const pts = (hidden ? sel.hiddenPart.add(e) : sel.hiddenPart.remove(e)) ?? [];
     this.pushUndo({
@@ -681,56 +678,10 @@ export class SelectionModel {
     return affected;
   }
 
-  /**
-   * Hide/show an ARBITRARY POINT-SUBSET of a committed selection — the
-   * command layer's `hide/show @name.<pred>` route. Composed purely of the
-   * existing per-entry mutators inside ONE stroke (one undo op); no new
-   * state semantics.
-   *
-   * Hiding consolidates: stored members whose points all lie in the subset
-   * hide as MEMBER entries (row-purple parity with the member gesture); the
-   * remainder hides as point entries inside coarser members.
-   *
-   * Showing is the exact inverse (SYMMETRY): every hiddenPart entry the
-   * subset touches is cleared, and a PARTIALLY-named entry SPLITS — cleared,
-   * then its unnamed remainder re-hidden as point entries — so exactly the
-   * named points become visible, never a whole-entry superset.
-   */
-  setPointsHidden(id: number, points: readonly number[], hidden: boolean): number[] {
-    const sel = this.byId(id);
-    if (!sel) return [];
-    const named = new Set(points);
-    const affected: number[] = [];
-    this.beginStroke();
-    if (hidden) {
-      const claimed = new Set<number>();
-      const entries: Entry[] = [];
-      for (const e of sel.set.listEntries()) {
-        const pts = this.hierarchy.pointsOf(e);
-        if (pts.length > 0 && pts.every((p) => named.has(p))) {
-          entries.push(e);
-          for (const p of pts) claimed.add(p);
-        }
-      }
-      for (const p of points) {
-        if (!claimed.has(p)) entries.push({ level: "point", id: p });
-      }
-      for (const e of entries) affected.push(...this.setEntryHidden(id, e, true));
-    } else {
-      for (const e of sel.hiddenPart.listEntries()) {
-        const pts = this.hierarchy.pointsOf(e);
-        if (!pts.some((p) => named.has(p))) continue;
-        affected.push(...this.setEntryHidden(id, e, false));
-        for (const p of pts) {
-          if (!named.has(p)) {
-            affected.push(...this.setEntryHidden(id, { level: "point", id: p }, true));
-          }
-        }
-      }
-    }
-    this.endStroke();
-    return affected;
-  }
+  // NOTE (consistency principle 2): a setPointsHidden method that could hide
+  // arbitrary point-subsets INSIDE coarse members existed briefly and was
+  // REMOVED — commands operate at whole-member granularity, exactly like the
+  // panel gestures, so no command can produce state the UI cannot reverse.
 
   /** Clear ALL hidden state on one selection — the whole-selection flag AND
    * every per-member hide — as ONE undo op. "Show the whole selection" means
