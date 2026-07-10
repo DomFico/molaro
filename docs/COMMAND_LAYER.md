@@ -138,8 +138,15 @@ inherits (`commitTargetEntries` in main.ts):
 resolution cannot disagree about what sits under a prefix. Rules that took
 deliberate decisions:
 
-- Unique verb completion appends a space; unique category/group appends `.`;
-  subgroup/leaf/@name append nothing.
+- Path segments follow the STATELESS TWO-STAGE rule (`pathStage`): a partial
+  token settles (unique → full label, several → common prefix + list; never a
+  dot); a token that already EXACTLY equals a node label at a descendable
+  level (category/group/subgroup) appends `.` and offers the next level's
+  candidates — unconditionally, even when longer siblings share the token as
+  a prefix. An exact LEAF token is terminal (no dot, no candidates). The rule
+  is a pure function of (text, cursor) — no last-Tab state anywhere; do not
+  add any. Unique verb completion still appends a space; `@name` and
+  `@name.`-filter tokens never descend.
 - No-op on `*` tokens and on **range-in-progress** tokens (`^\d+-\d*$`) only —
   deliberately narrower than "contains a dash", or `group-0`-style labels
   would be uncompletable. `#`-tokens are inert (indices aren't enumerable).

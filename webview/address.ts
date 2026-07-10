@@ -469,9 +469,18 @@ const TOKEN_DELIMS = new Set([".", ",", "+", "@", '"']);
  * (completing `cat.group.` offers only that branch's subgroups); at the leaf
  * it offers the distinct point-type tokens under the scoped subgroups; after
  * `@` the committed-selection names; after `@name.` the distinct type tokens
- * of THAT selection's point set; after `+` a fresh term. A unique
- * category/group completion appends "." so tabbing flows down levels; leaf,
- * subgroup, and name completions append nothing.
+ * of THAT selection's point set; after `+` a fresh term.
+ *
+ * Path segments follow a STATELESS TWO-STAGE rule — the result is a pure
+ * function of (text, cursor), never of prior Tab presses:
+ *   stage one — a PARTIAL token settles: unique → the full label, several →
+ *   the common prefix + the candidate list; no "." is ever appended;
+ *   stage two — a token that already EXACTLY equals a node label at a
+ *   descendable level (category/group/subgroup) appends "." and offers the
+ *   next level's candidates. Exact-match descent is unconditional, even when
+ *   longer sibling labels share the token as a prefix (keep typing to reach
+ *   those). At the leaf (point-type) an exact token is terminal — no dot,
+ *   nothing further; #/@name/glob/range tokens never descend.
  *
  * No-ops (empty candidates): a token containing `*` (glob in progress), a
  * token that IS a range in progress (`\d+-\d*` — a dash inside an ordinary
@@ -574,7 +583,27 @@ export function completeTarget(
   const k = completed.length;
   if (k > 3) return none; // nothing below the leaf level
 
-  if (k === 0) return finish(ts, token, tree.categories.map((c) => c.label), ".");
+  // STATELESS TWO-STAGE path completion: an exact-complete token at a
+  // descendable level appends "." and offers the NEXT level's candidates
+  // (unconditionally — longer siblings sharing the token as a prefix do not
+  // block descending into the fully-typed node); a partial token settles
+  // with no dot; an exact LEAF token is terminal. Pure in (text, cursor).
+  const pathStage = (pool: string[], descend: (() => string[]) | null): Completion => {
+    if (token !== "" && pool.includes(token)) {
+      if (!descend) return { start: ts, candidates: [], applied: "" }; // exact leaf: terminal
+      const next = [...new Set(descend())].filter((c) => c !== "").sort();
+      return { start: ts, candidates: next, applied: "." };
+    }
+    return finish(ts, token, pool, ""); // settle the token — never a "."
+  };
+
+  if (k === 0) {
+    return pathStage(
+      tree.categories.map((c) => c.label),
+      () => tree.categories.filter((c) => c.label === token)
+        .flatMap((c) => c.groups.map((g) => g.label)),
+    );
+  }
 
   const parsed = parseTarget(completed.join("."));
   if (parsed.kind === "error" || parsed.terms[0].kind !== "path") return none;
@@ -582,11 +611,30 @@ export function completeTarget(
 
   const cats = catsMatching(segs[0], tree);
   if (k === 1) {
-    return finish(ts, token, cats.flatMap((c) => c.groups.map((g) => g.label)), ".");
+    const groupsInScope = cats.flatMap((c) => c.groups);
+    return pathStage(
+      groupsInScope.map((g) => g.label),
+      () => groupsInScope.filter((g) => g.label === token)
+        .flatMap((g) => g.subgroups.map((s) => s.label)),
+    );
   }
   const groups = groupsMatching(segs[1], cats);
   if (k === 2) {
-    return finish(ts, token, groups.flatMap((g) => g.subgroups.map((s) => s.label)), "");
+    const subsInScope = groups.flatMap((g) => g.subgroups);
+    return pathStage(
+      subsInScope.map((s) => s.label),
+      () => {
+        const out: string[] = [];
+        for (const s of subsInScope) {
+          if (s.label !== token) continue;
+          for (const p of hierarchy.subgroupPoints(s.subgroupId)) {
+            const t = types[p];
+            if (t) out.push(t);
+          }
+        }
+        return out;
+      },
+    );
   }
   const subs = subgroupsMatching(segs[2], groups);
   const leafTypes: string[] = [];
@@ -596,7 +644,7 @@ export function completeTarget(
       if (t) leafTypes.push(t);
     }
   }
-  return finish(ts, token, leafTypes, "");
+  return pathStage(leafTypes, null);
 }
 
 function finish(

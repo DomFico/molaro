@@ -177,6 +177,12 @@ function openPanel(
       { viewColumn: vscode.ViewColumn.Beside, preserveFocus: false },
       {
         enableScripts: true,
+        // Keep the terminal's DOM alive while its tab is backgrounded —
+        // otherwise VS Code tears the webview down and recreates it empty,
+        // wiping the output log, the input line, and the command history.
+        // Trade-off: a hidden terminal holds its context in memory; for a
+        // text-only surface that cost is negligible.
+        retainContextWhenHidden: true,
         localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist", "webview")],
       },
     );

@@ -230,6 +230,27 @@ full address grammar above (any term kind, any union); no new syntax.
   target is a *nomatch* and commits nothing; `[]` / an unbalanced `]` are
   parse errors.
 
+## Tab completion — stateless and two-stage
+
+Tab's behavior is a pure function of the current input; it keeps no memory of
+prior presses. The two stages come from the token under the cursor:
+
+- **Partial token** → it settles: the full label if unique, the common prefix
+  plus a printed candidate list if several. No `.` is appended.
+  `view alp` ⇥ → `view alpha`.
+- **Exact-complete token at a descendable level** (category / group /
+  subgroup) → Tab appends `.` and prints the next level's candidates. So
+  pressing Tab again right after a completion naturally walks down a level:
+  `view alpha` ⇥ → `view alpha.` + its groups listed. Exact-match descent is
+  unconditional — even when longer sibling labels share the token as a prefix,
+  the fully-typed node descends; keep typing to reach a longer sibling.
+- **The leaf (point-type), and `#` / `@name` / glob / range tokens** never
+  descend and never gain a dot. An exact leaf token is terminal — Tab does
+  nothing further.
+
+Verb completion appends a space on a unique match; after `@name.` candidates
+are that selection's own identity tokens (types + ancestor labels).
+
 ## Parse error vs. nomatch — how to self-diagnose
 
 This is the key debugging distinction:

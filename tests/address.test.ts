@@ -481,21 +481,30 @@ test("completion: verbs at the start of the line (unique adds a space)", () => {
   assert.deepEqual(comp("zoom").candidates, []);
 });
 
-test("completion: categories (interior level — unique appends the dot)", () => {
-  assert.deepEqual(comp("view a"), { start: 5, candidates: ["alpha"], applied: "lpha." });
+test("completion stage one: a PARTIAL token settles with NO dot, at every level", () => {
+  assert.deepEqual(comp("view a"), { start: 5, candidates: ["alpha"], applied: "lpha" });
   assert.deepEqual(comp("view "), { start: 5, candidates: ["alpha", "beta", "env3"], applied: "" });
-});
-
-test("completion: groups under the scoped category (dot on unique)", () => {
   assert.deepEqual(comp("view alpha."), { start: 11, candidates: ["g-1", "g-2"], applied: "g-" });
-  assert.deepEqual(comp("view alpha.g-1"), { start: 11, candidates: ["g-1"], applied: "." });
-  assert.deepEqual(comp("view beta."), { start: 10, candidates: ["g-7"], applied: "g-7." });
+  assert.deepEqual(comp("view beta."), { start: 10, candidates: ["g-7"], applied: "g-7" });
+  assert.deepEqual(comp("view alpha.g-1."), { start: 15, candidates: ["s1", "s2"], applied: "s" });
+  assert.deepEqual(comp("view alpha.g-2."), { start: 15, candidates: ["s1"], applied: "s1" });
 });
 
-test("completion: subgroups scoped by the branch — NO trailing dot", () => {
-  assert.deepEqual(comp("view alpha.g-1."), { start: 15, candidates: ["s1", "s2"], applied: "s" });
-  assert.deepEqual(comp("view alpha.g-1.s1"), { start: 15, candidates: ["s1"], applied: "" });
-  assert.deepEqual(comp("view alpha.g-2."), { start: 15, candidates: ["s1"], applied: "s1" });
+test("completion stage two: an EXACT-complete descendable token appends '.' and offers the next level", () => {
+  // category → its groups; group → its branch's subgroups; subgroup → its types
+  assert.deepEqual(comp("view alpha"), { start: 5, candidates: ["g-1", "g-2"], applied: "." });
+  assert.deepEqual(comp("view alpha.g-1"), { start: 11, candidates: ["s1", "s2"], applied: "." });
+  assert.deepEqual(comp("view alpha.g-1.s1"), { start: 15, candidates: ["t2", "tH"], applied: "." });
+  assert.deepEqual(comp("view beta.g-7"), { start: 10, candidates: ["s7"], applied: "." });
+});
+
+test("completion is STATELESS: the same input always yields the same result", () => {
+  const a = comp("view alpha");
+  const b = comp("view alpha");
+  assert.deepEqual(a, b);
+  const c = comp("view alpha.g-1.s1.t");
+  const dd = comp("view alpha.g-1.s1.t");
+  assert.deepEqual(c, dd);
 });
 
 test("completion honors the visible tree's category split of a spanning group", () => {
@@ -506,11 +515,43 @@ test("completion honors the visible tree's category split of a spanning group", 
   assert.deepEqual(compSpan("view *.span.").candidates, ["sA", "sB", "sD"]);
 });
 
-test("completion: leaf point types under the scoped subgroup — no dot ever", () => {
+test("completion: the leaf never descends — an exact point-type token is TERMINAL", () => {
   assert.deepEqual(comp("view alpha.g-1.s1."), { start: 18, candidates: ["t2", "tH"], applied: "t" });
   assert.deepEqual(comp("view alpha.g-1.s2."), { start: 18, candidates: ["anchor"], applied: "anchor" });
   assert.deepEqual(comp("view alpha.g-1.s1.t").applied, "");
   assert.deepEqual(comp("view beta.g-7.s7.").candidates, ["anchor", "t9", "tH"]);
+  // exact leaf: no dot, no candidates, nothing further
+  assert.deepEqual(comp("view alpha.g-1.s2.anchor"), { start: 18, candidates: [], applied: "" });
+  assert.deepEqual(comp("view alpha.g-1.s1.t2"), { start: 18, candidates: [], applied: "" });
+});
+
+/** Sibling-edge fixture: "sub" is BOTH an exact subgroup label AND a prefix of
+ * its longer sibling "subX"; the types under "sub" repeat the shape ("tt" vs
+ * "ttX"). Exact-complete descent must win over common-prefix extension. */
+function makeSiblingHeader(): Header {
+  return {
+    version: "0.1.0", name: "sib", n_points: 3, n_frames: 1, units: "m", bbox: null,
+    points: { type: ["tt", "ttX", "q"], group_id: [30, 30, 30], subgroup_id: [300, 300, 301],
+      category: [0, 0, 0] },
+    categories: ["c"], groups: { "30": "g" }, subgroups: { "300": "sub", "301": "subX" },
+    edges: [], polylines: [], channels: [],
+  };
+}
+const sibHeader = makeSiblingHeader();
+const sibHier = new Hierarchy(sibHeader);
+const sibTree = buildTree(sibHeader);
+function compSib(text: string) {
+  return completeTarget(text, text.length, sibTree, sibHier, sibHeader.points.type, none, VERBS);
+}
+
+test("the sibling edge: an exact token descends even with longer siblings present", () => {
+  // "sub" is exact AND a prefix of "subX" — Tab descends into "sub"
+  assert.deepEqual(compSib("view c.g.sub"), { start: 9, candidates: ["tt", "ttX"], applied: "." });
+  assert.deepEqual(compSib("view c.g.subX"), { start: 9, candidates: ["q"], applied: "." });
+  // a PARTIAL token still settles by common prefix (list, no dot)
+  assert.deepEqual(compSib("view c.g.su"), { start: 9, candidates: ["sub", "subX"], applied: "b" });
+  // at the LEAF the same shape is terminal: exact "tt" does nothing, despite "ttX"
+  assert.deepEqual(compSib("view c.g.sub.tt"), { start: 13, candidates: [], applied: "" });
 });
 
 test("completion: @ completes committed-selection names", () => {
@@ -521,7 +562,8 @@ test("completion: @ completes committed-selection names", () => {
 
 test("completion: after + a fresh term begins (path or @)", () => {
   assert.deepEqual(comp("view alpha + ").candidates, ["alpha", "beta", "env3"]);
-  assert.deepEqual(comp("view alpha + e"), { start: 13, candidates: ["env3"], applied: "nv3." });
+  assert.deepEqual(comp("view alpha + e"), { start: 13, candidates: ["env3"], applied: "nv3" });
+  assert.deepEqual(comp("view alpha + env3"), { start: 13, candidates: ["bath"], applied: "." });
   assert.deepEqual(comp("view alpha +@sol").candidates, ["sol2", "solvent"]);
 });
 
@@ -569,7 +611,7 @@ test("completion: total on junk — empty candidates, never a throw", () => {
 test("completion: only text before the cursor counts", () => {
   // cursor after "view a" with trailing text present — completes the category
   const r = comp("view aXXXX", 6);
-  assert.deepEqual(r, { start: 5, candidates: ["alpha"], applied: "lpha." });
+  assert.deepEqual(r, { start: 5, candidates: ["alpha"], applied: "lpha" });
 });
 
 // -- splitTrailingName: the mutating verbs' [name] argument ---------------------------

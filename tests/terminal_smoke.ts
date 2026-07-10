@@ -102,35 +102,47 @@ try {
   await d.key("ArrowDown", "ArrowDown", 40);
   check("ArrowDown walks back forward", (await inputValue()) === "bogus");
 
-  // Tab completion round-trips through the SAME relay: the terminal ships
-  // {complete, text, cursor}, the viewer computes over its tree, the result
-  // extends the input and ambiguous candidates print into the log
+  // Tab completion round-trips through the SAME relay, with the STATELESS
+  // two-stage rule: a partial token settles (no dot); Tab on the now-exact
+  // token descends — appends "." and prints the next level's candidates
   await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
   await clickInput();
   await d.insertText("view alp");
   await d.key("Tab", "Tab", 9);
   await sleep(400);
-  check("Tab completes a unique category and appends the level dot",
-    (await inputValue()) === "view alpha.", JSON.stringify(await inputValue()));
-  await d.insertText("group-");
+  check("stage one: a partial token settles WITHOUT a dot",
+    (await inputValue()) === "view alpha", JSON.stringify(await inputValue()));
   await d.key("Tab", "Tab", 9);
   await sleep(400);
   let lines2 = await logLines();
   let lastLine = lines2[lines2.length - 1];
-  check("ambiguous Tab prints the candidate list through the relay",
-    /term-echo/.test(lastLine?.cls ?? "") && lastLine?.text === "group-0  group-1  group-2",
-    JSON.stringify(lastLine));
-  check("…and the input is unchanged (no shared extension)",
-    (await inputValue()) === "view alpha.group-");
-  await d.insertText("0.sub");
+  check("stage two: Tab on the exact token descends (dot + next level printed)",
+    (await inputValue()) === "view alpha." &&
+      /term-echo/.test(lastLine?.cls ?? "") && lastLine?.text === "group-0  group-1  group-2",
+    `input=${JSON.stringify(await inputValue())} line=${JSON.stringify(lastLine)}`);
+  await d.insertText("group-");
   await d.key("Tab", "Tab", 9);
   await sleep(400);
-  check("Tab extends to the common prefix of the branch's subgroups",
-    (await inputValue()) === "view alpha.group-0.subgroup-", JSON.stringify(await inputValue()));
   lines2 = await logLines();
   lastLine = lines2[lines2.length - 1];
-  check("…printing the scoped candidates (alpha's subgroups only)",
-    lastLine?.text === "subgroup-0  subgroup-3", JSON.stringify(lastLine));
+  check("a partial multi-match still lists candidates, input unchanged",
+    (await inputValue()) === "view alpha.group-" &&
+      lastLine?.text === "group-0  group-1  group-2",
+    JSON.stringify(lastLine));
+  await d.insertText("0");
+  await d.key("Tab", "Tab", 9);
+  await sleep(400);
+  lines2 = await logLines();
+  lastLine = lines2[lines2.length - 1];
+  check("exact group descends into ITS branch (dot + scoped subgroups printed)",
+    (await inputValue()) === "view alpha.group-0." &&
+      lastLine?.text === "subgroup-0  subgroup-3",
+    `input=${JSON.stringify(await inputValue())} line=${JSON.stringify(lastLine)}`);
+  await d.insertText("sub");
+  await d.key("Tab", "Tab", 9);
+  await sleep(400);
+  check("common-prefix extension is unchanged (stage one again)",
+    (await inputValue()) === "view alpha.group-0.subgroup-", JSON.stringify(await inputValue()));
 
   // #index through the real relay: frames one point; Tab on a #-token is inert
   await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
