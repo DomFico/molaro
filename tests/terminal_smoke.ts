@@ -223,19 +223,28 @@ try {
   await sleep(600);
   lines2 = await logLines();
   lastLine = lines2[lines2.length - 1];
-  check("Tab on the exact @name descends — dot kept, oversized pool CAPPED to a hint",
+  check("Tab on the exact @name descends — dot kept, capped hint under the FILTER header",
     (await inputValue()) === "view @solvent." &&
       /term-echo/.test(lastLine?.cls ?? "") &&
-      /^\d+ matches\s+— type to narrow$/.test(lastLine?.text ?? ""),
+      /^filter by \(type or label\):\n\d+ matches\s+— type to narrow$/.test(lastLine?.text ?? ""),
     `input=${JSON.stringify(await inputValue())} line=${JSON.stringify(lastLine)}`);
-  // a typed prefix narrows the same pool back to a listable set
+  // a typed prefix narrows the same pool back to a listable set — same header
   await d.insertText("t");
   await d.key("Tab", "Tab", 9);
   await sleep(400);
   lines2 = await logLines();
   lastLine = lines2[lines2.length - 1];
-  check("…and a prefix narrows it to the normal list",
-    lastLine?.text === "t0  t1  t2  t3", JSON.stringify(lastLine));
+  check("…and a prefix narrows it to the normal list, still headed as filters",
+    lastLine?.text === "filter by (type or label):\nt0  t1  t2  t3", JSON.stringify(lastLine));
+  // repeated Tab on the unchanged input must NOT stack duplicate previews
+  const logLenAt = (await logLines()).length;
+  await d.key("Tab", "Tab", 9);
+  await sleep(300);
+  await d.key("Tab", "Tab", 9);
+  await sleep(300);
+  check("mashing Tab shows the preview once — no stacking",
+    (await logLines()).length === logLenAt,
+    `len ${(await logLines()).length} vs ${logLenAt}`);
 
   // inverted range bounds normalize: #hi-lo ≡ #lo-hi
   lastLine = await runLine("view #10-5");

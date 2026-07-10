@@ -28,6 +28,7 @@ interface CompleteResultMsg {
   start: number;
   candidates: string[];
   applied: string;
+  kind?: "filter";
 }
 
 function main(): void {
@@ -42,6 +43,28 @@ function main(): void {
     el.textContent = text;
     log.appendChild(el);
     log.scrollTop = log.scrollHeight;
+  };
+
+  // Completion previews (candidate lists / cap hints) are INFORMATIONAL: a
+  // repeated Tab on an unchanged input must not stack duplicate copies. We
+  // suppress a re-print when the identical preview is already the last log
+  // line; any command output in between makes the next preview print again.
+  let lastPreview: HTMLElement | null = null;
+  const printCompletionPreview = (text: string): void => {
+    if (
+      lastPreview !== null &&
+      lastPreview.isConnected &&
+      lastPreview === log.lastElementChild &&
+      lastPreview.textContent === text
+    ) {
+      return; // the same preview is already showing — don't stack another
+    }
+    const el = document.createElement("div");
+    el.className = "term-line term-echo";
+    el.textContent = text;
+    log.appendChild(el);
+    log.scrollTop = log.scrollHeight;
+    lastPreview = el;
   };
 
   // Tab completion is computed viewer-side; the terminal only remembers what
@@ -64,7 +87,16 @@ function main(): void {
         const caret = req.cursor + m.applied.length;
         input.setSelectionRange(caret, caret);
       }
-      if (m.candidates.length > 1) print("term-echo", m.candidates.join("  "));
+      if (m.candidates.length > 1) {
+        // "@name." completions are FILTER vocabulary (predicates over the
+        // points' type or ancestor labels), not a membership listing — the
+        // header keeps that unmistakable. Path completions are genuine tree
+        // levels and stay headerless.
+        const body = m.candidates.join("  ");
+        printCompletionPreview(
+          m.kind === "filter" ? `filter by (type or label):\n${body}` : body,
+        );
+      }
     }
   });
 

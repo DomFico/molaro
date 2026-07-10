@@ -15,14 +15,22 @@ than scattering them.
    points; `@name.<pred>` filters those points by a single flat predicate
    (match-anywhere: the point's type or any ancestor label). It is *not* a
    path segment — there is no descent, no sub-levels, no navigable structure.
-   Resolution, error messages, and completion must all tell this same story:
-   `@name.a.b` is an error (no second level, enforced for every verb);
-   `@name.<token>` matches points whose type or any ancestor label equals the
-   token; and completion after `@name.` offers exactly the tokens that would
-   match as such a flat predicate — never a curated "membership" list that
-   implies the selection has structure to enter. (Both hide/show bugs fixed
-   in this layer's history came from a component quietly treating the flat
-   bag as if it had structure.)
+   The nuance that makes this easy to over-read: the selection's MEMBERSHIP
+   is flat (what it stores and the panel shows), but its points RETAIN FULL
+   ANCESTRY — type, subgroup, group, category — and the filter matches over
+   exactly that retained ancestry. "Filter a flat selection by a subgroup
+   label" is therefore not a contradiction: the bag is flat, the points
+   inside it are not. Resolution, error messages, and completion must all
+   tell this same story: `@name.a.b` is an error (no second level, enforced
+   for every verb, with the message pointing at the reserved `&` for future
+   condition-combining); `@name.<token>` matches points whose type or any
+   ancestor label equals the token; and completion after `@name.` offers
+   exactly the tokens that would match as such a flat predicate — rendered
+   under a "filter by (type or label)" header so the list reads as filter
+   VOCABULARY, never a curated "membership" list that implies the selection
+   has structure to enter. (Both hide/show bugs fixed in this layer's
+   history came from a component quietly treating the flat bag as if it had
+   structure.)
 
 ## Layering and the purity fence
 
@@ -215,6 +223,13 @@ deliberate decisions:
   distinct types AND the subgroup/group/category labels its points sit under —
   never the global label space. Do NOT curate or "membership-scope" this pool
   (consistency principle 1): it is the exact flat match-anywhere token set.
+- `@name.` completions return `kind: "filter"` (pure data on `Completion`);
+  the terminal renders them under a `filter by (type or label):` header so
+  the tokens read as PREDICATES, not membership — path completions are
+  genuine tree levels and stay headerless. The terminal also suppresses a
+  repeated identical preview while it is still the last log line (mashing
+  Tab shows the hint/list once — the stateless completion result itself is
+  unchanged; only the redundant echo is dropped).
 - DISPLAY-VOLUME CAP (`COMPLETION_LIST_CAP`, one uniform rule in `capped()`):
   any completion list over ~50 candidates returns a `N matches — type to
   narrow` hint pair instead of the list, withholding the common-prefix
@@ -242,10 +257,13 @@ deliberate decisions:
   syntax can land without ambiguity. Deferred: the collision is visible (an
   over-large framed set) and refinable by typing a narrower predicate.
 - **`&` intersection operator** — `+` union plus single-predicate filters
-  covered every need so far; intersection was never blocking. NOTE: `&` is
-  *not* yet reserved — labels containing `&` parse as literals today, so
-  making it an operator later is a (small) breaking change for such labels.
-  Reserve it first if/when the operator becomes concrete.
+  covered every need so far; intersection was never blocking. The
+  `@name.a.b` error message now references `&` as the intended path for
+  combining conditions (e.g. a label AND a type over one selection) — keep
+  that message in sync if this thread moves. NOTE: `&` is *not* yet
+  reserved — labels containing `&` parse as literals today, so making it an
+  operator later is a (small) breaking change for such labels. Reserve it
+  first if/when the operator becomes concrete.
 
 ## Test topology
 

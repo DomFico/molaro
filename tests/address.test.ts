@@ -309,6 +309,9 @@ test("the trailing predicate binds tighter than + (two independent filters)", ()
 test("@name.a.b is a parse error — a committed selection has no sub-levels", () => {
   assert.match(parseErr("@mix.a.b"), /at most one leaf predicate/);
   assert.match(parseErr("@mix.#1.b"), /at most one leaf predicate/);
+  // the message explains the flat-set model and points at the reserved "&"
+  assert.match(parseErr("@mix.a.b"), /flat set of points/);
+  assert.match(parseErr("@mix.a.b"), /"&" is the intended intersection operator/);
 });
 
 test("malformed @ filters are parse errors; a missing selection is a nomatch", () => {
@@ -632,9 +635,9 @@ test("an exact @name token is descendable: second Tab appends '.' + the filter p
   assert.deepEqual(comp("view @solv"), { start: 6, candidates: ["solvent"], applied: "ent" });
   // stage two: the exact name descends into its filter level
   assert.deepEqual(comp("view @solvent"),
-    { start: 6, candidates: ["bath", "env3", "w", "w1", "w2"], applied: "." });
+    { start: 6, candidates: ["bath", "env3", "w", "w1", "w2"], applied: ".", kind: "filter" });
   assert.deepEqual(comp("view @picks"),
-    { start: 6, candidates: ["alpha", "g-1", "s1", "t2", "tH"], applied: "." });
+    { start: 6, candidates: ["alpha", "g-1", "s1", "t2", "tH"], applied: ".", kind: "filter" });
   // stateless: same input, same result
   assert.deepEqual(comp("view @solvent"), comp("view @solvent"));
   // a partial with several names still settles (no dot)
@@ -647,7 +650,12 @@ test("an exact @name token is descendable: second Tab appends '.' + the filter p
 test("completion after @name. merges the selection's types AND ancestor labels", () => {
   // picks = subgroup 100 (points 0,1): types tH,t2 under s1 / g-1 / alpha
   assert.deepEqual(comp("view @picks."),
-    { start: 12, candidates: ["alpha", "g-1", "s1", "t2", "tH"], applied: "" });
+    { start: 12, candidates: ["alpha", "g-1", "s1", "t2", "tH"], applied: "", kind: "filter" });
+  // the tag marks FILTER vocabulary; genuine tree navigation stays untagged
+  assert.equal(comp("view @picks.t").kind, "filter");
+  assert.equal(comp("view alpha.").kind, undefined);
+  assert.equal(comp("view alpha").kind, undefined);
+  assert.equal(comp("view ").kind, undefined);
   assert.deepEqual(comp("view @picks.t").candidates, ["t2", "tH"]);
   // solvent = category 2 (points 8-11): type w under w1,w2 / bath / env3
   assert.deepEqual(comp("view @solvent.").candidates, ["bath", "env3", "w", "w1", "w2"]);
@@ -724,10 +732,10 @@ function compBig(text: string) {
 test("completion cap: an oversized list prints a count-and-hint, never the pool", () => {
   // @broad. pool = 60 types + 60 subgroup labels + group + category = 122
   assert.deepEqual(compBig("view @broad."),
-    { start: 12, candidates: ["122 matches", "— type to narrow"], applied: "" });
+    { start: 12, candidates: ["122 matches", "— type to narrow"], applied: "", kind: "filter" });
   // the exact-@name descend caps its PREVIEW but keeps the descend dot
   assert.deepEqual(compBig("view @broad"),
-    { start: 6, candidates: ["122 matches", "— type to narrow"], applied: "." });
+    { start: 6, candidates: ["122 matches", "— type to narrow"], applied: ".", kind: "filter" });
   // the same one rule applies to large PATH pools — not an @ special case
   assert.deepEqual(compBig("view big.grp.").candidates, ["60 matches", "— type to narrow"]);
   assert.equal(compBig("view big.grp.").applied, "");

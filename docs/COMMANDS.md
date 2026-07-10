@@ -163,11 +163,19 @@ view @selection_1.#161            its point 161 (containment check)
 view @selection_1.t0,anchor       lists union, as in any segment
 ```
 
+The selection's *membership* is flat — that's what the panel lists — but its
+points retain their full ancestry (type, subgroup, group, category), and the
+filter matches against exactly that. So filtering a flat selection by a
+subgroup, group, or category token is expected, not a contradiction.
+
 If a token matches at more than one level (or different points at different
 levels), the result is the **union of all matching points** — deliberately
 broad, never a "which level did you mean" question. If the framed set is
 larger than intended, type a narrower predicate. A `:` in the filter is
-reserved for a future explicit level qualifier and is currently a parse error.
+reserved for a future explicit level qualifier and is currently a parse
+error, and combining two conditions (a label **and** a type) is not yet
+expressible — the reserved `&` intersection operator is the intended future
+path (the `@name.a.b` error says so).
 
 ## Union: `+`
 
@@ -302,7 +310,12 @@ prior presses. The two stages come from the token under the cursor:
 Verb completion appends a space on a unique match; after `@name.` candidates
 are that selection's own identity tokens (types + ancestor labels) — the
 exact set a `@name.<token>` filter would match, because a selection is a flat
-set of points with no structure to enter.
+set of points with no structure to enter. To keep that unmistakable, the
+terminal prints these under a `filter by (type or label):` header — each
+token is a **predicate you could apply**, not a member of the selection.
+Path-level completion has no header: those candidates genuinely are tree
+levels. Mashing Tab never stacks duplicates — an identical hint/list prints
+once and stays until the input changes.
 
 **Large lists cap for display**: when a completion would print more than ~50
 candidates, Tab prints `N matches — type to narrow` instead of the list (and

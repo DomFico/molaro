@@ -178,7 +178,9 @@ class Parser {
         }
         if (this.s[this.i] === ".") {
           throw new Failure(
-            `@name accepts at most one leaf predicate — a committed selection has no sub-levels`,
+            `@name accepts at most one leaf predicate — a selection is a flat set of points ` +
+              `(one filter, no path descent); combining conditions is not yet expressible ` +
+              `("&" is the intended intersection operator)`,
           );
         }
       }
@@ -469,6 +471,12 @@ export interface Completion {
   /** The string to INSERT at the cursor: the unique completion (plus "." after
    * a category/group, " " after a verb) or the common-prefix extension. */
   applied: string;
+  /** "filter": the candidates are @name.<pred> FILTER vocabulary — predicates
+   * over the points' type or ancestor labels — not tree levels or members.
+   * The terminal renders a header marking them as such; path-level
+   * completions (genuine tree navigation) carry no kind. Returned data only —
+   * no DOM concern lives here. */
+  kind?: "filter";
 }
 
 /** Token characters end at these; the scan-back from the cursor stops here. */
@@ -567,7 +575,7 @@ export function completeTarget(
   if (before.endsWith("@")) {
     if (token !== "" && committedNames.has(token)) {
       const next = [...new Set(selectionPool(token) ?? [])].sort();
-      return capped(ts, next, ".", ".");
+      return { ...capped(ts, next, ".", "."), kind: "filter" };
     }
     return finish(ts, token, committedNames.keys(), "");
   }
@@ -598,7 +606,7 @@ export function completeTarget(
     if (selName === null) return none; // a second level, or junk
     const pool = selectionPool(selName);
     if (pool === null) return none;
-    return finish(ts, token, pool, "");
+    return { ...finish(ts, token, pool, ""), kind: "filter" };
   }
 
   if (/[@"\s]/.test(termBefore)) return none; // refs/quotes/spaces → not a completable path
