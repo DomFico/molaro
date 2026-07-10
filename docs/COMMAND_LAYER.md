@@ -259,6 +259,41 @@ inherits (`commitTargetEntries` in main.ts):
   show-wins masking means a hide may change no pixels; that's the accepted
   trade-off, not a failure.
 
+`color` extends the template into REPRESENTATION state — the shape every
+future appearance verb (size, opacity, …) clones:
+
+- **The first non-selection mutation.** The write lands in the
+  representation layer's per-point color buffer (`rep.state.color`, the
+  `aColor` attribute the renderer already reads — the uniform base look is
+  just that buffer's initial value, so uncolored points keep it with no
+  merge/override machinery). The wiring closure is `colorPoints` in main.ts,
+  which mirrors how `refreshPoints` writes `rep.state.visible` directly.
+- **One undo system, ever** (the corollary of the founding contract): rather
+  than a parallel stack, `SelectionModel.recordOp(undo)` is the one public
+  seam for external undoable state — it routes through the same private
+  `pushUndo` as every model mutator, so it coalesces inside strokes and pops
+  on the same system-wide Ctrl+Z. `colorPoints` captures the previous RGB of
+  exactly the written points and records their restoration (LIFO composes:
+  undoing a re-color restores the *earlier* color, and unwinding every
+  stroke restores the pristine buffer — S15 proves both).
+- **Targets exactly like `view`**: same `resolveTarget`, same point-union
+  dedupe, hidden points included, never commits. One stroke per invocation;
+  last-write-wins per point with no precedence system; nomatch / unknown
+  color / usage errors write nothing and push no stroke. The message reports
+  the ACTION and count (`colored N points green`) — show's
+  report-the-action rule; colored-but-hidden is legitimate state.
+- **Argument shape**: `splitTrailingWord` in address.ts (pure, quote-aware)
+  splits the trailing color token off the target expression, so quoted
+  spaced labels survive (`color gamma.group-2."subgroup 11" red`).
+  `parseColor` in commands.ts validates CSS names (the full named-color
+  table) and `#hex`/`#rgb`, case-insensitively — a color token is CSS, not
+  a grammar label.
+- **Principle-2 check** (how a verb with no panel surface passes it): the
+  state is displayed by the viewport itself (the base-pass pixels) and
+  reversed by the system-wide undo; it adds no hidden depth the UI cannot
+  account for. A gesture analog may come later with the styling layer; the
+  command deliberately created no new UI surface.
+
 ## `ls`, `rename`, `clear`
 
 - `ls` is READ-ONLY — no model mutation, no undo entry, ever. Its three
@@ -393,8 +428,10 @@ deliberate decisions:
 ## Test topology
 
 - **Unit** (`npm test`, Node-native TS): `address.test.ts` (grammar + resolver
-  + completion, incl. spanning fixtures and quoted spaced labels),
-  `commands.test.ts` (registry + help), `sets.test.ts` (state model +
+  + completion, incl. spanning fixtures, quoted spaced labels, and the
+  argument-shape splitters `splitTrailingName`/`splitLeadingRef`/
+  `splitTrailingWord`), `commands.test.ts` (every verb handler against a
+  stateful stub context, `parseColor`, help), `sets.test.ts` (state model +
   `entryIntersects`), plus the substrate suites (contract/geometry/framing/
   playback/producer_protocol/classification/picking).
 - **E2E** (`npm run build && node tests/redesign.ts`, headless Chrome over
@@ -405,12 +442,25 @@ deliberate decisions:
   count/kind/level and both panel surfaces, using the `debug.resolvePoints`
   seam; **S11** is the mutation template — create_sele vs the real
   build+Create-selection gesture must snapshot identically, one undo removes
-  cleanly, edit mode is independent, collisions mutate nothing. The harness
-  runs the synthetic producer at **N=6000** (the extension default is 20000 —
-  counts differ).
+  cleanly, edit mode is independent, collisions mutate nothing; **S12** is
+  hide/show — the commit rule's both arms, gesture interop (a command hide
+  cleared by the panel's right-click and vice versa), member-state symmetry,
+  idempotent no-ops leaving the undo depth untouched; **S13** is `all`/
+  `@all`, hide's all-or-nothing commit rule across mixed targets, `ls`, and
+  `rename` (model-routed collision parity); **S14** is `add`/`remove` —
+  byte-identical membership vs the edit-mode gestures, natural-level adds,
+  the no-carve nomatches, delete-vs-empty, and `remove @all`'s one-undo full
+  restore; **S15** is `color` — resolution parity with `view` (the changed
+  point set == `resolvePoints`, per target kind), hidden-set writes, one
+  stroke per invocation, exact-one-step Ctrl+Z (restoring the *previous*
+  color, then the base look; unwinding to the pristine buffer), last-write-
+  wins, and the no-write guarantees of nomatch/error/usage paths. The
+  harness runs the synthetic producer at **N=6000** (the extension default
+  is 20000 — counts differ).
 - **Terminal smoke** (`node tests/terminal_smoke.ts`): the real terminal
   bundle + real viewer in one page, host relay emulated by the bridge shim's
-  loopback; commands, completion, history, help.
+  loopback; commands (every verb incl. `color`'s buffer write and its
+  unknown-color error), completion, history, help.
 - **Real-relay VSIX smoke** (manual recipe): install the packaged VSIX into an
   isolated VS Code profile, drive the actual workbench over CDP — proves the
   true terminal→host→viewer→host→terminal path and panel lifecycle. Evidence

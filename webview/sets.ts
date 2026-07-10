@@ -572,6 +572,15 @@ export class SelectionModel {
     });
   }
 
+  /** Record an EXTERNAL undoable mutation — state living outside this model
+   * (e.g. a per-point representation write) — on the SAME stack system-wide
+   * Ctrl+Z drives, so no second undo system can ever exist. The closure must
+   * revert that external state itself and return the affected point indices;
+   * between beginStroke/endStroke it coalesces like any other op. */
+  recordOp(undo: () => number[]): void {
+    this.pushUndo({ undo });
+  }
+
   // -- lifecycle ----------------------------------------------------------------
 
   /** Commit the pending selection as a named committed selection (undoable).

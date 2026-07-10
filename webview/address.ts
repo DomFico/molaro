@@ -128,6 +128,26 @@ export function splitTrailingName(
   return { expr: trimmed.slice(0, open).trim(), name };
 }
 
+/** Split the LAST whitespace-delimited word (quotes respected) from a verb's
+ * arguments — the shape of `color <target> <color>`-style verbs whose final
+ * argument is a plain token rather than part of the target expression.
+ * `word: null` when the args hold fewer than two chunks. Pure argument-SHAPE
+ * parsing like splitTrailingName — the verb words its own usage errors. */
+export function splitTrailingWord(args: string): { expr: string; word: string | null } {
+  const s = args.trim();
+  let inQuote = false;
+  let prevWs = true;
+  let cut = -1; // start index of the last top-level chunk
+  for (let i = 0; i < s.length; i++) {
+    const ws = !inQuote && /\s/.test(s[i]);
+    if (!ws && prevWs) cut = i;
+    if (s[i] === '"') inQuote = !inQuote;
+    prevWs = ws;
+  }
+  if (cut <= 0) return { expr: s, word: null }; // zero or one chunk
+  return { expr: s.slice(0, cut).trim(), word: s.slice(cut) };
+}
+
 /** The shape of a member-mutation verb's FIRST argument (add/remove take
  * exactly one lone committed-selection reference before their expression). */
 export type LeadingRef =

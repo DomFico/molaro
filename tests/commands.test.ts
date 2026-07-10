@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import type { Header } from "../contract/contract.ts";
 import { buildTree } from "../webview/classification.ts";
 import { Hierarchy, type Entry } from "../webview/sets.ts";
-import { createCommandRegistry, HELP_TEXT, type CommandContext } from "../webview/commands.ts";
+import { createCommandRegistry, HELP_TEXT, parseColor, type CommandContext } from "../webview/commands.ts";
 
 function makeHeader(): Header {
   const category = [0, 0, 1];
@@ -38,6 +38,7 @@ function makeRegistry() {
   ]);
   const refOps: { names: string[]; hidden: boolean }[] = [];
   const memberOps: { name: string; mode: "add" | "remove"; entries: Entry[] }[] = [];
+  const colorOps: { points: number[]; rgb: [number, number, number] }[] = [];
   const ctx: CommandContext = {
     hierarchy,
     tree: buildTree(header),
@@ -173,8 +174,13 @@ function makeRegistry() {
       }
       return n;
     },
+    colorPoints: (points, rgb) => {
+      // one call = one stroke in the real wiring; the stub records the write
+      colorOps.push({ points: [...points], rgb });
+      return points.length;
+    },
   };
-  return { registry: createCommandRegistry(ctx), calls, commits, hiddenState, refOps, memberOps, sels };
+  return { registry: createCommandRegistry(ctx), calls, commits, hiddenState, refOps, memberOps, colorOps, sels };
 }
 
 test("help and ? return a non-empty ok summary pointing at the full reference", () => {
@@ -590,4 +596,65 @@ test("view still dispatches through the same registry (bare view = frameVisible)
   assert.equal(res2.message, "focused 2 points");
   assert.equal(calls.focus, 1);
   assert.equal(calls.flash, 1);
+});
+
+// -- color: the first representation verb (constant per-point color) -----------------
+
+test("parseColor: CSS names, hex long/short, case-insensitive; junk is null", () => {
+  assert.deepEqual(parseColor("red"), [1, 0, 0]);
+  assert.deepEqual(parseColor("black"), [0, 0, 0]);
+  assert.deepEqual(parseColor("white"), [1, 1, 1]);
+  assert.deepEqual(parseColor("steelblue"), [0x46 / 255, 0x82 / 255, 0xb4 / 255]);
+  assert.deepEqual(parseColor("#ff8800"), [1, 0x88 / 255, 0]);
+  assert.deepEqual(parseColor("#f80"), parseColor("#ff8800"), "#rgb expands to #rrggbb");
+  assert.deepEqual(parseColor("Red"), parseColor("red"), "CSS names are case-insensitive");
+  assert.deepEqual(parseColor("#FF8800"), parseColor("#ff8800"));
+  for (const junk of ["notacolor", "#ggg", "#12345", "#1234567", "#", "", "rgb(1,2,3)"]) {
+    assert.equal(parseColor(junk), null, junk);
+  }
+});
+
+test("color resolves EXACTLY like view (same resolver, hidden included) and writes once", () => {
+  const { registry, colorOps } = makeRegistry();
+  // category path → the same 2 points "view c0" focuses (points 0 and 1)
+  const res = registry.runCommand("color c0 red");
+  assert.equal(res.status, "ok");
+  assert.equal(res.message, "colored 2 points red");
+  assert.equal(colorOps.length, 1, "one invocation = one write (one stroke)");
+  assert.deepEqual(colorOps[0].points, [0, 1]);
+  assert.deepEqual(colorOps[0].rgb, [1, 0, 0]);
+  // full grammar: leaf type, @name (stored members), all, hex color
+  assert.equal(registry.runCommand("color c0.g0.s0.a #ff8800").message, "colored 1 points #ff8800");
+  assert.deepEqual(colorOps[1].points, [0]);
+  assert.equal(registry.runCommand("color @stored steelblue").status, "ok");
+  assert.deepEqual(colorOps[2].points, [0, 1, 2], "@stored = subgroup s0 (0,1) + point 2");
+  assert.equal(registry.runCommand("color all white").message, "colored 3 points white");
+});
+
+test("color: re-coloring an overlap is simply a NEW write (last-write-wins downstream)", () => {
+  const { registry, colorOps } = makeRegistry();
+  registry.runCommand("color c0 red");
+  registry.runCommand("color c0.g0.s0.a blue");
+  assert.equal(colorOps.length, 2, "two invocations, two strokes — no merge, no precedence");
+  assert.deepEqual(colorOps[1].points, [0]);
+  assert.deepEqual(colorOps[1].rgb, [0, 0, 1]);
+});
+
+test("color: nomatch / bad color / usage / parse errors write NOTHING", () => {
+  const { registry, colorOps } = makeRegistry();
+  const nomatch = registry.runCommand("color nothere red");
+  assert.equal(nomatch.status, "nomatch");
+  assert.match(nomatch.message, /nothing matches "nothere"/);
+  const bad = registry.runCommand("color c0 notacolor");
+  assert.equal(bad.status, "error");
+  assert.match(bad.message, /unknown color "notacolor"/);
+  const bare = registry.runCommand("color");
+  assert.equal(bare.status, "error");
+  assert.match(bare.message, /color <target> <color>/);
+  const oneArg = registry.runCommand("color red"); // one chunk = no target
+  assert.equal(oneArg.status, "error");
+  assert.match(oneArg.message, /needs a target and a color/);
+  const parseErr = registry.runCommand("color c0.[x] red"); // [ reserved in expressions
+  assert.equal(parseErr.status, "error");
+  assert.equal(colorOps.length, 0, "no path wrote anything");
 });

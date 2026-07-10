@@ -16,6 +16,7 @@ import {
   resolveTarget,
   splitLeadingRef,
   splitTrailingName,
+  splitTrailingWord,
   type ParseError,
   type TargetAst,
 } from "../webview/address.ts";
@@ -765,6 +766,28 @@ test("splitTrailingName: malformed names are parse errors; expr keeps [ ] reserv
   const s = splitTrailingName("a[b]c") as { expr: string; name: string | null };
   assert.deepEqual(s, { expr: "a[b]c", name: null });
   assert.match(parseErr(s.expr), /reserved character "\["/);
+});
+
+// -- splitTrailingWord: `color <target> <color>`-shaped verb arguments -----------------
+
+test("splitTrailingWord: last top-level chunk splits off; quoted spaces stay in the expr", () => {
+  assert.deepEqual(splitTrailingWord("alpha green"), { expr: "alpha", word: "green" });
+  assert.deepEqual(splitTrailingWord("beta.group-0.subgroup-0.t2 #ff8800"),
+    { expr: "beta.group-0.subgroup-0.t2", word: "#ff8800" });
+  // a quoted spaced label is ONE chunk — the split never cuts inside quotes
+  assert.deepEqual(splitTrailingWord('gamma.group-2."subgroup 11" red'),
+    { expr: 'gamma.group-2."subgroup 11"', word: "red" });
+  assert.deepEqual(splitTrailingWord("a + b   red"), { expr: "a + b", word: "red" });
+  assert.deepEqual(splitTrailingWord("  alpha   green  "), { expr: "alpha", word: "green" });
+});
+
+test("splitTrailingWord: fewer than two chunks → word null (the verb words the usage error)", () => {
+  assert.deepEqual(splitTrailingWord("green"), { expr: "green", word: null });
+  assert.deepEqual(splitTrailingWord(""), { expr: "", word: null });
+  assert.deepEqual(splitTrailingWord("   "), { expr: "", word: null });
+  // an unbalanced quote swallows to the end: one chunk, word null — the
+  // grammar's own unbalanced-quote error surfaces downstream on the expr
+  assert.deepEqual(splitTrailingWord('"abc def'), { expr: '"abc def', word: null });
 });
 
 // -- completion display-volume cap -----------------------------------------------------

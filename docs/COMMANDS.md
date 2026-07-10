@@ -35,6 +35,7 @@ point types `anchor` and `t0`–`t3`).
 | `create_sele <expr> [name]` | Commit the target as a new selection (auto-named without `[name]`) | `create_sele alpha.group-0.* [ring]` |
 | `hide <expr>` / `hide @name[.pred]` | Hide it (an uncommitted target commits first; an all-`@` target hides in place) | `hide @selection_1.t0` |
 | `show [<expr>` / `@name[.pred]]` | Clear hidden state (never commits); bare `show` reveals everything | `show @selection_1` |
+| `color <expr> <color>` | Color those points a constant color (CSS name or `#hex`; hidden points too; last-write-wins; one undo stroke) | `color alpha green` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |
 | `rename @name [new]` | Rename a committed selection | `rename @selection_1 [ring]` |
 | `add @name <tree-target>` | Add tree-addressed entries as **members** at their natural level (no `@` on the right) | `add @ring alpha.group-0` |
@@ -318,6 +319,47 @@ hidden set. That shapes the pair's asymmetry:
   selection whose points are covered by another *visible* selection changes
   nothing on screen until the coverer hides too — the command still reports
   `hid "name" — N points`, because that is what it did.
+
+## Coloring points: `color`
+
+```
+color <target-expr> <color>
+```
+
+The first **representation** verb: it paints the resolved points a constant
+color. `color` targets **exactly like `view`** — the full grammar, the same
+resolver, **hidden points included**, and it never commits a selection —
+so `color <t> <c>` colors precisely the point set `view <t>` frames. Unlike
+`view`, it *mutates*: each invocation is **one undo stroke** (`Ctrl+Z`
+restores the exact previous colors, which may themselves be an earlier
+`color`'s).
+
+```
+color alpha green
+color beta.group-0.subgroup-0.t2 #ff8800
+color gamma.group-2."subgroup 11" red
+color @selection_1 steelblue
+color #156-187 #f80
+```
+
+- **`<color>`** is a CSS color name (`red`, `steelblue`, `rebeccapurple`) or
+  hex (`#ff8800`, or the short form `#f80`). The color token is
+  **case-insensitive** (CSS semantics — it is a color, not a tree label);
+  an unknown or malformed color is an **error** and nothing is written.
+- **Last-write-wins per point**: re-coloring an overlapping target simply
+  overwrites those points — no precedence system, no blending. Points never
+  colored keep the uniform base look, and an undo past your first `color`
+  restores it.
+- **Hidden points color too** — the write lands in the representation buffer
+  regardless of visibility, and the message reports the **action**
+  (`colored N points green`), not pixels, exactly like `hide`/`show` under
+  show-wins. The color shows whenever the points do.
+- A nomatch or any error **writes nothing and pushes no undo stroke**. Bare
+  `color` (or a single argument) is a usage error — it needs both a target
+  and a color.
+- Constant colors only, deliberately: gradients, by-channel mappings, and
+  other appearance verbs (size, opacity) are future work that will clone
+  this verb's shape.
 
 ## Listing: `ls`
 

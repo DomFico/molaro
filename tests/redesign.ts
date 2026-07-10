@@ -2602,9 +2602,153 @@ async function S14(): Promise<void> {
   });
 }
 
+async function S15(): Promise<void> {
+  console.log("S15 — color: the first representation verb (constant per-point color)");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    /** Snapshot the color buffer in-page (comparisons stay in-page too). */
+    const snap = (slot: string) =>
+      d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.color))`);
+    const buffersEqual = (slot: string) =>
+      d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.color, s=window.${slot};
+        if (c.length !== s.length) return false;
+        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) return false;
+        return true;
+      })()`);
+    /** Run `color <expr> <tok>` and audit RESOLUTION PARITY in-page: the set
+     * of points whose buffer values changed must equal debug.resolvePoints
+     * (the exact union view frames). Callers use a fresh color per audit so
+     * "changed" can't undercount on already-that-color points. */
+    const paint = async (expr: string, tok: string) => {
+      await snap("__preColor");
+      const r = await cmd(`color ${expr} ${tok}`);
+      const parity = await d.evaluate<{ changed: number; match: boolean }>(`(()=>{
+        const v=${V}; const c=v.rep.state.color; const s=window.__preColor;
+        const changed=[];
+        for (let p=0;p<c.length/3;p++) {
+          if (c[3*p]!==s[3*p]||c[3*p+1]!==s[3*p+1]||c[3*p+2]!==s[3*p+2]) changed.push(p);
+        }
+        const want=[...new Set(v.debug.resolvePoints(${JSON.stringify(expr)}))].sort((a,b)=>a-b);
+        return { changed: changed.length,
+                 match: changed.length===want.length && changed.every((p,i)=>p===want[i]) };
+      })()`);
+      return { r, parity };
+    };
+    /** Every point of `expr` carries exactly this RGB (0..255 ints). */
+    const allColored = (expr: string, rgb: [number, number, number]) =>
+      d.evaluate<boolean>(`(()=>{
+        const v=${V}; const c=v.rep.state.color;
+        const want=[${rgb.join(",")}].map(x=>Math.fround(x/255));
+        return v.debug.resolvePoints(${JSON.stringify(expr)})
+          .every(p=>c[3*p]===want[0]&&c[3*p+1]===want[1]&&c[3*p+2]===want[2]);
+      })()`);
+
+    await snap("__pristine");
+    const baseDepth = await undoDepth();
+
+    // -- (a) resolution parity: color <t> writes the set view <t> resolves ------
+    // fresh hex per audit; targets cover category, deep glob+leaf, #index
+    // range, quoted spaced label, and a committed @name reference
+    for (const [expr, tok] of [
+      ["alpha", "#123456"],
+      ["beta.group-*.*.t1", "#234567"],
+      ["#100-140", "#345678"],
+      ['gamma.group-2."subgroup 11"', "#456789"],
+      ["@solvent", "#567890"],
+    ] as const) {
+      const { r, parity } = await paint(expr, tok);
+      check(`S15: color ${expr} — writes EXACTLY the set view resolves`,
+        r.status === "ok" && parity.match && parity.changed > 0,
+        `${JSON.stringify(r)} changed=${parity.changed}`);
+      check(`S15: ...message reports the action and count`,
+        r.message === `colored ${parity.changed} points ${tok}`, r.message);
+    }
+
+    // -- (b) a hidden point set colors too, one stroke ---------------------------
+    await cmd("hide alpha [tmphide]");
+    const visAfterHide = await visibleCount(d);
+    const depthHidden = await undoDepth();
+    const hid = await paint("alpha", "#654321");
+    check("S15: coloring a HIDDEN set writes the buffer (report the action, not pixels)",
+      hid.r.status === "ok" && hid.parity.match && hid.parity.changed > 0,
+      JSON.stringify(hid));
+    check("S15: ...as exactly ONE undo stroke",
+      (await undoDepth()) === depthHidden + 1);
+    check("S15: ...and unhides nothing", (await visibleCount(d)) === visAfterHide);
+
+    // -- (c) Ctrl+Z reverts a color in exactly one step --------------------------
+    await d.ctrlZ();
+    await sleep(120);
+    check("S15: one Ctrl+Z restores the exact previous buffer",
+      (await buffersEqual("__preColor")) && (await undoDepth()) === depthHidden);
+    check("S15: ...and pops ONLY the color stroke — the hide beneath it stands",
+      (await visibleCount(d)) === visAfterHide);
+    await d.ctrlZ(); // pop the hide too; back to an all-visible scene
+    await sleep(120);
+
+    // unwind the (a) paints too — and prove color strokes compose LIFO all
+    // the way back to the untouched buffer
+    while ((await undoDepth()) > baseDepth) {
+      await d.ctrlZ();
+      await sleep(60);
+    }
+    check("S15: unwinding every stroke restores the pristine buffer",
+      await buffersEqual("__pristine"));
+
+    // -- (d) last-write-wins on overlapping targets ------------------------------
+    // (subgroup-0 sits fully inside alpha — no spanning-group surprises here)
+    await cmd("color alpha red");
+    await cmd("color alpha.group-0.subgroup-0 blue");
+    check("S15: re-coloring an overlap overwrites those points",
+      await allColored("alpha.group-0.subgroup-0", [0, 0, 255]));
+    check("S15: ...points outside the overlap keep the first color",
+      await d.evaluate<boolean>(`(()=>{
+        const v=${V}; const c=v.rep.state.color;
+        const inner=new Set(v.debug.resolvePoints("alpha.group-0.subgroup-0"));
+        return v.debug.resolvePoints("alpha").filter(p=>!inner.has(p))
+          .every(p=>c[3*p]===1&&c[3*p+1]===0&&c[3*p+2]===0);
+      })()`));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S15: undo restores the PREVIOUS color (red), not the base look",
+      await allColored("alpha.group-0.subgroup-0", [255, 0, 0]));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S15: a second undo restores the uniform base look",
+      await d.evaluate<boolean>(`(()=>{
+        const v=${V}; const c=v.rep.state.color; const base=Math.fround(0.9);
+        return v.debug.resolvePoints("alpha")
+          .every(p=>c[3*p]===base&&c[3*p+1]===base&&c[3*p+2]===base);
+      })()`));
+
+    // -- (e) nomatch / error / bare color write nothing, push no stroke ----------
+    await snap("__noWrite");
+    const depthQuiet = await undoDepth();
+    const quiet: [string, string][] = [
+      ["color nothere red", "nomatch"],
+      ["color alpha notacolor", "error"],
+      ["color", "error"],
+      ["color alpha", "error"], // one chunk: a color but no target
+      ["color alpha.[x] red", "error"], // [ reserved inside expressions
+    ];
+    for (const [text, status] of quiet) {
+      const r = await cmd(text);
+      check(`S15: ${text} → ${status}`, r.status === status, JSON.stringify(r));
+    }
+    check("S15: ...none of them wrote a single component",
+      await buffersEqual("__noWrite"));
+    check("S15: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet);
+
+    await d.screenshot(`${REPORT}/S15_color.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

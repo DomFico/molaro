@@ -416,6 +416,24 @@ try {
         blocksBeforeDel - 1,
     JSON.stringify(lastLine));
 
+  // color through the real relay: the representation write and its errors
+  lastLine = await runLine("color alpha.group-0.subgroup-0 green");
+  check("color <target> <color> lands through the relay",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "colored 100 points green",
+    JSON.stringify(lastLine));
+  check("…and the buffer actually carries the CSS green (008000)",
+    await d.evaluate<boolean>(`(()=>{
+      const v=window.__viewer; const c=v.rep.state.color;
+      const want=[0x00,0x80,0x00].map(x=>Math.fround(x/255));
+      return v.debug.resolvePoints("alpha.group-0.subgroup-0")
+        .every(p=>c[3*p]===want[0]&&c[3*p+1]===want[1]&&c[3*p+2]===want[2]);
+    })()`));
+  lastLine = await runLine("color alpha nope");
+  check("an unknown color is the specific error line",
+    /term-err/.test(lastLine?.cls ?? "") &&
+      lastLine?.text === `unknown color "nope" — use a CSS color name (red, steelblue) or hex (#ff8800)`,
+    JSON.stringify(lastLine));
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();

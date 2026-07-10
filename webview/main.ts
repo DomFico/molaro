@@ -958,6 +958,42 @@ async function main(): Promise<void> {
     refreshPoints(arr);
     return arr.length;
   };
+  /** color <target> <c>: THE FIRST REPRESENTATION MUTATION — a constant
+   * per-point RGB written straight into the representation layer's color
+   * buffer (the renderer already reads it as the aColor attribute; the
+   * uniform base look is just this buffer's initial value, so uncolored
+   * points keep it). Last-write-wins per point — no precedence system.
+   * Recorded via model.recordOp on the SAME undo stack the gestures use:
+   * one stroke per invocation, and its undo restores the exact previous RGB
+   * values, which may themselves be an earlier color's (LIFO composes). */
+  const colorPoints = (points: readonly number[], rgb: [number, number, number]): number => {
+    if (points.length === 0) return 0;
+    const color = rep.state.color;
+    const pts = [...points];
+    const prev = new Float32Array(pts.length * 3);
+    for (let i = 0; i < pts.length; i++) {
+      const p = pts[i] * 3;
+      prev[i * 3] = color[p];
+      prev[i * 3 + 1] = color[p + 1];
+      prev[i * 3 + 2] = color[p + 2];
+      color[p] = rgb[0];
+      color[p + 1] = rgb[1];
+      color[p + 2] = rgb[2];
+    }
+    rep.dirty = true; // the render loop re-uploads every rep attribute
+    model.recordOp(() => {
+      for (let i = 0; i < pts.length; i++) {
+        const p = pts[i] * 3;
+        color[p] = prev[i * 3];
+        color[p + 1] = prev[i * 3 + 1];
+        color[p + 2] = prev[i * 3 + 2];
+      }
+      rep.dirty = true;
+      return pts;
+    });
+    return pts.length;
+  };
+
   const commandContext = {
     hierarchy,
     tree: fullTree, // the SAME model the bottom tree renders — click parity
@@ -982,6 +1018,7 @@ async function main(): Promise<void> {
     renameSelection,
     mutateMembers,
     deleteSelections,
+    colorPoints,
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);
