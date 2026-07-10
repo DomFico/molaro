@@ -272,6 +272,32 @@ try {
       lastLine?.text === `a selection named "picked" already exists`,
     JSON.stringify(lastLine));
 
+  // hide/show through the real relay, with the panel's purple reflecting it
+  lastLine = await runLine("hide alpha.group-0.subgroup-3");
+  check("hide <target> commits-then-hides via the relay",
+    /term-ok/.test(lastLine?.cls ?? "") &&
+      lastLine?.text === `created and hid "selection_1" — 100 points`,
+    JSON.stringify(lastLine));
+  lastLine = await runLine("hide @solvent");
+  check("hide @name hides the whole selection",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === `hid "solvent" — 4800 points`,
+    JSON.stringify(lastLine));
+  check("…and its block goes purple in the panel",
+    await d.evaluate<boolean>(`[...document.querySelectorAll('#selections .sel-block')]
+      .some(b=>b.querySelector('.sel-name')?.textContent==='solvent'
+        && b.classList.contains('hidden-sel'))`));
+  lastLine = await runLine("show @solvent");
+  check("show @name clears the whole-selection flag",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === `showed "solvent" — 4800 points`,
+    JSON.stringify(lastLine));
+  lastLine = await runLine("show");
+  check("bare show reveals everything",
+    /term-ok/.test(lastLine?.cls ?? "") && /^showed everything — \d+ points$/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  check("…and no block stays purple",
+    await d.evaluate<boolean>(`[...document.querySelectorAll('#selections .sel-block')]
+      .every(b=>!b.classList.contains('hidden-sel'))`));
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();

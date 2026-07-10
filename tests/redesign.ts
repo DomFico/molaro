@@ -19,6 +19,9 @@
  *       IDENTICAL to the equivalent build+Create-selection gesture (entries,
  *       levels, members, brackets), one undo removes them cleanly, edit mode
  *       is irrelevant, collisions error without mutating
+ *   S12 hide/show — commit-then-hide as ONE undo unit ≡ the build+commit+
+ *       header-hide gestures; whole/member/coarse-subset hides; show inverts
+ *       each and never commits; the show-wins masked hide reports honestly
  *
  * Screenshots + [PASS]/[FAIL] lines; evidence in reports/redesign/.
  * Run from viewer/ (after npm run build):  node tests/redesign.ts [S0 S1 ...]
@@ -1941,9 +1944,222 @@ async function S11(): Promise<void> {
   });
 }
 
+// ============================ S12: hide / show ================================
+async function S12(): Promise<void> {
+  console.log("S12 — hide/show: the mutating pair over per-selection hidden state");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    // setup: expand alpha → group-0 → drill subgroup-0
+    await expandBottomCategory(d, "/alpha/");
+    await sleep(200);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      rows.find(r=>r.dataset.level==='group')?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(250);
+    await d.evaluate(`(()=>{
+      const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0);
+      rows.find(r=>r.dataset.level==='subgroup')?.querySelector('.caret')?.click();
+    })()`);
+    await sleep(300);
+
+    // -- hide <path> ≡ build + commit + header-right-click-hide, ONE undo -----
+    const baseUndo = await undoDepth();
+    const sub0 = (await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const el=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+        .find(r=>r.dataset.level==='subgroup' && Number(r.dataset.id)===0
+          && r.getBoundingClientRect().height>0);
+      if(!el) return null; const b=el.getBoundingClientRect();
+      return {x:b.left+b.width/2, y:b.top+b.height/2};
+    })()`))!;
+    await d.click(sub0.x, sub0.y);
+    await sleep(100);
+    const btn = await d.evaluate<{ x: number; y: number }>(`(()=>{
+      const r=document.getElementById('commit-btn').getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2};
+    })()`);
+    await d.click(btn.x, btn.y);
+    await sleep(200);
+    const gHead = (await selHead(d, "/selection_1/"))!;
+    await d.rightClick(gHead.x, gHead.y); // gesture hide
+    await sleep(200);
+    const gSnap = {
+      hidden: (await committed(d))[1].hidden,
+      visible: await visibleCount(d),
+      purple: /hidden-sel/.test((await selHead(d, "/selection_1/"))!.cls),
+    };
+    for (let i = 0; i < 3; i++) {
+      await d.ctrlZ();
+      await sleep(80);
+    }
+    check("S12: gesture detour fully undone",
+      (await committed(d)).length === 1 && (await visibleCount(d)) === 6000 &&
+        (await undoDepth()) === baseUndo);
+    const run = await d.evaluate<{ status: string; message: string; pulse: number }>(`(()=>{
+      const res=${V}.command("hide alpha.group-0.subgroup-0");
+      const pulse=document.querySelectorAll('#tree-host .tree-row.sel-covered').length;
+      return { status: res.status, message: res.message, pulse };
+    })()`);
+    check("S12: hide <path> commits-then-hides with the created-and-hid line",
+      run.status === "ok" && run.message === `created and hid "selection_1" — 100 points`,
+      JSON.stringify(run));
+    check("S12: the green commit pulse still plays before the purple settles",
+      run.pulse > 0, `pulse=${run.pulse}`);
+    const cSnap = {
+      hidden: (await committed(d))[1].hidden,
+      visible: await visibleCount(d),
+      purple: /hidden-sel/.test((await selHead(d, "/selection_1/"))!.cls),
+    };
+    check("S12: hide <path> state ≡ the gesture sequence (hidden, visible count, purple)",
+      JSON.stringify(cSnap) === JSON.stringify(gSnap),
+      `cmd=${JSON.stringify(cSnap)} gesture=${JSON.stringify(gSnap)}`);
+    await sleep(300); // the bracket layer re-lays out on a scheduled rAF
+    check("S12: the gutter bracket goes purple too",
+      await d.evaluate<boolean>(`!!document.querySelector('.bracket.hidden')`));
+    await d.ctrlZ(); // ONE undo reverses commit AND hide together
+    await sleep(150);
+    check("S12: one Ctrl+Z fully reverses commit-then-hide",
+      (await committed(d)).length === 1 && (await visibleCount(d)) === 6000 &&
+        (await undoDepth()) === baseUndo && (await selCount(d)) === 0);
+
+    // -- hide @name: whole flag, idempotent, gesture-interoperable ------------
+    const r1 = await cmd("hide @solvent");
+    check("S12: hide @name hides the whole selection",
+      r1.status === "ok" && r1.message === `hid "solvent" — 4800 points` &&
+        (await visibleCount(d)) === 1200,
+      JSON.stringify(r1));
+    const depthAfterHide = await undoDepth();
+    const r2 = await cmd("hide @solvent");
+    check("S12: hide @name is idempotent, never a toggle",
+      r2.status === "ok" && r2.message === `"solvent" is already hidden` &&
+        (await visibleCount(d)) === 1200 && (await undoDepth()) === depthAfterHide,
+      JSON.stringify(r2));
+    // the header right-click gesture (a toggle) un-hides what the command hid
+    const solHead = (await selHead(d, "/solvent/"))!;
+    await d.rightClick(solHead.x, solHead.y);
+    await sleep(150);
+    check("S12: the gesture toggle interoperates with the command's state",
+      (await visibleCount(d)) === 6000);
+    const r3 = await cmd("show @solvent");
+    check("S12: show @name on a visible selection is an honest no-op",
+      r3.message === `"solvent" is already visible` && (await undoDepth()) === depthAfterHide + 1);
+    await d.ctrlZ(); // gesture toggle
+    await sleep(80);
+    await d.ctrlZ(); // command hide
+    await sleep(80);
+    check("S12: hide/show detour undone", (await visibleCount(d)) === 6000 &&
+      (await undoDepth()) === baseUndo);
+
+    // -- member subsets: exact member, coarse-entry subset, type filter --------
+    await cmd("create_sele alpha.group-0.subgroup-0 + #200 [mix]");
+    const rM = await cmd("hide @mix.#200"); // an exact point MEMBER
+    check("S12: hide @name.#member hides that member",
+      rM.message === `hid 1 points in "mix"` && (await visibleCount(d)) === 5999,
+      JSON.stringify(rM));
+    // its member row carries the persistent purple, like the right-click
+    await d.evaluate(`(()=>{
+      const b=[...document.querySelectorAll('#selections .sel-block')]
+        .find(x=>x.querySelector('.sel-name')?.textContent==='mix');
+      const body=b.querySelector('.sel-body');
+      if (body.style.display==='none' || !body.hasChildNodes()) b.querySelector('.caret').click();
+    })()`);
+    await sleep(200);
+    check("S12: the hidden member row is purple (the gesture's feedback)",
+      await d.evaluate<boolean>(`(()=>{
+        const b=[...document.querySelectorAll('#selections .sel-block')]
+          .find(x=>x.querySelector('.sel-name')?.textContent==='mix');
+        const row=[...b.querySelectorAll('.tree-row.selectable')]
+          .find(r=>r.dataset.level==='point' && Number(r.dataset.id)===200);
+        return !!row && row.classList.contains('hidden-entry-row');
+      })()`));
+    // the member right-click gesture (a toggle) un-hides it — interop
+    const row200 = (await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const b=[...document.querySelectorAll('#selections .sel-block')]
+        .find(x=>x.querySelector('.sel-name')?.textContent==='mix');
+      const el=[...b.querySelectorAll('.tree-row.selectable')]
+        .find(r=>r.dataset.level==='point' && Number(r.dataset.id)===200);
+      if(!el) return null; const r=el.getBoundingClientRect();
+      return {x:r.left+r.width/2, y:r.top+r.height/2};
+    })()`))!;
+    await d.rightClick(row200.x, row200.y);
+    await sleep(150);
+    check("S12: the member-row gesture inverts the command's member hide",
+      (await visibleCount(d)) === 6000);
+    // a point INSIDE the coarse subgroup-0 member: the widened per-member path
+    const rC = await cmd("hide @mix.#5");
+    check("S12: a coarse-entry point-subset hides exactly the named point",
+      rC.message === `hid 1 points in "mix"` && (await visibleCount(d)) === 5999,
+      JSON.stringify(rC));
+    check("S12: ...reported in the member count, not as a row-purple",
+      await d.evaluate<boolean>(`(()=>{
+        const b=[...document.querySelectorAll('#selections .sel-block')]
+          .find(x=>x.querySelector('.sel-name')?.textContent==='mix');
+        const subRow=[...b.querySelectorAll('.tree-row.selectable')]
+          .find(r=>r.dataset.level==='subgroup');
+        return /1 hidden/.test(b.querySelector('.sel-count').textContent) &&
+          !subRow.classList.contains('hidden-entry-row');
+      })()`));
+    const rShowC = await cmd("show @mix.#5");
+    check("S12: show @name.#N inverts the coarse-subset hide",
+      rShowC.message === `showed 1 points in "mix"` && (await visibleCount(d)) === 6000,
+      JSON.stringify(rShowC));
+    // a type filter names a member subset too
+    const rT = await cmd("hide @mix.t1");
+    check("S12: hide @name.<type> hides the matched subset",
+      rT.message === `hid 25 points in "mix"` && (await visibleCount(d)) === 5975,
+      JSON.stringify(rT));
+    const rAll = await cmd("show @mix.#*");
+    check("S12: show @name.#* clears every member hide",
+      rAll.message === `showed 25 points in "mix"` && (await visibleCount(d)) === 6000,
+      JSON.stringify(rAll));
+
+    // -- the show-wins masked hide: state changes, pixels don't ---------------
+    await cmd("create_sele alpha.group-0.subgroup-0 [inner]"); // covered by mix (visible)
+    const visBefore = await visibleCount(d);
+    const rMasked = await cmd("hide @inner");
+    check("S12: a masked hide reports the hide it performed (not a failure)",
+      rMasked.status === "ok" && rMasked.message === `hid "inner" — 100 points`,
+      JSON.stringify(rMasked));
+    check("S12: ...the block goes purple while the 3D count is unchanged (show-wins)",
+      (await visibleCount(d)) === visBefore &&
+        /hidden-sel/.test((await selHead(d, "/inner/"))!.cls));
+
+    // -- bare show: reveal everything, one undo op ------------------------------
+    await cmd("hide @solvent");
+    check("S12: (setup) two selections hidden", (await visibleCount(d)) === 1200);
+    const depthBeforeShow = await undoDepth();
+    const rShowAll = await cmd("show");
+    check("S12: bare show clears ALL hidden state",
+      /^showed everything — \d+ points$/.test(rShowAll.message) &&
+        (await visibleCount(d)) === 6000 &&
+        (await d.evaluate<boolean>(`${V}.model.committed().every(c=>!c.hidden)`)),
+      JSON.stringify(rShowAll));
+    check("S12: ...as ONE undo op", (await undoDepth()) === depthBeforeShow + 1);
+    await d.ctrlZ();
+    await sleep(150);
+    check("S12: undoing bare show restores both hides at once",
+      (await visibleCount(d)) === 1200);
+    await cmd("show");
+    // -- errors and empty matches ----------------------------------------------
+    const rNoTarget = await cmd("hide");
+    const rBadName = await cmd("hide @mix [x]");
+    const rMiss = await cmd("hide zzz");
+    check("S12: bare hide errors; @name+[name] errors; empty target nomatches",
+      rNoTarget.status === "error" && /needs a target/.test(rNoTarget.message) &&
+        rBadName.status === "error" && /applies only when hide commits/.test(rBadName.message) &&
+        rMiss.status === "nomatch",
+      JSON.stringify([rNoTarget.message, rBadName.message, rMiss.status]));
+    await d.screenshot(`${REPORT}/S12_hide_show.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

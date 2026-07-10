@@ -649,11 +649,18 @@ export class SelectionModel {
     return sel ? this.setHidden(id, !sel.hidden) : [];
   }
 
-  /** Hide/show ONE member entry of a committed selection (undoable). */
+  /** Hide/show ONE member entry of a committed selection (undoable). The
+   * entry may be an exact stored member OR any node COVERED by one (e.g. a
+   * point inside a group-level member) — hiddenPart already resolves
+   * point-wise and isPointHidden gates on set.contains(point) first, so
+   * finer-than-member hides are sound; gestures still pass exact members
+   * only, the command layer uses the covered form for @name.<pred> subsets. */
   setEntryHidden(id: number, e: Entry, hidden: boolean): number[] {
     const sel = this.byId(id);
     if (!sel) return [];
-    if (hidden && !sel.set.has(e)) return []; // only members can be part-hidden
+    if (hidden && !(sel.set.has(e) || this.coversEntry(sel.set, e))) {
+      return []; // only members (or nodes inside them) can be part-hidden
+    }
     if (sel.hiddenPart.has(e) === hidden) return [];
     const pts = (hidden ? sel.hiddenPart.add(e) : sel.hiddenPart.remove(e)) ?? [];
     this.pushUndo({

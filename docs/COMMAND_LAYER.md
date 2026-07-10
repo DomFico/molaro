@@ -137,6 +137,31 @@ inherits (`commitTargetEntries` in main.ts):
 - S11 is the parity suite: gesture-built and command-built selections must
   snapshot identically (entries, levels, member rows, brackets).
 
+`hide`/`show` extend the same template:
+
+- `hide <target>` = the commit template with `setHidden(true)` folded into
+  the SAME stroke (`commitEntries(entries, name, hide)`) — one undo removes
+  selection + hidden state together. `hide @name` / `show @name` are the
+  whole-flag mutator; `@name.<pred>` subsets go through
+  `setEntriesHidden`. Model widening made for this (reported, deliberate):
+  `setEntryHidden` now accepts entries COVERED by a stored member, not just
+  exact members — `hiddenPart` already resolves point-wise and
+  `isPointHidden` gates on `set.contains(point)` first, so visibility
+  semantics are unchanged and gestures (which only pass exact members) are
+  unaffected. The wiring consolidates: members fully inside the filter hide
+  as MEMBER entries (row-purple, gesture parity); the remainder hides as
+  point entries (count-only feedback — no row exists for sub-member points).
+- `show` NEVER commits (a point in no selection is already visible): whole
+  flags, intersected hiddenPart entries (whole-entry granularity — un-hiding
+  can reveal more than named when state exists only at a coarser grain), or
+  — path form — every selection covering the named points; bare `show`
+  clears all hidden state. Each action is one stroke = one undo op; empty
+  strokes push nothing, so idempotent calls leave the undo depth untouched.
+- `hide` never toggles (idempotent `already hidden`); bare `hide` errors (no
+  gesture analog, destructive-feeling). Messages report the ACTION —
+  show-wins masking means a hide may change no pixels; that's the accepted
+  trade-off, not a failure.
+
 ## Completion
 
 `completeTarget` is resolution's inverse over the SAME descent helpers

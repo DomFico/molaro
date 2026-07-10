@@ -446,3 +446,16 @@ test("point-set row selection: rows chosen to flash = rows intersecting the set"
     "sub(1) {2} and pt(2) don't intersect; everything covering 0,1,5 does",
   );
 });
+
+test("setEntryHidden accepts entries COVERED by a coarse member (command-layer subsets)", () => {
+  const m = model();
+  m.addToTarget(cat(0)); // {0,1,2} stored as ONE coarse entry
+  const sel = m.commit()!;
+  const pts = m.setEntryHidden(sel.id, pt(1), true); // a point INSIDE the member
+  assert.deepEqual(pts, [1]);
+  assert.ok(m.isPointHidden(1), "the named point hides");
+  assert.ok(!m.isPointHidden(0) && !m.isPointHidden(2), "its siblings do not");
+  assert.deepEqual(m.setEntryHidden(sel.id, pt(4), true), [], "outside the selection: refused");
+  m.undo();
+  assert.ok(!m.isPointHidden(1), "undoable like any member hide");
+});

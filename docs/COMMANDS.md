@@ -31,6 +31,8 @@ point types `anchor` and `t0`–`t3`).
 | `a + b` | Union of terms (the only cross-subtree operator) | `view alpha + @selection_1.t0` |
 | `view` | Frame the visible scene (no argument) | `view` |
 | `create_sele <expr> [name]` | Commit the target as a new selection (auto-named without `[name]`) | `create_sele alpha.group-0.* [ring]` |
+| `hide <expr>` / `hide @name[.pred]` | Hide it (an uncommitted target commits first); never toggles | `hide @selection_1.t0` |
+| `show [<expr>` / `@name[.pred]]` | Clear hidden state (never commits); bare `show` reveals everything | `show @selection_1` |
 | `help` / `?` | This summary; `help <verb>` describes one verb | `help view` |
 
 ## The mental model: one segment per level
@@ -237,6 +239,40 @@ full address grammar above (any term kind, any union); no new syntax.
   (`a selection named "<name>" already exists`) and nothing changes; an empty
   target is a *nomatch* and commits nothing; `[]` / an unbalanced `]` are
   parse errors.
+
+## Hiding and showing: `hide` / `show`
+
+Hiding is a property of **committed selections** — there is no free-floating
+hidden set. That shapes the pair's asymmetry:
+
+- **`hide <target>`** (a path/glob/`#`/range/list target) — the target
+  **commits first** (exactly like `create_sele`, including the optional
+  trailing `[name]` and its collision rule), then the new selection hides —
+  one action, **one undo**: a single `Ctrl+Z` removes the selection and its
+  hidden state together. The full cascade plays: green commit pulse → the new
+  block → brackets → purple.
+- **`hide @name`** — sets the whole-selection hidden flag. No commit, no
+  green — purple only, points drop per show-wins.
+- **`hide @name.<pred>`** — hides the matched members of an existing
+  selection (`@sel.#12`, `@sel.#12-40`, `@sel.#*`, or type/label predicates
+  matched against its points). Members fully matched go purple as rows; a
+  subset *inside* a coarse member hides exactly those points, reported in the
+  block's "N hidden" count (there is no row for a sub-member point).
+- `hide` **never toggles** — hiding something already hidden is an idempotent
+  `already hidden` line (the header right-click gesture toggles; the verb
+  chooses directional clarity). Bare `hide` is an **error** — there is no
+  "hide everything".
+- **`show` never commits** — a point in no selection is already visible.
+  `show @name` clears the whole-selection flag only; `show @name.<pred>`
+  clears the member hides the predicate intersects (whole-entry granularity,
+  like every un-hide); `show <target>` clears hidden state *covering* those
+  points wherever it lives — and no-ops honestly (`nothing hidden there`)
+  when nothing is. Bare **`show` reveals everything** (non-destructive, one
+  undo op).
+- **Messages report the action, not pixels**: under show-wins, hiding a
+  selection whose points are covered by another *visible* selection changes
+  nothing on screen until the coverer hides too — the command still reports
+  `hid "name" — N points`, because that is what it did.
 
 ## Tab completion — stateless and two-stage
 

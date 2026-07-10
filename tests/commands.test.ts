@@ -27,9 +27,10 @@ function makeRegistry() {
   const header = makeHeader();
   const hierarchy = new Hierarchy(header);
   const calls = { focus: 0, frame: 0, flash: 0 };
-  // commitEntries stub: records what the handler asked to commit and mimics
-  // the model's surface (collision error for "taken", auto-name, point count)
-  const commits: { entries: Entry[]; name: string | null }[] = [];
+  // stateful stubs: record what the handlers asked for and mimic the model's
+  // surface (collision error for "taken", auto-name, idempotence via state)
+  const commits: { entries: Entry[]; name: string | null; hide: boolean }[] = [];
+  const hiddenState = { whole: new Map<string, boolean>(), pts: new Set<number>() };
   const ctx: CommandContext = {
     hierarchy,
     tree: buildTree(header),
@@ -41,15 +42,45 @@ function makeRegistry() {
     focusPoints: () => { calls.focus++; },
     frameVisible: () => { calls.frame++; },
     flashPointRows: () => { calls.flash++; },
-    commitEntries: (entries, name) => {
+    commitEntries: (entries, name, hide = false) => {
       if (name === "taken") return { error: `a selection named "taken" already exists` };
-      commits.push({ entries, name });
+      commits.push({ entries, name, hide });
       const pts = new Set<number>();
       for (const e of entries) for (const p of hierarchy.pointsOf(e)) pts.add(p);
       return { name: name ?? "selection_1", points: pts.size };
     },
+    setSelectionHidden: (name, hidden) => {
+      const cur = hiddenState.whole.get(name) ?? false;
+      if (cur === hidden) return { affected: 0 };
+      hiddenState.whole.set(name, hidden);
+      return { affected: 4 };
+    },
+    setPointsHiddenIn: (_name, points, hidden) => {
+      const delta = points.filter((p) => hiddenState.pts.has(p) !== hidden);
+      for (const p of delta) {
+        if (hidden) hiddenState.pts.add(p);
+        else hiddenState.pts.delete(p);
+      }
+      return { affected: delta.length };
+    },
+    showPointsCovering: (points) => {
+      const delta = points.filter((p) => hiddenState.pts.has(p));
+      for (const p of delta) hiddenState.pts.delete(p);
+      return delta.length;
+    },
+    showAll: () => {
+      let n = hiddenState.pts.size;
+      hiddenState.pts.clear();
+      for (const [k, v] of hiddenState.whole) {
+        if (v) {
+          n += 4;
+          hiddenState.whole.set(k, false);
+        }
+      }
+      return n;
+    },
   };
-  return { registry: createCommandRegistry(ctx), calls, commits };
+  return { registry: createCommandRegistry(ctx), calls, commits, hiddenState };
 }
 
 test("help and ? return a non-empty ok summary pointing at the full reference", () => {
@@ -91,7 +122,8 @@ test("create_sele commits the resolved entries AT THEIR NATURAL LEVEL", () => {
   let res = registry.runCommand("create_sele c0");
   assert.equal(res.status, "ok");
   assert.equal(res.message, `created "selection_1" — 2 points`);
-  assert.deepEqual(commits.at(-1), { entries: [{ level: "category", id: 0 }], name: null });
+  assert.deepEqual(commits.at(-1),
+    { entries: [{ level: "category", id: 0 }], name: null, hide: false });
   // a leaf path stays point entries (never collapsed to a coarser handle)
   registry.runCommand("create_sele c0.g0.s0.*");
   assert.deepEqual(commits.at(-1)?.entries, [{ level: "point", id: 0 }, { level: "point", id: 1 }]);
@@ -124,6 +156,67 @@ test("create_sele [name] is verbatim; collisions error; empty target commits not
   assert.match((registry.runCommand("create_sele c0 []")).message, /empty selection name/);
   assert.match((registry.runCommand("create_sele c[0]x")).message, /reserved character "\["/);
   assert.ok(registry.verbs().includes("create_sele"), "registered like any verb");
+});
+
+test("hide: commit-then-hide for plain targets, whole/member for @name, errors", () => {
+  const { registry, commits } = makeRegistry();
+  assert.match(registry.runCommand("hide").message, /hide needs a target/);
+  assert.equal(registry.runCommand("hide").status, "error");
+  // plain target → the create_sele template with hide folded in
+  let res = registry.runCommand("hide c0");
+  assert.equal(res.message, `created and hid "selection_1" — 2 points`);
+  assert.deepEqual(commits.at(-1),
+    { entries: [{ level: "category", id: 0 }], name: null, hide: true });
+  res = registry.runCommand("hide c1 [dark]");
+  assert.equal(res.message, `created and hid "dark" — 1 points`);
+  assert.equal(commits.at(-1)?.hide, true);
+  assert.match(registry.runCommand("hide c0 [taken]").message, /already exists/);
+  // @name → whole-selection flag; NEVER toggles (idempotent ok)
+  res = registry.runCommand("hide @stored");
+  assert.deepEqual(res, { status: "ok", message: `hid "stored" — 4 points` });
+  assert.deepEqual(registry.runCommand("hide @stored"),
+    { status: "ok", message: `"stored" is already hidden` });
+  // @name.<pred> → member subset (types: pts 0,1 = "a","b"; pt 2 = "c")
+  res = registry.runCommand("hide @stored.a");
+  assert.deepEqual(res, { status: "ok", message: `hid 1 points in "stored"` });
+  assert.match(registry.runCommand("hide @stored.a").message, /already hidden — 1 points/);
+  // usage errors and empty matches
+  assert.match(registry.runCommand("hide @stored [x]").message,
+    /applies only when hide commits/);
+  assert.equal(registry.runCommand("hide @nope").status, "nomatch");
+  assert.equal(registry.runCommand("hide zzz").status, "nomatch");
+  assert.equal(commits.length, 2, "nomatch/errors committed nothing further");
+});
+
+test("show: never commits — clears whole/member/covering state, honest no-ops", () => {
+  const { registry, commits } = makeRegistry();
+  // nothing hidden yet: bare show and path-show no-op honestly
+  assert.deepEqual(registry.runCommand("show"), { status: "ok", message: "nothing hidden" });
+  assert.match(registry.runCommand("show c0").message, /nothing hidden there — 2 points already visible/);
+  assert.deepEqual(registry.runCommand("show @stored"),
+    { status: "ok", message: `"stored" is already visible` });
+  // hide, then show inverts each granularity
+  registry.runCommand("hide @stored");
+  assert.deepEqual(registry.runCommand("show @stored"),
+    { status: "ok", message: `showed "stored" — 4 points` });
+  registry.runCommand("hide @stored.a"); // hides point 0
+  assert.deepEqual(registry.runCommand("show @stored.a"),
+    { status: "ok", message: `showed 1 points in "stored"` });
+  assert.deepEqual(registry.runCommand("show @stored.a"),
+    { status: "ok", message: `nothing hidden there` });
+  // path-show clears covering hidden state without committing
+  registry.runCommand("hide @stored.a"); // point 0 hidden again
+  assert.deepEqual(registry.runCommand("show c0"), { status: "ok", message: "showed 1 points" });
+  // bare show clears everything, in one call
+  registry.runCommand("hide @stored");
+  registry.runCommand("hide @stored.a");
+  assert.match(registry.runCommand("show").message, /showed everything — 5 points/);
+  // show never commits and rejects [name]
+  assert.match(registry.runCommand("show c0 [x]").message, /show takes no \[name\]/);
+  assert.equal(registry.runCommand("show zzz").status, "nomatch");
+  assert.equal(registry.runCommand("show @nope").status, "nomatch");
+  assert.equal(commits.length, 0, "show committed nothing, ever");
+  assert.ok(registry.verbs().includes("hide") && registry.verbs().includes("show"));
 });
 
 test("view still dispatches through the same registry (bare view = frameVisible)", () => {

@@ -749,6 +749,7 @@ async function main(): Promise<void> {
   const commitTargetEntries = (
     entries: Entry[],
     name: string | null,
+    hide = false, // hide <target>: commit-then-hide, ONE stroke = one undo
   ): { name: string; points: number } | { error: string } => {
     if (name !== null && model.committed().some((c) => c.name === name)) {
       return { error: `a selection named "${name}" already exists` };
@@ -761,6 +762,7 @@ async function main(): Promise<void> {
     for (const e of entries) refreshPoints(model.addToTarget(e));
     const sel = model.commit(); // pushes its usual single undo op INTO the stroke
     if (sel && name !== null) model.rename(sel.id, name);
+    if (sel && hide) refreshPoints(model.setHidden(sel.id, true)); // same stroke
     for (const e of stashed) refreshPoints(model.addToTarget(e));
     model.endStroke();
     if (editId !== null) refreshPoints(model.beginEdit(editId));
@@ -768,9 +770,99 @@ async function main(): Promise<void> {
     refreshPoints(sel.set.resolvedPoints());
     // the build→commit green beat in one shot: the committed rows pulse with
     // the EXISTING pending-green look through the EXISTING flash mechanism,
-    // then settle into the neutral committed block
+    // then settle into the committed block (purple, when committed hidden)
     flashPointRows(sel.set.resolvedPoints(), "sel-covered");
     return { name: sel.name, points: sel.set.pointCount };
+  };
+
+  // hide/show closures — every mutation routes through the EXISTING model
+  // mutators (setHidden / setEntryHidden / setEntriesHidden), each action one
+  // undo op, the panel cascade playing through model.onChange as always.
+  const selByName = (name: string) => model.committed().find((c) => c.name === name);
+
+  /** Whole-selection hide/show. affected 0 = already in that state. */
+  const setSelectionHidden = (name: string, hidden: boolean): { affected: number } | null => {
+    const sel = selByName(name);
+    if (!sel) return null;
+    const affected = model.setHidden(sel.id, hidden);
+    refreshPoints(affected);
+    return { affected: affected.length };
+  };
+
+  /** Member-subset hide/show for @name.<pred> (a resolved point set).
+   * Hiding consolidates: stored members FULLY inside the set hide as member
+   * entries (row-purple, exactly like the member right-click); the remainder
+   * hides as point entries inside coarser members (visible via the hidden
+   * count). Showing clears the hiddenPart entries the set intersects —
+   * whole-entry granularity, like every un-hide. One undo op either way. */
+  const setPointsHiddenIn = (
+    name: string,
+    points: readonly number[],
+    hidden: boolean,
+  ): { affected: number } | null => {
+    const sel = selByName(name);
+    if (!sel) return null;
+    const named = new Set(points);
+    let entries: Entry[];
+    if (hidden) {
+      entries = [];
+      const claimed = new Set<number>();
+      for (const e of sel.set.listEntries()) {
+        const pts = hierarchy.pointsOf(e);
+        if (pts.length > 0 && pts.every((p) => named.has(p))) {
+          entries.push(e);
+          for (const p of pts) claimed.add(p);
+        }
+      }
+      for (const p of points) if (!claimed.has(p)) entries.push({ level: "point", id: p });
+    } else {
+      entries = sel.hiddenPart
+        .listEntries()
+        .filter((e) => hierarchy.pointsOf(e).some((p) => named.has(p)));
+    }
+    const affected = model.setEntriesHidden(sel.id, entries, hidden); // one stroke
+    refreshPoints(affected);
+    return { affected: affected.length };
+  };
+
+  /** show <path>: clear hidden state wherever these points are hidden —
+   * whole-selection flags and hiddenPart entries covering them. Never
+   * commits; one stroke = one undo op. Returns distinct affected points. */
+  const showPointsCovering = (points: readonly number[]): number => {
+    const named = new Set(points);
+    const affected = new Set<number>();
+    model.beginStroke();
+    for (const sel of model.committed()) {
+      if (sel.hidden && sel.set.resolvedPoints().some((p) => named.has(p))) {
+        for (const p of model.setHidden(sel.id, false)) affected.add(p);
+      }
+      const toClear = sel.hiddenPart
+        .listEntries()
+        .filter((e) => hierarchy.pointsOf(e).some((p) => named.has(p)));
+      for (const e of toClear) {
+        for (const p of model.setEntryHidden(sel.id, e, false)) affected.add(p);
+      }
+    }
+    model.endStroke();
+    const arr = [...affected];
+    refreshPoints(arr);
+    return arr.length;
+  };
+
+  /** Bare show: clear ALL hidden state (non-destructive, one undo op). */
+  const showAllHidden = (): number => {
+    const affected = new Set<number>();
+    model.beginStroke();
+    for (const sel of model.committed()) {
+      for (const p of model.setHidden(sel.id, false)) affected.add(p);
+      for (const e of sel.hiddenPart.listEntries()) {
+        for (const p of model.setEntryHidden(sel.id, e, false)) affected.add(p);
+      }
+    }
+    model.endStroke();
+    const arr = [...affected];
+    refreshPoints(arr);
+    return arr.length;
   };
   const commandContext = {
     hierarchy,
@@ -787,6 +879,10 @@ async function main(): Promise<void> {
     },
     flashPointRows,
     commitEntries: commitTargetEntries,
+    setSelectionHidden,
+    setPointsHiddenIn,
+    showPointsCovering,
+    showAll: showAllHidden,
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);
