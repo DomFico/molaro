@@ -149,6 +149,16 @@ export interface CommandContext {
    * discipline and last-write-wins per vertex; vertices never written keep
    * the uniform base look. Returns the count written. */
   colorTrace(vertexIds: readonly number[], rgb: [number, number, number]): number;
+  /** The SIZE axis of the family — the color closures' twins on the size
+   * buffers: same one-stroke recordOp discipline, LWW per element, each
+   * writing ONLY its primitive's size buffer. Size ⊥ hide: 0 is a literal
+   * extent and never touches visibility. Return the count written. */
+  sizePoints(points: readonly number[], size: number): number;
+  /** bondsize/bondsizeof share the ONE edge-size buffer (as the edge verbs
+   * share edgeColor). State-only pending impostor geometry — the commands,
+   * undo, and buffers are complete; visible thickness lags the renderer. */
+  sizeEdges(edgeIds: readonly number[], size: number): number;
+  sizeTrace(vertexIds: readonly number[], size: number): number;
 }
 
 export class CommandRegistry {
@@ -486,31 +496,44 @@ export function parseColor(token: string): [number, number, number] | null {
   ];
 }
 
-/** The color family's shared argument/target front half: split the trailing
- * color token, validate it, parse the expression, and resolve to the deduped
- * point union — hidden points included, never committing: view's EXACT
- * resolution, so every family verb colors off the point set `view <target>`
- * frames. Errors/nomatch come back as the CommandResult; success carries the
- * points, the RGB, and the split for the verb's own wording. */
-function resolveColorArgs(
+/** Parse a size token — a plain non-negative number (1.5, 0, 3). A NEGATIVE
+ * clamps to 0 with the clamp flagged so the verb reports it (a negative
+ * extent is meaningless; clamping beats rejection for obvious intent).
+ * null = not a number. Size and hide are ORTHOGONAL channels: 0 is a
+ * literal zero-extent, never a hide. */
+export function parseSize(token: string): { size: number; clamped: boolean } | null {
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(token)) return null;
+  const n = Number(token);
+  if (!Number.isFinite(n)) return null;
+  return n < 0 ? { size: 0, clamped: true } : { size: n, clamped: false };
+}
+
+/** The representation families' shared argument/target front half — generic
+ * over the trailing VALUE token, so the color and size axes CANNOT diverge
+ * on argument shape or resolution: split the trailing token, validate it,
+ * parse the expression, and resolve to the deduped point union — hidden
+ * points included, never committing: view's EXACT resolution, so every
+ * family verb works off the point set `view <target>` frames. Errors/
+ * nomatch come back as the CommandResult; success carries the points, the
+ * parsed value, and the split for the verb's own wording. */
+function resolveRepArgs<T>(
   ctx: CommandContext,
   verb: string,
   args: string,
-): { points: number[]; rgb: [number, number, number]; expr: string; word: string } | CommandResult {
+  noun: string,
+  example: string,
+  parse: (word: string) => T | null,
+  badValue: (word: string) => string,
+): { points: number[]; value: T; expr: string; word: string } | CommandResult {
   const split = splitTrailingWord(args);
   if (split.word === null) {
     return {
       status: "error",
-      message: `${verb} needs a target and a color — ${verb} <target> <color> (e.g. ${verb} alpha green)`,
+      message: `${verb} needs a target and a ${noun} — ${verb} <target> <${noun}> (e.g. ${verb} alpha ${example})`,
     };
   }
-  const rgb = parseColor(split.word);
-  if (!rgb) {
-    return {
-      status: "error",
-      message: `unknown color "${split.word}" — use a CSS color name (red, steelblue) or hex (#ff8800)`,
-    };
-  }
+  const value = parse(split.word);
+  if (value === null) return { status: "error", message: badValue(split.word) };
   const ast = parseTarget(split.expr);
   if (ast.kind === "error") return { status: "error", message: ast.message };
   const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
@@ -527,7 +550,46 @@ function resolveColorArgs(
   if (points.length === 0) {
     return { status: "nomatch", message: `nothing matches "${split.expr}"` };
   }
-  return { points, rgb, expr: split.expr, word: split.word };
+  return { points, value, expr: split.expr, word: split.word };
+}
+
+function resolveColorArgs(ctx: CommandContext, verb: string, args: string) {
+  return resolveRepArgs(ctx, verb, args, "color", "green", parseColor,
+    (w) => `unknown color "${w}" — use a CSS color name (red, steelblue) or hex (#ff8800)`);
+}
+
+function resolveSizeArgs(ctx: CommandContext, verb: string, args: string) {
+  return resolveRepArgs(ctx, verb, args, "size", "1.5", parseSize,
+    (w) => `not a size: "${w}" — use a non-negative number (e.g. 1.5 or 0)`);
+}
+
+/** The edge-mapping predicate, written ONCE for BOTH axes (colorbonds/
+ * bondsize = both endpoints in the set; colorbondsof/bondsizeof = at least
+ * one — the incident reach). Matching edge ids, header order. */
+function edgesMatching(
+  edges: readonly [number, number][],
+  points: readonly number[],
+  both: boolean,
+): number[] {
+  const inSet = new Set(points);
+  const ids: number[] = [];
+  for (let e = 0; e < edges.length; e++) {
+    const [a, b] = edges[e];
+    if (both ? inSet.has(a) && inSet.has(b) : inSet.has(a) || inSet.has(b)) ids.push(e);
+  }
+  return ids;
+}
+
+/** The subgroup map-up, written ONCE for BOTH axes (colortrace/tracesize):
+ * polyline vertices whose subgroup contains ≥1 resolved point. */
+function activeTraceVertexIds(ctx: CommandContext, points: readonly number[]): number[] {
+  const active = new Set<number>();
+  for (const p of points) active.add(ctx.hierarchy.subgroupOfPoint(p));
+  const ids: number[] = [];
+  for (let v = 0; v < ctx.traceVertices.length; v++) {
+    if (active.has(ctx.hierarchy.subgroupOfPoint(ctx.traceVertices[v]))) ids.push(v);
+  }
+  return ids;
 }
 
 /**
@@ -548,7 +610,7 @@ export function makeColorPointsHandler(ctx: CommandContext): CommandHandler {
   return (args: string): CommandResult => {
     const r = resolveColorArgs(ctx, "colorpoints", args);
     if ("status" in r) return r;
-    const n = ctx.colorPoints(r.points, r.rgb);
+    const n = ctx.colorPoints(r.points, r.value);
     return { status: "ok", message: `colored ${n} points ${r.word}` };
   };
 }
@@ -580,12 +642,7 @@ export function makeColorBondsHandler(
   return (args: string): CommandResult => {
     const r = resolveColorArgs(ctx, verb, args);
     if ("status" in r) return r;
-    const inSet = new Set(r.points);
-    const edgeIds: number[] = [];
-    for (let e = 0; e < ctx.edges.length; e++) {
-      const [a, b] = ctx.edges[e];
-      if (both ? inSet.has(a) && inSet.has(b) : inSet.has(a) || inSet.has(b)) edgeIds.push(e);
-    }
+    const edgeIds = edgesMatching(ctx.edges, r.points, both);
     if (edgeIds.length === 0) {
       return {
         status: "nomatch",
@@ -594,7 +651,7 @@ export function makeColorBondsHandler(
           : `no edges touching "${r.expr}"`,
       };
     }
-    const n = ctx.colorEdges(edgeIds, r.rgb);
+    const n = ctx.colorEdges(edgeIds, r.value);
     return { status: "ok", message: `colored ${n} edges ${r.word}` };
   };
 }
@@ -619,17 +676,79 @@ export function makeColorTraceHandler(ctx: CommandContext): CommandHandler {
   return (args: string): CommandResult => {
     const r = resolveColorArgs(ctx, "colortrace", args);
     if ("status" in r) return r;
-    const active = new Set<number>();
-    for (const p of r.points) active.add(ctx.hierarchy.subgroupOfPoint(p));
-    const vertexIds: number[] = [];
-    for (let v = 0; v < ctx.traceVertices.length; v++) {
-      if (active.has(ctx.hierarchy.subgroupOfPoint(ctx.traceVertices[v]))) vertexIds.push(v);
-    }
+    const vertexIds = activeTraceVertexIds(ctx, r.points);
     if (vertexIds.length === 0) {
       return { status: "nomatch", message: `no trace vertices in "${r.expr}"` };
     }
-    const n = ctx.colorTrace(vertexIds, r.rgb);
+    const n = ctx.colorTrace(vertexIds, r.value);
     return { status: "ok", message: `colored ${n} trace vertices ${r.word}` };
+  };
+}
+
+/** `set N <noun> to size S`, with the clamp note when a negative clamped. */
+function sizedMsg(n: number, noun: string, v: { size: number; clamped: boolean }): string {
+  return `set ${n} ${noun} to size ${v.size}${v.clamped ? " (clamped to 0)" : ""}`;
+}
+
+/**
+ * The SIZE family — `pointsize` / `bondsize` / `bondsizeof` / `tracesize` —
+ * clones the color family verb-for-verb: same shared front half
+ * (resolveRepArgs → identical resolution), same map-up grains through the
+ * SAME predicate functions (edgesMatching / activeTraceVertexIds — written
+ * once, never re-implemented per axis), same one-stroke recordOp discipline,
+ * LWW per element, own buffer only. Together the two axes form the grid
+ * {point, edge-both, edge-either, subgroup-vertex} × {color, size}.
+ *
+ * Size semantics: 0 is a LITERAL extent — it never hides (size ⊥ hide; a
+ * zero-extent element may draw no pixels, which is not a reason to couple
+ * the channels). Negatives clamp to 0 and the message says so. bondsizeof's
+ * incident reach mirrors colorbondsof exactly: on a single named element it
+ * sizes that element's incident edges unambiguously (the primary use); on a
+ * broad target, a boundary edge shared with a neighboring region resolves
+ * last-write-wins if a later command touches the neighbor — inherent to
+ * incident semantics, identical to color, documented rather than prevented.
+ */
+export function makePointSizeHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const r = resolveSizeArgs(ctx, "pointsize", args);
+    if ("status" in r) return r;
+    const n = ctx.sizePoints(r.points, r.value.size);
+    return { status: "ok", message: sizedMsg(n, "points", r.value) };
+  };
+}
+
+export function makeBondSizeHandler(
+  ctx: CommandContext,
+  verb: "bondsize" | "bondsizeof",
+): CommandHandler {
+  const both = verb === "bondsize";
+  return (args: string): CommandResult => {
+    const r = resolveSizeArgs(ctx, verb, args);
+    if ("status" in r) return r;
+    const edgeIds = edgesMatching(ctx.edges, r.points, both);
+    if (edgeIds.length === 0) {
+      return {
+        status: "nomatch",
+        message: both
+          ? `no edges with both endpoints in "${r.expr}"`
+          : `no edges touching "${r.expr}"`,
+      };
+    }
+    const n = ctx.sizeEdges(edgeIds, r.value.size);
+    return { status: "ok", message: sizedMsg(n, "edges", r.value) };
+  };
+}
+
+export function makeTraceSizeHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const r = resolveSizeArgs(ctx, "tracesize", args);
+    if ("status" in r) return r;
+    const vertexIds = activeTraceVertexIds(ctx, r.points);
+    if (vertexIds.length === 0) {
+      return { status: "nomatch", message: `no trace vertices in "${r.expr}"` };
+    }
+    const n = ctx.sizeTrace(vertexIds, r.value.size);
+    return { status: "ok", message: sizedMsg(n, "trace vertices", r.value) };
   };
 }
 
@@ -972,6 +1091,10 @@ export const HELP_TEXT = [
   "               endpoint — deliberately reaches one hop outside it)",
   "  colortrace <expr> <color>   color polyline vertices whose SUBGROUP holds",
   "               a resolved point (maps up; boundary segments blend)",
+  "  pointsize <expr> <n>        size those points (0 is legal and never hides;",
+  "               negatives clamp to 0; one undo stroke)",
+  "  bondsize / bondsizeof / tracesize <expr> <n>   the same shapes on the",
+  "               SIZE axis (edge/trace width stored; not yet drawn)",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  rename @name [new]  rename a selection · clear  wipe the terminal log",
   "  add @name <tree-target>     add tree entries as members (natural level)",
@@ -1038,6 +1161,26 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "colortrace",
     makeColorTraceHandler(ctx),
     "color polyline vertices whose subgroup contains a resolved point (contained at subgroup grain): colortrace <target> <color>",
+  );
+  registry.register(
+    "pointsize",
+    makePointSizeHandler(ctx),
+    "size the target's points (0 is legal and never hides; negatives clamp to 0): pointsize <target> <size>",
+  );
+  registry.register(
+    "bondsize",
+    makeBondSizeHandler(ctx, "bondsize"),
+    "size every edge with BOTH endpoints in the target (contained; width stored, not yet drawn): bondsize <target> <size>",
+  );
+  registry.register(
+    "bondsizeof",
+    makeBondSizeHandler(ctx, "bondsizeof"),
+    "size every edge with AT LEAST ONE endpoint in the target (incident — reaches one hop outside): bondsizeof <target> <size>",
+  );
+  registry.register(
+    "tracesize",
+    makeTraceSizeHandler(ctx),
+    "size polyline vertices whose subgroup contains a resolved point (contained at subgroup grain): tracesize <target> <size>",
   );
   registry.register(
     "ls",

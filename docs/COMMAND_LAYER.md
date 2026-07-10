@@ -259,26 +259,49 @@ inherits (`commitTargetEntries` in main.ts):
   show-wins masking means a hide may change no pixels; that's the accepted
   trade-off, not a failure.
 
-The COLOR FAMILY (`colorpoints` / `colorbonds` / `colorbondsof` /
-`colortrace`) extends the template into REPRESENTATION state — the shape
-every future appearance verb (size, opacity, …) clones. `colorpoints`
-shipped first as `color` and was renamed when the family grew (no alias —
-`color` is an unknown command; the rename is pinned by unit, E2E, and smoke
-checks). The family is COMPLETE: three contained verbs at three
-granularities (point / edge-both / subgroup-vertex) and one intentional
-reach (`colorbondsof`):
+The REPRESENTATION FAMILY extends the template into representation state —
+an EIGHT-VERB GRID: four shapes (how a point set maps onto a primitive) ×
+two axes (color and size). `colorpoints` shipped first as `color` and was
+renamed when the family grew (no alias — `color` is an unknown command; the
+rename is pinned by unit, E2E, and smoke checks). Per axis: three contained
+shapes at three granularities (point / edge-both / subgroup-vertex) and one
+intentional reach (edge-either). The grid guarantee — a size verb and its
+color sibling CANNOT diverge — is structural, not conventional:
+`resolveRepArgs` is the one generic front half (argument shape +
+resolution, parameterized only by the value parser and its error wording:
+`parseColor` / `parseSize`), and the mapping predicates are written ONCE
+(`edgesMatching` for both/either, `activeTraceVertexIds` for the subgroup
+map-up) and called by both axes' handlers. Unit tests assert the shared
+sets; the code has one implementation to assert about:
 
 - **Non-selection mutations.** Writes land in the representation layer's
-  buffers: `rep.state.color` (per-point, the `aColor` attribute) for
-  colorpoints; `rep.state.edgeColor` (per-EDGE, indexed by the header's edge
-  order) for BOTH edge verbs — they compose by last-write-wins per edge; and
-  `rep.state.traceColor` (per-POLYLINE-VERTEX, header vertex order = the
-  flattened `header.polylines`) for colortrace. The uniform base look is
+  buffers — one per primitive per axis: `rep.state.color` / `.size`
+  (per-point), `.edgeColor` / `.edgeSize` (per-EDGE, header edge order —
+  each shared by BOTH edge verbs of its axis, composing by last-write-wins
+  per edge), `.traceColor` / `.traceSize` (per-POLYLINE-VERTEX, header
+  vertex order = the flattened `header.polylines`). The uniform base look is
   each buffer's initial value, so unwritten elements keep it with no
-  merge/override machinery. Wiring closures: `colorPoints`, `colorEdges`,
-  and `colorTrace` in main.ts, mirroring how `refreshPoints` writes
-  `rep.state.visible` directly. Each verb writes ITS primitive's buffer and
-  touches no other (S16/S17 assert the independence in every direction).
+  merge/override machinery. Wiring closures: `colorPoints`/`colorEdges`/
+  `colorTrace` and the `makeSizeWriter`-built `sizePoints`/`sizeEdges`/
+  `sizeTrace` in main.ts, mirroring how `refreshPoints` writes
+  `rep.state.visible` directly. Each verb writes ITS primitive's buffer on
+  ITS axis and touches no other (S16/S17/S18 assert the independence across
+  the whole grid).
+- **SIZE ⊥ HIDE.** A size of 0 is a literal zero-extent: it never hides,
+  never touches `visible` or any selection state, and the message says
+  `set N points to size 0`, never "hidden" (S18 pins the visible buffer
+  byte-identical across a zero write). Negatives clamp to 0 with the clamp
+  reported (`parseSize` flags it); non-numeric size tokens error. Size-0 is
+  NOT an opacity substitute — opacity is its own future axis.
+- **Point size renders today; edge/trace width is STATE ONLY (Phase-0
+  finding, on record).** The point pass already honored per-point size
+  (`rep.state.size` → the `aSize` attribute → `gl_PointSize`), so
+  `pointsize` needed no render change — the brief's `pointSize` buffer
+  already existed under the name `size` and is reused, not duplicated. GL
+  lines, by contrast, rasterize at 1 px on essentially every platform and
+  have no per-vertex width concept at all, so `edgeSize`/`traceSize` are
+  complete as command + buffer + undo but produce no visible thickness
+  until an impostor/mesh-line render pass exists (see open threads).
 - **The de-indexed edge pass** (the one render change per-edge color forced):
   flat per-edge color cannot ride an indexed LineSegments sharing the points'
   position attribute — shared vertices would bleed one edge's color onto
@@ -470,7 +493,16 @@ deliberate decisions:
   first if/when the operator becomes concrete.
 (The former `colortrace` deferral is RESOLVED and built: the semantic
 decision landed on per-vertex color with an explicit gradient-boundary
-rendering — see the color-family section above and S17.)
+rendering — see the representation-family section above and S17.)
+
+- **Honored edge/trace thickness — the flagged renderer follow-up.**
+  `rep.state.edgeSize` / `.traceSize` are live (commands, undo, LWW, tests
+  through S18) but GL lines rasterize at 1 px, so the stored widths draw no
+  pixels yet. Making them visible means replacing the two line passes with
+  impostor/cylinder or mesh-line (triangle-strip) geometry — a renderer
+  brief of its own, deliberately NOT bundled into the size-verb brief. When
+  it lands, it reads the existing buffers; no command-layer change should
+  be needed.
 
 ## Test topology
 
@@ -515,12 +547,22 @@ rendering — see the color-family section above and S17.)
   map-up pin (`#124` colors exactly its subgroup's one vertex), the
   no-vertex nomatch (`@solvent`), three-buffer independence in every
   direction, and the family's undo/LWW/hidden/no-write discipline on the
-  trace buffer. The harness runs the synthetic producer at **N=6000** (the
-  extension default is 20000 — counts differ).
+  trace buffer; **S18** is the size axis — per-shape parity on the size
+  buffers (identity / contained / incident-with-reach / subgroup-map-up,
+  mirroring S16/S17 exactly), the single-point contained-vs-incident pin on
+  the size buffer, ZERO ⊥ HIDE (a zero write leaves the visible buffer
+  byte-identical, the scene count unchanged, and the points resolving), the
+  negative clamp with its message, the SIX-buffer independence matrix
+  across all eight verbs (including the shared edge-size buffer), and the
+  undo/LWW/hidden/no-write discipline on the size axis (unwinding restores
+  all six buffers to pristine). The harness runs the synthetic producer at
+  **N=6000** (the extension default is 20000 — counts differ).
 - **Terminal smoke** (`node tests/terminal_smoke.ts`): the real terminal
   bundle + real viewer in one page, host relay emulated by the bridge shim's
-  loopback; commands (every verb incl. the color family's buffer writes,
-  the total rename, and the unknown-color error), completion, history, help.
+  loopback; commands (every verb incl. the representation family's buffer
+  writes on both axes, the total rename, the unknown-color and
+  non-numeric-size errors, and the negative-clamp line), completion,
+  history, help.
 - **Real-relay VSIX smoke** (manual recipe): install the packaged VSIX into an
   isolated VS Code profile, drive the actual workbench over CDP — proves the
   true terminal→host→viewer→host→terminal path and panel lifecycle. Evidence

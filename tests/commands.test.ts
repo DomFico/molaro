@@ -9,7 +9,13 @@ import assert from "node:assert/strict";
 import type { Header } from "../contract/contract.ts";
 import { buildTree } from "../webview/classification.ts";
 import { Hierarchy, type Entry } from "../webview/sets.ts";
-import { createCommandRegistry, HELP_TEXT, parseColor, type CommandContext } from "../webview/commands.ts";
+import {
+  createCommandRegistry,
+  HELP_TEXT,
+  parseColor,
+  parseSize,
+  type CommandContext,
+} from "../webview/commands.ts";
 
 function makeHeader(): Header {
   const category = [0, 0, 1];
@@ -48,6 +54,7 @@ function makeRegistry() {
   // ONE polyline vertex: point 0 (subgroup s0). Point 1 shares s0 but is NOT
   // a vertex (pins the map-up); s1 owns no vertex (pins the nomatch).
   const traceVertices: number[] = [0];
+  const sizeOps: { kind: "points" | "edges" | "trace"; ids: number[]; size: number }[] = [];
   const ctx: CommandContext = {
     hierarchy,
     tree: buildTree(header),
@@ -198,10 +205,22 @@ function makeRegistry() {
       traceOps.push({ vertexIds: [...vertexIds], rgb });
       return vertexIds.length;
     },
+    sizePoints: (points, size) => {
+      sizeOps.push({ kind: "points", ids: [...points], size });
+      return points.length;
+    },
+    sizeEdges: (edgeIds, size) => {
+      sizeOps.push({ kind: "edges", ids: [...edgeIds], size });
+      return edgeIds.length;
+    },
+    sizeTrace: (vertexIds, size) => {
+      sizeOps.push({ kind: "trace", ids: [...vertexIds], size });
+      return vertexIds.length;
+    },
   };
   return {
     registry: createCommandRegistry(ctx),
-    calls, commits, hiddenState, refOps, memberOps, colorOps, edgeOps, traceOps, sels,
+    calls, commits, hiddenState, refOps, memberOps, colorOps, edgeOps, traceOps, sizeOps, sels,
   };
 }
 
@@ -771,6 +790,103 @@ test("colortrace: nomatch / bad color / usage / parse errors write NOTHING", () 
   const parseErr = registry.runCommand("colortrace c0.[x] red"); // [ reserved
   assert.equal(parseErr.status, "error");
   assert.equal(traceOps.length, 0, "no path wrote anything");
+});
+
+// -- the size family: pointsize / bondsize / bondsizeof / tracesize -------------------
+
+test("parseSize: non-negative numbers; negatives clamp; junk is null", () => {
+  assert.deepEqual(parseSize("1.5"), { size: 1.5, clamped: false });
+  assert.deepEqual(parseSize("0"), { size: 0, clamped: false });
+  assert.deepEqual(parseSize("3"), { size: 3, clamped: false });
+  assert.deepEqual(parseSize(".5"), { size: 0.5, clamped: false });
+  assert.deepEqual(parseSize("2."), { size: 2, clamped: false });
+  assert.deepEqual(parseSize("3e2"), { size: 300, clamped: false });
+  assert.deepEqual(parseSize("-2"), { size: 0, clamped: true }, "negative clamps to 0");
+  assert.deepEqual(parseSize("-0.1"), { size: 0, clamped: true });
+  for (const junk of ["abc", "", "1,5", "1.5x", "--1", "Infinity", "NaN", "#3", "1 5"]) {
+    assert.equal(parseSize(junk), null, junk);
+  }
+});
+
+test("pointsize resolves EXACTLY like colorpoints/view; zero is literal, never a hide", () => {
+  const { registry, sizeOps } = makeRegistry();
+  const res = registry.runCommand("pointsize c0 2");
+  assert.equal(res.status, "ok");
+  assert.equal(res.message, "set 2 points to size 2");
+  assert.deepEqual(sizeOps[0], { kind: "points", ids: [0, 1], size: 2 });
+  // ZERO: a legal literal value — the write happens, the message says size 0
+  const zero = registry.runCommand("pointsize c0 0");
+  assert.equal(zero.status, "ok");
+  assert.equal(zero.message, "set 2 points to size 0", "reports the action, never 'hidden'");
+  assert.deepEqual(sizeOps[1], { kind: "points", ids: [0, 1], size: 0 });
+  // negative clamps, and the message says so
+  const neg = registry.runCommand("pointsize c0 -2");
+  assert.equal(neg.status, "ok");
+  assert.equal(neg.message, "set 2 points to size 0 (clamped to 0)");
+  assert.deepEqual(sizeOps[2].size, 0);
+});
+
+test("bondsize/bondsizeof use the IDENTICAL predicates as their color siblings", () => {
+  const { registry, sizeOps, edgeOps } = makeRegistry();
+  // both-endpoints: same edge set as colorbonds, on the size buffer
+  registry.runCommand("colorbonds c0 red");
+  registry.runCommand("bondsize c0 2");
+  assert.deepEqual(sizeOps[0], { kind: "edges", ids: edgeOps[0].edgeIds, size: 2 });
+  // either-endpoint: same edge set as colorbondsof (the incident reach)
+  registry.runCommand("colorbondsof c0 red");
+  registry.runCommand("bondsizeof c0 1.5");
+  assert.deepEqual(sizeOps[1], { kind: "edges", ids: edgeOps[1].edgeIds, size: 1.5 });
+  assert.deepEqual(sizeOps[1].ids, [0, 1], "edge 1 leans on an out-of-set endpoint — sized anyway");
+  assert.equal(registry.runCommand("bondsize c0 2").message, "set 1 edges to size 2");
+  assert.equal(registry.runCommand("bondsizeof c0 2").message, "set 2 edges to size 2");
+});
+
+test("single-point pin on the size axis: bondsize nomatches, bondsizeof sizes incidents", () => {
+  const { registry, sizeOps } = makeRegistry();
+  const bonds = registry.runCommand("bondsize c0.g0.s0.a 2");
+  assert.equal(bonds.status, "nomatch");
+  assert.equal(bonds.message, `no edges with both endpoints in "c0.g0.s0.a"`);
+  assert.equal(sizeOps.length, 0);
+  const bondsof = registry.runCommand("bondsizeof c0.g0.s0.a 2");
+  assert.equal(bondsof.status, "ok");
+  assert.equal(bondsof.message, "set 1 edges to size 2");
+  assert.deepEqual(sizeOps[0].ids, [0]);
+});
+
+test("tracesize uses the IDENTICAL subgroup map-up as colortrace", () => {
+  const { registry, sizeOps, traceOps } = makeRegistry();
+  registry.runCommand("colortrace c0 red");
+  registry.runCommand("tracesize c0 2.5");
+  assert.deepEqual(sizeOps[0], { kind: "trace", ids: traceOps[0].vertexIds, size: 2.5 });
+  // the map-up: point 1 is not a vertex; its subgroup's vertex sizes anyway
+  const up = registry.runCommand("tracesize c0.g0.s0.b 1.5");
+  assert.equal(up.message, "set 1 trace vertices to size 1.5");
+  assert.deepEqual(sizeOps[1].ids, [0]);
+  // no-vertex subgroups nomatch, identical wording to colortrace
+  const none = registry.runCommand("tracesize c1 2");
+  assert.equal(none.status, "nomatch");
+  assert.equal(none.message, `no trace vertices in "c1"`);
+});
+
+test("the size verbs: nomatch / bad size / usage / parse errors write NOTHING", () => {
+  const { registry, sizeOps } = makeRegistry();
+  for (const verb of ["pointsize", "bondsize", "bondsizeof", "tracesize"]) {
+    const nomatch = registry.runCommand(`${verb} nothere 2`);
+    assert.equal(nomatch.status, "nomatch", verb);
+    assert.match(nomatch.message, /nothing matches "nothere"/);
+    const bad = registry.runCommand(`${verb} c0 abc`);
+    assert.equal(bad.status, "error", verb);
+    assert.match(bad.message, /not a size: "abc"/);
+    const bare = registry.runCommand(verb);
+    assert.equal(bare.status, "error", verb);
+    assert.match(bare.message, new RegExp(`${verb} <target> <size>`));
+    const oneArg = registry.runCommand(`${verb} 2`); // one chunk = no target
+    assert.equal(oneArg.status, "error", verb);
+    assert.match(oneArg.message, /needs a target and a size/);
+    const parseErr = registry.runCommand(`${verb} c0.[x] 2`); // [ reserved
+    assert.equal(parseErr.status, "error", verb);
+  }
+  assert.equal(sizeOps.length, 0, "no path wrote anything");
 });
 
 test("colorpoints: nomatch / bad color / usage / parse errors write NOTHING", () => {

@@ -1146,6 +1146,36 @@ async function main(): Promise<void> {
     return ids.length;
   };
 
+  /** The SIZE axis closures — the color closures' twins on the size
+   * buffers, one factory so the recordOp/capture/LWW shape is written once.
+   * Size ⊥ hide: a zero size is a literal extent; nothing here reads or
+   * writes visibility. sizePoints re-uploads through rep.dirty (the point
+   * shader honors aSize via gl_PointSize); edge/trace sizes are STATE ONLY
+   * pending impostor/mesh-line geometry (GL lines rasterize at 1px) — no
+   * render hook to poke, so their onWrite is a no-op. */
+  const makeSizeWriter = (buf: Float32Array, onWrite: () => void) =>
+    (ids: readonly number[], size: number): number => {
+      if (ids.length === 0) return 0;
+      const list = [...ids];
+      const prev = new Float32Array(list.length);
+      for (let i = 0; i < list.length; i++) {
+        prev[i] = buf[list[i]];
+        buf[list[i]] = size;
+      }
+      onWrite();
+      model.recordOp(() => {
+        for (let i = 0; i < list.length; i++) buf[list[i]] = prev[i];
+        onWrite();
+        return [];
+      });
+      return list.length;
+    };
+  const sizePoints = makeSizeWriter(rep.state.size, () => {
+    rep.dirty = true;
+  });
+  const sizeEdges = makeSizeWriter(rep.state.edgeSize, () => {});
+  const sizeTrace = makeSizeWriter(rep.state.traceSize, () => {});
+
   const commandContext = {
     hierarchy,
     tree: fullTree, // the SAME model the bottom tree renders — click parity
@@ -1175,6 +1205,9 @@ async function main(): Promise<void> {
     colorEdges,
     traceVertices,
     colorTrace,
+    sizePoints,
+    sizeEdges,
+    sizeTrace,
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);

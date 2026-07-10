@@ -479,6 +479,73 @@ try {
       lastLine?.text === `unknown color "nope" — use a CSS color name (red, steelblue) or hex (#ff8800)`,
     JSON.stringify(lastLine));
 
+  // the size family through the real relay (buffer state; size ⊥ hide)
+  lastLine = await runLine("pointsize alpha.group-0.subgroup-0 5");
+  check("pointsize lands through the relay",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "set 100 points to size 5",
+    JSON.stringify(lastLine));
+  check("…and exactly those points carry size 5 (the rest keep the base 3)",
+    await d.evaluate<boolean>(`(()=>{
+      const v=window.__viewer; const s=v.rep.state.size;
+      const target=new Set(v.debug.resolvePoints("alpha.group-0.subgroup-0"));
+      const five=Math.fround(5), three=Math.fround(3);
+      let hits=0;
+      for (let p=0;p<s.length;p++) {
+        if (target.has(p)) { if (s[p]!==five) return false; hits++; }
+        else if (s[p]!==three) return false;
+      }
+      return hits === 100;
+    })()`));
+  lastLine = await runLine("bondsize alpha.group-0.subgroup-0 2");
+  check("bondsize lands through the relay (contained edges, stored width)",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "set 99 edges to size 2",
+    JSON.stringify(lastLine));
+  check("…and exactly the contained edges carry size 2 in the edge-size buffer",
+    await d.evaluate<boolean>(`(()=>{
+      const v=window.__viewer; const es=v.rep.state.edgeSize;
+      const pts=new Set(v.debug.resolvePoints("alpha.group-0.subgroup-0"));
+      const two=Math.fround(2), one=Math.fround(1);
+      let hits=0;
+      for (let e=0;e<v.edges.length;e++) {
+        const both=pts.has(v.edges[e][0])&&pts.has(v.edges[e][1]);
+        if (both) { if (es[e]!==two) return false; hits++; }
+        else if (es[e]!==one) return false;
+      }
+      return hits === 99;
+    })()`));
+  lastLine = await runLine("bondsizeof #124 1.5");
+  check("bondsizeof lands through the relay (incident edges of one point)",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "set 2 edges to size 1.5",
+    JSON.stringify(lastLine));
+  lastLine = await runLine("tracesize alpha 2.5");
+  check("tracesize lands through the relay (active-subgroup vertices)",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "set 4 trace vertices to size 2.5",
+    JSON.stringify(lastLine));
+  check("…and exactly the active vertices carry 2.5 in the trace-size buffer",
+    await d.evaluate<boolean>(`(()=>{
+      const v=window.__viewer; const ts=v.rep.state.traceSize;
+      const active=new Set(v.debug.resolvePoints("alpha")
+        .map(p=>v.hierarchy.subgroupOfPoint(p)));
+      const want=Math.fround(2.5), base=Math.fround(1);
+      let hits=0;
+      for (let i=0;i<v.traceVertices.length;i++) {
+        const on=active.has(v.hierarchy.subgroupOfPoint(v.traceVertices[i]));
+        if (on) { if (ts[i]!==want) return false; hits++; }
+        else if (ts[i]!==base) return false;
+      }
+      return hits === 4;
+    })()`));
+  lastLine = await runLine("pointsize alpha nope");
+  check("a non-numeric size is the specific error line",
+    /term-err/.test(lastLine?.cls ?? "") &&
+      lastLine?.text === `not a size: "nope" — use a non-negative number (e.g. 1.5 or 0)`,
+    JSON.stringify(lastLine));
+  lastLine = await runLine("pointsize beta -3");
+  check("a negative size clamps, and the line says so",
+    /term-ok/.test(lastLine?.cls ?? "") &&
+      lastLine?.text === "set 400 points to size 0 (clamped to 0)",
+    JSON.stringify(lastLine));
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();

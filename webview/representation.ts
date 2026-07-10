@@ -22,6 +22,12 @@ export const DEFAULT_SIZE = 3;
 export const DEFAULT_EDGE_COLOR: [number, number, number] = [0x5a / 255, 0x7a / 255, 0x9a / 255];
 /** Per-trace-vertex base look (was the uniform polyline color 0x9a7a5a). */
 export const DEFAULT_TRACE_COLOR: [number, number, number] = [0x9a / 255, 0x7a / 255, 0x5a / 255];
+/** Edge/trace base widths. NOTE: these buffers are STATE ONLY today — WebGL
+ * rasterizes GL lines at 1px regardless (no per-vertex width exists in GL),
+ * so visible thickness awaits an impostor/mesh-line pass. The command layer,
+ * undo, and tests are complete against the buffers; only pixels lag. */
+export const DEFAULT_EDGE_SIZE = 1;
+export const DEFAULT_TRACE_SIZE = 1;
 
 export interface RepresentationState {
   /** length 3N — per-point RGB the base scene draws with. */
@@ -40,6 +46,14 @@ export interface RepresentationState {
    * along each segment, so a colored↔uncolored boundary renders as a
    * gradient — inherent to per-vertex color, and intended. */
   traceColor: Float32Array;
+  /** length E — per-EDGE width, header edge order (bondsize/bondsizeof both
+   * write it — LWW per edge, like edgeColor). Size and hide are ORTHOGONAL:
+   * 0 is a literal extent, never a hide. State-only pending an impostor
+   * pass (see DEFAULT_EDGE_SIZE note). */
+  edgeSize: Float32Array;
+  /** length V — per-POLYLINE-VERTEX thickness, header vertex order. Same
+   * orthogonality and same state-only-pending-geometry caveat. */
+  traceSize: Float32Array;
 }
 
 export class RepresentationLayer {
@@ -70,6 +84,8 @@ export class RepresentationLayer {
       traceColor[v * 3 + 1] = DEFAULT_TRACE_COLOR[1];
       traceColor[v * 3 + 2] = DEFAULT_TRACE_COLOR[2];
     }
-    this.state = { color, size, visible, edgeColor, traceColor };
+    const edgeSize = new Float32Array(nEdges).fill(DEFAULT_EDGE_SIZE);
+    const traceSize = new Float32Array(nTraceVertices).fill(DEFAULT_TRACE_SIZE);
+    this.state = { color, size, visible, edgeColor, traceColor, edgeSize, traceSize };
   }
 }

@@ -3102,9 +3102,233 @@ async function S17(): Promise<void> {
   });
 }
 
+async function S18(): Promise<void> {
+  console.log("S18 — the size family: pointsize/bondsize/bondsizeof/tracesize (size ⊥ hide)");
+  const BUFS = ["color", "edgeColor", "traceColor", "size", "edgeSize", "traceSize"] as const;
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const snap = (slot: string, buf: string) =>
+      d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.${buf}))`);
+    const equalsSnap = (slot: string, buf: string) =>
+      d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.${buf}, s=window.${slot};
+        if (c.length !== s.length) return false;
+        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) return false;
+        return true;
+      })()`);
+    const snapAll = async () => {
+      for (const b of BUFS) await snap(`__all_${b}`, b);
+    };
+    /** Which of the six buffers changed since snapAll — the independence
+     * audit runs over the WHOLE eight-verb grid with this one helper. */
+    const changedBuffers = async (): Promise<string> => {
+      const out: string[] = [];
+      for (const b of BUFS) if (!(await equalsSnap(`__all_${b}`, b))) out.push(b);
+      return JSON.stringify(out);
+    };
+    /** Size parity per primitive: the set of buffer slots whose value
+     * changed must equal the verb's map-up over resolvePoints. */
+    const paintSize = async (
+      verb: "pointsize" | "bondsize" | "bondsizeof" | "tracesize",
+      expr: string,
+      size: string,
+    ) => {
+      const buf = verb === "pointsize" ? "size" : verb === "tracesize" ? "traceSize" : "edgeSize";
+      await snap("__preSize", buf);
+      const r = await cmd(`${verb} ${expr} ${size}`);
+      const parity = await d.evaluate<{ ids: number[]; match: boolean; reach: number }>(`(()=>{
+        const v=${V}; const c=v.rep.state.${buf}; const s=window.__preSize;
+        const changed=[];
+        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) changed.push(i);
+        const pts=new Set(v.debug.resolvePoints(${JSON.stringify(expr)}));
+        let want=[]; let reach=0;
+        if (${JSON.stringify(verb)} === "pointsize") {
+          want=[...pts].sort((a,b)=>a-b);
+        } else if (${JSON.stringify(verb)} === "tracesize") {
+          const active=new Set([...pts].map(p=>v.hierarchy.subgroupOfPoint(p)));
+          for (let i=0;i<v.traceVertices.length;i++) {
+            if (active.has(v.hierarchy.subgroupOfPoint(v.traceVertices[i]))) want.push(i);
+          }
+        } else {
+          const both=${JSON.stringify(verb)} === "bondsize";
+          for (let e=0;e<v.edges.length;e++) {
+            const a=v.edges[e][0], b=v.edges[e][1];
+            if (both ? (pts.has(a)&&pts.has(b)) : (pts.has(a)||pts.has(b))) want.push(e);
+          }
+          for (const e of changed) {
+            const a=v.edges[e][0], b=v.edges[e][1];
+            if (!pts.has(a)||!pts.has(b)) reach++;
+          }
+        }
+        return { ids: changed.length<=16?changed:[], reach,
+                 match: changed.length===want.length && changed.every((x,i)=>x===want[i]) };
+      })()`);
+      return { r, parity };
+    };
+    /** Every resolved point of `expr` carries exactly this point size. */
+    const pointsSized = (expr: string, val: number) =>
+      d.evaluate<boolean>(`(()=>{
+        const v=${V}; const s=v.rep.state.size; const w=Math.fround(${val});
+        return v.debug.resolvePoints(${JSON.stringify(expr)}).every(p=>s[p]===w);
+      })()`);
+
+    await snapAll(); // the pristine full-grid snapshot
+    for (const b of BUFS) await snap(`__pristine_${b}`, b);
+    const baseDepth = await undoDepth();
+
+    // -- (a) pointsize parity (identity grain; avoid the base size 3) ------------
+    for (const [expr, size] of [
+      ["alpha", "1.5"],
+      ["#100-140", "2.5"],
+      ['gamma.group-2."subgroup 11"', "4"],
+      ["@solvent", "5"],
+    ] as const) {
+      const { r, parity } = await paintSize("pointsize", expr, size);
+      check(`S18: pointsize ${expr} — sizes EXACTLY the resolved points`,
+        r.status === "ok" && parity.match, JSON.stringify(r));
+      check(`S18: ...message reports the action`,
+        /^set \d+ points to size [\d.]+$/.test(r.message), r.message);
+    }
+
+    // -- (b) the edge pair: contained vs incident, on the size buffer ------------
+    const bonds = await paintSize("bondsize", "alpha", "1.5");
+    check("S18: bondsize alpha — sizes EXACTLY the both-endpoints edges (reach 0)",
+      bonds.r.status === "ok" && bonds.parity.match && bonds.parity.reach === 0,
+      JSON.stringify(bonds.r));
+    const bondsof = await paintSize("bondsizeof", "beta.group-*.*.t1", "2.5");
+    check("S18: bondsizeof beta.group-*.*.t1 — the either-endpoint set, ALL reaching out",
+      bondsof.r.status === "ok" && bondsof.parity.match && bondsof.parity.reach > 0,
+      `${JSON.stringify(bondsof.r)} reach=${bondsof.parity.reach}`);
+
+    // -- (c) the single-point pin, mirrored from S16 onto the size buffer ---------
+    await snap("__quietES", "edgeSize");
+    const depthPin = await undoDepth();
+    const pin = await cmd("bondsize #124 2");
+    check("S18: bondsize #124 → nomatch (no contained edge in a one-point set)",
+      pin.status === "nomatch" && pin.message === `no edges with both endpoints in "#124"`,
+      JSON.stringify(pin));
+    check("S18: ...byte- and depth-identical no-op",
+      (await equalsSnap("__quietES", "edgeSize")) && (await undoDepth()) === depthPin);
+    const pinOf = await paintSize("bondsizeof", "#124", "2.25");
+    check("S18: bondsizeof #124 sizes exactly the incident edges",
+      pinOf.r.status === "ok" && pinOf.parity.match &&
+        pinOf.parity.reach > 0 && pinOf.r.message === `set 2 edges to size 2.25`,
+      JSON.stringify(pinOf));
+
+    // -- (d) tracesize: the subgroup map-up, scattered set pinned -----------------
+    const trace = await paintSize("tracesize", "alpha", "1.5");
+    check("S18: tracesize alpha — the SCATTERED [0,3,6,9] (colortrace's exact map-up)",
+      trace.r.status === "ok" && trace.parity.match &&
+        JSON.stringify(trace.parity.ids) === "[0,3,6,9]",
+      JSON.stringify(trace.parity.ids));
+    const traceUp = await paintSize("tracesize", "#124", "2.5");
+    check("S18: tracesize #124 — one point maps up to its subgroup's ONE vertex",
+      traceUp.r.status === "ok" && JSON.stringify(traceUp.parity.ids) === "[1]" &&
+        traceUp.r.message === "set 1 trace vertices to size 2.5",
+      JSON.stringify(traceUp));
+    const traceNone = await cmd("tracesize @solvent 2");
+    check("S18: tracesize @solvent — bulk subgroups own no vertices → nomatch",
+      traceNone.status === "nomatch" && traceNone.message === `no trace vertices in "@solvent"`,
+      JSON.stringify(traceNone));
+
+    // -- (e) ZERO ⊥ HIDE: the load-bearing new assertion --------------------------
+    await snap("__preZeroVis", "visible");
+    const visBefore = await visibleCount(d);
+    const zero = await cmd("pointsize alpha 0");
+    check("S18: pointsize alpha 0 — a literal write, reported as size 0 (never 'hidden')",
+      zero.status === "ok" && zero.message === "set 400 points to size 0",
+      JSON.stringify(zero));
+    check("S18: ...the size buffer really is 0 there", await pointsSized("alpha", 0));
+    check("S18: ...hide-state is BYTE-IDENTICAL and the scene count unchanged",
+      (await equalsSnap("__preZeroVis", "visible")) && (await visibleCount(d)) === visBefore);
+    check("S18: ...zero-size points still resolve (present, not hidden)",
+      (await d.evaluate<number>(`${V}.debug.resolvePoints("alpha").length`)) === 400);
+
+    // -- (f) the negative clamp ----------------------------------------------------
+    const neg = await cmd("pointsize beta -2");
+    check("S18: a negative size clamps to 0 and the message says so",
+      neg.status === "ok" && neg.message === "set 400 points to size 0 (clamped to 0)",
+      JSON.stringify(neg));
+    check("S18: ...and the buffer holds 0", await pointsSized("beta", 0));
+
+    // -- (g) independence across the EIGHT-verb grid, six buffers -----------------
+    const grid: [string, string][] = [
+      ["pointsize gamma 2.75", `["size"]`],
+      ["bondsize gamma 1.75", `["edgeSize"]`],
+      ["bondsizeof gamma 1.25", `["edgeSize"]`], // the SHARED edge-size buffer
+      ["tracesize gamma 2.25", `["traceSize"]`],
+      ["colorpoints gamma #111213", `["color"]`],
+      ["colorbonds gamma #141516", `["edgeColor"]`],
+      ["colortrace gamma #171819", `["traceColor"]`],
+    ];
+    for (const [text, want] of grid) {
+      await snapAll();
+      await cmd(text);
+      check(`S18: ${text} touches ONLY ${want}`, (await changedBuffers()) === want,
+        await changedBuffers());
+    }
+
+    // -- (h) undo/LWW/hidden on the size axis -------------------------------------
+    while ((await undoDepth()) > baseDepth) {
+      await d.ctrlZ();
+      await sleep(60);
+    }
+    let allPristine = true;
+    for (const b of BUFS) allPristine = allPristine && (await equalsSnap(`__pristine_${b}`, b));
+    check("S18: unwinding every stroke restores ALL SIX buffers to pristine", allPristine);
+    await cmd("pointsize alpha 5");
+    await cmd("pointsize alpha.group-0.subgroup-0 7");
+    check("S18: re-sizing an overlap overwrites those points (LWW)",
+      (await pointsSized("alpha.group-0.subgroup-0", 7)));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S18: undo restores the PREVIOUS size (5), not the base look",
+      await pointsSized("alpha.group-0.subgroup-0", 5));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S18: a second undo restores the base point size (3)",
+      await pointsSized("alpha", 3));
+    await cmd("hide alpha [tmphide]");
+    const visHidden = await visibleCount(d);
+    const depthHidden = await undoDepth();
+    const hid = await paintSize("pointsize", "alpha", "4");
+    check("S18: sizing a HIDDEN target writes the buffer as ONE stroke, unhiding nothing",
+      hid.r.status === "ok" && hid.parity.match &&
+        (await undoDepth()) === depthHidden + 1 && (await visibleCount(d)) === visHidden,
+      JSON.stringify(hid.r));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S18: one Ctrl+Z pops ONLY the size stroke — the hide stands",
+      (await equalsSnap("__preSize", "size")) &&
+        (await undoDepth()) === depthHidden && (await visibleCount(d)) === visHidden);
+
+    // -- (i) the remaining quiet paths, byte-identical across every buffer --------
+    await snapAll();
+    const depthQuiet = await undoDepth();
+    const quiet: [string, string][] = [
+      ["pointsize nothere 2", "nomatch"],
+      ["pointsize alpha abc", "error"],
+      ["pointsize", "error"],
+      ["bondsizeof 2", "error"], // one chunk: a size but no target
+      ["tracesize alpha.[x] 2", "error"], // [ reserved
+    ];
+    for (const [text, status] of quiet) {
+      const r = await cmd(text);
+      check(`S18: ${text} → ${status}`, r.status === status, JSON.stringify(r));
+    }
+    check("S18: ...none of them wrote a single component anywhere",
+      (await changedBuffers()) === "[]");
+    check("S18: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet);
+
+    await d.screenshot(`${REPORT}/S18_size.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

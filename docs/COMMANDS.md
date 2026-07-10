@@ -39,6 +39,10 @@ point types `anchor` and `t0`–`t3`).
 | `colorbonds <expr> <color>` | Color every edge with **both** endpoints in the target (contained) | `colorbonds beta.group-0.subgroup-0 #ff8800` |
 | `colorbondsof <expr> <color>` | Color every edge **touching** the target (either endpoint — deliberately reaches one hop outside) | `colorbondsof #124 red` |
 | `colortrace <expr> <color>` | Color polyline vertices whose **subgroup** contains a resolved point (maps up; boundary segments blend) | `colortrace alpha steelblue` |
+| `pointsize <expr> <size>` | Size those points (0 is legal and **never hides**; negatives clamp to 0) | `pointsize alpha 2` |
+| `bondsize <expr> <size>` | Width for edges with **both** endpoints in the target (stored; not yet drawn) | `bondsize beta.group-0.subgroup-0 0` |
+| `bondsizeof <expr> <size>` | Width for edges **touching** the target (either endpoint — the incident reach) | `bondsizeof #124 1.5` |
+| `tracesize <expr> <size>` | Thickness for polyline vertices whose **subgroup** contains a resolved point | `tracesize alpha 1.5` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |
 | `rename @name [new]` | Rename a committed selection | `rename @selection_1 [ring]` |
 | `add @name <tree-target>` | Add tree-addressed entries as **members** at their natural level (no `@` on the right) | `add @ring alpha.group-0` |
@@ -323,99 +327,119 @@ hidden set. That shapes the pair's asymmetry:
   nothing on screen until the coverer hides too — the command still reports
   `hid "name" — N points`, because that is what it did.
 
-## The color family: `colorpoints` / `colorbonds` / `colorbondsof` / `colortrace`
+## The representation family: color and size
 
 ```
-colorpoints  <target-expr> <color>    the points themselves
-colorbonds   <target-expr> <color>    edges with BOTH endpoints in the target
-colorbondsof <target-expr> <color>    edges with AT LEAST ONE endpoint in it
-colortrace   <target-expr> <color>    polyline vertices whose SUBGROUP holds
-                                      a resolved point
+colorpoints  <target-expr> <color>  │  pointsize   <target-expr> <size>
+colorbonds   <target-expr> <color>  │  bondsize    <target-expr> <size>
+colorbondsof <target-expr> <color>  │  bondsizeof  <target-expr> <size>
+colortrace   <target-expr> <color>  │  tracesize   <target-expr> <size>
 ```
 
-The **representation** verbs — the family is complete: one verb per
-renderable primitive (points, edges, polylines), plus one deliberate
-variant. Every verb targets **exactly like `view`** — the full grammar, the
-same resolver, **hidden points included**, and it never commits a selection
-— so each resolves precisely the point set `view <target>` frames. They
-differ only in how that point set maps onto a primitive:
+The **representation** verbs form a grid: four *shapes* (how a point set
+maps onto a renderable primitive) × two *axes* (color and size) — eight
+verbs, one template. Every verb targets **exactly like `view`** — the full
+grammar, the same resolver, **hidden points included**, and it never commits
+a selection — so each resolves precisely the point set `view <target>`
+frames. A size verb and its color sibling share the *same* mapping code, so
+the two axes cannot disagree about which elements a target reaches. The
+four shapes:
 
-- **`colorpoints`** colors the points in the set (the identity mapping).
-  (Shipped as `color`; renamed when the family grew — `color` is no longer
-  a command, there is no alias.)
-- **`colorbonds`** colors every edge whose **both** endpoints are in the set
-  — *contained*, parity-preserving: every colored edge lies inside the
-  target.
-- **`colorbondsof`** colors every edge with **at least one** endpoint in the
-  set — *incident*. An edge is colored **even when its other endpoint is
-  outside the target**: reaching one hop out is this verb's whole point, and
-  the one deliberate break from strict target-containment in the family —
-  which is why it is a separate verb, not a flag. The two edge verbs write
-  the same per-edge color state, so they compose by last-write-wins per
-  edge.
-- **`colortrace`** colors polyline geometry **per vertex, mapped up to the
-  subgroup level**: the subgroups containing ≥1 resolved point are *active*,
-  and a vertex colors iff its subgroup is active. This stays *contained* —
-  no vertex outside the target's subgroups ever colors; the map-up is
-  resolution-to-primitive-**granularity** (a single point activates its
-  whole subgroup's vertex), not `colorbondsof`'s reach. Segments between a
-  colored and an uncolored vertex render as a **gradient** toward the base
-  look — inherent to per-vertex color, and intended; there is no
+- **Point** (`colorpoints` / `pointsize`) — the points in the set, the
+  identity mapping. (`colorpoints` shipped as `color`; renamed when the
+  family grew — `color` is no longer a command, there is no alias.)
+- **Edge-contained** (`colorbonds` / `bondsize`) — every edge whose **both**
+  endpoints are in the set: *contained*, parity-preserving — every written
+  edge lies inside the target.
+- **Edge-incident** (`colorbondsof` / `bondsizeof`) — every edge with **at
+  least one** endpoint in the set: *incident*. An edge is written **even
+  when its other endpoint is outside the target**: reaching one hop out is
+  this shape's whole point (on a single named element it is *the* way to
+  address that element's emanating edges), and the one deliberate break
+  from strict target-containment in the family — which is why it is a
+  separate verb, not a flag. The two edge shapes write the same per-edge
+  state on each axis (one edge-color buffer, one edge-size buffer), so they
+  compose by last-write-wins per edge. Corollary on broad incident targets:
+  an edge bridging the target and a neighboring element is *shared* — if a
+  later command addresses the neighbor, that boundary edge resolves
+  last-write-wins. Inherent to incident semantics, identical on both axes,
+  documented rather than prevented.
+- **Subgroup-vertex** (`colortrace` / `tracesize`) — polyline geometry **per
+  vertex, mapped up to the subgroup level**: the subgroups containing ≥1
+  resolved point are *active*, and a vertex is written iff its subgroup is
+  active. This stays *contained* — no vertex outside the target's subgroups
+  is ever written; the map-up is resolution-to-primitive-**granularity** (a
+  single point activates its whole subgroup's vertex), not the incident
+  reach. Segments between differently-valued vertices **interpolate**
+  (color: a gradient toward the base look; size likewise, once thickness
+  renders) — inherent to per-vertex state, and intended; there is no
   per-segment rule. A target whose active subgroups own no polyline
   vertices is a **nomatch**. (On the synthetic data a single-category
-  target like `colortrace alpha` colors a *scattered* vertex set — the
+  target like `colortrace alpha` writes a *scattered* vertex set — the
   polyline's categories cycle — so the trace looks dashed. Correct, by
   design.)
 
-So: three **contained** verbs at three granularities (point / edge-both /
-subgroup-vertex) and one intentional **reach** (`colorbondsof`). The
-contained-vs-incident line is sharpest on a single point:
-`colorbonds #124 red` is a **nomatch** (no edge has both endpoints in a
-one-point set) while `colorbondsof #124 red` colors exactly the edges
-incident to point 124 — and `colortrace` with `#124` in scope colors
-exactly the one vertex of the subgroup owning point 124.
+So on each axis: three **contained** shapes at three granularities (point /
+edge-both / subgroup-vertex) and one intentional **reach** (edge-either).
+The contained-vs-incident line is sharpest on a single point:
+`colorbonds #124 red` / `bondsize #124 2` are **nomatch** (no edge has both
+endpoints in a one-point set) while `colorbondsof #124 red` /
+`bondsizeof #124 1.5` write exactly the edges incident to point 124 — and
+the trace shapes with `#124` in scope write exactly the one vertex of the
+subgroup owning point 124.
 
 ```
-colorpoints alpha green
-colorpoints beta.group-0.subgroup-0.t2 #ff8800
-colorpoints gamma.group-2."subgroup 11" red
-colorbonds beta.group-0.subgroup-0 #ff8800
-colorbonds all blue
-colorbondsof #124 red
-colorbondsof @selection_1 steelblue
-colortrace alpha steelblue
-colortrace gamma.group-2."subgroup 11".#124 red
-colortrace all blue
+colorpoints alpha green                     pointsize alpha 2
+colorpoints gamma.group-2."subgroup 11" red pointsize all 3
+colorbonds beta.group-0.subgroup-0 #ff8800  bondsize beta.group-0.subgroup-0 0
+colorbondsof #124 red                       bondsizeof #124 1.5
+colortrace alpha steelblue                  tracesize alpha 1.5
 ```
 
-Shared rules (identical across the family):
+The axis values:
 
 - **`<color>`** is a CSS color name (`red`, `steelblue`, `rebeccapurple`) or
   hex (`#ff8800`, or the short form `#f80`). The color token is
   **case-insensitive** (CSS semantics — it is a color, not a tree label);
   an unknown or malformed color is an **error** and nothing is written.
-- **Each verb writes its own primitive only**: `colorpoints` never affects
-  edges or polylines; the edge verbs never affect points or polylines;
-  `colortrace` never affects points or edges. Within each primitive,
-  **last-write-wins per element** — no precedence system, no blending.
-  Elements never colored keep the uniform base look, and undoing past the
-  first write restores it.
+- **`<size>`** is a plain non-negative number (`2`, `1.5`, `0`). **Zero is a
+  legal, literal value — it does NOT hide**: a size-0 element stays in the
+  scene, stays in its buffer slot, and its hide-state is untouched (size
+  and hide are orthogonal channels; a zero-extent element may draw no
+  pixels, which is not the same thing as hidden — the message says
+  `set N points to size 0`, never "hidden"). **Negative values clamp to 0**
+  and the message notes it (`(clamped to 0)`). A non-numeric size token is
+  an **error** and nothing is written.
+- **Visible thickness caveat**: point sizes render immediately (the point
+  pass honors per-point size). Edge and trace **widths are stored but not
+  yet drawn** — WebGL rasterizes lines at 1 px regardless, so honored
+  thickness awaits an impostor/mesh-line render pass. The buffers, undo,
+  and messages are fully live; only the pixels lag.
+
+Shared rules (identical across the eight verbs):
+
+- **Each verb writes its own primitive's buffer on its own axis only** — no
+  size verb touches any color buffer or another primitive's size buffer,
+  and vice versa. Within each buffer, **last-write-wins per element** — no
+  precedence system, no blending. Elements never written keep the uniform
+  base look, and undoing past the first write restores it.
 - **One undo stroke per invocation** — `Ctrl+Z` restores the exact previous
-  colors, which may themselves be an earlier verb's (strokes compose LIFO).
-- **Hidden geometry colors too** — the write lands in the representation
-  state regardless of visibility, and the message reports the **action**
-  (`colored N points green`, `colored N edges red`, `colored N trace
-  vertices blue`), not pixels, exactly like `hide`/`show` under show-wins.
-  The color shows whenever the geometry does.
+  values, which may themselves be an earlier verb's (strokes compose LIFO).
+- **Hidden geometry is written too** — the write lands in the
+  representation state regardless of visibility, and the message reports
+  the **action** (`colored N points green`, `set N edges to size 2`), not
+  pixels, exactly like `hide`/`show` under show-wins. The value shows
+  whenever the geometry does.
 - A nomatch or any error **writes nothing and pushes no undo stroke**. A
   well-formed target that matches points but no edges or trace vertices
-  (e.g. `colorbonds` on a single point, `colortrace` on bulk subgroups) is
-  a nomatch too. A bare verb (or a single argument) is a usage error — it
-  needs both a target and a color.
-- Constant colors only, deliberately: color *mappings* (rainbow,
-  by-channel), and other appearance verbs (size, opacity) are future work
-  that will clone this family's shape. (`colortrace`'s boundary gradient is
-  a rendering consequence of per-vertex color, not a mapping feature.)
+  (e.g. a contained edge verb on a single point, a trace verb on bulk
+  subgroups) is a nomatch too. A bare verb (or a single argument) is a
+  usage error — it needs both a target and a value.
+- Constant values only, deliberately: *mappings* (rainbow, by-channel),
+  opacity, and shape verbs are future work that will clone this family's
+  template. (The trace shapes' boundary interpolation is a rendering
+  consequence of per-vertex state, not a mapping feature; size-0 is not an
+  opacity substitute.)
 
 ## Listing: `ls`
 
