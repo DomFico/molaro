@@ -139,6 +139,16 @@ export interface CommandContext {
    * recordOp discipline; edges never written keep the uniform base look.
    * Returns the count written. */
   colorEdges(edgeIds: readonly number[], rgb: [number, number, number]): number;
+  /** The polyline vertices in HEADER ORDER (flattened polylines) —
+   * traceVertices[v] = that vertex's point index. colortrace maps the
+   * resolved point set up to subgroup grain and colors the vertices whose
+   * subgroup is active; vertex ids index the trace-color buffer. */
+  traceVertices: readonly number[];
+  /** colorPoints' POLYLINE twin: write a constant per-vertex RGB on exactly
+   * these vertex ids in the trace-color buffer. Same one-stroke recordOp
+   * discipline and last-write-wins per vertex; vertices never written keep
+   * the uniform base look. Returns the count written. */
+  colorTrace(vertexIds: readonly number[], rgb: [number, number, number]): number;
 }
 
 export class CommandRegistry {
@@ -589,6 +599,40 @@ export function makeColorBondsHandler(
   };
 }
 
+/**
+ * `colortrace <target> <color>` — the POLYLINE member of the family,
+ * completing it (four verbs: point / edge-both / edge-either /
+ * subgroup-vertex). Per-VERTEX color, mapped UP to the subgroup level: the
+ * target resolves to the family's usual point set, `active` = the subgroups
+ * containing ≥1 resolved point, and vertex V colors iff subgroup(V) is
+ * active. That keeps the containment discipline — no vertex outside the
+ * target's subgroups ever colors; the map-up is resolution-to-primitive-
+ * GRANULARITY (a single point activates its whole subgroup's vertex), not
+ * colorbondsof's deliberate reach-out. Segments between a colored and an
+ * uncolored vertex render as a GRADIENT (colored → base look) — inherent to
+ * per-vertex color and intended; there is no per-segment rule. On the
+ * synthetic data a single-category target colors a SCATTERED, dashed-looking
+ * vertex set (the polyline's categories cycle) — correct, pinned by S17.
+ * Active subgroups owning no polyline vertices = nomatch, nothing written.
+ */
+export function makeColorTraceHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const r = resolveColorArgs(ctx, "colortrace", args);
+    if ("status" in r) return r;
+    const active = new Set<number>();
+    for (const p of r.points) active.add(ctx.hierarchy.subgroupOfPoint(p));
+    const vertexIds: number[] = [];
+    for (let v = 0; v < ctx.traceVertices.length; v++) {
+      if (active.has(ctx.hierarchy.subgroupOfPoint(ctx.traceVertices[v]))) vertexIds.push(v);
+    }
+    if (vertexIds.length === 0) {
+      return { status: "nomatch", message: `no trace vertices in "${r.expr}"` };
+    }
+    const n = ctx.colorTrace(vertexIds, r.rgb);
+    return { status: "ok", message: `colored ${n} trace vertices ${r.word}` };
+  };
+}
+
 /** Cap long listings the way completion caps candidate lists. */
 function capLines(lines: string[], noun: string): string {
   return lines.length > COMPLETION_LIST_CAP
@@ -926,6 +970,8 @@ export const HELP_TEXT = [
   "  colorbonds <expr> <color>   color edges with BOTH endpoints in the target",
   "  colorbondsof <expr> <color> color edges TOUCHING the target (either",
   "               endpoint — deliberately reaches one hop outside it)",
+  "  colortrace <expr> <color>   color polyline vertices whose SUBGROUP holds",
+  "               a resolved point (maps up; boundary segments blend)",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  rename @name [new]  rename a selection · clear  wipe the terminal log",
   "  add @name <tree-target>     add tree entries as members (natural level)",
@@ -987,6 +1033,11 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "colorbondsof",
     makeColorBondsHandler(ctx, "colorbondsof"),
     "color every edge with AT LEAST ONE endpoint in the target (incident — reaches one hop outside): colorbondsof <target> <color>",
+  );
+  registry.register(
+    "colortrace",
+    makeColorTraceHandler(ctx),
+    "color polyline vertices whose subgroup contains a resolved point (contained at subgroup grain): colortrace <target> <color>",
   );
   registry.register(
     "ls",

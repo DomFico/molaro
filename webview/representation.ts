@@ -20,6 +20,8 @@ export const DEFAULT_COLOR: [number, number, number] = [0.9, 0.9, 0.9];
 export const DEFAULT_SIZE = 3;
 /** Per-edge base look (was the uniform LineBasicMaterial color 0x5a7a9a). */
 export const DEFAULT_EDGE_COLOR: [number, number, number] = [0x5a / 255, 0x7a / 255, 0x9a / 255];
+/** Per-trace-vertex base look (was the uniform polyline color 0x9a7a5a). */
+export const DEFAULT_TRACE_COLOR: [number, number, number] = [0x9a / 255, 0x7a / 255, 0x5a / 255];
 
 export interface RepresentationState {
   /** length 3N — per-point RGB the base scene draws with. */
@@ -32,6 +34,12 @@ export interface RepresentationState {
    * look is the initial value (like `color`), so an edge never written keeps
    * the uniform look with no sentinel/override machinery. */
   edgeColor: Float32Array;
+  /** length 3V — per-POLYLINE-VERTEX RGB, in header vertex order (the
+   * flattened `header.polylines`). Same no-sentinel pattern: the base look
+   * is the initial value. The renderer interpolates between vertex colors
+   * along each segment, so a colored↔uncolored boundary renders as a
+   * gradient — inherent to per-vertex color, and intended. */
+  traceColor: Float32Array;
 }
 
 export class RepresentationLayer {
@@ -39,7 +47,7 @@ export class RepresentationLayer {
   /** Set when any buffer changed so the renderer re-uploads attributes. */
   dirty = true;
 
-  constructor(nPoints: number, nEdges = 0) {
+  constructor(nPoints: number, nEdges = 0, nTraceVertices = 0) {
     const color = new Float32Array(nPoints * 3);
     const size = new Float32Array(nPoints);
     const visible = new Float32Array(nPoints);
@@ -56,6 +64,12 @@ export class RepresentationLayer {
       edgeColor[e * 3 + 1] = DEFAULT_EDGE_COLOR[1];
       edgeColor[e * 3 + 2] = DEFAULT_EDGE_COLOR[2];
     }
-    this.state = { color, size, visible, edgeColor };
+    const traceColor = new Float32Array(nTraceVertices * 3);
+    for (let v = 0; v < nTraceVertices; v++) {
+      traceColor[v * 3] = DEFAULT_TRACE_COLOR[0];
+      traceColor[v * 3 + 1] = DEFAULT_TRACE_COLOR[1];
+      traceColor[v * 3 + 2] = DEFAULT_TRACE_COLOR[2];
+    }
+    this.state = { color, size, visible, edgeColor, traceColor };
   }
 }

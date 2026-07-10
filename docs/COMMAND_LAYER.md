@@ -259,21 +259,26 @@ inherits (`commitTargetEntries` in main.ts):
   show-wins masking means a hide may change no pixels; that's the accepted
   trade-off, not a failure.
 
-The COLOR FAMILY (`colorpoints` / `colorbonds` / `colorbondsof`) extends the
-template into REPRESENTATION state — the shape every future appearance verb
-(size, opacity, …) clones. `colorpoints` shipped first as `color` and was
-renamed when the family grew (no alias — `color` is an unknown command; the
-rename is pinned by unit, E2E, and smoke checks):
+The COLOR FAMILY (`colorpoints` / `colorbonds` / `colorbondsof` /
+`colortrace`) extends the template into REPRESENTATION state — the shape
+every future appearance verb (size, opacity, …) clones. `colorpoints`
+shipped first as `color` and was renamed when the family grew (no alias —
+`color` is an unknown command; the rename is pinned by unit, E2E, and smoke
+checks). The family is COMPLETE: three contained verbs at three
+granularities (point / edge-both / subgroup-vertex) and one intentional
+reach (`colorbondsof`):
 
 - **Non-selection mutations.** Writes land in the representation layer's
   buffers: `rep.state.color` (per-point, the `aColor` attribute) for
   colorpoints; `rep.state.edgeColor` (per-EDGE, indexed by the header's edge
-  order) for BOTH edge verbs — they compose by last-write-wins per edge. The
-  uniform base look is each buffer's initial value, so unwritten elements
-  keep it with no merge/override machinery. Wiring closures: `colorPoints`
-  and `colorEdges` in main.ts, mirroring how `refreshPoints` writes
+  order) for BOTH edge verbs — they compose by last-write-wins per edge; and
+  `rep.state.traceColor` (per-POLYLINE-VERTEX, header vertex order = the
+  flattened `header.polylines`) for colortrace. The uniform base look is
+  each buffer's initial value, so unwritten elements keep it with no
+  merge/override machinery. Wiring closures: `colorPoints`, `colorEdges`,
+  and `colorTrace` in main.ts, mirroring how `refreshPoints` writes
   `rep.state.visible` directly. Each verb writes ITS primitive's buffer and
-  touches no other (S16 asserts the independence both ways).
+  touches no other (S16/S17 assert the independence in every direction).
 - **The de-indexed edge pass** (the one render change per-edge color forced):
   flat per-edge color cannot ride an indexed LineSegments sharing the points'
   position attribute — shared vertices would bleed one edge's color onto
@@ -281,9 +286,19 @@ rename is pinned by unit, E2E, and smoke checks):
   edge (`fillEdges` in buildScene): positions re-copied from the current
   frame on every displayed-frame flip / visibility change / edge-color
   write, both vertices carrying the edge's color
-  (`LineBasicMaterial({vertexColors: true})`). Polylines keep the zero-copy
-  indexed form — they have no per-segment color yet (colortrace deferred,
-  see open threads).
+  (`LineBasicMaterial({vertexColors: true})`).
+- **The polyline pass stays zero-copy** — per-VERTEX color is exactly what
+  indexed geometry renders natively. The pass keeps sharing the points'
+  position attribute (nothing re-copies on frame flip) and gains a per-POINT
+  color attribute (indexed draws fetch attributes by point index; only the
+  polyline-vertex slots ever draw), written through from
+  `rep.state.traceColor` on color-write only. The GPU interpolates between
+  vertex colors along a segment, so a colored↔uncolored boundary renders as
+  a GRADIENT toward the base look — inherent to per-vertex color and
+  intended; there is no per-segment rule. This is the resolution of the
+  former colortrace deferral: the segment-ownership ambiguity dissolves at
+  vertex granularity (each vertex IS a point with one subgroup), and the
+  gradient boundary is accepted as the honest rendering of it.
 - **One undo system, ever** (the corollary of the founding contract): rather
   than a parallel stack, `SelectionModel.recordOp(undo)` is the one public
   seam for external undoable state — it routes through the same private
@@ -291,7 +306,7 @@ rename is pinned by unit, E2E, and smoke checks):
   on the same system-wide Ctrl+Z. Each closure captures the previous RGB of
   exactly the written elements and records their restoration (LIFO composes:
   undoing a re-color restores the *earlier* color, and unwinding every
-  stroke restores the pristine buffer — S15/S16 prove both).
+  stroke restores the pristine buffer — S15/S16/S17 prove all three).
 - **Targets exactly like `view`**: same `resolveTarget`, same point-union
   dedupe (`resolveColorArgs`, the family's shared front half in commands.ts),
   hidden points included, never commits. The verbs differ ONLY in mapping
@@ -300,10 +315,16 @@ rename is pinned by unit, E2E, and smoke checks):
   = edges with AT LEAST ONE endpoint in the set (incident — an edge whose
   other endpoint is OUTSIDE the target is colored INTENTIONALLY; the
   one-hop reach is the verb's contract and the reason it is a separate verb,
-  not a flag). One stroke per invocation; last-write-wins per element;
-  nomatch / unknown color / usage errors write nothing and push no stroke —
-  including the well-formed-but-edgeless case (`colorbonds` on a one-point
-  set). Messages report the ACTION and count (`colored N points/edges …`) —
+  not a flag); colortrace = polyline vertices whose SUBGROUP contains a
+  resolved point (contained at subgroup granularity — the map-up is
+  resolution-to-primitive-GRANULARITY, a single point activating its whole
+  subgroup's vertex, never colorbondsof's reach-out; on the synthetic data
+  a single-category target therefore colors a SCATTERED vertex set, pinned
+  as correct by S17). One stroke per invocation; last-write-wins per
+  element; nomatch / unknown color / usage errors write nothing and push no
+  stroke — including the well-formed-but-empty cases (`colorbonds` on a
+  one-point set, `colortrace` on subgroups owning no vertices). Messages
+  report the ACTION and count (`colored N points/edges/trace vertices …`) —
   show's report-the-action rule; colored-but-hidden is legitimate state.
 - **Argument shape**: `splitTrailingWord` in address.ts (pure, quote-aware)
   splits the trailing color token off the target expression, so quoted
@@ -447,23 +468,9 @@ deliberate decisions:
   reserved — labels containing `&` parse as literals today, so making it an
   operator later is a (small) breaking change for such labels. Reserve it
   first if/when the operator becomes concrete.
-- **`colortrace` (the polyline color verb) — deferred on findings, not
-  built.** The intended rule ("a polyline vertex/segment is colored iff its
-  owning subgroup contains a resolved point") assumes a segment has ONE
-  owning subgroup. It doesn't: the producer's polyline threads the
-  structured subgroups' anchor points, so **every segment spans two
-  subgroups** — and since consecutive anchors always belong to different
-  categories (subgroup % 3), a both-subgroups-activated rule colors ZERO
-  segments for any single-category target, while an either-subgroup rule
-  reproduces exactly the incident semantics the family deliberately isolates
-  in `colorbondsof`. A per-VERTEX coloring (each vertex IS a point with one
-  subgroup) is well-defined but renders as cross-boundary gradients, which
-  makes "the colored segment set" — the thing a parity test must pin —
-  ill-defined. Resolve the semantic first (likely: an explicit
-  vertex-granularity contract plus a gradient-boundary rendering decision,
-  or a segment rule stated over subgroup PAIRS); the buffer/undo/one-stroke
-  mechanics are ready to clone from the edge verbs. Until then polylines
-  keep the uniform indexed pass.
+(The former `colortrace` deferral is RESOLVED and built: the semantic
+decision landed on per-vertex color with an explicit gradient-boundary
+rendering — see the color-family section above and S17.)
 
 ## Test topology
 
@@ -501,9 +508,15 @@ deliberate decisions:
   list), the single-point pin (`colorbonds #N` nomatches while
   `colorbondsof #N` colors exactly the incident edges), the deliberate
   out-of-set reach, per-primitive buffer independence both ways, and the
-  same undo/LWW/hidden/no-write discipline on the edge buffer. The
-  harness runs the synthetic producer at **N=6000** (the extension default
-  is 20000 — counts differ).
+  same undo/LWW/hidden/no-write discipline on the edge buffer; **S17** is
+  `colortrace` — vertex parity via the seam's `traceVertices` (changed
+  vertex ids == active-subgroup vertices over `resolvePoints`), the exact
+  SCATTERED single-category set (category cycling pinned as correct), the
+  map-up pin (`#124` colors exactly its subgroup's one vertex), the
+  no-vertex nomatch (`@solvent`), three-buffer independence in every
+  direction, and the family's undo/LWW/hidden/no-write discipline on the
+  trace buffer. The harness runs the synthetic producer at **N=6000** (the
+  extension default is 20000 — counts differ).
 - **Terminal smoke** (`node tests/terminal_smoke.ts`): the real terminal
   bundle + real viewer in one page, host relay emulated by the bridge shim's
   loopback; commands (every verb incl. the color family's buffer writes,

@@ -38,6 +38,7 @@ point types `anchor` and `t0`–`t3`).
 | `colorpoints <expr> <color>` | Color those points a constant color (CSS name or `#hex`; hidden points too; last-write-wins; one undo stroke) | `colorpoints alpha green` |
 | `colorbonds <expr> <color>` | Color every edge with **both** endpoints in the target (contained) | `colorbonds beta.group-0.subgroup-0 #ff8800` |
 | `colorbondsof <expr> <color>` | Color every edge **touching** the target (either endpoint — deliberately reaches one hop outside) | `colorbondsof #124 red` |
+| `colortrace <expr> <color>` | Color polyline vertices whose **subgroup** contains a resolved point (maps up; boundary segments blend) | `colortrace alpha steelblue` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |
 | `rename @name [new]` | Rename a committed selection | `rename @selection_1 [ring]` |
 | `add @name <tree-target>` | Add tree-addressed entries as **members** at their natural level (no `@` on the right) | `add @ring alpha.group-0` |
@@ -322,19 +323,22 @@ hidden set. That shapes the pair's asymmetry:
   nothing on screen until the coverer hides too — the command still reports
   `hid "name" — N points`, because that is what it did.
 
-## The color family: `colorpoints` / `colorbonds` / `colorbondsof`
+## The color family: `colorpoints` / `colorbonds` / `colorbondsof` / `colortrace`
 
 ```
 colorpoints  <target-expr> <color>    the points themselves
 colorbonds   <target-expr> <color>    edges with BOTH endpoints in the target
 colorbondsof <target-expr> <color>    edges with AT LEAST ONE endpoint in it
+colortrace   <target-expr> <color>    polyline vertices whose SUBGROUP holds
+                                      a resolved point
 ```
 
-The **representation** verbs: they paint a renderable primitive a constant
-color. Every verb in the family targets **exactly like `view`** — the full
-grammar, the same resolver, **hidden points included**, and it never commits
-a selection — so each resolves precisely the point set `view <target>`
-frames. They differ only in how that point set maps onto a primitive:
+The **representation** verbs — the family is complete: one verb per
+renderable primitive (points, edges, polylines), plus one deliberate
+variant. Every verb targets **exactly like `view`** — the full grammar, the
+same resolver, **hidden points included**, and it never commits a selection
+— so each resolves precisely the point set `view <target>` frames. They
+differ only in how that point set maps onto a primitive:
 
 - **`colorpoints`** colors the points in the set (the identity mapping).
   (Shipped as `color`; renamed when the family grew — `color` is no longer
@@ -349,11 +353,27 @@ frames. They differ only in how that point set maps onto a primitive:
   which is why it is a separate verb, not a flag. The two edge verbs write
   the same per-edge color state, so they compose by last-write-wins per
   edge.
+- **`colortrace`** colors polyline geometry **per vertex, mapped up to the
+  subgroup level**: the subgroups containing ≥1 resolved point are *active*,
+  and a vertex colors iff its subgroup is active. This stays *contained* —
+  no vertex outside the target's subgroups ever colors; the map-up is
+  resolution-to-primitive-**granularity** (a single point activates its
+  whole subgroup's vertex), not `colorbondsof`'s reach. Segments between a
+  colored and an uncolored vertex render as a **gradient** toward the base
+  look — inherent to per-vertex color, and intended; there is no
+  per-segment rule. A target whose active subgroups own no polyline
+  vertices is a **nomatch**. (On the synthetic data a single-category
+  target like `colortrace alpha` colors a *scattered* vertex set — the
+  polyline's categories cycle — so the trace looks dashed. Correct, by
+  design.)
 
-The contained-vs-incident line is sharpest on a single point:
+So: three **contained** verbs at three granularities (point / edge-both /
+subgroup-vertex) and one intentional **reach** (`colorbondsof`). The
+contained-vs-incident line is sharpest on a single point:
 `colorbonds #124 red` is a **nomatch** (no edge has both endpoints in a
 one-point set) while `colorbondsof #124 red` colors exactly the edges
-incident to point 124.
+incident to point 124 — and `colortrace` with `#124` in scope colors
+exactly the one vertex of the subgroup owning point 124.
 
 ```
 colorpoints alpha green
@@ -363,6 +383,9 @@ colorbonds beta.group-0.subgroup-0 #ff8800
 colorbonds all blue
 colorbondsof #124 red
 colorbondsof @selection_1 steelblue
+colortrace alpha steelblue
+colortrace gamma.group-2."subgroup 11".#124 red
+colortrace all blue
 ```
 
 Shared rules (identical across the family):
@@ -372,25 +395,27 @@ Shared rules (identical across the family):
   **case-insensitive** (CSS semantics — it is a color, not a tree label);
   an unknown or malformed color is an **error** and nothing is written.
 - **Each verb writes its own primitive only**: `colorpoints` never affects
-  edges; the edge verbs never affect points or polylines. Within each
-  primitive, **last-write-wins per element** — no precedence system, no
-  blending. Elements never colored keep the uniform base look, and undoing
-  past the first write restores it.
+  edges or polylines; the edge verbs never affect points or polylines;
+  `colortrace` never affects points or edges. Within each primitive,
+  **last-write-wins per element** — no precedence system, no blending.
+  Elements never colored keep the uniform base look, and undoing past the
+  first write restores it.
 - **One undo stroke per invocation** — `Ctrl+Z` restores the exact previous
   colors, which may themselves be an earlier verb's (strokes compose LIFO).
 - **Hidden geometry colors too** — the write lands in the representation
   state regardless of visibility, and the message reports the **action**
-  (`colored N points green`, `colored N edges red`), not pixels, exactly
-  like `hide`/`show` under show-wins. The color shows whenever the geometry
-  does.
+  (`colored N points green`, `colored N edges red`, `colored N trace
+  vertices blue`), not pixels, exactly like `hide`/`show` under show-wins.
+  The color shows whenever the geometry does.
 - A nomatch or any error **writes nothing and pushes no undo stroke**. A
-  well-formed target that matches points but no edges (e.g. `colorbonds` on
-  a single point) is a nomatch too. A bare verb (or a single argument) is a
-  usage error — it needs both a target and a color.
-- Constant colors only, deliberately: gradients, by-channel mappings, other
-  appearance verbs (size, opacity), and a polyline verb (`colortrace` —
-  deferred; see `docs/COMMAND_LAYER.md` open threads) are future work that
-  will clone this family's shape.
+  well-formed target that matches points but no edges or trace vertices
+  (e.g. `colorbonds` on a single point, `colortrace` on bulk subgroups) is
+  a nomatch too. A bare verb (or a single argument) is a usage error — it
+  needs both a target and a color.
+- Constant colors only, deliberately: color *mappings* (rainbow,
+  by-channel), and other appearance verbs (size, opacity) are future work
+  that will clone this family's shape. (`colortrace`'s boundary gradient is
+  a rendering consequence of per-vertex color, not a mapping feature.)
 
 ## Listing: `ls`
 

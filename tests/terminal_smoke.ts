@@ -454,6 +454,25 @@ try {
   check("colorbondsof lands through the relay (edges incident to one point)",
     /term-ok/.test(lastLine?.cls ?? "") && /^colored \d+ edges tomato$/.test(lastLine?.text ?? ""),
     JSON.stringify(lastLine));
+  lastLine = await runLine("colortrace alpha orchid");
+  check("colortrace lands through the relay (active-subgroup vertices, mapped up)",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "colored 4 trace vertices orchid",
+    JSON.stringify(lastLine));
+  check("…and the trace buffer carries orchid on exactly the active vertices",
+    await d.evaluate<boolean>(`(()=>{
+      const v=window.__viewer; const tc=v.rep.state.traceColor;
+      const want=[0xda,0x70,0xd6].map(x=>Math.fround(x/255));
+      const active=new Set(v.debug.resolvePoints("alpha")
+        .map(p=>v.hierarchy.subgroupOfPoint(p)));
+      let hits=0;
+      for (let i=0;i<v.traceVertices.length;i++) {
+        const on=active.has(v.hierarchy.subgroupOfPoint(v.traceVertices[i]));
+        const painted=tc[3*i]===want[0]&&tc[3*i+1]===want[1]&&tc[3*i+2]===want[2];
+        if (on !== painted) return false;
+        if (painted) hits++;
+      }
+      return hits === 4;
+    })()`));
   lastLine = await runLine("colorbonds alpha nope");
   check("an unknown color is the specific error line",
     /term-err/.test(lastLine?.cls ?? "") &&

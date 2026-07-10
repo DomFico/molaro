@@ -34,7 +34,7 @@ import {
 } from "../contract/contract.ts";
 import { StreamingPlayer } from "./playback.ts";
 import { Transport, rejectIfErrorPayload } from "./transport.ts";
-import { RepresentationLayer } from "./representation.ts";
+import { DEFAULT_TRACE_COLOR, RepresentationLayer } from "./representation.ts";
 import { bulkCategories, buildTree } from "./classification.ts";
 import { flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
@@ -51,9 +51,9 @@ const LOOKAHEAD_CHUNKS = 2;
 const MAX_IN_FLIGHT = 2;
 const MAX_CACHE_BYTES = 256 * 1024 * 1024;
 
-// (the edges' base look moved to representation.ts DEFAULT_EDGE_COLOR — the
-// de-indexed edge pass reads rep.state.edgeColor per edge)
-const POLYLINE_COLOR = 0x9a7a5a;
+// (the edges' and polylines' base looks moved to representation.ts
+// DEFAULT_EDGE_COLOR / DEFAULT_TRACE_COLOR — both passes read per-element
+// representation state now)
 const BACKGROUND = 0x1e1e1e;
 const SELECTION_COLOR = 0xbfffe4; // pending-target tint (light green)
 const FOCUS_COLOR = 0xffe9a8; // camera-focus tint (light yellow)
@@ -114,6 +114,9 @@ interface SceneParts {
   /** re-copy the de-indexed edge pass (positions from the current frame,
    * colors from rep.state.edgeColor) — every displayed-frame flip needs it. */
   fillEdges: () => void;
+  /** the polyline pass's per-POINT color attribute (null without polylines);
+   * colorTrace writes rep.state.traceColor through to the vertex slots. */
+  traceColAttr: THREE.BufferAttribute | null;
 }
 
 function basePointsMaterial(pixelRatio: number): THREE.ShaderMaterial {
@@ -319,18 +322,40 @@ function buildScene(
       edgeGeo.setDrawRange(0, k);
     };
   }
-  const mkLines = (pairs: [number, number][], color: number) => {
+  // The polyline pass keeps the ZERO-COPY indexed form (positions ride the
+  // shared attribute; nothing re-copies on frame flip). Per-VERTEX color
+  // arrives as a per-POINT attribute — indexed draws fetch attributes by
+  // point index — sized 3N with only the polyline-vertex slots ever drawn;
+  // colorTrace writes it through from rep.state.traceColor on color-write
+  // only. The GPU interpolates between vertex colors along a segment, so a
+  // colored↔uncolored boundary renders as a gradient — intended, inherent
+  // to per-vertex color. (If two polyline vertices ever shared one point
+  // index, the drawn color of that point would be the later write; state
+  // stays per-vertex regardless. The producer's vertices are distinct.)
+  const polySegs = polylineSegmentPairs(header.polylines);
+  let traceColAttr: THREE.BufferAttribute | null = null;
+  let rebuildPoly: () => void = () => {};
+  if (polySegs.length > 0) {
+    const traceArr = new Float32Array(header.n_points * 3);
+    for (let p = 0; p < header.n_points; p++) {
+      traceArr[p * 3] = DEFAULT_TRACE_COLOR[0];
+      traceArr[p * 3 + 1] = DEFAULT_TRACE_COLOR[1];
+      traceArr[p * 3 + 2] = DEFAULT_TRACE_COLOR[2];
+    }
+    traceColAttr = new THREE.BufferAttribute(traceArr, 3);
+    traceColAttr.setUsage(THREE.DynamicDrawUsage);
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", positionAttr);
-    const index = new THREE.BufferAttribute(new Uint32Array(pairs.length * 2), 1);
+    geo.setAttribute("color", traceColAttr);
+    const index = new THREE.BufferAttribute(new Uint32Array(polySegs.length * 2), 1);
     index.setUsage(THREE.DynamicDrawUsage);
     geo.setIndex(index);
     geo.setDrawRange(0, 0);
-    drawables.push(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color })));
-    return () => {
+    drawables.push(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ vertexColors: true })));
+    rebuildPoly = () => {
       const arr = index.array as Uint32Array;
       let k = 0;
-      for (const [a, b] of pairs) {
+      for (const [a, b] of polySegs) {
         if (visible[a] > 0.5 && visible[b] > 0.5) {
           arr[k++] = a;
           arr[k++] = b;
@@ -339,9 +364,7 @@ function buildScene(
       index.needsUpdate = true;
       geo.setDrawRange(0, k);
     };
-  };
-  const polySegs = polylineSegmentPairs(header.polylines);
-  const rebuildPoly = polySegs.length ? mkLines(polySegs, POLYLINE_COLOR) : () => {};
+  }
   const rebuildLines = (): void => {
     fillEdges();
     rebuildPoly();
@@ -386,6 +409,7 @@ function buildScene(
     flashMat,
     rebuildLines,
     fillEdges,
+    traceColAttr,
   };
 }
 
@@ -461,7 +485,10 @@ async function main(): Promise<void> {
   container.appendChild(renderer.domElement);
 
   // -- interaction state layers ------------------------------------------------
-  const rep = new RepresentationLayer(header.n_points, header.edges.length);
+  // Polyline vertices in HEADER ORDER (flattened polylines) — the axis
+  // rep.state.traceColor is indexed by; traceVertices[v] = the point index.
+  const traceVertices = header.polylines.flat();
+  const rep = new RepresentationLayer(header.n_points, header.edges.length, traceVertices.length);
   const hierarchy = new Hierarchy(header);
   const model = new SelectionModel(hierarchy); // pending target + committed selections
   const selArray = new Float32Array(header.n_points); // per-point target flag (green)
@@ -1079,6 +1106,46 @@ async function main(): Promise<void> {
     return ids.length;
   };
 
+  /** colortrace: the POLYLINE member of the family — a constant per-VERTEX
+   * RGB in rep.state.traceColor (header vertex order), written through to
+   * the polyline pass's per-point attribute slots (indexed draws fetch by
+   * point index; write-time only — positions stay zero-copy on frame flip).
+   * Same recordOp discipline: one stroke, exact-prior-RGB restore on both
+   * the state buffer and the GPU slots, no point indices returned. */
+  const colorTrace = (vertexIds: readonly number[], rgb: [number, number, number]): number => {
+    const attr = parts.traceColAttr;
+    if (!attr || vertexIds.length === 0) return 0;
+    const tc = rep.state.traceColor;
+    const gpu = attr.array as Float32Array;
+    const ids = [...vertexIds];
+    const prev = new Float32Array(ids.length * 3);
+    const put = (v: number, r: number, g: number, b: number): void => {
+      tc[v * 3] = r;
+      tc[v * 3 + 1] = g;
+      tc[v * 3 + 2] = b;
+      const p = traceVertices[v] * 3;
+      gpu[p] = r;
+      gpu[p + 1] = g;
+      gpu[p + 2] = b;
+    };
+    for (let i = 0; i < ids.length; i++) {
+      const v = ids[i] * 3;
+      prev[i * 3] = tc[v];
+      prev[i * 3 + 1] = tc[v + 1];
+      prev[i * 3 + 2] = tc[v + 2];
+      put(ids[i], rgb[0], rgb[1], rgb[2]);
+    }
+    attr.needsUpdate = true;
+    model.recordOp(() => {
+      for (let i = 0; i < ids.length; i++) {
+        put(ids[i], prev[i * 3], prev[i * 3 + 1], prev[i * 3 + 2]);
+      }
+      attr.needsUpdate = true;
+      return [];
+    });
+    return ids.length;
+  };
+
   const commandContext = {
     hierarchy,
     tree: fullTree, // the SAME model the bottom tree renders — click parity
@@ -1106,6 +1173,8 @@ async function main(): Promise<void> {
     colorPoints,
     edges: header.edges,
     colorEdges,
+    traceVertices,
+    colorTrace,
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);
@@ -1426,6 +1495,7 @@ async function main(): Promise<void> {
       hierarchy,
       model,
       edges: header.edges, // parity audits test edge endpoints vs resolvePoints
+      traceVertices, // parity audits map vertices to subgroups vs resolvePoints
       actions: committedActions,
       command: runCommand,
       complete: runComplete,

@@ -44,6 +44,10 @@ function makeRegistry() {
   // the category boundary (point 1 in c0, point 2 in c1) — the contained-vs-
   // incident distinction is decidable from these two alone
   const edges: [number, number][] = [[0, 1], [1, 2]];
+  const traceOps: { vertexIds: number[]; rgb: [number, number, number] }[] = [];
+  // ONE polyline vertex: point 0 (subgroup s0). Point 1 shares s0 but is NOT
+  // a vertex (pins the map-up); s1 owns no vertex (pins the nomatch).
+  const traceVertices: number[] = [0];
   const ctx: CommandContext = {
     hierarchy,
     tree: buildTree(header),
@@ -189,10 +193,15 @@ function makeRegistry() {
       edgeOps.push({ edgeIds: [...edgeIds], rgb });
       return edgeIds.length;
     },
+    traceVertices,
+    colorTrace: (vertexIds, rgb) => {
+      traceOps.push({ vertexIds: [...vertexIds], rgb });
+      return vertexIds.length;
+    },
   };
   return {
     registry: createCommandRegistry(ctx),
-    calls, commits, hiddenState, refOps, memberOps, colorOps, edgeOps, sels,
+    calls, commits, hiddenState, refOps, memberOps, colorOps, edgeOps, traceOps, sels,
   };
 }
 
@@ -719,6 +728,49 @@ test("the edge verbs: nomatch / bad color / usage / parse errors write NOTHING",
     assert.equal(parseErr.status, "error", verb);
   }
   assert.equal(edgeOps.length, 0, "no path wrote anything");
+});
+
+test("colortrace: active subgroups → vertices, with the map-up to subgroup grain", () => {
+  const { registry, traceOps, colorOps, edgeOps } = makeRegistry();
+  // c0 = {0,1}: s0 active → vertex 0 (its anchor, point 0)
+  const res = registry.runCommand("colortrace c0 red");
+  assert.equal(res.status, "ok");
+  assert.equal(res.message, "colored 1 trace vertices red");
+  assert.deepEqual(traceOps[0], { vertexIds: [0], rgb: [1, 0, 0] });
+  // THE MAP-UP: point 1 is NOT a vertex, but its subgroup s0 is activated,
+  // so s0's vertex colors — resolution-to-granularity, not reach
+  const up = registry.runCommand("colortrace c0.g0.s0.b steelblue");
+  assert.equal(up.message, "colored 1 trace vertices steelblue");
+  assert.deepEqual(traceOps[1].vertexIds, [0]);
+  assert.equal(colorOps.length + edgeOps.length, 0, "no other primitive's buffer is touched");
+});
+
+test("colortrace: a target whose subgroups own no vertices is a nomatch", () => {
+  const { registry, traceOps } = makeRegistry();
+  // c1 = {2}: s1 is active but owns no polyline vertex
+  const res = registry.runCommand("colortrace c1 red");
+  assert.equal(res.status, "nomatch");
+  assert.equal(res.message, `no trace vertices in "c1"`);
+  assert.equal(traceOps.length, 0, "a no-vertex nomatch writes nothing");
+});
+
+test("colortrace: nomatch / bad color / usage / parse errors write NOTHING", () => {
+  const { registry, traceOps } = makeRegistry();
+  const nomatch = registry.runCommand("colortrace nothere red");
+  assert.equal(nomatch.status, "nomatch");
+  assert.match(nomatch.message, /nothing matches "nothere"/);
+  const bad = registry.runCommand("colortrace c0 notacolor");
+  assert.equal(bad.status, "error");
+  assert.match(bad.message, /unknown color "notacolor"/);
+  const bare = registry.runCommand("colortrace");
+  assert.equal(bare.status, "error");
+  assert.match(bare.message, /colortrace <target> <color>/);
+  const oneArg = registry.runCommand("colortrace red"); // one chunk = no target
+  assert.equal(oneArg.status, "error");
+  assert.match(oneArg.message, /needs a target and a color/);
+  const parseErr = registry.runCommand("colortrace c0.[x] red"); // [ reserved
+  assert.equal(parseErr.status, "error");
+  assert.equal(traceOps.length, 0, "no path wrote anything");
 });
 
 test("colorpoints: nomatch / bad color / usage / parse errors write NOTHING", () => {

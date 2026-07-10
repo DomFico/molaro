@@ -2930,9 +2930,181 @@ async function S16(): Promise<void> {
   });
 }
 
+async function S17(): Promise<void> {
+  console.log("S17 — colortrace: per-vertex polyline color, mapped up to subgroup grain");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const snap = (slot: string, buf: "color" | "edgeColor" | "traceColor") =>
+      d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.${buf}))`);
+    const equalsSnap = (slot: string, buf: "color" | "edgeColor" | "traceColor") =>
+      d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.${buf}, s=window.${slot};
+        if (c.length !== s.length) return false;
+        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) return false;
+        return true;
+      })()`);
+    /** Run colortrace and audit VERTEX PARITY in-page: the vertex ids whose
+     * buffer values changed must equal {V | subgroup(V) has ≥1 point in
+     * resolvePoints} — the map-up rule. Ships the changed ids back (≤12
+     * vertices in the harness) so scatter assertions can pin exact sets. */
+    const paintT = async (expr: string, tok: string) => {
+      await snap("__preTrace", "traceColor");
+      const r = await cmd(`colortrace ${expr} ${tok}`);
+      const parity = await d.evaluate<{ ids: number[]; match: boolean }>(`(()=>{
+        const v=${V}; const tc=v.rep.state.traceColor; const s=window.__preTrace;
+        const changed=[];
+        for (let i=0;i<v.traceVertices.length;i++) {
+          if (tc[3*i]!==s[3*i]||tc[3*i+1]!==s[3*i+1]||tc[3*i+2]!==s[3*i+2]) changed.push(i);
+        }
+        const active=new Set(v.debug.resolvePoints(${JSON.stringify(expr)})
+          .map(p=>v.hierarchy.subgroupOfPoint(p)));
+        const want=[];
+        for (let i=0;i<v.traceVertices.length;i++) {
+          if (active.has(v.hierarchy.subgroupOfPoint(v.traceVertices[i]))) want.push(i);
+        }
+        return { ids: changed,
+                 match: changed.length===want.length && changed.every((x,i)=>x===want[i]) };
+      })()`);
+      return { r, parity };
+    };
+    /** Every listed vertex carries exactly this RGB (0..255 ints). */
+    const verticesColored = (ids: number[], rgb: [number, number, number]) =>
+      d.evaluate<boolean>(`(()=>{
+        const tc=${V}.rep.state.traceColor;
+        const w=[${rgb.join(",")}].map(x=>Math.fround(x/255));
+        return ${JSON.stringify(ids)}
+          .every(i=>tc[3*i]===w[0]&&tc[3*i+1]===w[1]&&tc[3*i+2]===w[2]);
+      })()`);
+
+    await snap("__pristineT", "traceColor");
+    const baseDepth = await undoDepth();
+
+    // -- (a) vertex parity, incl. the SCATTERED single-category pin --------------
+    // the polyline threads subgroups whose category cycles, so alpha's vertex
+    // set is non-adjacent BY DESIGN — pinned exactly, not smoothed over
+    const alpha = await paintT("alpha", "#123456");
+    check("S17: colortrace alpha — colors EXACTLY the active-subgroup vertices",
+      alpha.r.status === "ok" && alpha.parity.match,
+      `${JSON.stringify(alpha.r)} ids=${JSON.stringify(alpha.parity.ids)}`);
+    check("S17: ...and that set is the SCATTERED [0,3,6,9] (category cycling pinned)",
+      JSON.stringify(alpha.parity.ids) === "[0,3,6,9]",
+      JSON.stringify(alpha.parity.ids));
+    check("S17: ...message reports the action and count",
+      alpha.r.message === "colored 4 trace vertices #123456", alpha.r.message);
+    for (const [expr, tok, wantIds] of [
+      ["beta.group-0.subgroup-1", "#234567", "[1]"],
+      ["#100-140", "#345678", "[1]"], // those points all sit in subgroup 1
+      ['gamma.group-2."subgroup 11"', "#456789", "[11]"],
+    ] as const) {
+      const { r, parity } = await paintT(expr, tok);
+      check(`S17: colortrace ${expr} — parity + exact ids ${wantIds}`,
+        r.status === "ok" && parity.match && JSON.stringify(parity.ids) === wantIds,
+        `${JSON.stringify(r)} ids=${JSON.stringify(parity.ids)}`);
+    }
+    await cmd("create_sele gamma [gsel]");
+    const ref = await paintT("@gsel", "#565758");
+    check("S17: colortrace @gsel — an @-reference maps up like any target",
+      ref.r.status === "ok" && ref.parity.match &&
+        JSON.stringify(ref.parity.ids) === "[2,5,8,11]",
+      JSON.stringify(ref.parity.ids));
+
+    // -- (b) the map-up granularity: one point activates its subgroup's vertex ---
+    const one = await paintT("#124", "#616263");
+    check("S17: colortrace #124 colors exactly its subgroup's ONE vertex (map-up)",
+      one.r.status === "ok" && one.parity.match &&
+        JSON.stringify(one.parity.ids) === "[1]" &&
+        one.r.message === "colored 1 trace vertices #616263",
+      `${JSON.stringify(one.r)} ids=${JSON.stringify(one.parity.ids)}`);
+
+    // -- (c) active subgroups owning no vertices = nomatch ------------------------
+    await snap("__quietT", "traceColor");
+    const depthQuiet1 = await undoDepth();
+    const bulk = await cmd("colortrace @solvent red");
+    check("S17: colortrace @solvent — bulk subgroups own no vertices → nomatch",
+      bulk.status === "nomatch" && bulk.message === `no trace vertices in "@solvent"`,
+      JSON.stringify(bulk));
+    check("S17: ...byte- and depth-identical no-op",
+      (await equalsSnap("__quietT", "traceColor")) && (await undoDepth()) === depthQuiet1);
+
+    // -- (d) independence: four verbs, three buffers, no cross-talk ---------------
+    await snap("__indepP", "color");
+    await snap("__indepE", "edgeColor");
+    await cmd("colortrace beta #0a0b0c");
+    check("S17: colortrace leaves the point AND edge buffers untouched",
+      (await equalsSnap("__indepP", "color")) && (await equalsSnap("__indepE", "edgeColor")));
+    await snap("__indepT", "traceColor");
+    await cmd("colorpoints beta #0d0e0f");
+    await cmd("colorbonds beta #101112");
+    await cmd("colorbondsof beta #131415");
+    check("S17: colorpoints/colorbonds/colorbondsof leave traceColor untouched",
+      await equalsSnap("__indepT", "traceColor"));
+
+    // -- (e) undo/LWW on the trace buffer -----------------------------------------
+    while ((await undoDepth()) > baseDepth) {
+      await d.ctrlZ();
+      await sleep(60);
+    }
+    check("S17: unwinding every stroke restores the pristine trace buffer",
+      await equalsSnap("__pristineT", "traceColor"));
+    await cmd("colortrace all red");
+    check("S17: colortrace all colors every vertex",
+      await verticesColored([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], [255, 0, 0]));
+    await cmd("colortrace alpha blue");
+    check("S17: re-coloring an overlap overwrites those vertices (LWW)",
+      (await verticesColored([0, 3, 6, 9], [0, 0, 255])) &&
+        (await verticesColored([1, 2, 4, 5], [255, 0, 0])));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S17: undo restores the PREVIOUS vertex color (red), not the base look",
+      await verticesColored([0, 3, 6, 9], [255, 0, 0]));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S17: a second undo restores the uniform trace base look",
+      await verticesColored([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11], [0x9a, 0x7a, 0x5a]));
+
+    // -- (f) a hidden target's vertices color too, one stroke ---------------------
+    await cmd("hide alpha [tmphide]");
+    const visHidden = await visibleCount(d);
+    const depthHidden = await undoDepth();
+    const hid = await paintT("alpha", "#654321");
+    check("S17: coloring a HIDDEN target's vertices writes the buffer",
+      hid.r.status === "ok" && hid.parity.match &&
+        JSON.stringify(hid.parity.ids) === "[0,3,6,9]",
+      JSON.stringify(hid));
+    check("S17: ...as exactly ONE undo stroke", (await undoDepth()) === depthHidden + 1);
+    check("S17: ...and unhides nothing", (await visibleCount(d)) === visHidden);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S17: one Ctrl+Z pops ONLY the trace stroke — the hide stands",
+      (await equalsSnap("__preTrace", "traceColor")) &&
+        (await undoDepth()) === depthHidden && (await visibleCount(d)) === visHidden);
+
+    // -- (g) the remaining quiet paths --------------------------------------------
+    await snap("__quiet2T", "traceColor");
+    const depthQuiet2 = await undoDepth();
+    const quiet: [string, string][] = [
+      ["colortrace nothere red", "nomatch"],
+      ["colortrace alpha notacolor", "error"],
+      ["colortrace", "error"],
+      ["colortrace red", "error"], // one chunk: a color but no target
+    ];
+    for (const [text, status] of quiet) {
+      const r = await cmd(text);
+      check(`S17: ${text} → ${status}`, r.status === status, JSON.stringify(r));
+    }
+    check("S17: ...none of them wrote a single component",
+      await equalsSnap("__quiet2T", "traceColor"));
+    check("S17: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet2);
+
+    await d.screenshot(`${REPORT}/S17_colortrace.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];
