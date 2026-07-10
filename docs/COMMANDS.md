@@ -73,10 +73,12 @@ Each segment holds one predicate, or a comma-list of them. All matching is
   `s*0` (starts-s-ends-0). `view alpha.group-0.subgroup-*` matches both of
   that branch's subgroups.
 - **Label range `lo-hi`** — parses the integer **at the end** of each label
-  and matches when it lies in `[lo, hi]` inclusive. `alpha.group-0.0-3`
+  and matches when it lies in the inclusive range. `alpha.group-0.0-3`
   matches `subgroup-0` and `subgroup-3`. A label with no trailing integer
-  (e.g. `solvent-bath`) never matches a range. Inverted bounds (`9-2`)
-  match nothing.
+  (e.g. `solvent-bath`) never matches a range. **Range order is not
+  semantic**: bounds normalize to `[min, max]`, so `9-2` and `2-9` denote
+  the same set — for label ranges and `#` index ranges alike. (A range names
+  a set, not a direction; a directional range would get its own syntax.)
 - **List `a,b,c`** — the union of its element predicates, evaluated within
   the same parent scope. Elements may mix kinds:
   `alpha.group-0.subgroup-0.t1,t2,anchor`.
@@ -115,6 +117,7 @@ rows. `#` addresses points by that index directly:
 
 - `view #161` — the single point with index 161.
 - `view #156-187` — every point whose index is in `[156, 187]` inclusive.
+  Bound order doesn't matter: `#187-156` is the same set.
 
 `#` is the **sole distinguisher** between an index range and a label range:
 `#44-55` matches point indices; bare `44-55` matches the trailing integer of

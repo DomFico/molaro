@@ -87,6 +87,9 @@ property every earlier suite missed while the bug was live.
   Placement is parse-enforced: standalone term or a path's 4th segment only,
   where it **intersects** the scope (containment check). Out-of-range = 
   nomatch; ranges clamp to `n_points` so `#0-99999999` materializes nothing.
+  Range bounds are UNORDERED for both kinds (`inRange` normalizes to
+  `[min, max]`; normalization before clamping): a range denotes a set, not a
+  direction — `..` stays reserved if an ordered range is ever wanted.
 - `@name` = the committed selection's stored entries; `@name.<pred>` filters
   its resolved **point set** — match-anywhere: leaf type OR subgroup/group/
   category label (via `subgroupOfPoint` → `ancestorsOfSubgroup` → `label`,

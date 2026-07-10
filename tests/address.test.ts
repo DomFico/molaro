@@ -177,10 +177,14 @@ test("range matches the trailing integer, inclusive, at every level", () => {
   assert.deepEqual(keys("beta.g-7.s7.2-9"), ["point:6"]); // t9
 });
 
-test("range: no trailing integer ⇒ no match; inverted bounds match nothing", () => {
+test("range: no trailing integer ⇒ no match; INVERTED bounds normalize to [min,max]", () => {
   assert.deepEqual(keys("env3.0-99"), []); // "bath" has no trailing int
   assert.deepEqual(keys("beta.g-7.s7.0-8"), []); // tH/anchor no int; t9 out of range
-  assert.deepEqual(keys("alpha.9-2"), []); // lo > hi
+  // range order is NOT semantic — either order denotes the same inclusive set
+  assert.deepEqual(keys("alpha.9-2"), keys("alpha.2-9"));
+  assert.deepEqual(keys("alpha.2-1"), keys("alpha.1-2")); // both groups g-1,g-2
+  assert.deepEqual(keys("alpha.2-1"), ["group:10", "group:11"]);
+  assert.deepEqual(keys("alpha.1-1"), ["group:10"]); // equal bounds: single value
 });
 
 // -- resolution: lists -----------------------------------------------------------
@@ -333,10 +337,19 @@ test("standalone #N resolves point entries unconditionally (no scope)", () => {
   assert.deepEqual(keys("#5 + beta"), ["category:1", "point:5"]); // + composes
 });
 
+test("range bounds NORMALIZE: #9-5 ≡ #5-9, in every position", () => {
+  assert.deepEqual(keys("#6-3"), keys("#3-6")); // standalone
+  assert.deepEqual(keys("#5-5"), ["point:5"]); // equal bounds untouched
+  assert.deepEqual(keys("alpha.g-1.s1.#1-0"), keys("alpha.g-1.s1.#0-1")); // scoped leaf
+  assert.deepEqual(keys("beta.g-7.s7.anchor,#6-5"), keys("beta.g-7.s7.anchor,#5-6")); // in a list
+  assert.deepEqual(keys("#7-5 + alpha"), keys("#5-7 + alpha")); // in a + union
+  assert.deepEqual(keys("@mix.#9-0", FNAMES), keys("@mix.#0-9", FNAMES)); // @name filter
+});
+
 test("out-of-range indices are an empty match (nomatch), never an error", () => {
   assert.deepEqual(keys("#500"), []); // n_points = 12
   assert.deepEqual(keys("#10-500"), ["point:10", "point:11"]); // clamped
-  assert.deepEqual(keys("#9-2"), []); // inverted bounds
+  assert.deepEqual(keys("#500-10"), ["point:10", "point:11"]); // inverted clamps the same
 });
 
 test("scoped leaf #N INTERSECTS the scope — a containment check", () => {

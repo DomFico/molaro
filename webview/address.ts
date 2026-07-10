@@ -375,7 +375,7 @@ export function resolveTarget(
       for (const p of inSel) {
         const hit = filter.predicates.some((pr) =>
           pr.kind === "index"
-            ? p >= pr.lo && p <= pr.hi
+            ? inRange(p, pr.lo, pr.hi)
             : predicateMatches(pr, types[p] ?? "") ||
               identityLabels(p).some((l) => predicateMatches(pr, l)),
         );
@@ -384,11 +384,13 @@ export function resolveTarget(
       continue;
     }
     if (term.kind === "points") {
-      // standalone "#…": unconditional point entries, clamped to the contract
-      // range — a well-formed but out-of-range index is an empty match
+      // standalone "#…": unconditional point entries. Bounds NORMALIZE first
+      // (range order is not semantic — #9-5 ≡ #5-9), then clamp to the
+      // contract range — a well-formed but out-of-range index is an empty match
       for (const spec of term.specs) {
-        const hi = Math.min(spec.hi, hierarchy.n - 1);
-        for (let p = Math.max(0, spec.lo); p <= hi; p++) add({ level: "point", id: p });
+        const lo = Math.max(0, Math.min(spec.lo, spec.hi));
+        const hi = Math.min(Math.max(spec.lo, spec.hi), hierarchy.n - 1);
+        for (let p = lo; p <= hi; p++) add({ level: "point", id: p });
       }
       continue;
     }
@@ -675,7 +677,7 @@ function segmentMatches(seg: Segment, name: string): boolean {
  * match the point INDEX, everything else the opaque type string. */
 function leafHit(seg: Segment, pointId: number, typeName: string): boolean {
   return seg.predicates.some((pr) =>
-    pr.kind === "index" ? pointId >= pr.lo && pointId <= pr.hi : predicateMatches(pr, typeName),
+    pr.kind === "index" ? inRange(pointId, pr.lo, pr.hi) : predicateMatches(pr, typeName),
   );
 }
 
@@ -689,13 +691,21 @@ export function predicateMatches(p: Predicate, name: string): boolean {
       return globMatch(p.pattern, name);
     case "range": {
       const n = trailingInt(name);
-      return n !== null && n >= p.lo && n <= p.hi;
+      return n !== null && inRange(n, p.lo, p.hi);
     }
     case "index":
       // "#" matches point INDICES, never labels; the parser confines it to
       // the leaf, where resolution handles it against the index directly
       return false;
   }
+}
+
+/** Inclusive range test with UNORDERED bounds. Range order is not semantic —
+ * a range denotes a SET, so `9-5` ≡ `5-9` for both label and # index ranges
+ * (a directional range, if ever wanted, gets its own syntax; `..` stays
+ * reserved). Equal bounds still match exactly that value. */
+function inRange(value: number, a: number, b: number): boolean {
+  return value >= Math.min(a, b) && value <= Math.max(a, b);
 }
 
 /** `*` matches any run of characters, including the empty one. Case-sensitive. */

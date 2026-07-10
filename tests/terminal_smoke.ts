@@ -203,6 +203,14 @@ try {
   check("Tab after @name. completes a selection ancestor label",
     (await inputValue()) === "view @solvent.solvent-bath", JSON.stringify(await inputValue()));
 
+  // inverted range bounds normalize: #hi-lo ≡ #lo-hi
+  lastLine = await runLine("view #10-5");
+  const forward = await runLine("view #5-10");
+  check("an inverted # range resolves identically to its forward form",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "focused 6 points" &&
+      forward?.text === lastLine?.text,
+    JSON.stringify([lastLine?.text, forward?.text]));
+
   // help through the real relay, and verb autocomplete offering it
   lastLine = await runLine("help");
   check("help prints the grammar summary through the relay",
