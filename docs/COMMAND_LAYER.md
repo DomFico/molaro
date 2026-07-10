@@ -540,6 +540,37 @@ rendering — see the representation-family section above and S17.)
   (Unlike the width follow-up, this one is visible-but-imperfect rather
   than invisible.)
 
+## Webview lifecycle: retained context (the tab-away fix)
+
+Applying representation writes, switching to another editor tab, and
+switching back used to reset the viewer to the base look. Diagnosed by CDP
+probe against the real workbench (not the harness — the harness has no
+panel lifecycle): **the viewer webview was being DESTROYED on hide and
+reloaded on re-show** — the webview CDP target vanished the moment the tab
+was hidden, a fresh target appeared on return with none of the old JS state
+(a planted `window` marker was gone), and the reloaded page re-requested
+the stream over the *surviving* broker (the producer child process never
+restarted — ruling out a reconnect as an independent cause). The reload
+wiped everything not re-derivable: the nine representation buffers (the
+only state that exists nowhere but the buffers), committed selections,
+hides, the undo stack, camera pose, and the playhead — representation loss
+was just the salient symptom. Re-seeding on a visibility/resize event was
+ruled out structurally: `RepresentationLayer` is constructed exactly once
+at page boot, and the resize path touches renderer size/camera only.
+
+**The fix**: the viewer panel now sets `retainContextWhenHidden: true`,
+exactly as the terminal panel always has (and for the same reason). The
+context survives hide, so nothing is ever "restored" — and therefore **the
+undo stack is untouched by tab round-trips, by construction**. That
+invariant is non-negotiable for any future change here: re-showing must
+never replay verbs or record strokes; state is kept (or, if a future cause
+forces re-application, re-copied) — never re-issued as commands. After a
+round-trip, Ctrl+Z pops exactly the strokes the user issued, in order
+(S20 asserts this, along with byte-identical buffers, hide-state, camera
+pose, and a pixel-level render check). Trade-off: a hidden viewer holds its
+DOM/JS/GL memory — accepted knowingly, same decision as the terminal at a
+higher cost.
+
 ## Test topology
 
 - **Unit** (`npm test`, Node-native TS): `address.test.ts` (grammar + resolver
@@ -599,9 +630,17 @@ rendering — see the representation-family section above and S17.)
   vanish at opacity 0 while the points still resolve — this check caught a
   real re-upload wiring bug), the NINE-buffer independence matrix across
   all twelve verbs, and the undo/LWW/hidden/no-write discipline on the
-  opacity axis (unwinding restores all nine buffers to pristine). The
-  harness runs the synthetic producer at **N=6000** (the extension default
-  is 20000 — counts differ).
+  opacity axis (unwinding restores all nine buffers to pristine); **S20**
+  pins the retained-webview invariants behind the tab-away fix — after
+  strokes across five buffers plus a hide, the visibility/resize round-trip
+  a RETAINED webview experiences leaves all nine rep buffers and the hide
+  state byte-identical, the undo stack untouched (no restore stroke), the
+  camera pose unchanged, and the colored pixels still rendering; Ctrl+Z
+  afterward pops exactly the user's strokes in order. (The retention itself
+  — the webview surviving a real tab hide — is validated against the
+  packaged VSIX by the real-VS-Code CDP probe, since the harness has no
+  panel lifecycle.) The harness runs the synthetic producer at **N=6000**
+  (the extension default is 20000 — counts differ).
 - **Terminal smoke** (`node tests/terminal_smoke.ts`): the real terminal
   bundle + real viewer in one page, host relay emulated by the bridge shim's
   loopback; commands (every verb incl. the representation family's buffer

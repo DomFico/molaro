@@ -3585,9 +3585,134 @@ async function S19(): Promise<void> {
   });
 }
 
+async function S20(): Promise<void> {
+  console.log("S20 — representation state survives hidden→visible (and restore touches no undo)");
+  // The tab-away loss was CAUSE #1: without retainContextWhenHidden VS Code
+  // destroyed the webview on hide and reloaded it on re-show (confirmed by
+  // CDP probe against the real workbench — the webview target vanishes, a
+  // fresh one appears, window state is gone). The fix retains the context,
+  // so a RETAINED webview experiences only visibility/resize events on the
+  // round-trip. This scenario pins the webview-side invariants that make
+  // retention sufficient: nothing on the visibility/resize path re-seeds or
+  // re-allocates rep state, nothing touches the undo stack, and the pixels
+  // still render afterward. (The retention itself is validated against the
+  // packaged VSIX by the real-VS-Code probe — the harness has no panel
+  // lifecycle to drive.)
+  const BUFS = [
+    "color", "edgeColor", "traceColor",
+    "size", "edgeSize", "traceSize",
+    "opacity", "edgeOpacity", "traceOpacity",
+  ] as const;
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const snap = (slot: string, buf: string) =>
+      d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.${buf}))`);
+    const equalsSnap = (slot: string, buf: string) =>
+      d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.${buf}, s=window.${slot};
+        if (c.length !== s.length) return false;
+        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) return false;
+        return true;
+      })()`);
+    const cameraPose = () =>
+      d.evaluate<number[]>(`(()=>{
+        const v=${V};
+        return [...v.camera.position.toArray(), ...v.controls.target.toArray()];
+      })()`);
+    const redCount = (b64: string) =>
+      d.evaluate<number>(`(async () => {
+        const app = document.getElementById('app').getBoundingClientRect();
+        const img = new Image();
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+        const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+        const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+        const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+          Math.round(app.width), Math.round(app.height) - 60).data;
+        let n = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) n++;
+        }
+        return n;
+      })()`);
+
+    // -- user strokes across five buffers (point/edge/trace, all three axes) -----
+    await cmd("hide gamma [ghide]"); // hide-state must survive too
+    await cmd("colorpoints alpha.group-0.subgroup-0 red");
+    await cmd("pointsize beta 2");
+    await cmd("pointopacity beta 0.4");
+    await cmd("colorbonds alpha #ff8800");
+    await cmd("colortrace alpha steelblue");
+    for (const b of BUFS) await snap(`__pre_${b}`, b);
+    await snap("__preVis", "visible");
+    const depthBefore = await undoDepth();
+    const poseBefore = JSON.stringify(await cameraPose());
+    const redBefore = await redCount(await d.captureB64(`${REPORT}/S20_before.png`));
+    check("S20: (setup) the colored subgroup renders red pixels", redBefore > 50,
+      `red=${redBefore}`);
+
+    // -- the retained-webview round-trip: visibility + resize events --------------
+    await d.evaluate(`(()=>{
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("resize"));
+      window.dispatchEvent(new Event("panelrelayout"));
+      ${V}.applyResize();
+      document.dispatchEvent(new Event("visibilitychange"));
+      window.dispatchEvent(new Event("resize"));
+      ${V}.applyResize();
+    })()`);
+    await sleep(600);
+
+    // -- the invariants -------------------------------------------------------------
+    let allSame = true;
+    for (const b of BUFS) allSame = allSame && (await equalsSnap(`__pre_${b}`, b));
+    check("S20: all NINE rep-state buffers byte-identical across the round-trip", allSame);
+    check("S20: hide-state byte-identical across the round-trip",
+      await equalsSnap("__preVis", "visible"));
+    check("S20: the undo stack is UNTOUCHED (no restore stroke, no depth change)",
+      (await undoDepth()) === depthBefore,
+      `depth=${await undoDepth()} vs ${depthBefore}`);
+    check("S20: camera pose survives",
+      JSON.stringify(await cameraPose()) === poseBefore);
+    const redAfter = await redCount(await d.captureB64(`${REPORT}/S20_after.png`));
+    check("S20: the colored pixels still render after the round-trip (re-upload intact)",
+      redAfter > 50 && Math.abs(redAfter - redBefore) < redBefore * 0.5,
+      `before=${redBefore} after=${redAfter}`);
+
+    // -- undo still pops EXACTLY the user's strokes, in order ----------------------
+    await d.ctrlZ(); // pops the colortrace stroke, nothing else
+    await sleep(120);
+    check("S20: Ctrl+Z after the round-trip pops the LAST user stroke (colortrace)",
+      (await d.evaluate<boolean>(`(()=>{
+        const tc=${V}.rep.state.traceColor; const base=[0x9a,0x7a,0x5a].map(x=>Math.fround(x/255));
+        for (let i=0;i<tc.length/3;i++) {
+          if (tc[3*i]!==base[0]||tc[3*i+1]!==base[1]||tc[3*i+2]!==base[2]) return false;
+        }
+        return true;
+      })()`)) && (await equalsSnap("__pre_edgeColor", "edgeColor")),
+      "traceColor back to base; edgeColor still written");
+    await d.ctrlZ(); // pops the colorbonds stroke
+    await sleep(120);
+    check("S20: a second Ctrl+Z pops the NEXT stroke (colorbonds), in order",
+      await d.evaluate<boolean>(`(()=>{
+        const ec=${V}.rep.state.edgeColor; const base=[0x5a,0x7a,0x9a].map(x=>Math.fround(x/255));
+        for (let e=0;e<ec.length/3;e++) {
+          if (ec[3*e]!==base[0]||ec[3*e+1]!==base[1]||ec[3*e+2]!==base[2]) return false;
+        }
+        return true;
+      })()`));
+    check("S20: ...and the earlier strokes are still in place beneath",
+      (await equalsSnap("__pre_color", "color")) && (await equalsSnap("__pre_size", "size")) &&
+        (await equalsSnap("__pre_opacity", "opacity")));
+
+    await d.screenshot(`${REPORT}/S20_survival.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

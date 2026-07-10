@@ -139,6 +139,20 @@ function openPanel(
     vscode.ViewColumn.Active,
     {
       enableScripts: true,
+      // Keep the viewer's context alive while its tab is backgrounded.
+      // Without this, VS Code DESTROYS the webview on hide and reloads the
+      // page from scratch on re-show (confirmed by CDP probe: the webview
+      // target vanishes on hide; a fresh target with none of the old JS
+      // state appears on return, and the page re-requests the stream over
+      // the surviving broker). That wiped everything not re-derivable —
+      // the nine representation buffers (the only state that exists
+      // nowhere but the buffers), committed selections, hides, the undo
+      // stack, camera pose, and the playhead. Retention keeps the live
+      // context, so nothing is "restored" — and therefore the undo stack
+      // is untouched by tab round-trips, by construction. Trade-off: a
+      // hidden viewer holds its DOM/JS/GL memory (same decision as the
+      // terminal panel below, at a higher cost accepted knowingly).
+      retainContextWhenHidden: true,
       localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist", "webview")],
     },
   );
