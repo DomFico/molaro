@@ -4,10 +4,20 @@
  * (webview/commands.ts) feeds verb arguments through here.
  *
  *   target-expr := term ("+" term)*             union across subtrees
- *   term        := path | at-term | index-term
+ *   term        := path | at-term | index-term | "all"
  *   at-term     := "@" name ("." leaf-pred)?    @name = a committed selection,
  *                                               optionally FILTERED by ONE
  *                                               leaf predicate (a "," list)
+ *
+ * `all` (a whole term, exactly that token) = every point in the system —
+ * the union of all top-level categories, evaluated at command time. `@all`
+ * (the RESERVED name "all") = the union of every committed selection's
+ * stored entries, also evaluated at command time; with no selections it
+ * resolves to nothing. They are DIFFERENT sets: `all` is everything in
+ * existence, `@all` everything currently committed. `all.x` / `all,x` fall
+ * back to an ordinary literal (a label that happens to read "all"), and
+ * `"all"` quoted is always the literal — the keyword applies only to the
+ * bare, whole term. Selections cannot be created or renamed to "all".
  *   index-term  := "#" index-spec ("," "#" index-spec)*
  *   index-spec  := "*" | INT | INT "-" INT      the CONTRACT POINT INDEX
  *                                               ("#*" = every index in scope)
@@ -80,7 +90,8 @@ export interface Segment {
 export type Term =
   | { kind: "path"; segments: Segment[] }
   | { kind: "ref"; name: string; filter?: Segment } // "@name" / "@name.<leaf-pred>"
-  | { kind: "points"; specs: { lo: number; hi: number }[] }; // standalone "#…"
+  | { kind: "points"; specs: { lo: number; hi: number }[] } // standalone "#…"
+  | { kind: "all" }; // the bare keyword term "all" — every point in the system
 
 export interface TargetAst {
   kind: "target";
@@ -190,6 +201,16 @@ class Parser {
         throw new Failure(`unexpected "${c}" after "@${name}"`);
       }
       return filter ? { kind: "ref", name, filter } : { kind: "ref", name };
+    }
+    // the bare keyword term "all" — only when it IS the whole term (a
+    // following "." or "," demotes it to an ordinary literal segment, and
+    // the quoted form "\"all\"" is always the literal)
+    if (this.s.startsWith("all", this.i)) {
+      const after = this.s[this.i + 3];
+      if (after === undefined || after === "+" || /\s/.test(after)) {
+        this.i += 3;
+        return { kind: "all" };
+      }
     }
     if (this.s[this.i] === "#") {
       // standalone index term: "#N" / "#lo-hi", optionally a "#"-only list
@@ -357,8 +378,18 @@ export function resolveTarget(
     }
   };
   for (const term of ast.terms) {
+    if (term.kind === "all") {
+      // everything in the system, as the top-level category entries
+      // (entry-level parity: create_sele all commits the coarse categories)
+      for (const c of tree.categories) add({ level: "category", id: c.categoryIndex });
+      continue;
+    }
     if (term.kind === "ref") {
-      const stored = committedNames.get(term.name) ?? [];
+      // "@all" is the RESERVED union of every committed selection's entries
+      const stored =
+        term.name === "all"
+          ? [...committedNames.values()].flat()
+          : (committedNames.get(term.name) ?? []);
       if (!term.filter) {
         for (const e of stored) add(e);
         continue;
@@ -530,7 +561,10 @@ export function completeTarget(
   // shows, and exactly what a @name.<token> filter can match (consistency
   // principle 1: no descendant tokens, no ancestry pool). Deduped by finish().
   const selectionPool = (selName: string): string[] | null => {
-    const stored = committedNames.get(selName);
+    const stored =
+      selName === "all"
+        ? [...committedNames.values()].flat() // "@all" = the union membership
+        : committedNames.get(selName);
     if (!stored) return null;
     return stored
       .map((e) => (e.level === "point" ? (types[e.id] ?? "") : hierarchy.label(e)))
@@ -542,11 +576,11 @@ export function completeTarget(
   // level exists below it): second Tab appends "." and offers the
   // selection's identity pool; a partial name settles with no dot.
   if (before.endsWith("@")) {
-    if (token !== "" && committedNames.has(token)) {
+    if (token !== "" && (committedNames.has(token) || token === "all")) {
       const next = [...new Set(selectionPool(token) ?? [])].sort();
       return { ...capped(ts, next, ".", "."), kind: "filter" };
     }
-    return finish(ts, token, committedNames.keys(), "");
+    return finish(ts, token, [...committedNames.keys(), "all"], "");
   }
 
   // current term = after the last "+" (or after the verb); the structural

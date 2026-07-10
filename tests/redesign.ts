@@ -2249,9 +2249,158 @@ async function S12(): Promise<void> {
   });
 }
 
+async function S13(): Promise<void> {
+  console.log("S13 — all/@all, hide's commit rule (principle 3), ls, rename");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    // setup: a second selection alongside the visible bulk seed
+    await cmd("create_sele alpha.group-0.subgroup-3 [mix]");
+    check("S13: (setup) two committed selections", (await committed(d)).length === 2);
+    const baseUndo = await undoDepth();
+
+    // -- hide @all: every committed selection, IN PLACE, one undo op ----------
+    let r = await cmd("hide @all");
+    let sels = await committed(d);
+    check("S13: hide @all hides every selection in place — nothing new committed",
+      r.status === "ok" && r.message === "hid 4900 points across 2 selections" &&
+        sels.length === 2 && sels.every((c) => c.hidden),
+      JSON.stringify({ r, sels }));
+    check("S13: ...their points leave the render", (await visibleCount(d)) === 1100);
+    check("S13: ...as ONE undo op", (await undoDepth()) === baseUndo + 1);
+    r = await cmd("hide @all");
+    check("S13: hide @all is idempotent across the batch — never a toggle",
+      r.message === "already hidden" && (await undoDepth()) === baseUndo + 1,
+      JSON.stringify(r));
+    await d.ctrlZ();
+    await sleep(150);
+    check("S13: one Ctrl+Z restores the whole batch",
+      (await visibleCount(d)) === 6000 && (await undoDepth()) === baseUndo);
+
+    // -- hide @a + @b ≡ hide @all here: all-reference target, same rule -------
+    r = await cmd("hide @solvent + @mix");
+    check("S13: hide @a + @b hides both in place (no commit)",
+      r.message === "hid 4900 points across 2 selections" &&
+        (await committed(d)).length === 2 && (await visibleCount(d)) === 1100,
+      JSON.stringify(r));
+    r = await cmd("hide @solvent + @mix [x]");
+    check("S13: [name] on an already-committed target is a usage error",
+      r.status === "error" && /applies only when hide commits/.test(r.message),
+      JSON.stringify(r));
+    await cmd("show");
+    check("S13: (reset) everything visible again", (await visibleCount(d)) === 6000);
+
+    // -- any non-reference term: the WHOLE target commits, ONCE ----------------
+    const depthBeforeMix = await undoDepth();
+    r = await cmd("hide @mix + alpha.group-0.subgroup-0 [combo]");
+    sels = await committed(d);
+    const combo = sels.find((c) => c.name === "combo");
+    check("S13: a non-reference term makes the whole target commit as ONE selection",
+      r.message === `created and hid "combo" — 200 points` &&
+        sels.length === 3 && !!combo && combo.hidden,
+      JSON.stringify({ r, names: sels.map((s) => s.name) }));
+    check("S13: ...the referenced @mix stays untouched",
+      sels.find((c) => c.name === "mix")!.hidden === false);
+    check("S13: ...show-wins keeps @mix's covered points visible",
+      (await visibleCount(d)) === 5900);
+    check("S13: ...commit + hide = ONE undo op", (await undoDepth()) === depthBeforeMix + 1);
+    await d.ctrlZ();
+    await sleep(150);
+    check("S13: one Ctrl+Z removes combo and restores visibility",
+      (await committed(d)).length === 2 && (await visibleCount(d)) === 6000);
+
+    // -- hide all: the everything KEYWORD is not a reference -------------------
+    r = await cmd("hide all");
+    check("S13: hide all commits ONE selection holding the whole system, honestly sized",
+      /^created and hid "selection_\d+" — 6000 points$/.test(r.message) &&
+        (await committed(d)).length === 3,
+      JSON.stringify(r));
+    check("S13: ...show-wins: points covered by visible selections stay",
+      (await visibleCount(d)) === 4900);
+    await d.ctrlZ();
+    await sleep(150);
+    check("S13: hide all fully reversed by one Ctrl+Z",
+      (await committed(d)).length === 2 && (await visibleCount(d)) === 6000);
+
+    // -- rename: command ≡ the panel's inline rename ---------------------------
+    const depthBeforeRen = await undoDepth();
+    r = await cmd("rename @mix [alpha-picks]");
+    check("S13: rename routes through the model — one undo op",
+      r.status === "ok" && r.message === `renamed "mix" → "alpha-picks"` &&
+        (await committed(d)).some((c) => c.name === "alpha-picks") &&
+        (await undoDepth()) === depthBeforeRen + 1,
+      JSON.stringify(r));
+    check("S13: the panel header shows the new name",
+      !!(await selHead(d, "/alpha-picks/")) && !(await selHead(d, "/^mix$/")));
+    r = await cmd("rename @alpha-picks [solvent]");
+    check("S13: rename collision = the inline-rename error, exactly",
+      r.status === "error" && r.message === `a selection named "solvent" already exists`,
+      JSON.stringify(r));
+    r = await cmd(`rename @alpha-picks [all]`);
+    check(`S13: "all" is reserved as a selection name`,
+      r.status === "error" && /reserved/.test(r.message), JSON.stringify(r));
+    r = await cmd("create_sele beta [all]");
+    check("S13: ...create_sele can't take it either",
+      r.status === "error" && /reserved/.test(r.message), JSON.stringify(r));
+    await d.ctrlZ();
+    await sleep(150);
+    check("S13: Ctrl+Z undoes the rename (parity with inline rename)",
+      (await committed(d)).some((c) => c.name === "mix") &&
+        (await undoDepth()) === depthBeforeRen);
+
+    // -- ls: the panel's truth as read-only text --------------------------------
+    const depthBeforeLs = await undoDepth();
+    r = await cmd("ls");
+    check("S13: ls lists the committed selections with sizes",
+      r.status === "ok" && /solvent — 4800 points/.test(r.message) &&
+        /mix — 100 points/.test(r.message),
+      JSON.stringify(r));
+    r = await cmd("ls @mix");
+    check("S13: ls @name = the STORED members, at their stored levels",
+      r.status === "ok" && r.message === "subgroup-3 — 100 points", JSON.stringify(r));
+    // parity with the panel: mix's member list holds exactly that subgroup entry
+    await d.evaluate(`(()=>{
+      const b=[...document.querySelectorAll('#selections .sel-block')]
+        .find(x=>x.querySelector('.sel-name')?.textContent==='mix');
+      const body=b.querySelector('.sel-body');
+      if (body.style.display==='none' || !body.hasChildNodes()) b.querySelector('.caret').click();
+    })()`);
+    await sleep(200);
+    const panelMembers = await d.evaluate<string[]>(`(()=>{
+      const b=[...document.querySelectorAll('#selections .sel-block')]
+        .find(x=>x.querySelector('.sel-name')?.textContent==='mix');
+      return [...b.querySelectorAll('.tree-row.selectable')]
+        .filter(r=>r.getBoundingClientRect().height>0 && r.dataset.level==='subgroup')
+        .map(r=>r.textContent.trim());
+    })()`);
+    check("S13: ...exactly what the panel's member list shows",
+      panelMembers.length === 1 && /subgroup-3/.test(panelMembers[0]),
+      JSON.stringify(panelMembers));
+    r = await cmd("ls @all");
+    check("S13: ls @all pools every selection's members",
+      r.status === "ok" && r.message === "solvent — 4800 points\nsubgroup-3 — 100 points",
+      JSON.stringify(r));
+    r = await cmd("ls alpha.group-0");
+    check("S13: ls <path> lists the contents ONE level below",
+      r.status === "ok" && /subgroup-0 — 100 points/.test(r.message) &&
+        /subgroup-3 — 100 points/.test(r.message),
+      JSON.stringify(r));
+    r = await cmd("ls solvent.solvent-bath");
+    check("S13: long listings cap with a count-and-hint (completion's rule)",
+      r.status === "ok" && r.message === "1600 items — narrow the target",
+      JSON.stringify(r));
+    r = await cmd("ls @nope");
+    check("S13: ls honest nomatch", r.status === "nomatch", JSON.stringify(r));
+    check("S13: ls created NO state — undo depth untouched",
+      (await undoDepth()) === depthBeforeLs);
+    await d.screenshot(`${REPORT}/S13_batch.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

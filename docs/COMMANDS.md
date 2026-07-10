@@ -27,12 +27,17 @@ point types `anchor` and `t0`–`t3`).
 | `"…"` | Quote labels containing spaces/delimiters | `view gamma.group-2."subgroup 11"` |
 | `#N` / `#lo-hi` / `#*` | Point(s) by **contract index** (the `#N` on point rows; `#*` = all in scope) | `view #161`, `view #156-187` |
 | `@name` | A committed selection (its whole point set) | `view @selection_1` |
-| `@name.<pred>` | Filter the selection: keep points whose **type or any ancestor label** matches | `view @selection_1.anchor` |
+| `@name.<pred>` | Filter the selection's **stored members**: a member's own label, or a point member's type/index | `view @selection_1.anchor` |
+| `all` | Everything in existence (every top-level category) | `hide all` |
+| `@all` | Everything **committed** (the union of every selection) | `hide @all` |
 | `a + b` | Union of terms (the only cross-subtree operator) | `view alpha + @selection_1.t0` |
 | `view` | Frame the visible scene (no argument) | `view` |
 | `create_sele <expr> [name]` | Commit the target as a new selection (auto-named without `[name]`) | `create_sele alpha.group-0.* [ring]` |
-| `hide <expr>` / `hide @name[.pred]` | Hide it (an uncommitted target commits first); never toggles | `hide @selection_1.t0` |
+| `hide <expr>` / `hide @name[.pred]` | Hide it (an uncommitted target commits first; an all-`@` target hides in place) | `hide @selection_1.t0` |
 | `show [<expr>` / `@name[.pred]]` | Clear hidden state (never commits); bare `show` reveals everything | `show @selection_1` |
+| `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |
+| `rename @name [new]` | Rename a committed selection | `rename @selection_1 [ring]` |
+| `clear` | Wipe the terminal's own log (viewer state untouched) | `clear` |
 | `help` / `?` | This summary; `help <verb>` describes one verb | `help view` |
 
 ## The mental model: one segment per level
@@ -147,35 +152,52 @@ section — by its exact name. Names containing spaces are quoted:
 - A selection is a **flat set of points**: there is no descent past `@name`,
   only a single optional trailing predicate. `@name.a.b` is a parse error.
 
-### Filtering: `@name.<predicate>` matches anywhere
+### Filtering: `@name.<predicate>` filters the STORED MEMBERS
 
-The trailing predicate keeps each of the selection's points whose **leaf type
-OR any ancestor label** (subgroup, group, or category) matches — one rule for
-all of these:
+The trailing predicate filters the selection's **member list** — exactly
+what the panel shows under its block (and what `ls @name` prints). Each
+member is matched at its own level: a label-level member (category, group,
+or subgroup entry) by its **label**; a point-level member by its **type or
+`#index`**. The result is the whole matched members.
 
 ```
-view @selection_1.anchor          points whose TYPE is anchor
-view @selection_1."subgroup 11"   its points under that SUBGROUP
-view @selection_1.group-0         its points under that GROUP
-view @selection_1.alpha           its points under that CATEGORY
-view @selection_1.t*              a glob, matched against type and all labels
-view @selection_1.#161            its point 161 (containment check)
-view @selection_1.t0,anchor       lists union, as in any segment
+view @picks.anchor          its POINT members whose type is anchor
+view @picks."subgroup 11"   that member, if the SUBGROUP is a stored member
+view @picks.#161            its stored point member 161
+view @picks.s*              a glob over member labels and types
+view @picks.t0,anchor       lists union, as in any segment
 ```
 
-The selection's *membership* is flat — that's what the panel lists — but its
-points retain their full ancestry (type, subgroup, group, category), and the
-filter matches against exactly that. So filtering a flat selection by a
-subgroup, group, or category token is expected, not a contradiction.
+The filter never reaches **inside** a member: if the selection stores a
+whole subgroup, the types, indices, and deeper labels of the points under it
+are not members and match nothing — that granularity isn't in the
+selection. To address finer pieces, commit a finer selection first
+(`create_sele alpha.group-0.subgroup-0.* [fine]`); its members then ARE the
+points, and the same tokens match. Depth is a property of how a selection
+was committed, not of the filter. This keeps every command result something
+the panel can display and every hide something its gestures can reverse.
 
-If a token matches at more than one level (or different points at different
-levels), the result is the **union of all matching points** — deliberately
-broad, never a "which level did you mean" question. If the framed set is
-larger than intended, type a narrower predicate. A `:` in the filter is
-reserved for a future explicit level qualifier and is currently a parse
-error, and combining two conditions (a label **and** a type) is not yet
-expressible — the reserved `&` intersection operator is the intended future
-path (the `@name.a.b` error says so).
+A `:` in the filter is reserved for a future explicit level qualifier and
+is currently a parse error, and combining two conditions (a label **and** a
+type) is not yet expressible — the reserved `&` intersection operator is
+the intended future path (the `@name.a.b` error says so).
+
+### `all` and `@all` — the two "everything" terms
+
+- `all` (bare keyword) is **everything in existence**: it resolves to every
+  top-level category, exactly as if you had unioned them by hand. It is
+  only a keyword standing alone as a term — `all.x`, `allx`, and `"all"`
+  are ordinary labels.
+- `@all` is **everything committed**: the union of every committed
+  selection's members, deduplicated. With nothing committed it matches
+  nothing (an honest nomatch). `@all.<pred>` filters the pooled membership
+  under the same stored-members rule.
+
+Both are ordinary terms and compose with `+`. The difference matters most
+to `hide` (see below): `hide @all` hides your existing selections in
+place, while `hide all` creates one new selection holding the whole
+system. Because `@all` must always mean this, **`all` is refused as a
+selection name** by `create_sele` and `rename`.
 
 ## Union: `+`
 
@@ -253,38 +275,82 @@ full address grammar above (any term kind, any union); no new syntax.
 Hiding is a property of **committed selections** — there is no free-floating
 hidden set. That shapes the pair's asymmetry:
 
-- **`hide <target>`** (a path/glob/`#`/range/list target) — the target
-  **commits first** (exactly like `create_sele`, including the optional
-  trailing `[name]` and its collision rule), then the new selection hides —
-  one action, **one undo**: a single `Ctrl+Z` removes the selection and its
-  hidden state together. The full cascade plays: green commit pulse → the new
-  block → brackets → purple.
+- **The commit rule — hide commits only what isn't already committed,
+  all-or-nothing at the target level.** A target made **entirely of `@`
+  references** (`hide @a`, `hide @a + @b`, `hide @all`) is already
+  committed: hide flips hidden state on those selections **in place**,
+  creates nothing, and the whole batch is **one undo op**; a `[name]` there
+  is a usage error. A target containing **any non-reference term** — a
+  path, glob, `#`, range, list, or the `all` keyword — **commits first as
+  ONE new selection** (exactly like `create_sele`, including the optional
+  trailing `[name]` and its collision rule), then hides — one action, **one
+  undo**: a single `Ctrl+Z` removes the selection and its hidden state
+  together. Referenced terms in a mixed target contribute their members to
+  the new selection but their own selections stay untouched (show-wins
+  covers the overlap). So `hide @all` hides your existing selections and
+  creates nothing, while `hide all` creates one selection holding the
+  whole system and reports its honest full size. The full cascade plays on
+  the commit arm: green commit pulse → the new block → brackets → purple.
 - **`hide @name`** — sets the whole-selection hidden flag. No commit, no
   green — purple only, points drop per show-wins.
-- **`hide @name.<pred>`** — hides the matched members of an existing
-  selection (`@sel.#12`, `@sel.#12-40`, `@sel.#*`, or type/label predicates
-  matched against its points). Members fully matched go purple as rows; a
-  subset *inside* a coarse member hides exactly those points, reported in the
-  block's "N hidden" count (there is no row for a sub-member point).
+- **`hide @name.<pred>`** — hides the matched **stored members** of an
+  existing selection (`@sel.#12`, `@sel.#*`, or label/type predicates over
+  the member list — the stored-members rule above). Matched members go
+  purple as rows, exactly like the member right-click.
 - `hide` **never toggles** — hiding something already hidden is an idempotent
   `already hidden` line (the header right-click gesture toggles; the verb
   chooses directional clarity). Bare `hide` is an **error** — there is no
-  "hide everything".
+  "hide everything" (say `hide all` or `hide @all` and mean it).
 - **`show` never commits** — a point in no selection is already visible.
   `show @name` makes the **whole selection visible**: it clears the
   whole-selection flag *and* every per-member hide, so it is the reliable
   inverse of any hiding on that selection. `show @name.<pred>` clears
-  **exactly** the matched subset of the hidden members — hidden state stored
-  at a coarser grain splits as needed, so a narrower predicate never reveals
-  a superset (and if the selection is hidden *whole*, the subset form tells
-  you: `hidden whole — show @name to reveal it`). `show <target>` clears
-  hidden state *covering* those points wherever it lives — and no-ops
-  honestly (`nothing hidden there`) when nothing is. Bare **`show` reveals
-  everything** (non-destructive, one undo op).
+  **exactly** the matched hidden members (and if the selection is hidden
+  *whole*, the subset form tells you: `hidden whole — show @name to reveal
+  it`). `show <target>` clears hidden state *covering* those points
+  wherever it lives — and no-ops honestly (`nothing hidden there`) when
+  nothing is. Bare **`show`** and **`show @all`** reveal everything
+  (non-destructive, one undo op).
 - **Messages report the action, not pixels**: under show-wins, hiding a
   selection whose points are covered by another *visible* selection changes
   nothing on screen until the coverer hides too — the command still reports
   `hid "name" — N points`, because that is what it did.
+
+## Listing: `ls`
+
+`ls` is **read-only** — it never changes viewer state and never adds an
+undo step. Three forms, each the text twin of a panel surface:
+
+```
+ls                     the committed selections: name — N points [· hidden]
+ls @name               that selection's STORED members, as the panel lists them
+ls @all                every selection's members, pooled
+ls alpha.group-0       the contents ONE level below the resolved node(s)
+```
+
+For a path, `ls` lists the immediate children of whatever the path
+resolves to (subgroups under a group, points under a subgroup); points have
+nothing below. Very long listings cap with a count-and-hint
+(`1600 items — narrow the target`) — the same volume rule Tab completion
+uses. `ls` takes no `[name]`, and an empty result is an honest nomatch.
+
+## Renaming: `rename @name [new-name]`
+
+Renames a committed selection — the command twin of the panel's inline
+rename (double-click the block's name), sharing its machinery: **one undo
+op**, and the same collision error if `new-name` is taken. The target must
+be exactly one unfiltered `@name` (`@all`, predicates, paths, and unions
+are usage errors), the new name must be bracketed, and `all` is refused
+(reserved so `@all` always means the union of every selection).
+
+## `clear` — wipe the terminal log
+
+`clear` empties the terminal's own output log. It is **terminal-local**:
+nothing reaches the viewer, no selection or hidden state changes, no undo
+step is created; the command history (Up/Down) survives. Not to be
+confused with the panel's **Clear button**, which discards the pending
+(uncommitted) target in the sidebar — that one *is* a viewer operation,
+with its own two-step confirm.
 
 ## Tab completion — stateless and two-stage
 
@@ -308,9 +374,10 @@ prior presses. The two stages come from the token under the cursor:
   nothing further.
 
 Verb completion appends a space on a unique match; after `@name.` candidates
-are that selection's own identity tokens (types + ancestor labels) — the
-exact set a `@name.<token>` filter would match, because a selection is a flat
-set of points with no structure to enter. To keep that unmistakable, the
+are the selection's stored-member tokens (member labels + point-member
+types) — the exact set a `@name.<token>` filter could match, because a
+selection is a flat bag of members with no structure to enter. To keep that
+unmistakable, the
 terminal prints these under a `filter by (type or label):` header — each
 token is a **predicate you could apply**, not a member of the selection.
 Path-level completion has no header: those candidates genuinely are tree

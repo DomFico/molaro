@@ -112,6 +112,15 @@ function main(): void {
       history.push(text);
       histAt = -1;
       draft = "";
+      if (text === "clear") {
+        // Terminal-local: wipes this log only — never reaches viewer state,
+        // creates no undo step. (The panel's "Clear" button is a different
+        // operation: it discards the pending target.)
+        log.replaceChildren();
+        lastPreview = null;
+        input.value = "";
+        return;
+      }
       print("term-echo", `› ${text}`);
       host.postMessage({ type: "command", id: nextId++, text });
       input.value = "";

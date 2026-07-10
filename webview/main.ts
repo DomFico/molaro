@@ -751,6 +751,9 @@ async function main(): Promise<void> {
     name: string | null,
     hide = false, // hide <target>: commit-then-hide, ONE stroke = one undo
   ): { name: string; points: number } | { error: string } => {
+    if (name === "all") {
+      return { error: `"all" is reserved — @all means the union of every committed selection` };
+    }
     if (name !== null && model.committed().some((c) => c.name === name)) {
       return { error: `a selection named "${name}" already exists` };
     }
@@ -780,13 +783,58 @@ async function main(): Promise<void> {
   // undo op, the panel cascade playing through model.onChange as always.
   const selByName = (name: string) => model.committed().find((c) => c.name === name);
 
-  /** Whole-selection hide/show. affected 0 = already in that state. */
-  const setSelectionHidden = (name: string, hidden: boolean): { affected: number } | null => {
-    const sel = selByName(name);
-    if (!sel) return null;
-    const affected = model.setHidden(sel.id, hidden);
+  /** Hide/show a BATCH of committed references in place — whole selections
+   * and/or member subsets — inside ONE stroke (one undo op, principle 3's
+   * all-reference arm). Uses setHidden / setEntryHidden directly (never the
+   * self-stroking setEntriesHidden — strokes don't nest). */
+  const setRefsHidden = (
+    ops: { name: string; entries: Entry[] | null }[],
+    hidden: boolean,
+  ): { affected: number; changed: number } | null => {
+    const resolved = ops.map((op) => ({ sel: selByName(op.name), entries: op.entries }));
+    if (resolved.some((r) => !r.sel)) return null;
+    const affected: number[] = [];
+    let changed = 0;
+    model.beginStroke();
+    for (const { sel, entries } of resolved) {
+      let a: number[];
+      if (entries === null) {
+        a = model.setHidden(sel!.id, hidden);
+      } else {
+        a = [];
+        for (const e of entries) a.push(...model.setEntryHidden(sel!.id, e, hidden));
+      }
+      if (a.length > 0) changed++;
+      affected.push(...a);
+    }
+    model.endStroke();
     refreshPoints(affected);
-    return { affected: affected.length };
+    return { affected: affected.length, changed };
+  };
+
+  /** The committed selections, in panel order (ls; @all expansion). */
+  const selectionsInfo = (): { name: string; points: number; hidden: boolean }[] =>
+    model.committed().map((c) => ({ name: c.name, points: c.set.pointCount, hidden: c.hidden }));
+
+  /** Rename via the model's unique-name mutator (one undo op; the panel's
+   * inline rename uses the same path). "all" is reserved for @all. */
+  const renameSelection = (
+    oldName: string,
+    newName: string,
+  ): { ok: true } | { error: string } => {
+    const sel = selByName(oldName);
+    if (!sel) return { error: `no selection named "${oldName}"` };
+    const next = newName.trim();
+    if (next === "all") {
+      return { error: `"all" is reserved — @all means the union of every committed selection` };
+    }
+    if (model.committed().some((c) => c.id !== sel.id && c.name === next)) {
+      return { error: `a selection named "${next}" already exists` };
+    }
+    if (!model.rename(sel.id, next)) {
+      return { error: `cannot rename to "${newName}"` };
+    }
+    return { ok: true };
   };
 
   /** WHOLE-MEMBER hide/show for @name.<pred> — the filter resolves stored
@@ -872,11 +920,13 @@ async function main(): Promise<void> {
     },
     flashPointRows,
     commitEntries: commitTargetEntries,
-    setSelectionHidden,
+    setRefsHidden,
     setMembersHiddenIn,
     clearSelectionHidden,
     showPointsCovering,
     showAll: showAllHidden,
+    selectionsInfo,
+    renameSelection,
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);

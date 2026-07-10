@@ -333,6 +333,56 @@ try {
     /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === `showed "fine" — 25 points`,
     JSON.stringify(lastLine));
 
+  // ---- the batch: ls / clear / rename / hide's commit rule --------------------
+  lastLine = await runLine("ls");
+  check("ls lists the committed selections through the relay",
+    /term-ok/.test(lastLine?.cls ?? "") && /solvent — 4800 points/.test(lastLine?.text ?? "") &&
+      /picked — 100 points/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  lastLine = await runLine("ls @solvent");
+  check("ls @name prints the stored members, panel-style",
+    lastLine?.text === "solvent — 4800 points", JSON.stringify(lastLine));
+  lastLine = await runLine("ls @sixty");
+  check("an oversized ls caps with the count-and-hint",
+    lastLine?.text === "60 members — narrow the target", JSON.stringify(lastLine));
+
+  check("(setup) the log is non-empty before clear", (await logLines()).length > 0);
+  await submit("clear");
+  check("clear empties the terminal log", (await logLines()).length === 0,
+    `${(await logLines()).length} lines left`);
+  lastLine = await runLine("ls @solvent");
+  check("the session keeps working after clear",
+    lastLine?.text === "solvent — 4800 points", JSON.stringify(lastLine));
+
+  lastLine = await runLine("rename @picked [x2]");
+  check("rename lands through the relay",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === `renamed "picked" → "x2"`,
+    JSON.stringify(lastLine));
+  check("…and the panel block carries the new name",
+    await d.evaluate<boolean>(`(()=>{
+      const names=[...document.querySelectorAll('#selections .sel-name')].map(n=>n.textContent);
+      return names.includes('x2') && !names.includes('picked');
+    })()`));
+
+  const blocksBefore = await d.evaluate<number>(
+    `document.querySelectorAll('#selections .sel-block').length`);
+  lastLine = await runLine("hide @all");
+  check("hide @all hides in place — the honest across-selections line",
+    /^hid \d+ points across \d+ selections$/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  check("…and commits NO new selection",
+    (await d.evaluate<number>(`document.querySelectorAll('#selections .sel-block').length`)) ===
+      blocksBefore);
+  await runLine("show");
+  lastLine = await runLine("hide all");
+  check("hide all (the everything KEYWORD) commits ONE new selection, honestly sized",
+    /^created and hid "selection_\d+" — 6000 points$/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  check("…as a new panel block",
+    (await d.evaluate<number>(`document.querySelectorAll('#selections .sel-block').length`)) ===
+      blocksBefore + 1);
+  await runLine("show");
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();

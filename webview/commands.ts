@@ -14,11 +14,14 @@
  * Commands get no rendering or camera code of their own.
  */
 import {
+  COMPLETION_LIST_CAP,
   completeTarget,
   parseTarget,
   resolveTarget,
   splitTrailingName,
   type Completion,
+  type Segment,
+  type TargetAst,
 } from "./address.ts";
 import type { TreeModel } from "./classification.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
@@ -66,9 +69,20 @@ export interface CommandContext {
     name: string | null,
     hide?: boolean,
   ): { name: string; points: number } | { error: string };
-  /** Whole-selection hide/show flag (model.setHidden). affected 0 = already
-   * in that state (idempotent); null = no such selection. One undo op. */
-  setSelectionHidden(name: string, hidden: boolean): { affected: number } | null;
+  /** Hide/show a BATCH of committed-reference targets in place — whole
+   * selections (entries null) and/or member subsets — as ONE stroke = one
+   * undo op (the all-reference arm of the commit rule, principle 3).
+   * affected = points whose state changed; changed = selections touched.
+   * null = a named selection doesn't exist. */
+  setRefsHidden(
+    ops: { name: string; entries: Entry[] | null }[],
+    hidden: boolean,
+  ): { affected: number; changed: number } | null;
+  /** The committed selections, in panel order (ls / @all expansion). */
+  selectionsInfo(): { name: string; points: number; hidden: boolean }[];
+  /** Rename through the model's unique-name mutator (one undo op, exact
+   * parity with the panel's inline rename). */
+  renameSelection(oldName: string, newName: string): { ok: true } | { error: string };
   /** WHOLE-MEMBER hide/show for @name.<pred>: the filter resolves stored
    * member entries and this hides/shows exactly those members (the member
    * right-click's setEntriesHidden — no sub-member state can exist).
@@ -221,36 +235,69 @@ export function makeHideHandler(ctx: CommandContext): CommandHandler {
     }
     const ast = parseTarget(split.expr);
     if (ast.kind === "error") return { status: "error", message: ast.message };
-    const soleRef = ast.terms.length === 1 && ast.terms[0].kind === "ref" ? ast.terms[0] : null;
-    if (soleRef) {
+    // COMMIT-ONLY-WHEN-UNCOMMITTED (consistency principle 3, all-or-nothing
+    // at the whole-target level): a target made ENTIRELY of committed
+    // references (@name / @all, joined by +) is already committed — hide it
+    // in place, commit nothing. Any non-reference term (path, glob, #, all…)
+    // makes the WHOLE target commit as one new selection, leaving referenced
+    // selections untouched (show-wins handles the overlap).
+    const refs = ast.terms.every((t) => t.kind === "ref")
+      ? (ast.terms as { kind: "ref"; name: string; filter?: unknown }[])
+      : null;
+    if (refs) {
       if (split.name !== null) {
         return {
           status: "error",
-          message: `a [name] applies only when hide commits a new selection — "@${soleRef.name}" already exists`,
+          message: `a [name] applies only when hide commits a new selection — this target is already committed`,
         };
       }
-      if (!ctx.committedEntries().has(soleRef.name)) {
-        return { status: "nomatch", message: `no selection named "${soleRef.name}"` };
+      const known = ctx.selectionsInfo().map((s) => s.name);
+      const ops: { name: string; entries: Entry[] | null }[] = [];
+      let filteredMembers = 0;
+      for (const ref of ast.terms as { kind: "ref"; name: string; filter?: Segment }[]) {
+        if (ref.name !== "all" && !ctx.committedEntries().has(ref.name)) {
+          return { status: "nomatch", message: `no selection named "${ref.name}"` };
+        }
+        const names = ref.name === "all" ? known : [ref.name];
+        if (ref.name === "all" && names.length === 0) {
+          return { status: "nomatch", message: "no committed selections" };
+        }
+        for (const n of names) {
+          if (!ref.filter) {
+            ops.push({ name: n, entries: null });
+          } else {
+            // this selection's filtered MEMBERS, via the ordinary resolver
+            const sub: TargetAst = {
+              kind: "target",
+              terms: [{ kind: "ref", name: n, filter: ref.filter }],
+            };
+            const members = resolveTarget(sub, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
+            if (members.length > 0) {
+              ops.push({ name: n, entries: members });
+              filteredMembers += members.length;
+            }
+          }
+        }
       }
-      if (!soleRef.filter) {
-        const r = ctx.setSelectionHidden(soleRef.name, true)!;
-        return r.affected === 0
-          ? { status: "ok", message: `"${soleRef.name}" is already hidden` }
-          : { status: "ok", message: `hid "${soleRef.name}" — ${r.affected} points` };
-      }
-      // the filter resolves whole MEMBERS; hiding them is exactly the
-      // member-row right-click, so the UI can always display and reverse it
-      const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
-      if (entries.length === 0) {
+      if (ops.length === 0) {
         return { status: "nomatch", message: `nothing matches "${split.expr}"` };
       }
-      const r = ctx.setMembersHiddenIn(soleRef.name, entries, true)!;
-      return r.affected === 0
-        ? { status: "ok", message: `already hidden — ${entries.length} members in "${soleRef.name}"` }
-        : { status: "ok", message: `hid ${r.affected} points in "${soleRef.name}"` };
+      const r = ctx.setRefsHidden(ops, true)!;
+      const soleWhole = ops.length === 1 && ops[0].entries === null;
+      const soleFiltered = ops.length === 1 && ops[0].entries !== null;
+      if (r.affected === 0) {
+        if (soleWhole) return { status: "ok", message: `"${ops[0].name}" is already hidden` };
+        if (soleFiltered) {
+          return { status: "ok", message: `already hidden — ${filteredMembers} members in "${ops[0].name}"` };
+        }
+        return { status: "ok", message: "already hidden" };
+      }
+      if (soleWhole) return { status: "ok", message: `hid "${ops[0].name}" — ${r.affected} points` };
+      if (soleFiltered) return { status: "ok", message: `hid ${r.affected} points in "${ops[0].name}"` };
+      return { status: "ok", message: `hid ${r.affected} points across ${r.changed} selections` };
     }
-    // an uncommitted target: commit-then-hide (one undo unit), entry-level
-    // parity exactly as create_sele
+    // an uncommitted target: commit the WHOLE target as one new selection,
+    // then hide it (one undo unit), entry-level parity exactly as create_sele
     const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
     if (entries.length === 0) {
       return { status: "nomatch", message: `nothing matches "${split.expr}"` };
@@ -277,7 +324,14 @@ export function makeShowHandler(ctx: CommandContext): CommandHandler {
     const ast = parseTarget(split.expr);
     if (ast.kind === "error") return { status: "error", message: ast.message };
     const soleRef = ast.terms.length === 1 && ast.terms[0].kind === "ref" ? ast.terms[0] : null;
-    if (soleRef) {
+    if (soleRef?.name === "all" && !soleRef.filter) {
+      // show @all ≡ bare show: clear every selection's hidden state
+      const n = ctx.showAll();
+      return n === 0
+        ? { status: "ok", message: "nothing hidden" }
+        : { status: "ok", message: `showed everything — ${n} points` };
+    }
+    if (soleRef && soleRef.name !== "all") {
       if (!ctx.committedEntries().has(soleRef.name)) {
         return { status: "nomatch", message: `no selection named "${soleRef.name}"` };
       }
@@ -323,6 +377,122 @@ export function makeShowHandler(ctx: CommandContext): CommandHandler {
   };
 }
 
+/** Cap long listings the way completion caps candidate lists. */
+function capLines(lines: string[], noun: string): string {
+  return lines.length > COMPLETION_LIST_CAP
+    ? `${lines.length} ${noun} — narrow the target`
+    : lines.join("\n");
+}
+
+/**
+ * `ls` — READ-ONLY listing (no state, no undo). Three forms:
+ *   ls            the committed selections (the top panel section as text)
+ *   ls @name      that selection's stored members (the panel's member list;
+ *                 membership only — never descendants, per principle 1)
+ *   ls <path>     the immediate contents one level below the resolved nodes
+ */
+export function makeLsHandler(ctx: CommandContext): CommandHandler {
+  const entryLine = (e: Entry): string =>
+    `${ctx.hierarchy.label(e)} — ${ctx.hierarchy.pointsOf(e).length} points`;
+  return (args: string): CommandResult => {
+    const split = splitTrailingName(args);
+    if ("kind" in split) return { status: "error", message: split.message };
+    if (split.name !== null) {
+      return { status: "error", message: `ls takes no [name] — it lists, it doesn't create` };
+    }
+    if (split.expr === "") {
+      const sels = ctx.selectionsInfo();
+      if (sels.length === 0) return { status: "ok", message: "no selections" };
+      return {
+        status: "ok",
+        message: capLines(
+          sels.map((s) => `${s.name} — ${s.points} points${s.hidden ? " · hidden" : ""}`),
+          "selections",
+        ),
+      };
+    }
+    const ast = parseTarget(split.expr);
+    if (ast.kind === "error") return { status: "error", message: ast.message };
+    const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
+    if (ast.terms.every((t) => t.kind === "ref")) {
+      // MEMBERS view: exactly what the panel's member list shows
+      for (const t of ast.terms as { kind: "ref"; name: string }[]) {
+        if (t.name !== "all" && !ctx.committedEntries().has(t.name)) {
+          return { status: "nomatch", message: `no selection named "${t.name}"` };
+        }
+      }
+      if (entries.length === 0) {
+        return { status: "nomatch", message: `nothing matches "${split.expr}"` };
+      }
+      return { status: "ok", message: capLines(entries.map(entryLine), "members") };
+    }
+    // CONTENTS view: children one level below each resolved node
+    if (entries.length === 0) {
+      return { status: "nomatch", message: `nothing matches "${split.expr}"` };
+    }
+    const lines: string[] = [];
+    const seen = new Set<string>();
+    const push = (level: Entry["level"], id: number, label: string, points: number): void => {
+      const key = `${level}:${id}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      lines.push(`${label} — ${points} points`);
+    };
+    for (const e of entries) {
+      if (e.level === "category") {
+        const c = ctx.tree.categories.find((x) => x.categoryIndex === e.id);
+        for (const g of c?.groups ?? []) {
+          push("group", g.groupId, g.label,
+            ctx.hierarchy.pointsOf({ level: "group", id: g.groupId }).length);
+        }
+      } else if (e.level === "group") {
+        for (const c of ctx.tree.categories) {
+          for (const g of c.groups) {
+            if (g.groupId !== e.id) continue;
+            for (const sg of g.subgroups) push("subgroup", sg.subgroupId, sg.label, sg.pointCount);
+          }
+        }
+      } else if (e.level === "subgroup") {
+        for (const p of ctx.hierarchy.subgroupPoints(e.id)) {
+          push("point", p, ctx.hierarchy.label({ level: "point", id: p }), 1);
+        }
+      } // points have no contents below
+    }
+    if (lines.length === 0) {
+      return { status: "ok", message: "nothing below — points have no contents" };
+    }
+    return { status: "ok", message: capLines(lines, "items") };
+  };
+}
+
+/** `rename @name [new]` — exactly one committed selection, bracketed new
+ * name, routed through the model's unique-name rename (one undo op, exact
+ * parity with the panel's inline rename). */
+export function makeRenameHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const split = splitTrailingName(args);
+    if ("kind" in split) return { status: "error", message: split.message };
+    if (split.name === null) {
+      return { status: "error", message: `rename needs a bracketed name — rename @name [new-name]` };
+    }
+    const ast = parseTarget(split.expr);
+    if (ast.kind === "error") return { status: "error", message: ast.message };
+    const sole = ast.terms.length === 1 && ast.terms[0].kind === "ref" ? ast.terms[0] : null;
+    if (!sole || sole.filter || sole.name === "all") {
+      return {
+        status: "error",
+        message: `rename applies to exactly one committed selection — rename @name [new-name]`,
+      };
+    }
+    if (!ctx.committedEntries().has(sole.name)) {
+      return { status: "nomatch", message: `no selection named "${sole.name}"` };
+    }
+    const r = ctx.renameSelection(sole.name, split.name);
+    if ("error" in r) return { status: "error", message: r.error };
+    return { status: "ok", message: `renamed "${sole.name}" → "${split.name}"` };
+  };
+}
+
 /**
  * The `help` summary. KEEP IN SYNC with the quick-reference table at the top
  * of docs/COMMANDS.md — the two carry the same content for different surfaces
@@ -337,6 +507,7 @@ export const HELP_TEXT = [
   "  @name        a committed selection; @name.<pred> filters its STORED MEMBERS",
   "               (a member's label, or a point member's type/index; one predicate;",
   "               finer than the membership = no match — commit a finer selection)",
+  "  all / @all   everything in the system / the union of every committed selection",
   "  a + b        union of terms",
   "  view <expr>  frame it (hidden points included); bare view frames the visible scene",
   "  create_sele <expr> [name]   commit the target as a new selection",
@@ -345,6 +516,8 @@ export const HELP_TEXT = [
   "               never toggles — already hidden is a no-op; bare hide is an error",
   "  show [<expr>|@name[.pred]]  clear hidden state (never commits);",
   "               bare show reveals everything",
+  "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
+  "  rename @name [new]  rename a selection · clear  wipe the terminal log",
   'errors: a parse error = malformed syntax · "nothing matches" = valid syntax, empty result',
   "full reference: docs/COMMANDS.md",
 ].join("\n");
@@ -385,6 +558,21 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "show",
     makeShowHandler(ctx),
     "clear hidden state on the target (never commits); bare show reveals everything",
+  );
+  registry.register(
+    "ls",
+    makeLsHandler(ctx),
+    "read-only listing: ls = selections · ls @name = its members · ls <path> = a node's contents",
+  );
+  registry.register(
+    "rename",
+    makeRenameHandler(ctx),
+    "rename a committed selection: rename @name [new-name]",
+  );
+  registry.register(
+    "clear",
+    () => ({ status: "ok", message: "cleared" }),
+    "clear the terminal's output log (handled by the terminal surface itself)",
   );
   const help = makeHelpHandler(registry);
   registry.register("help", help, "this grammar summary; help <verb> describes one verb");

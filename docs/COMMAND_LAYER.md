@@ -41,6 +41,22 @@ than scattering them.
    this. (This is the second reversal driven by that class of problem; the
    first was the flash/echo presentation implying structure.)
 
+3. **A commit-then-act verb commits only when its target isn't already
+   committed — all-or-nothing at the whole-target level.** A target made
+   entirely of committed references (`@name` terms joined by `+`, `@all`
+   included) is already committed: the verb acts on those selections in
+   place and creates nothing (`hide @a + @b` flips two hidden flags in ONE
+   undo op; a `[name]` is a usage error there). Any non-reference term — a
+   path, a glob, a `#` term, the `all` keyword — makes the WHOLE target
+   commit as one new selection, referenced selections contributing entries
+   but staying untouched themselves (`hide @a + <path>` creates one new
+   hidden selection; `@a` keeps its own state, and show-wins handles the
+   overlap). There is no per-term splitting: one target, one decision. So
+   `hide @all` hides everything committed with zero new state, while
+   `hide all` commits one honest whole-system selection — same verb, the
+   commit decided by what the target already is. Future commit-then-act
+   verbs inherit this rule.
+
 ## Layering and the purity fence
 
 ```
@@ -136,6 +152,18 @@ property every earlier suite missed while the bug was live.
   match-anywhere rule; see principle 1). Results are the whole matched
   members at their stored levels. Exactly one trailing predicate (`@n.a.b`
   errors); it binds tighter than `+`.
+- `all` (bare keyword) = everything in existence — resolves to every
+  top-level category entry, ≡ the union of all top-level categories. It is
+  a keyword only when it IS the whole term: `all.x`, `allx`, and `"all"`
+  are ordinary path tokens. `@all` = everything **committed** — the union
+  of every committed selection's stored entries (deduped); empty when
+  nothing is committed (honest nomatch downstream). `@all.<pred>` filters
+  the pooled membership under the same membership-only rule. Both compose
+  with `+` like any term. In hide's commit rule they sit on OPPOSITE sides:
+  `all` is a non-reference (commits), `@all` is all-reference (in place) —
+  see principle 3. "all" is therefore a **reserved selection name**: both
+  `create_sele … [all]` and `rename … [all]` refuse it, so `@all` can never
+  be shadowed.
 - `view` frames the **full resolved union, hidden points included** (the
   row-click analog; only the pulse is visibility-gated by the overlay).
   Bare `view` = `frameVisible`, the empty-space-click analog, parked during
@@ -176,18 +204,23 @@ inherits (`commitTargetEntries` in main.ts):
 
 `hide`/`show` extend the same template:
 
-- `hide <target>` = the commit template with `setHidden(true)` folded into
-  the SAME stroke (`commitEntries(entries, name, hide)`) — one undo removes
-  selection + hidden state together. `hide @name` / `show @name` are the
-  whole-flag mutator; `@name.<pred>` subsets go through
-  `setEntriesHidden`. Model widening made for this (reported, deliberate):
-  `setEntryHidden` now accepts entries COVERED by a stored member, not just
-  exact members — `hiddenPart` already resolves point-wise and
-  `isPointHidden` gates on `set.contains(point)` first, so visibility
-  semantics are unchanged and gestures (which only pass exact members) are
-  unaffected. The wiring consolidates: members fully inside the filter hide
-  as MEMBER entries (row-purple, gesture parity); the remainder hides as
-  point entries (count-only feedback — no row exists for sub-member points).
+- `hide <target>` decides commit-vs-in-place by principle 3. A target made
+  entirely of `@` references (`@all` included — the handler expands it to
+  every committed selection) hides IN PLACE through `setRefsHidden`: ONE
+  stroke wraps the whole batch (whole flags via `setHidden`, filtered
+  member subsets via `setEntryHidden` — never the self-stroking
+  `setEntriesHidden` inside an outer stroke), so `hide @a + @b` /
+  `hide @all` are one undo op each and commit nothing; a `[name]` there is
+  a usage error. Any non-reference term makes the WHOLE target commit once:
+  the commit template with `setHidden(true)` folded into the SAME stroke
+  (`commitEntries(entries, name, hide)`) — one undo removes selection +
+  hidden state together; referenced terms contribute entries while their
+  selections stay untouched (`hide all` is this arm: one honest
+  6000-point selection). `hide @name` / `show @name` are the whole-flag
+  mutators; `@name.<pred>` subsets resolve to whole members (row-purple,
+  gesture parity). (An earlier `setEntryHidden` widening to covered
+  sub-member entries was REVERTED with the membership-only reversal — see
+  the show bullet.)
 - `show` NEVER commits (a point in no selection is already visible).
   MEMBER-STATE SYMMETRY is now structural: `hide/show @name.<pred>` both
   resolve WHOLE MEMBERS and route through `setEntriesHidden`, so a show
@@ -206,6 +239,30 @@ inherits (`commitTargetEntries` in main.ts):
   gesture analog, destructive-feeling). Messages report the ACTION —
   show-wins masking means a hide may change no pixels; that's the accepted
   trade-off, not a failure.
+
+## `ls`, `rename`, `clear`
+
+- `ls` is READ-ONLY — no model mutation, no undo entry, ever. Its three
+  forms each mirror an existing panel surface as text: bare `ls` = the
+  committed-selections section (name, point count, `· hidden` marker);
+  `ls @name` (and `ls @all`) = the STORED member list exactly as the panel
+  shows it (membership only, principle 1); `ls <path>` = the contents ONE
+  level below the resolved nodes (points list nothing below). All listings
+  share completion's `COMPLETION_LIST_CAP` volume rule — past ~50 lines it
+  prints a count-and-hint instead. `ls` takes no `[name]`.
+- `rename @name [new]` routes through the SAME `SelectionModel.rename`
+  the panel's inline rename uses — one undo op, identical collision error
+  (`a selection named "<new>" already exists`), full parity. Exactly one
+  unfiltered `@name` (not `@all`, no predicate, no paths) — anything else
+  is a usage error; a missing `[new]` errors. `"all"` is refused as a new
+  name (reserved for `@all`) here and in `create_sele`.
+- `clear` is TERMINAL-LOCAL: the surface intercepts it before the host
+  relay, wipes its own log, and resets the completion-preview dedup —
+  viewer state and undo history never hear about it. It is still a
+  registered verb so `help` can explain it. Distinct from the panel's
+  "Clear" button, which discards the pending TARGET (a viewer-state
+  operation with a two-step confirm); the shared word is unfortunate but
+  each surface's noun is its own.
 
 ## Completion
 

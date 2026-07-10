@@ -290,6 +290,44 @@ test("REVERSED: point members match on type only — labels of their ancestry do
   assert.deepEqual(keys("@duo.bath", duo), [], "p8's group label is not its membership");
 });
 
+// -- all / @all: the two everything-terms --------------------------------------------
+
+test("bare `all` = every top-level category (everything in existence)", () => {
+  assert.deepEqual(keys("all"), ["category:0", "category:1", "category:2"]);
+  assert.deepEqual(keys("all + beta"), ["category:0", "category:1", "category:2"],
+    "all already covers beta — union dedups");
+  const ast = parseTarget("all + beta") as TargetAst;
+  assert.deepEqual(ast.terms[0], { kind: "all" });
+  assert.equal(ast.terms[1].kind, "path");
+});
+
+test("`all` is a KEYWORD only at a term boundary — otherwise an ordinary label", () => {
+  assert.deepEqual(keys(`"all"`), [], "quoted = literal path token, no category named all");
+  assert.deepEqual(keys("all.x"), [], "all.x is a PATH (no category labeled all) — not keyword+descent");
+  assert.equal((parseTarget("all.x") as TargetAst).terms[0].kind, "path");
+  assert.deepEqual(keys("allx"), [], "prefix does not trigger the keyword");
+  assert.equal((parseTarget("allx") as TargetAst).terms[0].kind, "path");
+});
+
+test("@all = the union of every committed selection's stored entries, deduped", () => {
+  const committed = new Map<string, readonly Entry[]>([
+    ["picks", [{ level: "subgroup", id: 100 }, { level: "point", id: 5 }]],
+    ["solvent", [{ level: "category", id: 2 }]],
+    ["overlap", [{ level: "point", id: 5 }]], // stored twice across selections
+  ]);
+  assert.deepEqual(keys("@all", committed), ["category:2", "point:5", "subgroup:100"]);
+  assert.deepEqual(keys("@all + @picks", committed), ["category:2", "point:5", "subgroup:100"]);
+  assert.deepEqual(keys("@all", none), [], "no committed selections — empty match, not an error");
+});
+
+test("@all.<pred> filters the pooled membership — same membership-only rule as @name", () => {
+  assert.deepEqual(keys("@all.tH", FNAMES), ["point:5"]); // mix's stored point member
+  assert.deepEqual(keys("@all.s1", FNAMES), ["subgroup:100"]); // a member's own label
+  assert.deepEqual(keys("@all.env3", FNAMES), ["category:2"]);
+  assert.deepEqual(keys("@all.#5", FNAMES), ["point:5"]);
+  assert.deepEqual(keys("@all.w1", FNAMES), [], "descendants stay out of reach under @all too");
+});
+
 test(':" is reserved in @name filters (future level qualifier) — paths unaffected', () => {
   assert.match(parseErr("@mix.x:y"), /level qualifiers .* not yet supported/);
   assert.match(parseErr(`@mix."x:y"`), /level qualifiers .* not yet supported/);
@@ -606,8 +644,9 @@ test("the sibling edge: an exact token descends even with longer siblings presen
   assert.deepEqual(compSib("view c.g.sub.tt"), { start: 13, candidates: [], applied: "" });
 });
 
-test("completion: @ completes committed-selection names", () => {
-  assert.deepEqual(comp("view @").candidates, ["my picks", "picks", "sol2", "solvent"]);
+test("completion: @ completes committed-selection names (+ the reserved @all)", () => {
+  // "all" is always in the pool — @all is the union of every committed selection
+  assert.deepEqual(comp("view @").candidates, ["all", "my picks", "picks", "sol2", "solvent"]);
   assert.deepEqual(comp("view @sol"), { start: 6, candidates: ["sol2", "solvent"], applied: "" });
   assert.deepEqual(comp("view @solv"), { start: 6, candidates: ["solvent"], applied: "ent" });
 });
