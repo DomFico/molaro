@@ -51,7 +51,8 @@ const LOOKAHEAD_CHUNKS = 2;
 const MAX_IN_FLIGHT = 2;
 const MAX_CACHE_BYTES = 256 * 1024 * 1024;
 
-const EDGE_COLOR = 0x5a7a9a;
+// (the edges' base look moved to representation.ts DEFAULT_EDGE_COLOR — the
+// de-indexed edge pass reads rep.state.edgeColor per edge)
 const POLYLINE_COLOR = 0x9a7a5a;
 const BACKGROUND = 0x1e1e1e;
 const SELECTION_COLOR = 0xbfffe4; // pending-target tint (light green)
@@ -110,6 +111,9 @@ interface SceneParts {
   flashMat: THREE.ShaderMaterial;
   /** rebuild edge + polyline draw ranges from current visibility. */
   rebuildLines: () => void;
+  /** re-copy the de-indexed edge pass (positions from the current frame,
+   * colors from rep.state.edgeColor) — every displayed-frame flip needs it. */
+  fillEdges: () => void;
 }
 
 function basePointsMaterial(pixelRatio: number): THREE.ShaderMaterial {
@@ -266,10 +270,55 @@ function buildScene(
   pointsGeo.setAttribute("aVisible", visibleAttr);
   drawables.push(new THREE.Points(pointsGeo, basePointsMaterial(pixelRatio)));
 
-  // Edges + polylines: an index big enough for every segment, with a draw range
-  // that rebuildLines() trims to segments whose BOTH endpoints are visible (so a
-  // hidden category also hides its edge hairball).
+  // Edges + polylines, trimmed to segments whose BOTH endpoints are visible
+  // (so a hidden category also hides its edge hairball).
+  //
+  // The EDGE pass is DE-INDEXED: per-EDGE flat color (rep.state.edgeColor)
+  // cannot ride an indexed geometry sharing the points' position attribute —
+  // shared vertices would bleed one edge's color onto every adjacent edge as
+  // a gradient. So each visible edge gets two OWNED vertices: positions are
+  // copied from the current frame (fillEdges runs on every displayed-frame
+  // flip, visibility change, and edge-color write — a linear copy, cheap at
+  // these scales), and both vertices carry the edge's color. The polyline
+  // pass keeps the zero-copy indexed form: it has no per-segment color yet
+  // (colortrace is deferred — see docs/COMMAND_LAYER.md open threads).
   const visible = rep.state.visible;
+  const nEdges = header.edges.length;
+  const edgePosAttr = new THREE.BufferAttribute(new Float32Array(nEdges * 2 * 3), 3);
+  const edgeColAttr = new THREE.BufferAttribute(new Float32Array(nEdges * 2 * 3), 3);
+  edgePosAttr.setUsage(THREE.DynamicDrawUsage);
+  edgeColAttr.setUsage(THREE.DynamicDrawUsage);
+  let fillEdges: () => void = () => {};
+  if (nEdges > 0) {
+    const edgeGeo = new THREE.BufferGeometry();
+    edgeGeo.setAttribute("position", edgePosAttr);
+    edgeGeo.setAttribute("color", edgeColAttr);
+    edgeGeo.setDrawRange(0, 0);
+    drawables.push(new THREE.LineSegments(edgeGeo, new THREE.LineBasicMaterial({ vertexColors: true })));
+    fillEdges = (): void => {
+      const pos = positionAttr.array as Float32Array;
+      const ec = rep.state.edgeColor;
+      const pArr = edgePosAttr.array as Float32Array;
+      const cArr = edgeColAttr.array as Float32Array;
+      let k = 0; // vertex write cursor (2 per visible edge)
+      for (let e = 0; e < nEdges; e++) {
+        const a = header.edges[e][0];
+        const b = header.edges[e][1];
+        if (visible[a] > 0.5 && visible[b] > 0.5) {
+          for (let c = 0; c < 3; c++) {
+            pArr[k * 3 + c] = pos[a * 3 + c];
+            pArr[k * 3 + 3 + c] = pos[b * 3 + c];
+            cArr[k * 3 + c] = ec[e * 3 + c];
+            cArr[k * 3 + 3 + c] = ec[e * 3 + c];
+          }
+          k += 2;
+        }
+      }
+      edgePosAttr.needsUpdate = true;
+      edgeColAttr.needsUpdate = true;
+      edgeGeo.setDrawRange(0, k);
+    };
+  }
   const mkLines = (pairs: [number, number][], color: number) => {
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", positionAttr);
@@ -291,11 +340,10 @@ function buildScene(
       geo.setDrawRange(0, k);
     };
   };
-  const rebuildEdges = header.edges.length ? mkLines(header.edges, EDGE_COLOR) : () => {};
   const polySegs = polylineSegmentPairs(header.polylines);
   const rebuildPoly = polySegs.length ? mkLines(polySegs, POLYLINE_COLOR) : () => {};
   const rebuildLines = (): void => {
-    rebuildEdges();
+    fillEdges();
     rebuildPoly();
   };
 
@@ -337,6 +385,7 @@ function buildScene(
     selMat,
     flashMat,
     rebuildLines,
+    fillEdges,
   };
 }
 
@@ -412,7 +461,7 @@ async function main(): Promise<void> {
   container.appendChild(renderer.domElement);
 
   // -- interaction state layers ------------------------------------------------
-  const rep = new RepresentationLayer(header.n_points);
+  const rep = new RepresentationLayer(header.n_points, header.edges.length);
   const hierarchy = new Hierarchy(header);
   const model = new SelectionModel(hierarchy); // pending target + committed selections
   const selArray = new Float32Array(header.n_points); // per-point target flag (green)
@@ -994,6 +1043,42 @@ async function main(): Promise<void> {
     return pts.length;
   };
 
+  /** colorbonds / colorbondsof: colorPoints' EDGE twin — a constant per-edge
+   * RGB written into rep.state.edgeColor (indexed by the header's edge
+   * order; the base look is the buffer's initial value). Both verbs write
+   * THIS one buffer, so they compose by last-write-wins per edge. The
+   * de-indexed edge pass re-copies colors via fillEdges — no rep.dirty
+   * (that re-uploads the per-POINT attributes; edges own their buffers).
+   * Same recordOp discipline as colorPoints: one stroke, exact-prior-RGB
+   * restore; the undo returns no point indices (no point state changed). */
+  const colorEdges = (edgeIds: readonly number[], rgb: [number, number, number]): number => {
+    if (edgeIds.length === 0) return 0;
+    const ec = rep.state.edgeColor;
+    const ids = [...edgeIds];
+    const prev = new Float32Array(ids.length * 3);
+    for (let i = 0; i < ids.length; i++) {
+      const e = ids[i] * 3;
+      prev[i * 3] = ec[e];
+      prev[i * 3 + 1] = ec[e + 1];
+      prev[i * 3 + 2] = ec[e + 2];
+      ec[e] = rgb[0];
+      ec[e + 1] = rgb[1];
+      ec[e + 2] = rgb[2];
+    }
+    parts.fillEdges();
+    model.recordOp(() => {
+      for (let i = 0; i < ids.length; i++) {
+        const e = ids[i] * 3;
+        ec[e] = prev[i * 3];
+        ec[e + 1] = prev[i * 3 + 1];
+        ec[e + 2] = prev[i * 3 + 2];
+      }
+      parts.fillEdges();
+      return [];
+    });
+    return ids.length;
+  };
+
   const commandContext = {
     hierarchy,
     tree: fullTree, // the SAME model the bottom tree renders — click parity
@@ -1019,6 +1104,8 @@ async function main(): Promise<void> {
     mutateMembers,
     deleteSelections,
     colorPoints,
+    edges: header.edges,
+    colorEdges,
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);
@@ -1255,6 +1342,7 @@ async function main(): Promise<void> {
     const offset = (f - chunk.start) * header.n_points * 3;
     positionAttr.array = chunk.positions.subarray(offset, offset + header.n_points * 3);
     positionAttr.needsUpdate = true;
+    parts.fillEdges(); // the de-indexed edge pass owns copies of these positions
     if (displayedFrame === -1) for (const obj of drawables) obj.visible = true;
     displayedFrame = f;
     shownSinceMark++;
@@ -1337,6 +1425,7 @@ async function main(): Promise<void> {
       rep,
       hierarchy,
       model,
+      edges: header.edges, // parity audits test edge endpoints vs resolvePoints
       actions: committedActions,
       command: runCommand,
       complete: runComplete,

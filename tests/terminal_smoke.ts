@@ -416,19 +416,45 @@ try {
         blocksBeforeDel - 1,
     JSON.stringify(lastLine));
 
-  // color through the real relay: the representation write and its errors
-  lastLine = await runLine("color alpha.group-0.subgroup-0 green");
-  check("color <target> <color> lands through the relay",
+  // the color family through the real relay: per-primitive writes + errors
+  lastLine = await runLine("colorpoints alpha.group-0.subgroup-0 green");
+  check("colorpoints <target> <color> lands through the relay",
     /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "colored 100 points green",
     JSON.stringify(lastLine));
-  check("…and the buffer actually carries the CSS green (008000)",
+  check("…and the point buffer actually carries the CSS green (008000)",
     await d.evaluate<boolean>(`(()=>{
       const v=window.__viewer; const c=v.rep.state.color;
       const want=[0x00,0x80,0x00].map(x=>Math.fround(x/255));
       return v.debug.resolvePoints("alpha.group-0.subgroup-0")
         .every(p=>c[3*p]===want[0]&&c[3*p+1]===want[1]&&c[3*p+2]===want[2]);
     })()`));
-  lastLine = await runLine("color alpha nope");
+  lastLine = await runLine("color alpha green");
+  check("the RENAME is total — color is an unknown command through the relay",
+    /term-err/.test(lastLine?.cls ?? "") && lastLine?.text === "unknown command: color",
+    JSON.stringify(lastLine));
+  lastLine = await runLine("colorbonds alpha.group-0.subgroup-0 steelblue");
+  check("colorbonds lands through the relay (contained edges of the subgroup)",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "colored 99 edges steelblue",
+    JSON.stringify(lastLine));
+  check("…and the edge buffer carries steelblue on exactly the contained edges",
+    await d.evaluate<boolean>(`(()=>{
+      const v=window.__viewer; const ec=v.rep.state.edgeColor;
+      const want=[0x46,0x82,0xb4].map(x=>Math.fround(x/255));
+      const pts=new Set(v.debug.resolvePoints("alpha.group-0.subgroup-0"));
+      let hits=0;
+      for (let e=0;e<v.edges.length;e++) {
+        const both=pts.has(v.edges[e][0])&&pts.has(v.edges[e][1]);
+        const painted=ec[3*e]===want[0]&&ec[3*e+1]===want[1]&&ec[3*e+2]===want[2];
+        if (both !== painted) return false;
+        if (painted) hits++;
+      }
+      return hits === 99;
+    })()`));
+  lastLine = await runLine("colorbondsof #124 tomato");
+  check("colorbondsof lands through the relay (edges incident to one point)",
+    /term-ok/.test(lastLine?.cls ?? "") && /^colored \d+ edges tomato$/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  lastLine = await runLine("colorbonds alpha nope");
   check("an unknown color is the specific error line",
     /term-err/.test(lastLine?.cls ?? "") &&
       lastLine?.text === `unknown color "nope" — use a CSS color name (red, steelblue) or hex (#ff8800)`,

@@ -39,6 +39,11 @@ function makeRegistry() {
   const refOps: { names: string[]; hidden: boolean }[] = [];
   const memberOps: { name: string; mode: "add" | "remove"; entries: Entry[] }[] = [];
   const colorOps: { points: number[]; rgb: [number, number, number] }[] = [];
+  const edgeOps: { edgeIds: number[]; rgb: [number, number, number] }[] = [];
+  // a chain over the 3 points: edge 0 sits inside c0 ({0,1}); edge 1 crosses
+  // the category boundary (point 1 in c0, point 2 in c1) — the contained-vs-
+  // incident distinction is decidable from these two alone
+  const edges: [number, number][] = [[0, 1], [1, 2]];
   const ctx: CommandContext = {
     hierarchy,
     tree: buildTree(header),
@@ -179,8 +184,16 @@ function makeRegistry() {
       colorOps.push({ points: [...points], rgb });
       return points.length;
     },
+    edges,
+    colorEdges: (edgeIds, rgb) => {
+      edgeOps.push({ edgeIds: [...edgeIds], rgb });
+      return edgeIds.length;
+    },
   };
-  return { registry: createCommandRegistry(ctx), calls, commits, hiddenState, refOps, memberOps, colorOps, sels };
+  return {
+    registry: createCommandRegistry(ctx),
+    calls, commits, hiddenState, refOps, memberOps, colorOps, edgeOps, sels,
+  };
 }
 
 test("help and ? return a non-empty ok summary pointing at the full reference", () => {
@@ -598,7 +611,7 @@ test("view still dispatches through the same registry (bare view = frameVisible)
   assert.equal(calls.flash, 1);
 });
 
-// -- color: the first representation verb (constant per-point color) -----------------
+// -- the color family: colorpoints / colorbonds / colorbondsof -----------------------
 
 test("parseColor: CSS names, hex long/short, case-insensitive; junk is null", () => {
   assert.deepEqual(parseColor("red"), [1, 0, 0]);
@@ -614,47 +627,115 @@ test("parseColor: CSS names, hex long/short, case-insensitive; junk is null", ()
   }
 });
 
-test("color resolves EXACTLY like view (same resolver, hidden included) and writes once", () => {
+test("the rename is total: colorpoints is the verb, color is UNKNOWN", () => {
+  const { registry, colorOps } = makeRegistry();
+  const old = registry.runCommand("color c0 red");
+  assert.equal(old.status, "error");
+  assert.equal(old.message, "unknown command: color", "no alias — color is gone");
+  assert.equal(colorOps.length, 0);
+  assert.ok(registry.verbs().includes("colorpoints"));
+  assert.ok(!registry.verbs().includes("color"));
+});
+
+test("colorpoints resolves EXACTLY like view (same resolver, hidden included), writes once", () => {
   const { registry, colorOps } = makeRegistry();
   // category path → the same 2 points "view c0" focuses (points 0 and 1)
-  const res = registry.runCommand("color c0 red");
+  const res = registry.runCommand("colorpoints c0 red");
   assert.equal(res.status, "ok");
   assert.equal(res.message, "colored 2 points red");
   assert.equal(colorOps.length, 1, "one invocation = one write (one stroke)");
   assert.deepEqual(colorOps[0].points, [0, 1]);
   assert.deepEqual(colorOps[0].rgb, [1, 0, 0]);
   // full grammar: leaf type, @name (stored members), all, hex color
-  assert.equal(registry.runCommand("color c0.g0.s0.a #ff8800").message, "colored 1 points #ff8800");
+  assert.equal(registry.runCommand("colorpoints c0.g0.s0.a #ff8800").message, "colored 1 points #ff8800");
   assert.deepEqual(colorOps[1].points, [0]);
-  assert.equal(registry.runCommand("color @stored steelblue").status, "ok");
+  assert.equal(registry.runCommand("colorpoints @stored steelblue").status, "ok");
   assert.deepEqual(colorOps[2].points, [0, 1, 2], "@stored = subgroup s0 (0,1) + point 2");
-  assert.equal(registry.runCommand("color all white").message, "colored 3 points white");
+  assert.equal(registry.runCommand("colorpoints all white").message, "colored 3 points white");
 });
 
-test("color: re-coloring an overlap is simply a NEW write (last-write-wins downstream)", () => {
+test("colorpoints: re-coloring an overlap is simply a NEW write (LWW downstream)", () => {
   const { registry, colorOps } = makeRegistry();
-  registry.runCommand("color c0 red");
-  registry.runCommand("color c0.g0.s0.a blue");
+  registry.runCommand("colorpoints c0 red");
+  registry.runCommand("colorpoints c0.g0.s0.a blue");
   assert.equal(colorOps.length, 2, "two invocations, two strokes — no merge, no precedence");
   assert.deepEqual(colorOps[1].points, [0]);
   assert.deepEqual(colorOps[1].rgb, [0, 0, 1]);
 });
 
-test("color: nomatch / bad color / usage / parse errors write NOTHING", () => {
+test("colorbonds: BOTH endpoints in the set (contained) — same resolver as view", () => {
+  const { registry, edgeOps, colorOps } = makeRegistry();
+  // c0 = {0,1}: edge 0 (0,1) contained; edge 1 (1,2) leaks out → excluded
+  const res = registry.runCommand("colorbonds c0 red");
+  assert.equal(res.status, "ok");
+  assert.equal(res.message, "colored 1 edges red");
+  assert.deepEqual(edgeOps[0], { edgeIds: [0], rgb: [1, 0, 0] });
+  // all = {0,1,2}: both edges contained
+  assert.equal(registry.runCommand("colorbonds all #f80").message, "colored 2 edges #f80");
+  assert.deepEqual(edgeOps[1].edgeIds, [0, 1]);
+  assert.equal(colorOps.length, 0, "the POINT buffer is never touched (independence)");
+});
+
+test("colorbondsof: AT LEAST ONE endpoint (incident) — reaches one hop outside", () => {
+  const { registry, edgeOps } = makeRegistry();
+  // c0 = {0,1}: edge 1 (1,2) has its OTHER endpoint outside c0 and is colored
+  // anyway — the incident reach is the verb's contract, not a bug
+  const res = registry.runCommand("colorbondsof c0 red");
+  assert.equal(res.status, "ok");
+  assert.equal(res.message, "colored 2 edges red");
+  assert.deepEqual(edgeOps[0].edgeIds, [0, 1]);
+});
+
+test("single-point target pins contained-vs-incident: bonds nomatch, bondsof incident", () => {
+  const { registry, edgeOps } = makeRegistry();
+  // c0.g0.s0.a = point {0}: no edge has both endpoints in a one-point set
+  const bonds = registry.runCommand("colorbonds c0.g0.s0.a red");
+  assert.equal(bonds.status, "nomatch");
+  assert.equal(bonds.message, `no edges with both endpoints in "c0.g0.s0.a"`);
+  assert.equal(edgeOps.length, 0, "a no-edge nomatch writes nothing");
+  // …but exactly the edges incident to that point color under colorbondsof
+  const bondsof = registry.runCommand("colorbondsof c0.g0.s0.a red");
+  assert.equal(bondsof.status, "ok");
+  assert.equal(bondsof.message, "colored 1 edges red");
+  assert.deepEqual(edgeOps[0].edgeIds, [0]);
+});
+
+test("the edge verbs: nomatch / bad color / usage / parse errors write NOTHING", () => {
+  const { registry, edgeOps } = makeRegistry();
+  for (const verb of ["colorbonds", "colorbondsof"]) {
+    const nomatch = registry.runCommand(`${verb} nothere red`);
+    assert.equal(nomatch.status, "nomatch", verb);
+    assert.match(nomatch.message, /nothing matches "nothere"/);
+    const bad = registry.runCommand(`${verb} c0 notacolor`);
+    assert.equal(bad.status, "error", verb);
+    assert.match(bad.message, /unknown color "notacolor"/);
+    const bare = registry.runCommand(verb);
+    assert.equal(bare.status, "error", verb);
+    assert.match(bare.message, new RegExp(`${verb} <target> <color>`));
+    const oneArg = registry.runCommand(`${verb} red`); // one chunk = no target
+    assert.equal(oneArg.status, "error", verb);
+    assert.match(oneArg.message, /needs a target and a color/);
+    const parseErr = registry.runCommand(`${verb} c0.[x] red`); // [ reserved
+    assert.equal(parseErr.status, "error", verb);
+  }
+  assert.equal(edgeOps.length, 0, "no path wrote anything");
+});
+
+test("colorpoints: nomatch / bad color / usage / parse errors write NOTHING", () => {
   const { registry, colorOps } = makeRegistry();
-  const nomatch = registry.runCommand("color nothere red");
+  const nomatch = registry.runCommand("colorpoints nothere red");
   assert.equal(nomatch.status, "nomatch");
   assert.match(nomatch.message, /nothing matches "nothere"/);
-  const bad = registry.runCommand("color c0 notacolor");
+  const bad = registry.runCommand("colorpoints c0 notacolor");
   assert.equal(bad.status, "error");
   assert.match(bad.message, /unknown color "notacolor"/);
-  const bare = registry.runCommand("color");
+  const bare = registry.runCommand("colorpoints");
   assert.equal(bare.status, "error");
-  assert.match(bare.message, /color <target> <color>/);
-  const oneArg = registry.runCommand("color red"); // one chunk = no target
+  assert.match(bare.message, /colorpoints <target> <color>/);
+  const oneArg = registry.runCommand("colorpoints red"); // one chunk = no target
   assert.equal(oneArg.status, "error");
   assert.match(oneArg.message, /needs a target and a color/);
-  const parseErr = registry.runCommand("color c0.[x] red"); // [ reserved in expressions
+  const parseErr = registry.runCommand("colorpoints c0.[x] red"); // [ reserved in expressions
   assert.equal(parseErr.status, "error");
   assert.equal(colorOps.length, 0, "no path wrote anything");
 });

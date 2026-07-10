@@ -18,6 +18,8 @@
 // Defaults (the flat base look). RGB in 0..1 for a vertex-color attribute.
 export const DEFAULT_COLOR: [number, number, number] = [0.9, 0.9, 0.9];
 export const DEFAULT_SIZE = 3;
+/** Per-edge base look (was the uniform LineBasicMaterial color 0x5a7a9a). */
+export const DEFAULT_EDGE_COLOR: [number, number, number] = [0x5a / 255, 0x7a / 255, 0x9a / 255];
 
 export interface RepresentationState {
   /** length 3N — per-point RGB the base scene draws with. */
@@ -26,6 +28,10 @@ export interface RepresentationState {
   size: Float32Array;
   /** length N — 1 = drawn, 0 = hidden (driven by the hidden set). */
   visible: Float32Array;
+  /** length 3E — per-EDGE RGB, indexed by the header's edge order. The base
+   * look is the initial value (like `color`), so an edge never written keeps
+   * the uniform look with no sentinel/override machinery. */
+  edgeColor: Float32Array;
 }
 
 export class RepresentationLayer {
@@ -33,7 +39,7 @@ export class RepresentationLayer {
   /** Set when any buffer changed so the renderer re-uploads attributes. */
   dirty = true;
 
-  constructor(nPoints: number) {
+  constructor(nPoints: number, nEdges = 0) {
     const color = new Float32Array(nPoints * 3);
     const size = new Float32Array(nPoints);
     const visible = new Float32Array(nPoints);
@@ -44,6 +50,12 @@ export class RepresentationLayer {
       size[p] = DEFAULT_SIZE;
       visible[p] = 1;
     }
-    this.state = { color, size, visible };
+    const edgeColor = new Float32Array(nEdges * 3);
+    for (let e = 0; e < nEdges; e++) {
+      edgeColor[e * 3] = DEFAULT_EDGE_COLOR[0];
+      edgeColor[e * 3 + 1] = DEFAULT_EDGE_COLOR[1];
+      edgeColor[e * 3 + 2] = DEFAULT_EDGE_COLOR[2];
+    }
+    this.state = { color, size, visible, edgeColor };
   }
 }

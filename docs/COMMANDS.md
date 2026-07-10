@@ -35,7 +35,9 @@ point types `anchor` and `t0`–`t3`).
 | `create_sele <expr> [name]` | Commit the target as a new selection (auto-named without `[name]`) | `create_sele alpha.group-0.* [ring]` |
 | `hide <expr>` / `hide @name[.pred]` | Hide it (an uncommitted target commits first; an all-`@` target hides in place) | `hide @selection_1.t0` |
 | `show [<expr>` / `@name[.pred]]` | Clear hidden state (never commits); bare `show` reveals everything | `show @selection_1` |
-| `color <expr> <color>` | Color those points a constant color (CSS name or `#hex`; hidden points too; last-write-wins; one undo stroke) | `color alpha green` |
+| `colorpoints <expr> <color>` | Color those points a constant color (CSS name or `#hex`; hidden points too; last-write-wins; one undo stroke) | `colorpoints alpha green` |
+| `colorbonds <expr> <color>` | Color every edge with **both** endpoints in the target (contained) | `colorbonds beta.group-0.subgroup-0 #ff8800` |
+| `colorbondsof <expr> <color>` | Color every edge **touching** the target (either endpoint — deliberately reaches one hop outside) | `colorbondsof #124 red` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |
 | `rename @name [new]` | Rename a committed selection | `rename @selection_1 [ring]` |
 | `add @name <tree-target>` | Add tree-addressed entries as **members** at their natural level (no `@` on the right) | `add @ring alpha.group-0` |
@@ -320,46 +322,75 @@ hidden set. That shapes the pair's asymmetry:
   nothing on screen until the coverer hides too — the command still reports
   `hid "name" — N points`, because that is what it did.
 
-## Coloring points: `color`
+## The color family: `colorpoints` / `colorbonds` / `colorbondsof`
 
 ```
-color <target-expr> <color>
+colorpoints  <target-expr> <color>    the points themselves
+colorbonds   <target-expr> <color>    edges with BOTH endpoints in the target
+colorbondsof <target-expr> <color>    edges with AT LEAST ONE endpoint in it
 ```
 
-The first **representation** verb: it paints the resolved points a constant
-color. `color` targets **exactly like `view`** — the full grammar, the same
-resolver, **hidden points included**, and it never commits a selection —
-so `color <t> <c>` colors precisely the point set `view <t>` frames. Unlike
-`view`, it *mutates*: each invocation is **one undo stroke** (`Ctrl+Z`
-restores the exact previous colors, which may themselves be an earlier
-`color`'s).
+The **representation** verbs: they paint a renderable primitive a constant
+color. Every verb in the family targets **exactly like `view`** — the full
+grammar, the same resolver, **hidden points included**, and it never commits
+a selection — so each resolves precisely the point set `view <target>`
+frames. They differ only in how that point set maps onto a primitive:
+
+- **`colorpoints`** colors the points in the set (the identity mapping).
+  (Shipped as `color`; renamed when the family grew — `color` is no longer
+  a command, there is no alias.)
+- **`colorbonds`** colors every edge whose **both** endpoints are in the set
+  — *contained*, parity-preserving: every colored edge lies inside the
+  target.
+- **`colorbondsof`** colors every edge with **at least one** endpoint in the
+  set — *incident*. An edge is colored **even when its other endpoint is
+  outside the target**: reaching one hop out is this verb's whole point, and
+  the one deliberate break from strict target-containment in the family —
+  which is why it is a separate verb, not a flag. The two edge verbs write
+  the same per-edge color state, so they compose by last-write-wins per
+  edge.
+
+The contained-vs-incident line is sharpest on a single point:
+`colorbonds #124 red` is a **nomatch** (no edge has both endpoints in a
+one-point set) while `colorbondsof #124 red` colors exactly the edges
+incident to point 124.
 
 ```
-color alpha green
-color beta.group-0.subgroup-0.t2 #ff8800
-color gamma.group-2."subgroup 11" red
-color @selection_1 steelblue
-color #156-187 #f80
+colorpoints alpha green
+colorpoints beta.group-0.subgroup-0.t2 #ff8800
+colorpoints gamma.group-2."subgroup 11" red
+colorbonds beta.group-0.subgroup-0 #ff8800
+colorbonds all blue
+colorbondsof #124 red
+colorbondsof @selection_1 steelblue
 ```
+
+Shared rules (identical across the family):
 
 - **`<color>`** is a CSS color name (`red`, `steelblue`, `rebeccapurple`) or
   hex (`#ff8800`, or the short form `#f80`). The color token is
   **case-insensitive** (CSS semantics — it is a color, not a tree label);
   an unknown or malformed color is an **error** and nothing is written.
-- **Last-write-wins per point**: re-coloring an overlapping target simply
-  overwrites those points — no precedence system, no blending. Points never
-  colored keep the uniform base look, and an undo past your first `color`
-  restores it.
-- **Hidden points color too** — the write lands in the representation buffer
-  regardless of visibility, and the message reports the **action**
-  (`colored N points green`), not pixels, exactly like `hide`/`show` under
-  show-wins. The color shows whenever the points do.
-- A nomatch or any error **writes nothing and pushes no undo stroke**. Bare
-  `color` (or a single argument) is a usage error — it needs both a target
-  and a color.
-- Constant colors only, deliberately: gradients, by-channel mappings, and
-  other appearance verbs (size, opacity) are future work that will clone
-  this verb's shape.
+- **Each verb writes its own primitive only**: `colorpoints` never affects
+  edges; the edge verbs never affect points or polylines. Within each
+  primitive, **last-write-wins per element** — no precedence system, no
+  blending. Elements never colored keep the uniform base look, and undoing
+  past the first write restores it.
+- **One undo stroke per invocation** — `Ctrl+Z` restores the exact previous
+  colors, which may themselves be an earlier verb's (strokes compose LIFO).
+- **Hidden geometry colors too** — the write lands in the representation
+  state regardless of visibility, and the message reports the **action**
+  (`colored N points green`, `colored N edges red`), not pixels, exactly
+  like `hide`/`show` under show-wins. The color shows whenever the geometry
+  does.
+- A nomatch or any error **writes nothing and pushes no undo stroke**. A
+  well-formed target that matches points but no edges (e.g. `colorbonds` on
+  a single point) is a nomatch too. A bare verb (or a single argument) is a
+  usage error — it needs both a target and a color.
+- Constant colors only, deliberately: gradients, by-channel mappings, other
+  appearance verbs (size, opacity), and a polyline verb (`colortrace` —
+  deferred; see `docs/COMMAND_LAYER.md` open threads) are future work that
+  will clone this family's shape.
 
 ## Listing: `ls`
 

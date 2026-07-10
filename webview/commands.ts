@@ -122,12 +122,23 @@ export interface CommandContext {
    * single Ctrl+Z restores every deleted selection intact (members, hidden
    * state, lane). null = a named selection doesn't exist. */
   deleteSelections(names: string[]): { deleted: number; points: number } | null;
-  /** color <target> <c> — THE FIRST REPRESENTATION MUTATION: write a constant
-   * per-point RGB (0..1) on exactly these points in the representation
-   * layer's color buffer, last-write-wins, recorded as ONE stroke on the
-   * SAME undo stack every gesture uses (never a second undo system). Points
-   * never colored keep the uniform base look. Returns the count written. */
+  /** colorpoints <target> <c> — THE FIRST REPRESENTATION MUTATION: write a
+   * constant per-point RGB (0..1) on exactly these points in the
+   * representation layer's color buffer, last-write-wins, recorded as ONE
+   * stroke on the SAME undo stack every gesture uses (never a second undo
+   * system). Points never colored keep the uniform base look. Returns the
+   * count written. */
   colorPoints(points: readonly number[], rgb: [number, number, number]): number;
+  /** The contract's edge list — endpoint point-index pairs, in header order.
+   * colorbonds/colorbondsof test these endpoints against the resolved point
+   * set; edge ids (indexes into this list) key the edge-color buffer. */
+  edges: readonly [number, number][];
+  /** colorPoints' EDGE twin: write a constant per-edge RGB on exactly these
+   * edge ids in the ONE edge-color buffer (colorbonds and colorbondsof both
+   * write it — they compose by last-write-wins per edge). Same one-stroke
+   * recordOp discipline; edges never written keep the uniform base look.
+   * Returns the count written. */
+  colorEdges(edgeIds: readonly number[], rgb: [number, number, number]): number;
 }
 
 export class CommandRegistry {
@@ -465,53 +476,116 @@ export function parseColor(token: string): [number, number, number] | null {
   ];
 }
 
+/** The color family's shared argument/target front half: split the trailing
+ * color token, validate it, parse the expression, and resolve to the deduped
+ * point union — hidden points included, never committing: view's EXACT
+ * resolution, so every family verb colors off the point set `view <target>`
+ * frames. Errors/nomatch come back as the CommandResult; success carries the
+ * points, the RGB, and the split for the verb's own wording. */
+function resolveColorArgs(
+  ctx: CommandContext,
+  verb: string,
+  args: string,
+): { points: number[]; rgb: [number, number, number]; expr: string; word: string } | CommandResult {
+  const split = splitTrailingWord(args);
+  if (split.word === null) {
+    return {
+      status: "error",
+      message: `${verb} needs a target and a color — ${verb} <target> <color> (e.g. ${verb} alpha green)`,
+    };
+  }
+  const rgb = parseColor(split.word);
+  if (!rgb) {
+    return {
+      status: "error",
+      message: `unknown color "${split.word}" — use a CSS color name (red, steelblue) or hex (#ff8800)`,
+    };
+  }
+  const ast = parseTarget(split.expr);
+  if (ast.kind === "error") return { status: "error", message: ast.message };
+  const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
+  // Union the entries' points, hidden ones included — view's exact dedupe.
+  const seen = new Set<number>();
+  const points: number[] = [];
+  for (const e of entries) {
+    for (const p of ctx.hierarchy.pointsOf(e)) {
+      if (seen.has(p)) continue;
+      seen.add(p);
+      points.push(p);
+    }
+  }
+  if (points.length === 0) {
+    return { status: "nomatch", message: `nothing matches "${split.expr}"` };
+  }
+  return { points, rgb, expr: split.expr, word: split.word };
+}
+
 /**
- * `color <target> <color>` — the FIRST representation verb: a constant
- * per-point color write, and the template every future appearance verb
- * (size, opacity, …) clones. It targets EXACTLY like view — the same
- * resolveTarget over the same descent helpers, full grammar, hidden points
- * included, no commit — so `color <t> <c>` colors precisely the point set
- * `view <t>` frames. Where it diverges from view: it MUTATES — one undo
- * stroke per invocation (re-coloring overlapping points last-write-wins as a
- * NEW stroke), and a nomatch / invalid color / usage error writes nothing
- * and pushes no stroke. The message reports the ACTION and count, never
- * pixels — some colored points may be hidden (show's report-the-action
- * rule). <color> is a CSS color name or hex.
+ * `colorpoints <target> <color>` — the FIRST representation verb (shipped as
+ * `color`, renamed when the family grew): a constant per-point color write,
+ * and the template every appearance verb clones. It targets EXACTLY like
+ * view — the same resolveTarget over the same descent helpers, full grammar,
+ * hidden points included, no commit — so `colorpoints <t> <c>` colors
+ * precisely the point set `view <t>` frames. Where it diverges from view: it
+ * MUTATES — one undo stroke per invocation (re-coloring overlapping points
+ * last-write-wins as a NEW stroke), and a nomatch / invalid color / usage
+ * error writes nothing and pushes no stroke. The message reports the ACTION
+ * and count, never pixels — some colored points may be hidden (show's
+ * report-the-action rule). <color> is a CSS color name or hex. It writes the
+ * POINT buffer only — edges and polylines are other verbs' primitives.
  */
-export function makeColorHandler(ctx: CommandContext): CommandHandler {
+export function makeColorPointsHandler(ctx: CommandContext): CommandHandler {
   return (args: string): CommandResult => {
-    const split = splitTrailingWord(args);
-    if (split.word === null) {
+    const r = resolveColorArgs(ctx, "colorpoints", args);
+    if ("status" in r) return r;
+    const n = ctx.colorPoints(r.points, r.rgb);
+    return { status: "ok", message: `colored ${n} points ${r.word}` };
+  };
+}
+
+/**
+ * `colorbonds <target> <color>` / `colorbondsof <target> <color>` — the edge
+ * pair. Both resolve the target to the same point set colorpoints/view use,
+ * then map it onto EDGES; they differ only in the endpoint predicate:
+ *
+ *   colorbonds    BOTH endpoints in the set (contained — parity-preserving:
+ *                 every colored edge lies inside the resolved target)
+ *   colorbondsof  AT LEAST ONE endpoint in the set (incident). Edges whose
+ *                 OTHER endpoint is OUTSIDE the target are colored
+ *                 INTENTIONALLY — reaching one hop out is this verb's whole
+ *                 point, and the one deliberate break from strict
+ *                 target-containment in the family; hence a separate verb
+ *                 rather than a flag.
+ *
+ * Both write the ONE edge-color buffer (they compose by last-write-wins per
+ * edge) and touch no other primitive. A well-formed target that matches
+ * points but no edges is a nomatch (e.g. colorbonds on a single point — no
+ * edge has both endpoints in a one-point set) — nothing written, no stroke.
+ */
+export function makeColorBondsHandler(
+  ctx: CommandContext,
+  verb: "colorbonds" | "colorbondsof",
+): CommandHandler {
+  const both = verb === "colorbonds";
+  return (args: string): CommandResult => {
+    const r = resolveColorArgs(ctx, verb, args);
+    if ("status" in r) return r;
+    const inSet = new Set(r.points);
+    const edgeIds: number[] = [];
+    for (let e = 0; e < ctx.edges.length; e++) {
+      const [a, b] = ctx.edges[e];
+      if (both ? inSet.has(a) && inSet.has(b) : inSet.has(a) || inSet.has(b)) edgeIds.push(e);
+    }
+    if (edgeIds.length === 0) {
       return {
-        status: "error",
-        message: "color needs a target and a color — color <target> <color> (e.g. color alpha green)",
+        status: "nomatch",
+        message: both
+          ? `no edges with both endpoints in "${r.expr}"`
+          : `no edges touching "${r.expr}"`,
       };
     }
-    const rgb = parseColor(split.word);
-    if (!rgb) {
-      return {
-        status: "error",
-        message: `unknown color "${split.word}" — use a CSS color name (red, steelblue) or hex (#ff8800)`,
-      };
-    }
-    const ast = parseTarget(split.expr);
-    if (ast.kind === "error") return { status: "error", message: ast.message };
-    const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
-    // Union the entries' points, hidden ones included — view's exact dedupe.
-    const seen = new Set<number>();
-    const points: number[] = [];
-    for (const e of entries) {
-      for (const p of ctx.hierarchy.pointsOf(e)) {
-        if (seen.has(p)) continue;
-        seen.add(p);
-        points.push(p);
-      }
-    }
-    if (points.length === 0) {
-      return { status: "nomatch", message: `nothing matches "${split.expr}"` };
-    }
-    const n = ctx.colorPoints(points, rgb);
-    return { status: "ok", message: `colored ${n} points ${split.word}` };
+    const n = ctx.colorEdges(edgeIds, r.rgb);
+    return { status: "ok", message: `colored ${n} edges ${r.word}` };
   };
 }
 
@@ -847,8 +921,11 @@ export const HELP_TEXT = [
   "               never toggles — already hidden is a no-op; bare hide is an error",
   "  show [<expr>|@name[.pred]]  clear hidden state (never commits);",
   "               bare show reveals everything",
-  "  color <expr> <color>        color those points (CSS name or #hex; hidden",
+  "  colorpoints <expr> <color>  color those points (CSS name or #hex; hidden",
   "               points color too; last-write-wins; one undo stroke)",
+  "  colorbonds <expr> <color>   color edges with BOTH endpoints in the target",
+  "  colorbondsof <expr> <color> color edges TOUCHING the target (either",
+  "               endpoint — deliberately reaches one hop outside it)",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  rename @name [new]  rename a selection · clear  wipe the terminal log",
   "  add @name <tree-target>     add tree entries as members (natural level)",
@@ -897,9 +974,19 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "clear hidden state on the target (never commits); bare show reveals everything",
   );
   registry.register(
-    "color",
-    makeColorHandler(ctx),
-    "color the target's points a constant color (CSS name or #hex, one undo stroke): color <target> <color>",
+    "colorpoints",
+    makeColorPointsHandler(ctx),
+    "color the target's points a constant color (CSS name or #hex, one undo stroke): colorpoints <target> <color>",
+  );
+  registry.register(
+    "colorbonds",
+    makeColorBondsHandler(ctx, "colorbonds"),
+    "color every edge with BOTH endpoints in the target (contained): colorbonds <target> <color>",
+  );
+  registry.register(
+    "colorbondsof",
+    makeColorBondsHandler(ctx, "colorbondsof"),
+    "color every edge with AT LEAST ONE endpoint in the target (incident — reaches one hop outside): colorbondsof <target> <color>",
   );
   registry.register(
     "ls",
