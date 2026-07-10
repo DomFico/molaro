@@ -203,6 +203,32 @@ try {
   check("Tab after @name. completes a selection ancestor label",
     (await inputValue()) === "view @solvent.solvent-bath", JSON.stringify(await inputValue()));
 
+  // #* — the all-indices wildcard: @name.#* ≡ @name through the relay
+  lastLine = await runLine("view @solvent.#*");
+  const wholeSel = await runLine("view @solvent");
+  check("view @name.#* returns the same count as view @name",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "focused 4800 points" &&
+      wholeSel?.text === lastLine?.text,
+    JSON.stringify([lastLine?.text, wholeSel?.text]));
+
+  // an exact @name token descends on the second Tab (stateless two-stage)
+  await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
+  await clickInput();
+  await d.insertText("view @solv");
+  await d.key("Tab", "Tab", 9);
+  await sleep(400);
+  check("a partial @name settles without a dot",
+    (await inputValue()) === "view @solvent", JSON.stringify(await inputValue()));
+  await d.key("Tab", "Tab", 9);
+  await sleep(600);
+  lines2 = await logLines();
+  lastLine = lines2[lines2.length - 1];
+  check("Tab on the exact @name descends: dot + the selection's identity pool",
+    (await inputValue()) === "view @solvent." &&
+      /term-echo/.test(lastLine?.cls ?? "") && /solvent-bath/.test(lastLine?.text ?? "") &&
+      /anchor/.test(lastLine?.text ?? ""),
+    `input=${JSON.stringify(await inputValue())}`);
+
   // inverted range bounds normalize: #hi-lo ≡ #lo-hi
   lastLine = await runLine("view #10-5");
   const forward = await runLine("view #5-10");

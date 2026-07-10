@@ -90,6 +90,9 @@ property every earlier suite missed while the bug was live.
   Range bounds are UNORDERED for both kinds (`inRange` normalizes to
   `[min, max]`; normalization before clamping): a range denotes a set, not a
   direction — `..` stays reserved if an ordered range is ever wanted.
+  `#*` is the all-indices wildcard ({lo:0, hi:Infinity} in the spec; clamped
+  like any range) — deliberately redundant with `*` / bare `@name`, kept for
+  axis symmetry; it must always resolve the same point set those do.
 - `@name` = the committed selection's stored entries; `@name.<pred>` filters
   its resolved **point set** — match-anywhere: leaf type OR subgroup/group/
   category label (via `subgroupOfPoint` → `ancestorsOfSubgroup` → `label`,
@@ -144,12 +147,14 @@ deliberate decisions:
 - Path segments follow the STATELESS TWO-STAGE rule (`pathStage`): a partial
   token settles (unique → full label, several → common prefix + list; never a
   dot); a token that already EXACTLY equals a node label at a descendable
-  level (category/group/subgroup) appends `.` and offers the next level's
+  level (category/group/subgroup, or an exact `@name` — the selection's
+  filter level sits below it, so second Tab appends `.` and offers its
+  identity pool via `selectionPool`) appends `.` and offers the next level's
   candidates — unconditionally, even when longer siblings share the token as
   a prefix. An exact LEAF token is terminal (no dot, no candidates). The rule
   is a pure function of (text, cursor) — no last-Tab state anywhere; do not
-  add any. Unique verb completion still appends a space; `@name` and
-  `@name.`-filter tokens never descend.
+  add any. Unique verb completion still appends a space; `@name.`-filter
+  tokens never descend.
 - No-op on `*` tokens and on **range-in-progress** tokens (`^\d+-\d*$`) only —
   deliberately narrower than "contains a dash", or `group-0`-style labels
   would be uncompletable. `#`-tokens are inert (indices aren't enumerable).

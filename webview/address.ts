@@ -9,7 +9,8 @@
  *                                               optionally FILTERED by ONE
  *                                               leaf predicate (a "," list)
  *   index-term  := "#" index-spec ("," "#" index-spec)*
- *   index-spec  := INT | INT "-" INT            the CONTRACT POINT INDEX
+ *   index-spec  := "*" | INT | INT "-" INT      the CONTRACT POINT INDEX
+ *                                               ("#*" = every index in scope)
  *   path        := segment ("." segment)*       1–4 segments, top-down;
  *                                               segment COUNT = target level
  *   segment     := predicate ("," predicate)*   list = union within the parent
@@ -245,9 +246,22 @@ class Parser {
     return { kind: "literal", value: tok };
   }
 
-  /** "#" INT ("-" INT)? — the point-index specifier. */
+  /** "#" ("*" | INT ("-" INT)?) — the point-index specifier. */
   private indexSpec(): { lo: number; hi: number } {
     this.i++; // the "#"
+    if (this.s[this.i] === "*") {
+      // "#*" — the all-indices wildcard (resolution clamps to n_points).
+      // Deliberately REDUNDANT: standalone #* ≡ * and @name.#* ≡ @name in
+      // point terms — its value is a consistent "every index" spelling on
+      // the # axis (removing the *-works-but-#*-errors papercut), not new
+      // expressive power.
+      this.i++;
+      const c = this.s[this.i];
+      if (this.i < this.s.length && c !== "." && c !== "," && c !== "+" && !/\s/.test(c)) {
+        throw new Failure(`unexpected "${c}" after a "#" index`);
+      }
+      return { lo: 0, hi: Infinity };
+    }
     const lo = this.integer(`expected an integer after "#"`);
     let hi = lo;
     if (this.s[this.i] === "-") {
@@ -517,8 +531,46 @@ export function completeTarget(
   // verb position: nothing but whitespace before the token
   if (/^\s*$/.test(before)) return finish(ts, token, verbs, " ");
 
-  // @name: the token hangs directly off an "@"
-  if (before.endsWith("@")) return finish(ts, token, committedNames.keys(), "");
+  // the identity-token pool of one committed selection (the "@name." filter
+  // candidates): its distinct point types + the subgroup/group/category
+  // labels its points sit under — deduplicated by finish()
+  const selectionPool = (selName: string): string[] | null => {
+    const stored = committedNames.get(selName);
+    if (!stored) return null;
+    const pool: string[] = [];
+    const seenPts = new Set<number>();
+    const seenSubs = new Set<number>();
+    for (const e of stored) {
+      for (const p of hierarchy.pointsOf(e)) {
+        if (seenPts.has(p)) continue;
+        seenPts.add(p);
+        const t = types[p];
+        if (t) pool.push(t);
+        const sid = hierarchy.subgroupOfPoint(p);
+        if (seenSubs.has(sid)) continue;
+        seenSubs.add(sid);
+        pool.push(hierarchy.label({ level: "subgroup", id: sid }));
+        const a = hierarchy.ancestorsOfSubgroup(sid);
+        if (a) {
+          pool.push(hierarchy.label({ level: "group", id: a.group }));
+          pool.push(hierarchy.label({ level: "category", id: a.category }));
+        }
+      }
+    }
+    return pool;
+  };
+
+  // @name: the token hangs directly off an "@". The two-stage rule applies
+  // here too — an EXACT-complete selection name is descendable (a filter
+  // level exists below it): second Tab appends "." and offers the
+  // selection's identity pool; a partial name settles with no dot.
+  if (before.endsWith("@")) {
+    if (token !== "" && committedNames.has(token)) {
+      const next = [...new Set(selectionPool(token) ?? [])].sort();
+      return { start: ts, candidates: next, applied: "." };
+    }
+    return finish(ts, token, committedNames.keys(), "");
+  }
 
   // current term = after the last "+" (or after the verb); the structural
   // prefix before the token must be empty or end at a "." / "," boundary
@@ -544,28 +596,8 @@ export function completeTarget(
     if (/^"[^"]*"$/.test(nameText)) selName = nameText.slice(1, -1);
     else if (!/[."]/.test(nameText)) selName = nameText;
     if (selName === null) return none; // a second level, or junk
-    const stored = committedNames.get(selName);
-    if (!stored) return none;
-    const pool: string[] = [];
-    const seenPts = new Set<number>();
-    const seenSubs = new Set<number>();
-    for (const e of stored) {
-      for (const p of hierarchy.pointsOf(e)) {
-        if (seenPts.has(p)) continue;
-        seenPts.add(p);
-        const t = types[p];
-        if (t) pool.push(t);
-        const sid = hierarchy.subgroupOfPoint(p);
-        if (seenSubs.has(sid)) continue;
-        seenSubs.add(sid);
-        pool.push(hierarchy.label({ level: "subgroup", id: sid }));
-        const a = hierarchy.ancestorsOfSubgroup(sid);
-        if (a) {
-          pool.push(hierarchy.label({ level: "group", id: a.group }));
-          pool.push(hierarchy.label({ level: "category", id: a.category }));
-        }
-      }
-    }
+    const pool = selectionPool(selName);
+    if (pool === null) return none;
     return finish(ts, token, pool, "");
   }
 

@@ -337,6 +337,34 @@ test("standalone #N resolves point entries unconditionally (no scope)", () => {
   assert.deepEqual(keys("#5 + beta"), ["category:1", "point:5"]); // + composes
 });
 
+test("#* is the all-indices wildcard — equivalent spellings, same point sets", () => {
+  // standalone: every point in the system, at point level
+  const all = resolve("#*");
+  assert.equal(all.length, 12);
+  assert.ok(all.every((e) => e.level === "point"));
+  assert.deepEqual(keys("#*"), keys("#0-999")); // ≡ a covering index range
+  // scoped leaf: intersects the path's scope like any # form
+  assert.deepEqual(keys("alpha.g-1.s1.#*"), ["point:0", "point:1"]);
+  assert.deepEqual(keys("alpha.g-1.s1.#*"), keys("alpha.g-1.s1.*"));
+  // @name filter: ≡ the selection's whole point set (and ≡ @name.*)
+  assert.deepEqual(keys("@mix.#*", FNAMES), ["point:0", "point:1", "point:5"]);
+  assert.deepEqual(keys("@mix.#*", FNAMES), keys("@mix.*", FNAMES));
+  // lists and unions compose like any index spec
+  assert.deepEqual(keys("alpha.g-1.s1.tH,#*"), ["point:0", "point:1"]);
+  assert.equal(resolve("#* + beta").length, 13); // 12 points + the category
+});
+
+test("#* obeys the placement rule; malformed # forms still error", () => {
+  assert.match(parseErr("alpha.#*"), /standalone term or in a path's final/);
+  assert.match(parseErr("#*.x"), /standalone term or in a path's final/);
+  assert.match(parseErr("#"), /expected an integer after "#"/);
+  assert.match(parseErr("#abc"), /expected an integer after "#"/);
+  assert.match(parseErr("#-5"), /expected an integer after "#"/);
+  assert.match(parseErr("#5-"), /expected an integer after "-"/);
+  assert.match(parseErr("#*5"), /unexpected "5" after a "#" index/);
+  assert.match(parseErr("#5*"), /unexpected "\*" after a "#" index/);
+});
+
 test("range bounds NORMALIZE: #9-5 ≡ #5-9, in every position", () => {
   assert.deepEqual(keys("#6-3"), keys("#3-6")); // standalone
   assert.deepEqual(keys("#5-5"), ["point:5"]); // equal bounds untouched
@@ -376,7 +404,7 @@ test("misplaced # (segments 1–3, or a dot after a standalone #) is a parse err
 test("malformed # forms are parse errors", () => {
   assert.match(parseErr("#"), /expected an integer after "#"/);
   assert.match(parseErr("#abc"), /expected an integer after "#"/);
-  assert.match(parseErr("#*"), /expected an integer after "#"/);
+  // "#*" is now VALID (the all-indices wildcard) — covered in its own suite
   assert.match(parseErr("#-5"), /expected an integer after "#"/);
   assert.match(parseErr("#5-"), /expected an integer after "-"/);
   assert.match(parseErr("#5x"), /unexpected "x" after a "#" index/);
@@ -597,6 +625,23 @@ test("completion: #-prefixed tokens are inert (indices aren't enumerable)", () =
   assert.deepEqual(comp("view #"), { start: 5, candidates: [], applied: "" });
   assert.deepEqual(comp("view #16").candidates, []);
   assert.deepEqual(comp("view alpha.g-1.s1.#1").candidates, []);
+});
+
+test("an exact @name token is descendable: second Tab appends '.' + the filter pool", () => {
+  // stage one: a partial name settles with NO dot
+  assert.deepEqual(comp("view @solv"), { start: 6, candidates: ["solvent"], applied: "ent" });
+  // stage two: the exact name descends into its filter level
+  assert.deepEqual(comp("view @solvent"),
+    { start: 6, candidates: ["bath", "env3", "w", "w1", "w2"], applied: "." });
+  assert.deepEqual(comp("view @picks"),
+    { start: 6, candidates: ["alpha", "g-1", "s1", "t2", "tH"], applied: "." });
+  // stateless: same input, same result
+  assert.deepEqual(comp("view @solvent"), comp("view @solvent"));
+  // a partial with several names still settles (no dot)
+  assert.deepEqual(comp("view @sol").candidates, ["sol2", "solvent"]);
+  assert.equal(comp("view @sol").applied, "");
+  // unknown exact-looking name: plain name completion (here: no candidates)
+  assert.deepEqual(comp("view @nope").candidates, []);
 });
 
 test("completion after @name. merges the selection's types AND ancestor labels", () => {

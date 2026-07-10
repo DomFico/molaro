@@ -25,7 +25,7 @@ point types `anchor` and `t0`–`t3`).
 | `lo-hi` | Label range: matches the integer at the **end of a label** | `view alpha.group-0.0-3` |
 | `a,b,c` | List: union of predicates **within one segment** | `view alpha.group-0.subgroup-0,subgroup-3` |
 | `"…"` | Quote labels containing spaces/delimiters | `view gamma.group-2."subgroup 11"` |
-| `#N` / `#lo-hi` | Point(s) by **contract index** (the `#N` on point rows) | `view #161`, `view #156-187` |
+| `#N` / `#lo-hi` / `#*` | Point(s) by **contract index** (the `#N` on point rows; `#*` = all in scope) | `view #161`, `view #156-187` |
 | `@name` | A committed selection (its whole point set) | `view @selection_1` |
 | `@name.<pred>` | Filter the selection: keep points whose **type or any ancestor label** matches | `view @selection_1.anchor` |
 | `a + b` | Union of terms (the only cross-subtree operator) | `view alpha + @selection_1.t0` |
@@ -118,6 +118,11 @@ rows. `#` addresses points by that index directly:
 - `view #161` — the single point with index 161.
 - `view #156-187` — every point whose index is in `[156, 187]` inclusive.
   Bound order doesn't matter: `#187-156` is the same set.
+- `#*` — every index at the current scope: standalone `#*` is every point in
+  the system, `<path>.#*` every point under that path, `@name.#*` every point
+  in that selection. Deliberately redundant — `#*` ≡ `*` standalone and
+  `@name.#*` ≡ `@name` in point terms; it exists as the consistent
+  "all indices" spelling on the `#` axis, not as new capability.
 
 `#` is the **sole distinguisher** between an index range and a label range:
 `#44-55` matches point indices; bare `44-55` matches the trailing integer of
@@ -242,11 +247,14 @@ prior presses. The two stages come from the token under the cursor:
   plus a printed candidate list if several. No `.` is appended.
   `view alp` ⇥ → `view alpha`.
 - **Exact-complete token at a descendable level** (category / group /
-  subgroup) → Tab appends `.` and prints the next level's candidates. So
-  pressing Tab again right after a completion naturally walks down a level:
-  `view alpha` ⇥ → `view alpha.` + its groups listed. Exact-match descent is
-  unconditional — even when longer sibling labels share the token as a prefix,
-  the fully-typed node descends; keep typing to reach a longer sibling.
+  subgroup, or an exact `@name` — a selection has its filter level below) →
+  Tab appends `.` and prints the next level's candidates. So pressing Tab
+  again right after a completion naturally walks down a level:
+  `view alpha` ⇥ → `view alpha.` + its groups listed; `view @selection_1` ⇥ →
+  `view @selection_1.` + that selection's identity tokens. Exact-match descent
+  is unconditional — even when longer sibling labels share the token as a
+  prefix, the fully-typed node descends; keep typing to reach a longer
+  sibling.
 - **The leaf (point-type), and `#` / `@name` / glob / range tokens** never
   descend and never gain a dot. An exact leaf token is terminal — Tab does
   nothing further.
