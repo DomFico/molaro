@@ -3326,9 +3326,268 @@ async function S18(): Promise<void> {
   });
 }
 
+async function S19(): Promise<void> {
+  console.log("S19 — the opacity family: the third axis (opacity ⊥ hide, naive blending)");
+  const BUFS = [
+    "color", "edgeColor", "traceColor",
+    "size", "edgeSize", "traceSize",
+    "opacity", "edgeOpacity", "traceOpacity",
+  ] as const;
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const snap = (slot: string, buf: string) =>
+      d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.${buf}))`);
+    const equalsSnap = (slot: string, buf: string) =>
+      d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.${buf}, s=window.${slot};
+        if (c.length !== s.length) return false;
+        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) return false;
+        return true;
+      })()`);
+    const snapAll = async () => {
+      for (const b of BUFS) await snap(`__all_${b}`, b);
+    };
+    const changedBuffers = async (): Promise<string> => {
+      const out: string[] = [];
+      for (const b of BUFS) if (!(await equalsSnap(`__all_${b}`, b))) out.push(b);
+      return JSON.stringify(out);
+    };
+    /** Opacity parity per shape (S18's paintSize, third axis). */
+    const paintOp = async (
+      verb: "pointopacity" | "bondopacity" | "bondopacityof" | "traceopacity",
+      expr: string,
+      value: string,
+    ) => {
+      const buf =
+        verb === "pointopacity" ? "opacity" :
+        verb === "traceopacity" ? "traceOpacity" : "edgeOpacity";
+      await snap("__preOp", buf);
+      const r = await cmd(`${verb} ${expr} ${value}`);
+      const parity = await d.evaluate<{ ids: number[]; match: boolean; reach: number }>(`(()=>{
+        const v=${V}; const c=v.rep.state.${buf}; const s=window.__preOp;
+        const changed=[];
+        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) changed.push(i);
+        const pts=new Set(v.debug.resolvePoints(${JSON.stringify(expr)}));
+        let want=[]; let reach=0;
+        if (${JSON.stringify(verb)} === "pointopacity") {
+          want=[...pts].sort((a,b)=>a-b);
+        } else if (${JSON.stringify(verb)} === "traceopacity") {
+          const active=new Set([...pts].map(p=>v.hierarchy.subgroupOfPoint(p)));
+          for (let i=0;i<v.traceVertices.length;i++) {
+            if (active.has(v.hierarchy.subgroupOfPoint(v.traceVertices[i]))) want.push(i);
+          }
+        } else {
+          const both=${JSON.stringify(verb)} === "bondopacity";
+          for (let e=0;e<v.edges.length;e++) {
+            const a=v.edges[e][0], b=v.edges[e][1];
+            if (both ? (pts.has(a)&&pts.has(b)) : (pts.has(a)||pts.has(b))) want.push(e);
+          }
+          for (const e of changed) {
+            const a=v.edges[e][0], b=v.edges[e][1];
+            if (!pts.has(a)||!pts.has(b)) reach++;
+          }
+        }
+        return { ids: changed.length<=16?changed:[], reach,
+                 match: changed.length===want.length && changed.every((x,i)=>x===want[i]) };
+      })()`);
+      return { r, parity };
+    };
+    const pointsAlpha = (expr: string, val: number) =>
+      d.evaluate<boolean>(`(()=>{
+        const v=${V}; const o=v.rep.state.opacity; const w=Math.fround(${val});
+        return v.debug.resolvePoints(${JSON.stringify(expr)}).every(p=>o[p]===w);
+      })()`);
+    /** Decidedly-RED canvas pixels (strict classifier — the brownish base
+     * polyline never counts) — the visible-transparency evidence. */
+    const redCount = (b64: string) =>
+      d.evaluate<number>(`(async () => {
+        const app = document.getElementById('app').getBoundingClientRect();
+        const img = new Image();
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+        const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+        const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+        const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+          Math.round(app.width), Math.round(app.height) - 60).data;
+        let n = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) n++;
+        }
+        return n;
+      })()`);
+
+    await snapAll();
+    for (const b of BUFS) await snap(`__pristine_${b}`, b);
+    const baseDepth = await undoDepth();
+
+    // -- (a) opacity parity per shape ---------------------------------------------
+    for (const [expr, value] of [
+      ["alpha", "0.25"],
+      ["#100-140", "0.5"],
+      ['gamma.group-2."subgroup 11"', "0.75"],
+      ["@solvent", "0.8"],
+    ] as const) {
+      const { r, parity } = await paintOp("pointopacity", expr, value);
+      check(`S19: pointopacity ${expr} — fades EXACTLY the resolved points`,
+        r.status === "ok" && parity.match, JSON.stringify(r));
+      check(`S19: ...message reports the action`,
+        /^set \d+ points to opacity [\d.]+$/.test(r.message), r.message);
+    }
+    const bonds = await paintOp("bondopacity", "alpha", "0.25");
+    check("S19: bondopacity alpha — EXACTLY the both-endpoints edges (reach 0)",
+      bonds.r.status === "ok" && bonds.parity.match && bonds.parity.reach === 0,
+      JSON.stringify(bonds.r));
+    const bondsof = await paintOp("bondopacityof", "beta.group-*.*.t1", "0.5");
+    check("S19: bondopacityof beta.group-*.*.t1 — the either-endpoint set, ALL reaching out",
+      bondsof.r.status === "ok" && bondsof.parity.match && bondsof.parity.reach > 0,
+      `${JSON.stringify(bondsof.r)} reach=${bondsof.parity.reach}`);
+    const trace = await paintOp("traceopacity", "alpha", "0.25");
+    check("S19: traceopacity alpha — the SCATTERED [0,3,6,9] (the shared map-up)",
+      trace.r.status === "ok" && trace.parity.match &&
+        JSON.stringify(trace.parity.ids) === "[0,3,6,9]",
+      JSON.stringify(trace.parity.ids));
+    const traceUp = await paintOp("traceopacity", "#124", "0.5");
+    check("S19: traceopacity #124 — one point maps up to its subgroup's ONE vertex",
+      traceUp.r.status === "ok" && JSON.stringify(traceUp.parity.ids) === "[1]" &&
+        traceUp.r.message === "set 1 trace vertices to opacity 0.5",
+      JSON.stringify(traceUp));
+    const traceNone = await cmd("traceopacity @solvent 0.5");
+    check("S19: traceopacity @solvent — no vertices → nomatch",
+      traceNone.status === "nomatch" && traceNone.message === `no trace vertices in "@solvent"`,
+      JSON.stringify(traceNone));
+
+    // -- (b) the single-point pin on the opacity axis ------------------------------
+    await snap("__quietEO", "edgeOpacity");
+    const depthPin = await undoDepth();
+    const pin = await cmd("bondopacity #124 0.5");
+    check("S19: bondopacity #124 → nomatch (no contained edge in a one-point set)",
+      pin.status === "nomatch" && pin.message === `no edges with both endpoints in "#124"`,
+      JSON.stringify(pin));
+    check("S19: ...byte- and depth-identical no-op",
+      (await equalsSnap("__quietEO", "edgeOpacity")) && (await undoDepth()) === depthPin);
+    const pinOf = await paintOp("bondopacityof", "#124", "0.3");
+    check("S19: bondopacityof #124 fades exactly the incident edges",
+      pinOf.r.status === "ok" && pinOf.parity.match &&
+        pinOf.parity.reach > 0 && pinOf.r.message === "set 2 edges to opacity 0.3",
+      JSON.stringify(pinOf));
+
+    // -- (c) OPACITY-ZERO ⊥ HIDE: invisible-but-present ----------------------------
+    await snap("__preZeroVis", "visible");
+    const visBefore = await visibleCount(d);
+    const zero = await cmd("pointopacity alpha 0");
+    check("S19: pointopacity alpha 0 — a literal write, reported as opacity 0 (never 'hidden')",
+      zero.status === "ok" && zero.message === "set 400 points to opacity 0",
+      JSON.stringify(zero));
+    check("S19: ...alpha really is 0 there", await pointsAlpha("alpha", 0));
+    check("S19: ...hide-state is BYTE-IDENTICAL and the scene count unchanged",
+      (await equalsSnap("__preZeroVis", "visible")) && (await visibleCount(d)) === visBefore);
+    check("S19: ...zero-opacity points still resolve (present, not hidden)",
+      (await d.evaluate<number>(`${V}.debug.resolvePoints("alpha").length`)) === 400);
+
+    // -- (d) the two-sided clamp ----------------------------------------------------
+    const high = await cmd("pointopacity alpha 1.5");
+    check("S19: >1 clamps to 1 and the message says so",
+      high.status === "ok" && high.message === "set 400 points to opacity 1 (clamped to 1)",
+      JSON.stringify(high));
+    check("S19: ...and the buffer holds 1", await pointsAlpha("alpha", 1));
+    const low = await cmd("pointopacity beta -0.5");
+    check("S19: <0 clamps to 0 and the message says so",
+      low.status === "ok" && low.message === "set 400 points to opacity 0 (clamped to 0)",
+      JSON.stringify(low));
+    check("S19: ...and the buffer holds 0", await pointsAlpha("beta", 0));
+
+    // -- (e) the pixels: transparency actually RENDERS ------------------------------
+    await cmd("colorpoints alpha.group-0.subgroup-0 red");
+    const redBefore = await redCount(await d.captureB64(`${REPORT}/S19_red_opaque.png`));
+    check("S19: (setup) an opaque red subgroup shows red pixels", redBefore > 50,
+      `red=${redBefore}`);
+    await cmd("pointopacity alpha.group-0.subgroup-0 0");
+    const redAfter = await redCount(await d.captureB64(`${REPORT}/S19_red_faded.png`));
+    check("S19: fading it to opacity 0 removes the red pixels (invisible-but-present)",
+      redAfter < Math.max(5, redBefore / 10), `before=${redBefore} after=${redAfter}`);
+    check("S19: ...while the points still resolve",
+      (await d.evaluate<number>(`${V}.debug.resolvePoints("alpha.group-0.subgroup-0").length`)) === 100);
+
+    // -- (f) independence across the TWELVE-verb grid, NINE buffers -----------------
+    const grid: [string, string][] = [
+      ["pointopacity gamma 0.6", `["opacity"]`],
+      ["bondopacity gamma 0.6", `["edgeOpacity"]`],
+      ["bondopacityof gamma 0.4", `["edgeOpacity"]`], // the SHARED edge-opacity buffer
+      ["traceopacity gamma 0.6", `["traceOpacity"]`],
+      ["colorpoints gamma #212223", `["color"]`],
+      ["pointsize gamma 2.6", `["size"]`],
+      ["colorbonds gamma #242526", `["edgeColor"]`],
+      ["bondsize gamma 1.6", `["edgeSize"]`],
+      ["colortrace gamma #272829", `["traceColor"]`],
+      ["tracesize gamma 2.4", `["traceSize"]`],
+    ];
+    for (const [text, want] of grid) {
+      await snapAll();
+      await cmd(text);
+      check(`S19: ${text} touches ONLY ${want}`, (await changedBuffers()) === want,
+        await changedBuffers());
+    }
+
+    // -- (g) undo/LWW/hidden on the opacity axis ------------------------------------
+    while ((await undoDepth()) > baseDepth) {
+      await d.ctrlZ();
+      await sleep(60);
+    }
+    let allPristine = true;
+    for (const b of BUFS) allPristine = allPristine && (await equalsSnap(`__pristine_${b}`, b));
+    check("S19: unwinding every stroke restores ALL NINE buffers to pristine", allPristine);
+    await cmd("pointopacity alpha 0.5");
+    await cmd("pointopacity alpha.group-0.subgroup-0 0.25");
+    check("S19: re-fading an overlap overwrites those points (LWW)",
+      await pointsAlpha("alpha.group-0.subgroup-0", 0.25));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S19: undo restores the PREVIOUS alpha (0.5), not the base look",
+      await pointsAlpha("alpha.group-0.subgroup-0", 0.5));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S19: a second undo restores the fully-opaque base (1)",
+      await pointsAlpha("alpha", 1));
+    await cmd("hide alpha [tmphide]");
+    const visHidden = await visibleCount(d);
+    const depthHidden = await undoDepth();
+    const hid = await paintOp("pointopacity", "alpha", "0.75");
+    check("S19: fading a HIDDEN target writes the buffer as ONE stroke, unhiding nothing",
+      hid.r.status === "ok" && hid.parity.match &&
+        (await undoDepth()) === depthHidden + 1 && (await visibleCount(d)) === visHidden,
+      JSON.stringify(hid.r));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S19: one Ctrl+Z pops ONLY the opacity stroke — the hide stands",
+      (await equalsSnap("__preOp", "opacity")) &&
+        (await undoDepth()) === depthHidden && (await visibleCount(d)) === visHidden);
+
+    // -- (h) the remaining quiet paths, byte-identical across every buffer ----------
+    await snapAll();
+    const depthQuiet = await undoDepth();
+    const quiet: [string, string][] = [
+      ["pointopacity nothere 0.5", "nomatch"],
+      ["pointopacity alpha abc", "error"],
+      ["pointopacity", "error"],
+      ["bondopacityof 0.5", "error"], // one chunk: a value but no target
+      ["traceopacity alpha.[x] 0.5", "error"], // [ reserved
+    ];
+    for (const [text, status] of quiet) {
+      const r = await cmd(text);
+      check(`S19: ${text} → ${status}`, r.status === status, JSON.stringify(r));
+    }
+    check("S19: ...none of them wrote a single component anywhere",
+      (await changedBuffers()) === "[]");
+    check("S19: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet);
+
+    await d.screenshot(`${REPORT}/S19_opacity.png`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

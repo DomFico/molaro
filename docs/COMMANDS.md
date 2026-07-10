@@ -43,6 +43,10 @@ point types `anchor` and `t0`–`t3`).
 | `bondsize <expr> <size>` | Width for edges with **both** endpoints in the target (stored; not yet drawn) | `bondsize beta.group-0.subgroup-0 0` |
 | `bondsizeof <expr> <size>` | Width for edges **touching** the target (either endpoint — the incident reach) | `bondsizeof #124 1.5` |
 | `tracesize <expr> <size>` | Thickness for polyline vertices whose **subgroup** contains a resolved point | `tracesize alpha 1.5` |
+| `pointopacity <expr> <a>` | Fade those points (0–1; 0 is invisible-but-**present**, never a hide; clamps) | `pointopacity alpha 0.5` |
+| `bondopacity <expr> <a>` | Alpha for edges with **both** endpoints in the target | `bondopacity beta.group-0.subgroup-0 0` |
+| `bondopacityof <expr> <a>` | Alpha for edges **touching** the target (either endpoint — the incident reach) | `bondopacityof #124 0.3` |
+| `traceopacity <expr> <a>` | Alpha for polyline vertices whose **subgroup** contains a resolved point | `traceopacity alpha 0.7` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |
 | `rename @name [new]` | Rename a committed selection | `rename @selection_1 [ring]` |
 | `add @name <tree-target>` | Add tree-addressed entries as **members** at their natural level (no `@` on the right) | `add @ring alpha.group-0` |
@@ -327,23 +331,23 @@ hidden set. That shapes the pair's asymmetry:
   nothing on screen until the coverer hides too — the command still reports
   `hid "name" — N points`, because that is what it did.
 
-## The representation family: color and size
+## The representation family: color, size, and opacity
 
 ```
-colorpoints  <target-expr> <color>  │  pointsize   <target-expr> <size>
-colorbonds   <target-expr> <color>  │  bondsize    <target-expr> <size>
-colorbondsof <target-expr> <color>  │  bondsizeof  <target-expr> <size>
-colortrace   <target-expr> <color>  │  tracesize   <target-expr> <size>
+colorpoints  <t> <color> │ pointsize  <t> <size> │ pointopacity  <t> <a>
+colorbonds   <t> <color> │ bondsize   <t> <size> │ bondopacity   <t> <a>
+colorbondsof <t> <color> │ bondsizeof <t> <size> │ bondopacityof <t> <a>
+colortrace   <t> <color> │ tracesize  <t> <size> │ traceopacity  <t> <a>
 ```
 
 The **representation** verbs form a grid: four *shapes* (how a point set
-maps onto a renderable primitive) × two *axes* (color and size) — eight
-verbs, one template. Every verb targets **exactly like `view`** — the full
-grammar, the same resolver, **hidden points included**, and it never commits
-a selection — so each resolves precisely the point set `view <target>`
-frames. A size verb and its color sibling share the *same* mapping code, so
-the two axes cannot disagree about which elements a target reaches. The
-four shapes:
+maps onto a renderable primitive) × three *axes* (color, size, opacity) —
+twelve verbs, one template. Every verb targets **exactly like `view`** — the
+full grammar, the same resolver, **hidden points included**, and it never
+commits a selection — so each resolves precisely the point set
+`view <target>` frames. The verbs of one shape share the *same* mapping
+code across all three axes, so the axes cannot disagree about which
+elements a target reaches. The four shapes:
 
 - **Point** (`colorpoints` / `pointsize`) — the points in the set, the
   identity mapping. (`colorpoints` shipped as `color`; renamed when the
@@ -382,18 +386,19 @@ four shapes:
 So on each axis: three **contained** shapes at three granularities (point /
 edge-both / subgroup-vertex) and one intentional **reach** (edge-either).
 The contained-vs-incident line is sharpest on a single point:
-`colorbonds #124 red` / `bondsize #124 2` are **nomatch** (no edge has both
-endpoints in a one-point set) while `colorbondsof #124 red` /
-`bondsizeof #124 1.5` write exactly the edges incident to point 124 — and
-the trace shapes with `#124` in scope write exactly the one vertex of the
-subgroup owning point 124.
+`colorbonds #124 red` / `bondsize #124 2` / `bondopacity #124 0.5` are
+**nomatch** (no edge has both endpoints in a one-point set) while
+`colorbondsof #124 red` / `bondsizeof #124 1.5` / `bondopacityof #124 0.3`
+write exactly the edges incident to point 124 — and the trace shapes with
+`#124` in scope write exactly the one vertex of the subgroup owning
+point 124.
 
 ```
-colorpoints alpha green                     pointsize alpha 2
-colorpoints gamma.group-2."subgroup 11" red pointsize all 3
-colorbonds beta.group-0.subgroup-0 #ff8800  bondsize beta.group-0.subgroup-0 0
-colorbondsof #124 red                       bondsizeof #124 1.5
-colortrace alpha steelblue                  tracesize alpha 1.5
+colorpoints alpha green      pointsize alpha 2      pointopacity alpha 0.5
+colorbonds beta.group-0.subgroup-0 #ff8800          bondopacity beta.group-0.subgroup-0 0
+colorbondsof #124 red        bondsizeof #124 1.5    bondopacityof #124 0.3
+colortrace alpha steelblue   tracesize alpha 1.5    traceopacity alpha 0.7
+colorpoints gamma.group-2."subgroup 11" red         pointopacity all 1
 ```
 
 The axis values:
@@ -410,13 +415,30 @@ The axis values:
   `set N points to size 0`, never "hidden"). **Negative values clamp to 0**
   and the message notes it (`(clamped to 0)`). A non-numeric size token is
   an **error** and nothing is written.
+- **`<opacity>`** is a number in **[0, 1]** (`0.5`, `0`, `1`). **Zero is a
+  legal, literal alpha — it does NOT hide**: a zero-opacity element is
+  *invisible-but-present* — still in the scene, still in its buffer slot,
+  still pickable, hide-state untouched (a hidden element is *gone*; the two
+  channels never touch each other — which is exactly what makes "fade an
+  element to fully transparent while keeping it selectable" expressible).
+  The message says `set N points to opacity 0`, never "hidden".
+  **Out-of-range clamps two-sidedly** — below 0 → 0, above 1 → 1 — and the
+  message names the bound (`(clamped to 0)` / `(clamped to 1)`). A
+  non-numeric token is an **error** and nothing is written.
 - **Visible thickness caveat**: point sizes render immediately (the point
   pass honors per-point size). Edge and trace **widths are stored but not
   yet drawn** — WebGL rasterizes lines at 1 px regardless, so honored
   thickness awaits an impostor/mesh-line render pass. The buffers, undo,
   and messages are fully live; only the pixels lag.
+- **Transparency-ordering caveat**: per-element opacity renders **today**
+  on all three primitives via alpha blending, but blending is draw-order
+  **naive** — overlapping *semi*-transparent elements may composite in the
+  wrong order (correct depth-sorting / order-independent transparency is a
+  recorded follow-up). Fully-opaque and fully-transparent elements render
+  exactly right; it is the translucent-over-translucent overlap that can
+  mis-composite.
 
-Shared rules (identical across the eight verbs):
+Shared rules (identical across the twelve verbs):
 
 - **Each verb writes its own primitive's buffer on its own axis only** — no
   size verb touches any color buffer or another primitive's size buffer,
@@ -435,11 +457,12 @@ Shared rules (identical across the eight verbs):
   (e.g. a contained edge verb on a single point, a trace verb on bulk
   subgroups) is a nomatch too. A bare verb (or a single argument) is a
   usage error — it needs both a target and a value.
-- Constant values only, deliberately: *mappings* (rainbow, by-channel),
-  opacity, and shape verbs are future work that will clone this family's
+- Constant values only, deliberately: *mappings* (rainbow, by-channel) and
+  shape/primitive-type verbs are future work that will clone this family's
   template. (The trace shapes' boundary interpolation is a rendering
-  consequence of per-vertex state, not a mapping feature; size-0 is not an
-  opacity substitute.)
+  consequence of per-vertex state, not a mapping feature; size-0 and
+  opacity-0 are distinct literal values on distinct channels, and neither
+  is a hide.)
 
 ## Listing: `ls`
 

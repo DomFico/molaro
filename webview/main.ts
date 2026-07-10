@@ -120,21 +120,31 @@ interface SceneParts {
 }
 
 function basePointsMaterial(pixelRatio: number): THREE.ShaderMaterial {
-  // Reads the representation layer's per-point color/size/visible buffers.
-  // Hidden points collapse (size 0) and discard.
+  // Reads the representation layer's per-point color/size/visible/opacity
+  // buffers. Hidden points collapse (size 0) and discard. Opacity blends
+  // NAIVELY (transparent: true, no depth sorting — overlap compositing is
+  // order-dependent; a recorded follow-up). Exactly-zero alpha discards so
+  // an invisible-but-present point never punches a depth hole in the scene
+  // (it stays pickable — picking is CPU-side and never reads alpha).
   return new THREE.ShaderMaterial({
+    transparent: true,
     uniforms: { uPixelRatio: { value: pixelRatio } },
     vertexShader: `
       attribute vec3 aColor; attribute float aSize; attribute float aVisible;
+      attribute float aOpacity;
       uniform float uPixelRatio; varying vec3 vColor; varying float vVisible;
+      varying float vOpacity;
       void main() {
-        vColor = aColor; vVisible = aVisible;
+        vColor = aColor; vVisible = aVisible; vOpacity = aOpacity;
         gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         gl_PointSize = aVisible > 0.5 ? aSize * uPixelRatio : 0.0;
       }`,
     fragmentShader: `
-      varying vec3 vColor; varying float vVisible;
-      void main() { if (vVisible < 0.5) discard; gl_FragColor = vec4(vColor, 1.0); }`,
+      varying vec3 vColor; varying float vVisible; varying float vOpacity;
+      void main() {
+        if (vVisible < 0.5 || vOpacity <= 0.0) discard;
+        gl_FragColor = vec4(vColor, vOpacity);
+      }`,
   });
 }
 
@@ -260,9 +270,12 @@ function buildScene(
   const colorAttr = new THREE.BufferAttribute(rep.state.color, 3);
   const sizeAttr = new THREE.BufferAttribute(rep.state.size, 1);
   const visibleAttr = new THREE.BufferAttribute(rep.state.visible, 1);
+  const opacityAttr = new THREE.BufferAttribute(rep.state.opacity, 1);
   const selAttr = new THREE.BufferAttribute(selArray, 1);
   const flashAttr = new THREE.BufferAttribute(flashArray, 1);
-  for (const a of [colorAttr, sizeAttr, visibleAttr, selAttr, flashAttr]) a.setUsage(THREE.DynamicDrawUsage);
+  for (const a of [colorAttr, sizeAttr, visibleAttr, opacityAttr, selAttr, flashAttr]) {
+    a.setUsage(THREE.DynamicDrawUsage);
+  }
 
   const drawables: THREE.Object3D[] = [];
 
@@ -271,6 +284,7 @@ function buildScene(
   pointsGeo.setAttribute("aColor", colorAttr);
   pointsGeo.setAttribute("aSize", sizeAttr);
   pointsGeo.setAttribute("aVisible", visibleAttr);
+  pointsGeo.setAttribute("aOpacity", opacityAttr);
   drawables.push(new THREE.Points(pointsGeo, basePointsMaterial(pixelRatio)));
 
   // Edges + polylines, trimmed to segments whose BOTH endpoints are visible
@@ -288,7 +302,12 @@ function buildScene(
   const visible = rep.state.visible;
   const nEdges = header.edges.length;
   const edgePosAttr = new THREE.BufferAttribute(new Float32Array(nEdges * 2 * 3), 3);
-  const edgeColAttr = new THREE.BufferAttribute(new Float32Array(nEdges * 2 * 3), 3);
+  // RGBA per vertex: an itemSize-4 color attribute makes three.js read the
+  // 4th component as per-vertex ALPHA (USE_COLOR_ALPHA) — the rep-state
+  // buffers stay separate (edgeColor 3E + edgeOpacity E); this GPU array is
+  // derived from both by fillEdges. Blending is NAIVE (transparent: true,
+  // no depth sorting) — the recorded follow-up covers overlap compositing.
+  const edgeColAttr = new THREE.BufferAttribute(new Float32Array(nEdges * 2 * 4), 4);
   edgePosAttr.setUsage(THREE.DynamicDrawUsage);
   edgeColAttr.setUsage(THREE.DynamicDrawUsage);
   let fillEdges: () => void = () => {};
@@ -297,10 +316,14 @@ function buildScene(
     edgeGeo.setAttribute("position", edgePosAttr);
     edgeGeo.setAttribute("color", edgeColAttr);
     edgeGeo.setDrawRange(0, 0);
-    drawables.push(new THREE.LineSegments(edgeGeo, new THREE.LineBasicMaterial({ vertexColors: true })));
+    drawables.push(new THREE.LineSegments(
+      edgeGeo,
+      new THREE.LineBasicMaterial({ vertexColors: true, transparent: true }),
+    ));
     fillEdges = (): void => {
       const pos = positionAttr.array as Float32Array;
       const ec = rep.state.edgeColor;
+      const eo = rep.state.edgeOpacity;
       const pArr = edgePosAttr.array as Float32Array;
       const cArr = edgeColAttr.array as Float32Array;
       let k = 0; // vertex write cursor (2 per visible edge)
@@ -311,9 +334,11 @@ function buildScene(
           for (let c = 0; c < 3; c++) {
             pArr[k * 3 + c] = pos[a * 3 + c];
             pArr[k * 3 + 3 + c] = pos[b * 3 + c];
-            cArr[k * 3 + c] = ec[e * 3 + c];
-            cArr[k * 3 + 3 + c] = ec[e * 3 + c];
+            cArr[k * 4 + c] = ec[e * 3 + c];
+            cArr[(k + 1) * 4 + c] = ec[e * 3 + c];
           }
+          cArr[k * 4 + 3] = eo[e];
+          cArr[(k + 1) * 4 + 3] = eo[e];
           k += 2;
         }
       }
@@ -336,13 +361,16 @@ function buildScene(
   let traceColAttr: THREE.BufferAttribute | null = null;
   let rebuildPoly: () => void = () => {};
   if (polySegs.length > 0) {
-    const traceArr = new Float32Array(header.n_points * 3);
+    // itemSize 4: RGBA per point slot (alpha = the 4th component, like the
+    // edge pass); rep.state.traceColor/traceOpacity write through per vertex.
+    const traceArr = new Float32Array(header.n_points * 4);
     for (let p = 0; p < header.n_points; p++) {
-      traceArr[p * 3] = DEFAULT_TRACE_COLOR[0];
-      traceArr[p * 3 + 1] = DEFAULT_TRACE_COLOR[1];
-      traceArr[p * 3 + 2] = DEFAULT_TRACE_COLOR[2];
+      traceArr[p * 4] = DEFAULT_TRACE_COLOR[0];
+      traceArr[p * 4 + 1] = DEFAULT_TRACE_COLOR[1];
+      traceArr[p * 4 + 2] = DEFAULT_TRACE_COLOR[2];
+      traceArr[p * 4 + 3] = 1;
     }
-    traceColAttr = new THREE.BufferAttribute(traceArr, 3);
+    traceColAttr = new THREE.BufferAttribute(traceArr, 4);
     traceColAttr.setUsage(THREE.DynamicDrawUsage);
     const geo = new THREE.BufferGeometry();
     geo.setAttribute("position", positionAttr);
@@ -351,7 +379,10 @@ function buildScene(
     index.setUsage(THREE.DynamicDrawUsage);
     geo.setIndex(index);
     geo.setDrawRange(0, 0);
-    drawables.push(new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ vertexColors: true })));
+    drawables.push(new THREE.LineSegments(
+      geo,
+      new THREE.LineBasicMaterial({ vertexColors: true, transparent: true }),
+    ));
     rebuildPoly = () => {
       const arr = index.array as Uint32Array;
       let k = 0;
@@ -401,7 +432,7 @@ function buildScene(
     scene,
     positionAttr,
     drawables,
-    repAttrs: [colorAttr, sizeAttr, visibleAttr],
+    repAttrs: [colorAttr, sizeAttr, visibleAttr, opacityAttr],
     selAttr,
     flashAttr,
     visibleAttr,
@@ -1034,147 +1065,79 @@ async function main(): Promise<void> {
     refreshPoints(arr);
     return arr.length;
   };
-  /** color <target> <c>: THE FIRST REPRESENTATION MUTATION — a constant
-   * per-point RGB written straight into the representation layer's color
-   * buffer (the renderer already reads it as the aColor attribute; the
-   * uniform base look is just this buffer's initial value, so uncolored
-   * points keep it). Last-write-wins per point — no precedence system.
-   * Recorded via model.recordOp on the SAME undo stack the gestures use:
-   * one stroke per invocation, and its undo restores the exact previous RGB
-   * values, which may themselves be an earlier color's (LIFO composes). */
-  const colorPoints = (points: readonly number[], rgb: [number, number, number]): number => {
-    if (points.length === 0) return 0;
-    const color = rep.state.color;
-    const pts = [...points];
-    const prev = new Float32Array(pts.length * 3);
-    for (let i = 0; i < pts.length; i++) {
-      const p = pts[i] * 3;
-      prev[i * 3] = color[p];
-      prev[i * 3 + 1] = color[p + 1];
-      prev[i * 3 + 2] = color[p + 2];
-      color[p] = rgb[0];
-      color[p + 1] = rgb[1];
-      color[p + 2] = rgb[2];
-    }
-    rep.dirty = true; // the render loop re-uploads every rep attribute
-    model.recordOp(() => {
-      for (let i = 0; i < pts.length; i++) {
-        const p = pts[i] * 3;
-        color[p] = prev[i * 3];
-        color[p + 1] = prev[i * 3 + 1];
-        color[p + 2] = prev[i * 3 + 2];
-      }
-      rep.dirty = true;
-      return pts;
-    });
-    return pts.length;
-  };
-
-  /** colorbonds / colorbondsof: colorPoints' EDGE twin — a constant per-edge
-   * RGB written into rep.state.edgeColor (indexed by the header's edge
-   * order; the base look is the buffer's initial value). Both verbs write
-   * THIS one buffer, so they compose by last-write-wins per edge. The
-   * de-indexed edge pass re-copies colors via fillEdges — no rep.dirty
-   * (that re-uploads the per-POINT attributes; edges own their buffers).
-   * Same recordOp discipline as colorPoints: one stroke, exact-prior-RGB
-   * restore; the undo returns no point indices (no point state changed). */
-  const colorEdges = (edgeIds: readonly number[], rgb: [number, number, number]): number => {
-    if (edgeIds.length === 0) return 0;
-    const ec = rep.state.edgeColor;
-    const ids = [...edgeIds];
-    const prev = new Float32Array(ids.length * 3);
-    for (let i = 0; i < ids.length; i++) {
-      const e = ids[i] * 3;
-      prev[i * 3] = ec[e];
-      prev[i * 3 + 1] = ec[e + 1];
-      prev[i * 3 + 2] = ec[e + 2];
-      ec[e] = rgb[0];
-      ec[e + 1] = rgb[1];
-      ec[e + 2] = rgb[2];
-    }
-    parts.fillEdges();
-    model.recordOp(() => {
-      for (let i = 0; i < ids.length; i++) {
-        const e = ids[i] * 3;
-        ec[e] = prev[i * 3];
-        ec[e + 1] = prev[i * 3 + 1];
-        ec[e + 2] = prev[i * 3 + 2];
-      }
-      parts.fillEdges();
-      return [];
-    });
-    return ids.length;
-  };
-
-  /** colortrace: the POLYLINE member of the family — a constant per-VERTEX
-   * RGB in rep.state.traceColor (header vertex order), written through to
-   * the polyline pass's per-point attribute slots (indexed draws fetch by
-   * point index; write-time only — positions stay zero-copy on frame flip).
-   * Same recordOp discipline: one stroke, exact-prior-RGB restore on both
-   * the state buffer and the GPU slots, no point indices returned. */
-  const colorTrace = (vertexIds: readonly number[], rgb: [number, number, number]): number => {
+  /** Write the polyline pass's RGBA slots for these vertex ids from the
+   * CURRENT rep state (traceColor + traceOpacity) — the one write-through
+   * both trace axes share, called after every write AND after every undo
+   * restore (the state is already correct; this just syncs the GPU). */
+  const syncTraceSlots = (ids: readonly number[]): void => {
     const attr = parts.traceColAttr;
-    if (!attr || vertexIds.length === 0) return 0;
-    const tc = rep.state.traceColor;
+    if (!attr) return;
     const gpu = attr.array as Float32Array;
-    const ids = [...vertexIds];
-    const prev = new Float32Array(ids.length * 3);
-    const put = (v: number, r: number, g: number, b: number): void => {
-      tc[v * 3] = r;
-      tc[v * 3 + 1] = g;
-      tc[v * 3 + 2] = b;
-      const p = traceVertices[v] * 3;
-      gpu[p] = r;
-      gpu[p + 1] = g;
-      gpu[p + 2] = b;
-    };
-    for (let i = 0; i < ids.length; i++) {
-      const v = ids[i] * 3;
-      prev[i * 3] = tc[v];
-      prev[i * 3 + 1] = tc[v + 1];
-      prev[i * 3 + 2] = tc[v + 2];
-      put(ids[i], rgb[0], rgb[1], rgb[2]);
+    const tc = rep.state.traceColor;
+    const to = rep.state.traceOpacity;
+    for (const v of ids) {
+      const p = traceVertices[v] * 4;
+      gpu[p] = tc[v * 3];
+      gpu[p + 1] = tc[v * 3 + 1];
+      gpu[p + 2] = tc[v * 3 + 2];
+      gpu[p + 3] = to[v];
     }
     attr.needsUpdate = true;
-    model.recordOp(() => {
-      for (let i = 0; i < ids.length; i++) {
-        put(ids[i], prev[i * 3], prev[i * 3 + 1], prev[i * 3 + 2]);
-      }
-      attr.needsUpdate = true;
-      return [];
-    });
-    return ids.length;
   };
 
-  /** The SIZE axis closures — the color closures' twins on the size
-   * buffers, one factory so the recordOp/capture/LWW shape is written once.
-   * Size ⊥ hide: a zero size is a literal extent; nothing here reads or
-   * writes visibility. sizePoints re-uploads through rep.dirty (the point
-   * shader honors aSize via gl_PointSize); edge/trace sizes are STATE ONLY
-   * pending impostor/mesh-line geometry (GL lines rasterize at 1px) — no
-   * render hook to poke, so their onWrite is a no-op. */
-  const makeSizeWriter = (buf: Float32Array, onWrite: () => void) =>
-    (ids: readonly number[], size: number): number => {
+  /** THE ONE WRITER FACTORY for the whole representation grid — all nine
+   * primitive×axis closures (color stride 3; size/opacity stride 1) flow
+   * through it: capture the prior values of exactly the written elements,
+   * write (LWW per element), sync the renderer via onWrite(ids), and record
+   * the restoration through recordOp — one stroke per invocation, undo
+   * returning no point indices (representation state is not selection
+   * state, so nothing model-derived needs recomputing). Axis ⊥ hide and
+   * axis ⊥ axis: a writer touches ONLY its own buffer. Render hooks:
+   * per-point buffers re-upload through rep.dirty; edge color/opacity
+   * re-copy through fillEdges; trace color/opacity write through
+   * syncTraceSlots; edge/trace SIZE is state-only pending impostor
+   * geometry (GL lines rasterize at 1px), so its onWrite is a no-op. */
+  const makeRepWriter = (
+    buf: Float32Array,
+    stride: number,
+    onWrite: (ids: readonly number[]) => void,
+  ) =>
+    (ids: readonly number[], value: number | readonly number[]): number => {
       if (ids.length === 0) return 0;
+      const vals = typeof value === "number" ? [value] : value;
       const list = [...ids];
-      const prev = new Float32Array(list.length);
+      const prev = new Float32Array(list.length * stride);
       for (let i = 0; i < list.length; i++) {
-        prev[i] = buf[list[i]];
-        buf[list[i]] = size;
+        const at = list[i] * stride;
+        for (let c = 0; c < stride; c++) {
+          prev[i * stride + c] = buf[at + c];
+          buf[at + c] = vals[c];
+        }
       }
-      onWrite();
+      onWrite(list);
       model.recordOp(() => {
-        for (let i = 0; i < list.length; i++) buf[list[i]] = prev[i];
-        onWrite();
+        for (let i = 0; i < list.length; i++) {
+          const at = list[i] * stride;
+          for (let c = 0; c < stride; c++) buf[at + c] = prev[i * stride + c];
+        }
+        onWrite(list);
         return [];
       });
       return list.length;
     };
-  const sizePoints = makeSizeWriter(rep.state.size, () => {
-    rep.dirty = true;
-  });
-  const sizeEdges = makeSizeWriter(rep.state.edgeSize, () => {});
-  const sizeTrace = makeSizeWriter(rep.state.traceSize, () => {});
+  const repDirty = (): void => {
+    rep.dirty = true; // the render loop re-uploads every per-point attribute
+  };
+  const fillEdgesHook = (): void => parts.fillEdges();
+  const colorPoints = makeRepWriter(rep.state.color, 3, repDirty);
+  const sizePoints = makeRepWriter(rep.state.size, 1, repDirty);
+  const opacityPoints = makeRepWriter(rep.state.opacity, 1, repDirty);
+  const colorEdges = makeRepWriter(rep.state.edgeColor, 3, fillEdgesHook);
+  const sizeEdges = makeRepWriter(rep.state.edgeSize, 1, () => {});
+  const opacityEdges = makeRepWriter(rep.state.edgeOpacity, 1, fillEdgesHook);
+  const colorTrace = makeRepWriter(rep.state.traceColor, 3, syncTraceSlots);
+  const sizeTrace = makeRepWriter(rep.state.traceSize, 1, () => {});
+  const opacityTrace = makeRepWriter(rep.state.traceOpacity, 1, syncTraceSlots);
 
   const commandContext = {
     hierarchy,
@@ -1208,6 +1171,9 @@ async function main(): Promise<void> {
     sizePoints,
     sizeEdges,
     sizeTrace,
+    opacityPoints,
+    opacityEdges,
+    opacityTrace,
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);

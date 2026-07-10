@@ -260,39 +260,64 @@ inherits (`commitTargetEntries` in main.ts):
   trade-off, not a failure.
 
 The REPRESENTATION FAMILY extends the template into representation state —
-an EIGHT-VERB GRID: four shapes (how a point set maps onto a primitive) ×
-two axes (color and size). `colorpoints` shipped first as `color` and was
-renamed when the family grew (no alias — `color` is an unknown command; the
-rename is pinned by unit, E2E, and smoke checks). Per axis: three contained
-shapes at three granularities (point / edge-both / subgroup-vertex) and one
-intentional reach (edge-either). The grid guarantee — a size verb and its
-color sibling CANNOT diverge — is structural, not conventional:
-`resolveRepArgs` is the one generic front half (argument shape +
-resolution, parameterized only by the value parser and its error wording:
-`parseColor` / `parseSize`), and the mapping predicates are written ONCE
-(`edgesMatching` for both/either, `activeTraceVertexIds` for the subgroup
-map-up) and called by both axes' handlers. Unit tests assert the shared
-sets; the code has one implementation to assert about:
+a TWELVE-VERB GRID: four shapes (how a point set maps onto a primitive) ×
+three axes (color, size, opacity). `colorpoints` shipped first as `color`
+and was renamed when the family grew (no alias — `color` is an unknown
+command; the rename is pinned by unit, E2E, and smoke checks). Per axis:
+three contained shapes at three granularities (point / edge-both /
+subgroup-vertex) and one intentional reach (edge-either). The grid
+guarantee — the verbs of one shape CANNOT diverge across axes — is
+structural, not conventional: `resolveRepArgs` is the one generic front
+half (argument shape + resolution, parameterized only by the value parser
+and its error wording: `parseColor` / `parseSize` / `parseOpacity`, the
+scalar two sharing `parseNumericToken`), the mapping predicates are written
+ONCE (`edgesMatching` for both/either, `activeTraceVertexIds` for the
+subgroup map-up) and called by all three axes' handlers, and ALL NINE
+writer closures (3 primitives × 3 axes) come out of the one `makeRepWriter`
+factory in main.ts (stride 3 for color, 1 for the scalars). Unit tests
+assert the shared sets three ways; the code has one implementation to
+assert about:
 
 - **Non-selection mutations.** Writes land in the representation layer's
-  buffers — one per primitive per axis: `rep.state.color` / `.size`
-  (per-point), `.edgeColor` / `.edgeSize` (per-EDGE, header edge order —
-  each shared by BOTH edge verbs of its axis, composing by last-write-wins
-  per edge), `.traceColor` / `.traceSize` (per-POLYLINE-VERTEX, header
-  vertex order = the flattened `header.polylines`). The uniform base look is
-  each buffer's initial value, so unwritten elements keep it with no
-  merge/override machinery. Wiring closures: `colorPoints`/`colorEdges`/
-  `colorTrace` and the `makeSizeWriter`-built `sizePoints`/`sizeEdges`/
-  `sizeTrace` in main.ts, mirroring how `refreshPoints` writes
-  `rep.state.visible` directly. Each verb writes ITS primitive's buffer on
-  ITS axis and touches no other (S16/S17/S18 assert the independence across
-  the whole grid).
-- **SIZE ⊥ HIDE.** A size of 0 is a literal zero-extent: it never hides,
-  never touches `visible` or any selection state, and the message says
-  `set N points to size 0`, never "hidden" (S18 pins the visible buffer
-  byte-identical across a zero write). Negatives clamp to 0 with the clamp
-  reported (`parseSize` flags it); non-numeric size tokens error. Size-0 is
-  NOT an opacity substitute — opacity is its own future axis.
+  buffers — one per primitive per axis: `rep.state.color` / `.size` /
+  `.opacity` (per-point), `.edgeColor` / `.edgeSize` / `.edgeOpacity`
+  (per-EDGE, header edge order — each shared by BOTH edge verbs of its
+  axis, composing by last-write-wins per edge), `.traceColor` /
+  `.traceSize` / `.traceOpacity` (per-POLYLINE-VERTEX, header vertex order
+  = the flattened `header.polylines`). Alpha is a SEPARATE buffer per
+  primitive — the RGB color buffers stay RGB, so the independence matrix
+  can assert color ⊥ opacity. The uniform base look is each buffer's
+  initial value (alpha base 1 = fully opaque), so unwritten elements keep
+  it with no merge/override machinery. All nine wiring closures come out of
+  `makeRepWriter`, mirroring how `refreshPoints` writes `rep.state.visible`
+  directly. Each verb writes ITS primitive's buffer on ITS axis and touches
+  no other (S16/S17/S18/S19 assert the independence across the whole grid,
+  nine buffers by twelve verbs).
+- **SIZE ⊥ HIDE, OPACITY ⊥ HIDE.** A zero on either scalar axis is a
+  literal value: it never hides, never touches `visible` or any selection
+  state, and the message reports the action (`set N points to size 0` /
+  `… to opacity 0`), never "hidden" (S18/S19 pin the visible buffer
+  byte-identical across zero writes, with the points still resolving and
+  pickable). A zero-OPACITY element is invisible-but-PRESENT — exactly what
+  makes "fade to fully transparent while keeping it selectable"
+  expressible; a hidden element is gone. Size clamps negatives to 0;
+  opacity clamps two-sidedly to [0, 1] — both report the clamp; non-numeric
+  tokens error.
+- **Opacity RENDERS today (unlike the widths) — via naive blending.** The
+  point pass gained an `aOpacity` attribute (`gl_FragColor = vec4(vColor,
+  vOpacity)`, `transparent: true`, and a discard at exactly-zero alpha so
+  an invisible-but-present point never punches a depth hole; picking is
+  CPU-side and never reads alpha). The two line passes carry alpha as the
+  4th component of an itemSize-4 color attribute (three.js
+  `USE_COLOR_ALPHA`) — the GPU arrays are DERIVED from the separate
+  rep-state color+opacity buffers by `fillEdges` / `syncTraceSlots`.
+  Blending is draw-order NAIVE: no depth sorting exists (drawables render
+  in scene order; three.js sorts transparent objects per-object only, and
+  each pass is one object), so overlapping SEMI-transparent elements may
+  mis-composite — accepted, and formally recorded as the depth-sort/OIT
+  follow-up (see open threads). Note the difference from the width
+  follow-up: opacity is visible-but-may-mis-composite-on-overlap; width
+  was not-visible-at-all.
 - **Point size renders today; edge/trace width is STATE ONLY (Phase-0
   finding, on record).** The point pass already honored per-point size
   (`rep.state.size` → the `aSize` attribute → `gl_PointSize`), so
@@ -503,6 +528,17 @@ rendering — see the representation-family section above and S17.)
   brief of its own, deliberately NOT bundled into the size-verb brief. When
   it lands, it reads the existing buffers; no command-layer change should
   be needed.
+- **Correct transparency ordering (depth sort / OIT) — the second flagged
+  renderer follow-up.** Per-element opacity renders NOW with naive
+  blending: all three passes are `transparent: true`, drawn in scene order
+  with no intra-object sorting, so overlapping SEMI-transparent elements
+  can composite in the wrong order (a translucent element in front may
+  fail to show a translucent one behind it correctly). Fully-opaque and
+  fully-transparent render exactly right. The fix is per-element
+  back-to-front sorting or an order-independent-transparency pass — a
+  renderer brief of its own; the buffers and commands need no change.
+  (Unlike the width follow-up, this one is visible-but-imperfect rather
+  than invisible.)
 
 ## Test topology
 
@@ -555,14 +591,23 @@ rendering — see the representation-family section above and S17.)
   negative clamp with its message, the SIX-buffer independence matrix
   across all eight verbs (including the shared edge-size buffer), and the
   undo/LWW/hidden/no-write discipline on the size axis (unwinding restores
-  all six buffers to pristine). The harness runs the synthetic producer at
-  **N=6000** (the extension default is 20000 — counts differ).
+  all six buffers to pristine); **S19** is the opacity axis — per-shape
+  parity mirroring S18, the single-point pin on the opacity buffer,
+  OPACITY-ZERO ⊥ HIDE (visible buffer byte-identical, points still
+  resolving), the two-sided clamp with its bound-naming messages, the
+  PIXEL PROOF that transparency renders (an opaque red subgroup's pixels
+  vanish at opacity 0 while the points still resolve — this check caught a
+  real re-upload wiring bug), the NINE-buffer independence matrix across
+  all twelve verbs, and the undo/LWW/hidden/no-write discipline on the
+  opacity axis (unwinding restores all nine buffers to pristine). The
+  harness runs the synthetic producer at **N=6000** (the extension default
+  is 20000 — counts differ).
 - **Terminal smoke** (`node tests/terminal_smoke.ts`): the real terminal
   bundle + real viewer in one page, host relay emulated by the bridge shim's
   loopback; commands (every verb incl. the representation family's buffer
-  writes on both axes, the total rename, the unknown-color and
-  non-numeric-size errors, and the negative-clamp line), completion,
-  history, help.
+  writes on all three axes, the total rename, the unknown-color /
+  non-numeric-size / non-numeric-opacity errors, and the clamp lines),
+  completion, history, help.
 - **Real-relay VSIX smoke** (manual recipe): install the packaged VSIX into an
   isolated VS Code profile, drive the actual workbench over CDP — proves the
   true terminal→host→viewer→host→terminal path and panel lifecycle. Evidence

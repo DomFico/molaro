@@ -13,6 +13,7 @@ import {
   createCommandRegistry,
   HELP_TEXT,
   parseColor,
+  parseOpacity,
   parseSize,
   type CommandContext,
 } from "../webview/commands.ts";
@@ -55,6 +56,7 @@ function makeRegistry() {
   // a vertex (pins the map-up); s1 owns no vertex (pins the nomatch).
   const traceVertices: number[] = [0];
   const sizeOps: { kind: "points" | "edges" | "trace"; ids: number[]; size: number }[] = [];
+  const opacityOps: { kind: "points" | "edges" | "trace"; ids: number[]; opacity: number }[] = [];
   const ctx: CommandContext = {
     hierarchy,
     tree: buildTree(header),
@@ -217,10 +219,23 @@ function makeRegistry() {
       sizeOps.push({ kind: "trace", ids: [...vertexIds], size });
       return vertexIds.length;
     },
+    opacityPoints: (points, opacity) => {
+      opacityOps.push({ kind: "points", ids: [...points], opacity });
+      return points.length;
+    },
+    opacityEdges: (edgeIds, opacity) => {
+      opacityOps.push({ kind: "edges", ids: [...edgeIds], opacity });
+      return edgeIds.length;
+    },
+    opacityTrace: (vertexIds, opacity) => {
+      opacityOps.push({ kind: "trace", ids: [...vertexIds], opacity });
+      return vertexIds.length;
+    },
   };
   return {
     registry: createCommandRegistry(ctx),
-    calls, commits, hiddenState, refOps, memberOps, colorOps, edgeOps, traceOps, sizeOps, sels,
+    calls, commits, hiddenState, refOps, memberOps,
+    colorOps, edgeOps, traceOps, sizeOps, opacityOps, sels,
   };
 }
 
@@ -887,6 +902,104 @@ test("the size verbs: nomatch / bad size / usage / parse errors write NOTHING", 
     assert.equal(parseErr.status, "error", verb);
   }
   assert.equal(sizeOps.length, 0, "no path wrote anything");
+});
+
+// -- the opacity family: pointopacity / bondopacity / bondopacityof / traceopacity ----
+
+test("parseOpacity: [0,1] values; two-sided clamp; junk is null", () => {
+  assert.deepEqual(parseOpacity("0.5"), { opacity: 0.5, clampedTo: null });
+  assert.deepEqual(parseOpacity("0"), { opacity: 0, clampedTo: null });
+  assert.deepEqual(parseOpacity("1"), { opacity: 1, clampedTo: null });
+  assert.deepEqual(parseOpacity(".25"), { opacity: 0.25, clampedTo: null });
+  assert.deepEqual(parseOpacity("-0.5"), { opacity: 0, clampedTo: 0 }, "below range clamps to 0");
+  assert.deepEqual(parseOpacity("1.5"), { opacity: 1, clampedTo: 1 }, "above range clamps to 1");
+  assert.deepEqual(parseOpacity("2e3"), { opacity: 1, clampedTo: 1 });
+  for (const junk of ["abc", "", "0.5x", "--1", "Infinity", "NaN", "#5", "0 5"]) {
+    assert.equal(parseOpacity(junk), null, junk);
+  }
+});
+
+test("the THREE axes share one mapping per shape — set-identity across color/size/opacity", () => {
+  const { registry, edgeOps, sizeOps, opacityOps, traceOps } = makeRegistry();
+  // edge-contained: colorbonds / bondsize / bondopacity → the same edge ids
+  registry.runCommand("colorbonds c0 red");
+  registry.runCommand("bondsize c0 2");
+  registry.runCommand("bondopacity c0 0.5");
+  assert.deepEqual(opacityOps[0], { kind: "edges", ids: edgeOps[0].edgeIds, opacity: 0.5 });
+  assert.deepEqual(opacityOps[0].ids, sizeOps[0].ids);
+  // edge-incident: colorbondsof / bondsizeof / bondopacityof → the same ids
+  registry.runCommand("colorbondsof c0 red");
+  registry.runCommand("bondsizeof c0 2");
+  registry.runCommand("bondopacityof c0 0.25");
+  assert.deepEqual(opacityOps[1].ids, edgeOps[1].edgeIds);
+  assert.deepEqual(opacityOps[1].ids, sizeOps[1].ids);
+  assert.deepEqual(opacityOps[1].ids, [0, 1], "the incident reach, identical on every axis");
+  // subgroup-vertex: colortrace / tracesize / traceopacity → the same vertex ids
+  registry.runCommand("colortrace c0 red");
+  registry.runCommand("tracesize c0 2");
+  registry.runCommand("traceopacity c0 0.75");
+  assert.deepEqual(opacityOps[2].ids, traceOps[0].vertexIds);
+  assert.deepEqual(opacityOps[2].ids, sizeOps[2].ids);
+});
+
+test("pointopacity: zero is literal (never a hide); the clamp is two-sided and reported", () => {
+  const { registry, opacityOps } = makeRegistry();
+  const half = registry.runCommand("pointopacity c0 0.5");
+  assert.equal(half.message, "set 2 points to opacity 0.5");
+  assert.deepEqual(opacityOps[0], { kind: "points", ids: [0, 1], opacity: 0.5 });
+  const zero = registry.runCommand("pointopacity c0 0");
+  assert.equal(zero.status, "ok");
+  assert.equal(zero.message, "set 2 points to opacity 0", "reports the action, never 'hidden'");
+  assert.deepEqual(opacityOps[1].opacity, 0);
+  const high = registry.runCommand("pointopacity c0 1.5");
+  assert.equal(high.message, "set 2 points to opacity 1 (clamped to 1)");
+  assert.equal(opacityOps[2].opacity, 1);
+  const low = registry.runCommand("pointopacity c0 -0.5");
+  assert.equal(low.message, "set 2 points to opacity 0 (clamped to 0)");
+  assert.equal(opacityOps[3].opacity, 0);
+});
+
+test("single-point pin on the opacity axis: bondopacity nomatches, bondopacityof fades incidents", () => {
+  const { registry, opacityOps } = makeRegistry();
+  const bonds = registry.runCommand("bondopacity c0.g0.s0.a 0.5");
+  assert.equal(bonds.status, "nomatch");
+  assert.equal(bonds.message, `no edges with both endpoints in "c0.g0.s0.a"`);
+  assert.equal(opacityOps.length, 0);
+  const bondsof = registry.runCommand("bondopacityof c0.g0.s0.a 0.5");
+  assert.equal(bondsof.status, "ok");
+  assert.equal(bondsof.message, "set 1 edges to opacity 0.5");
+  assert.deepEqual(opacityOps[0].ids, [0]);
+});
+
+test("traceopacity: the shared map-up, and the no-vertex nomatch", () => {
+  const { registry, opacityOps } = makeRegistry();
+  const up = registry.runCommand("traceopacity c0.g0.s0.b 0.5"); // maps up to s0's vertex
+  assert.equal(up.message, "set 1 trace vertices to opacity 0.5");
+  assert.deepEqual(opacityOps[0].ids, [0]);
+  const none = registry.runCommand("traceopacity c1 0.5");
+  assert.equal(none.status, "nomatch");
+  assert.equal(none.message, `no trace vertices in "c1"`);
+});
+
+test("the opacity verbs: nomatch / bad value / usage / parse errors write NOTHING", () => {
+  const { registry, opacityOps } = makeRegistry();
+  for (const verb of ["pointopacity", "bondopacity", "bondopacityof", "traceopacity"]) {
+    const nomatch = registry.runCommand(`${verb} nothere 0.5`);
+    assert.equal(nomatch.status, "nomatch", verb);
+    assert.match(nomatch.message, /nothing matches "nothere"/);
+    const bad = registry.runCommand(`${verb} c0 abc`);
+    assert.equal(bad.status, "error", verb);
+    assert.match(bad.message, /not an opacity: "abc"/);
+    const bare = registry.runCommand(verb);
+    assert.equal(bare.status, "error", verb);
+    assert.match(bare.message, new RegExp(`${verb} <target> <opacity>`));
+    const oneArg = registry.runCommand(`${verb} 0.5`); // one chunk = no target
+    assert.equal(oneArg.status, "error", verb);
+    assert.match(oneArg.message, /needs a target and an? opacity/);
+    const parseErr = registry.runCommand(`${verb} c0.[x] 0.5`); // [ reserved
+    assert.equal(parseErr.status, "error", verb);
+  }
+  assert.equal(opacityOps.length, 0, "no path wrote anything");
 });
 
 test("colorpoints: nomatch / bad color / usage / parse errors write NOTHING", () => {

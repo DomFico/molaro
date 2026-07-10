@@ -546,6 +546,60 @@ try {
       lastLine?.text === "set 400 points to size 0 (clamped to 0)",
     JSON.stringify(lastLine));
 
+  // the opacity family through the real relay (opacity ⊥ hide)
+  lastLine = await runLine("pointopacity alpha.group-0.subgroup-0 0.5");
+  check("pointopacity lands through the relay",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "set 100 points to opacity 0.5",
+    JSON.stringify(lastLine));
+  check("…and exactly those points carry alpha 0.5 (the rest stay opaque)",
+    await d.evaluate<boolean>(`(()=>{
+      const v=window.__viewer; const o=v.rep.state.opacity;
+      const target=new Set(v.debug.resolvePoints("alpha.group-0.subgroup-0"));
+      const half=Math.fround(0.5), one=Math.fround(1);
+      let hits=0;
+      for (let p=0;p<o.length;p++) {
+        if (target.has(p)) { if (o[p]!==half) return false; hits++; }
+        else if (o[p]!==one) return false;
+      }
+      return hits === 100;
+    })()`));
+  lastLine = await runLine("bondopacity alpha.group-0.subgroup-0 0.25");
+  check("bondopacity lands through the relay (contained edges)",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "set 99 edges to opacity 0.25",
+    JSON.stringify(lastLine));
+  lastLine = await runLine("bondopacityof #124 0.3");
+  check("bondopacityof lands through the relay (incident edges of one point)",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "set 2 edges to opacity 0.3",
+    JSON.stringify(lastLine));
+  lastLine = await runLine("traceopacity alpha 0.7");
+  check("traceopacity lands through the relay (active-subgroup vertices)",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "set 4 trace vertices to opacity 0.7",
+    JSON.stringify(lastLine));
+  check("…and exactly the active vertices carry 0.7 in the trace-opacity buffer",
+    await d.evaluate<boolean>(`(()=>{
+      const v=window.__viewer; const to=v.rep.state.traceOpacity;
+      const active=new Set(v.debug.resolvePoints("alpha")
+        .map(p=>v.hierarchy.subgroupOfPoint(p)));
+      const want=Math.fround(0.7), base=Math.fround(1);
+      let hits=0;
+      for (let i=0;i<v.traceVertices.length;i++) {
+        const on=active.has(v.hierarchy.subgroupOfPoint(v.traceVertices[i]));
+        if (on) { if (to[i]!==want) return false; hits++; }
+        else if (to[i]!==base) return false;
+      }
+      return hits === 4;
+    })()`));
+  lastLine = await runLine("pointopacity alpha nope");
+  check("a non-numeric opacity is the specific error line",
+    /term-err/.test(lastLine?.cls ?? "") &&
+      lastLine?.text === `not an opacity: "nope" — use a number from 0 to 1 (e.g. 0.5)`,
+    JSON.stringify(lastLine));
+  lastLine = await runLine("pointopacity beta 1.5");
+  check("an above-range opacity clamps to 1, and the line says so",
+    /term-ok/.test(lastLine?.cls ?? "") &&
+      lastLine?.text === "set 400 points to opacity 1 (clamped to 1)",
+    JSON.stringify(lastLine));
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();

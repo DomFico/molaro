@@ -159,6 +159,16 @@ export interface CommandContext {
    * undo, and buffers are complete; visible thickness lags the renderer. */
   sizeEdges(edgeIds: readonly number[], size: number): number;
   sizeTrace(vertexIds: readonly number[], size: number): number;
+  /** The OPACITY axis — the third scalar axis on the same writer/predicate
+   * machinery. OPACITY ⊥ HIDE: 0 is invisible-but-present (in the scene,
+   * pickable), never a hide. Alpha is a SEPARATE buffer per primitive — the
+   * RGB color buffers stay RGB, so color and opacity stay independent.
+   * Renders via naive blending; overlap compositing is a recorded
+   * follow-up (draw-order/OIT). Return the count written. */
+  opacityPoints(points: readonly number[], opacity: number): number;
+  /** bondopacity/bondopacityof share the ONE edge-opacity buffer. */
+  opacityEdges(edgeIds: readonly number[], opacity: number): number;
+  opacityTrace(vertexIds: readonly number[], opacity: number): number;
 }
 
 export class CommandRegistry {
@@ -496,16 +506,35 @@ export function parseColor(token: string): [number, number, number] | null {
   ];
 }
 
+/** The scalar axes' shared numeric core: a plain finite number or null. */
+function parseNumericToken(token: string): number | null {
+  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(token)) return null;
+  const n = Number(token);
+  return Number.isFinite(n) ? n : null;
+}
+
 /** Parse a size token — a plain non-negative number (1.5, 0, 3). A NEGATIVE
  * clamps to 0 with the clamp flagged so the verb reports it (a negative
  * extent is meaningless; clamping beats rejection for obvious intent).
  * null = not a number. Size and hide are ORTHOGONAL channels: 0 is a
  * literal zero-extent, never a hide. */
 export function parseSize(token: string): { size: number; clamped: boolean } | null {
-  if (!/^[+-]?(\d+\.?\d*|\.\d+)([eE][+-]?\d+)?$/.test(token)) return null;
-  const n = Number(token);
-  if (!Number.isFinite(n)) return null;
+  const n = parseNumericToken(token);
+  if (n === null) return null;
   return n < 0 ? { size: 0, clamped: true } : { size: n, clamped: false };
+}
+
+/** Parse an opacity token — a number CLAMPED to [0, 1] (the two-sided
+ * version of size's negative clamp; clampedTo reports which bound fired).
+ * null = not a number. OPACITY ⊥ HIDE: 0 is a literal, legal alpha — an
+ * invisible-but-PRESENT element (still in the scene, still pickable); a
+ * hidden element is gone. The two channels never touch each other. */
+export function parseOpacity(token: string): { opacity: number; clampedTo: 0 | 1 | null } | null {
+  const n = parseNumericToken(token);
+  if (n === null) return null;
+  if (n < 0) return { opacity: 0, clampedTo: 0 };
+  if (n > 1) return { opacity: 1, clampedTo: 1 };
+  return { opacity: n, clampedTo: null };
 }
 
 /** The representation families' shared argument/target front half — generic
@@ -527,9 +556,10 @@ function resolveRepArgs<T>(
 ): { points: number[]; value: T; expr: string; word: string } | CommandResult {
   const split = splitTrailingWord(args);
   if (split.word === null) {
+    const art = /^[aeiou]/.test(noun) ? "an" : "a";
     return {
       status: "error",
-      message: `${verb} needs a target and a ${noun} — ${verb} <target> <${noun}> (e.g. ${verb} alpha ${example})`,
+      message: `${verb} needs a target and ${art} ${noun} — ${verb} <target> <${noun}> (e.g. ${verb} alpha ${example})`,
     };
   }
   const value = parse(split.word);
@@ -561,6 +591,11 @@ function resolveColorArgs(ctx: CommandContext, verb: string, args: string) {
 function resolveSizeArgs(ctx: CommandContext, verb: string, args: string) {
   return resolveRepArgs(ctx, verb, args, "size", "1.5", parseSize,
     (w) => `not a size: "${w}" — use a non-negative number (e.g. 1.5 or 0)`);
+}
+
+function resolveOpacityArgs(ctx: CommandContext, verb: string, args: string) {
+  return resolveRepArgs(ctx, verb, args, "opacity", "0.5", parseOpacity,
+    (w) => `not an opacity: "${w}" — use a number from 0 to 1 (e.g. 0.5)`);
 }
 
 /** The edge-mapping predicate, written ONCE for BOTH axes (colorbonds/
@@ -749,6 +784,74 @@ export function makeTraceSizeHandler(ctx: CommandContext): CommandHandler {
     }
     const n = ctx.sizeTrace(vertexIds, r.value.size);
     return { status: "ok", message: sizedMsg(n, "trace vertices", r.value) };
+  };
+}
+
+/** `set N <noun> to opacity A`, with the bound named when a clamp fired. */
+function opacityMsg(n: number, noun: string, v: { opacity: number; clampedTo: 0 | 1 | null }): string {
+  return `set ${n} ${noun} to opacity ${v.opacity}${
+    v.clampedTo === null ? "" : ` (clamped to ${v.clampedTo})`
+  }`;
+}
+
+/**
+ * The OPACITY family — `pointopacity` / `bondopacity` / `bondopacityof` /
+ * `traceopacity` — the third and final scalar axis, completing the
+ * twelve-verb grid {point, edge-both, edge-either, subgroup-vertex} ×
+ * {color, size, opacity}. A pure third wrapper on the shared machinery:
+ * resolveRepArgs front half (parseOpacity is the only new part),
+ * edgesMatching / activeTraceVertexIds predicates reused unchanged, the
+ * same writer factory behind the ctx closures. Semantics mirror size:
+ * opacity 0 is LITERAL — invisible-but-present, never a hide (the element
+ * stays in the scene, stays pickable, hide-state untouched — exactly what
+ * makes "fade to fully transparent while keeping it selectable"
+ * expressible); out-of-range clamps to [0,1] two-sidedly with the bound
+ * reported. bondopacityof's incident reach and broad-target boundary-edge
+ * LWW follow the color/size precedent — documented, not special-cased.
+ * Rendering note: per-element alpha blends NAIVELY (no depth sorting) —
+ * overlapping translucency may mis-composite; a recorded follow-up.
+ */
+export function makePointOpacityHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const r = resolveOpacityArgs(ctx, "pointopacity", args);
+    if ("status" in r) return r;
+    const n = ctx.opacityPoints(r.points, r.value.opacity);
+    return { status: "ok", message: opacityMsg(n, "points", r.value) };
+  };
+}
+
+export function makeBondOpacityHandler(
+  ctx: CommandContext,
+  verb: "bondopacity" | "bondopacityof",
+): CommandHandler {
+  const both = verb === "bondopacity";
+  return (args: string): CommandResult => {
+    const r = resolveOpacityArgs(ctx, verb, args);
+    if ("status" in r) return r;
+    const edgeIds = edgesMatching(ctx.edges, r.points, both);
+    if (edgeIds.length === 0) {
+      return {
+        status: "nomatch",
+        message: both
+          ? `no edges with both endpoints in "${r.expr}"`
+          : `no edges touching "${r.expr}"`,
+      };
+    }
+    const n = ctx.opacityEdges(edgeIds, r.value.opacity);
+    return { status: "ok", message: opacityMsg(n, "edges", r.value) };
+  };
+}
+
+export function makeTraceOpacityHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const r = resolveOpacityArgs(ctx, "traceopacity", args);
+    if ("status" in r) return r;
+    const vertexIds = activeTraceVertexIds(ctx, r.points);
+    if (vertexIds.length === 0) {
+      return { status: "nomatch", message: `no trace vertices in "${r.expr}"` };
+    }
+    const n = ctx.opacityTrace(vertexIds, r.value.opacity);
+    return { status: "ok", message: opacityMsg(n, "trace vertices", r.value) };
   };
 }
 
@@ -1095,6 +1198,10 @@ export const HELP_TEXT = [
   "               negatives clamp to 0; one undo stroke)",
   "  bondsize / bondsizeof / tracesize <expr> <n>   the same shapes on the",
   "               SIZE axis (edge/trace width stored; not yet drawn)",
+  "  pointopacity <expr> <a>     fade those points (0..1; 0 is invisible-but-",
+  "               PRESENT, never a hide; out-of-range clamps to 0/1)",
+  "  bondopacity / bondopacityof / traceopacity <expr> <a>   the same shapes",
+  "               on the OPACITY axis (overlap compositing is draw-order naive)",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  rename @name [new]  rename a selection · clear  wipe the terminal log",
   "  add @name <tree-target>     add tree entries as members (natural level)",
@@ -1181,6 +1288,26 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "tracesize",
     makeTraceSizeHandler(ctx),
     "size polyline vertices whose subgroup contains a resolved point (contained at subgroup grain): tracesize <target> <size>",
+  );
+  registry.register(
+    "pointopacity",
+    makePointOpacityHandler(ctx),
+    "fade the target's points (0..1; 0 is invisible-but-present, never a hide): pointopacity <target> <opacity>",
+  );
+  registry.register(
+    "bondopacity",
+    makeBondOpacityHandler(ctx, "bondopacity"),
+    "fade every edge with BOTH endpoints in the target (contained): bondopacity <target> <opacity>",
+  );
+  registry.register(
+    "bondopacityof",
+    makeBondOpacityHandler(ctx, "bondopacityof"),
+    "fade every edge with AT LEAST ONE endpoint in the target (incident — reaches one hop outside): bondopacityof <target> <opacity>",
+  );
+  registry.register(
+    "traceopacity",
+    makeTraceOpacityHandler(ctx),
+    "fade polyline vertices whose subgroup contains a resolved point (contained at subgroup grain): traceopacity <target> <opacity>",
   );
   registry.register(
     "ls",

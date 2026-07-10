@@ -28,6 +28,10 @@ export const DEFAULT_TRACE_COLOR: [number, number, number] = [0x9a / 255, 0x7a /
  * undo, and tests are complete against the buffers; only pixels lag. */
 export const DEFAULT_EDGE_SIZE = 1;
 export const DEFAULT_TRACE_SIZE = 1;
+/** Base alpha for all three primitives: fully opaque. Unlike the widths,
+ * per-element opacity RENDERS today (alpha blending on existing geometry);
+ * overlap compositing is draw-order naive — see COMMAND_LAYER open threads. */
+export const DEFAULT_OPACITY = 1;
 
 export interface RepresentationState {
   /** length 3N — per-point RGB the base scene draws with. */
@@ -54,6 +58,15 @@ export interface RepresentationState {
   /** length V — per-POLYLINE-VERTEX thickness, header vertex order. Same
    * orthogonality and same state-only-pending-geometry caveat. */
   traceSize: Float32Array;
+  /** length N — per-point alpha (0..1). OPACITY ⊥ HIDE: 0 is
+   * invisible-but-present (still in the scene, still pickable); a hidden
+   * element is gone. Kept SEPARATE from the RGB color buffer so the two
+   * channels stay independent. */
+  opacity: Float32Array;
+  /** length E — per-EDGE alpha (bondopacity/bondopacityof both write it). */
+  edgeOpacity: Float32Array;
+  /** length V — per-POLYLINE-VERTEX alpha; boundary segments interpolate. */
+  traceOpacity: Float32Array;
 }
 
 export class RepresentationLayer {
@@ -86,6 +99,12 @@ export class RepresentationLayer {
     }
     const edgeSize = new Float32Array(nEdges).fill(DEFAULT_EDGE_SIZE);
     const traceSize = new Float32Array(nTraceVertices).fill(DEFAULT_TRACE_SIZE);
-    this.state = { color, size, visible, edgeColor, traceColor, edgeSize, traceSize };
+    const opacity = new Float32Array(nPoints).fill(DEFAULT_OPACITY);
+    const edgeOpacity = new Float32Array(nEdges).fill(DEFAULT_OPACITY);
+    const traceOpacity = new Float32Array(nTraceVertices).fill(DEFAULT_OPACITY);
+    this.state = {
+      color, size, visible, edgeColor, traceColor, edgeSize, traceSize,
+      opacity, edgeOpacity, traceOpacity,
+    };
   }
 }
