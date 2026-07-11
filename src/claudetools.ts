@@ -32,6 +32,22 @@ export const GATED_TOOLS: ToolName[] = ["write_mod", "run_mod"];
 /** The MCP-qualified name the SDK matches against `allowedTools`. */
 export const qualified = (name: ToolName): string => `mcp__${MCP_SERVER_NAME}__${name}`;
 
+/** The permission-boundary ALLOW-LIST, keyed on the EXACT MCP-qualified name.
+ * canUseTool fires for any tool not auto-approved; this decides what happens:
+ *  - `auto`  : our two ungated tools (they are in allowedTools, so they never
+ *              actually reach canUseTool — listed for completeness/tests);
+ *  - `gated` : our two gated tools → human approval;
+ *  - `deny`  : EVERYTHING else, by default.
+ * This is the second layer under disallowedTools: even a tool that bypassed the
+ * deny-list or the init tool surface entirely (a leaked SDK tool, or a native
+ * capability like AskUserQuestion emitted as a tool_use) is refused here unless
+ * it is EXACTLY one of our four. An allow-list, not a deny-list. */
+export function toolPolicy(toolName: string): "auto" | "gated" | "deny" {
+  if (toolName === qualified("get_context") || toolName === qualified("run_command")) return "auto";
+  if (toolName === qualified("write_mod") || toolName === qualified("run_mod")) return "gated";
+  return "deny";
+}
+
 /** The EXPECTED runtime tool surface — exactly our four MCP tools and nothing
  * else. This is the allow-list the surface test asserts EQUALITY against; any
  * tool the SDK actually exposes beyond this set is a leak and fails the test.
@@ -72,6 +88,11 @@ export interface SceneContext {
   categories: string[];
   groups: string[];
   subgroupCount: number;
+  /** The distinct subgroup-label kinds present (a residue's name is its
+   * subgroup label's first token: "ASP 33" → "ASP"), CAPPED — the residue
+   * vocabulary the model globs as `<group>.<kind>*`, not guesses. */
+  subgroupKinds: string[];
+  subgroupKindsCapped: boolean;
   /** e.g. "alpha.group-0" — a few real, constructible target examples. */
   targetExamples: string[];
   committedSelections: string;
@@ -143,11 +164,15 @@ export function buildToolDefs(deps: ToolDeps) {
       const modLines = c.mods.length
         ? c.mods.map((m) => `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""})${m.description ? `: ${m.description}` : ""}`).join("\n")
         : "  (none yet)";
+      const kinds = c.subgroupKinds.length
+        ? `Subgroup kinds (residue names — target as <group>.<kind>*, e.g. ${c.groups[0] ?? "A"}.${c.subgroupKinds[0]}*): ` +
+          `${c.subgroupKinds.join(", ")}${c.subgroupKindsCapped ? ", … (capped)" : ""}\n`
+        : "";
       return ok(
         `System: ${c.system}\nAtoms (N): ${c.nAtoms}\nFrames (T): ${c.nFrames}\n` +
         `Categories: ${c.categories.join(", ") || "(none)"}\n` +
         `Groups (${c.groups.length}): ${c.groups.slice(0, 24).join(", ")}${c.groups.length > 24 ? ", …" : ""}\n` +
-        `Subgroups: ${c.subgroupCount}\n` +
+        `Subgroups: ${c.subgroupCount}\n` + kinds +
         `Example targets: ${c.targetExamples.join(", ") || "@all"}\n` +
         `Committed selections:\n${c.committedSelections}\n` +
         `Registered mods:\n${modLines}`,
@@ -256,6 +281,11 @@ export function buildAgentOptions(params: {
     // Do NOT load the user's ~/.claude or project .claude settings — this is a
     // gated product surface, not a general coding agent.
     settingSources: [],
+    // We intentionally set NO onUserDialog / dialogKinds and NO onElicitation.
+    // The SDK FAILS CLOSED on user dialogs — "omitting the option entirely means
+    // no dialogs are emitted" — so AskUserQuestion (a native `request_user_dialog`
+    // capability, NOT a tool and NOT in the init tool surface) degrades to its
+    // no-dialog behavior. Belt to the canUseTool allow-list's suspenders.
     mcpServers: { [MCP_SERVER_NAME]: params.toolServer },
     includePartialMessages: true, // stream assistant text as deltas
     env: { ...process.env, ANTHROPIC_API_KEY: params.apiKey },

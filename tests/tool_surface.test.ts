@@ -19,7 +19,8 @@ import { EXPECTED_TOOL_SURFACE, type ToolDeps } from "../src/claudetools.ts";
 const stubDeps: ToolDeps = {
   getContext: async () => ({
     system: "x", nAtoms: 0, nFrames: 0, categories: [], groups: [],
-    subgroupCount: 0, targetExamples: [], committedSelections: "", mods: [],
+    subgroupCount: 0, subgroupKinds: [], subgroupKindsCapped: false,
+    targetExamples: [], committedSelections: "", mods: [],
   }),
   writeMod: async (s) => ({ name: s.name, file: "x" }),
   runMod: async () => ({ ok: true, message: "" }),

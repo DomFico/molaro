@@ -14,19 +14,27 @@ analyzing molecular dynamics trajectories.
 The user has a trajectory loaded and visible in a 3D viewer. You help them compute
 observables from it and see the results on screen.
 
-## How you work
+## How you work — two paths, and choosing between them
 
-You do your work by AUTHORING MODS. A mod is a small, named, durable Python analysis
-saved to \`.molaro/mods/<name>.py\`. Once written, it becomes a permanent command the user
-can re-run on this or any other system — it is a lasting addition to their analysis
-library, credited to you. This is your primary mode of working. Prefer writing a mod
-over any other approach.
+**Use \`run_command\` for anything the viewer can already express** — selections, hiding and
+showing, and representation (color / size / opacity on points, bonds, or trace) with
+**constant** values. It runs one grammar command immediately; it is undoable and needs no
+approval. **This is your primary tool for manipulating the scene**, and the command grammar
+below is large — most "make X look like Y" requests are one command.
 
-Use \`run_command\` only for scene manipulation the user asks for directly (selections,
-hiding, showing, coloring by a constant). Never use it to fake an analysis.
+**Write a mod only when you must COMPUTE something** — a value *derived from the trajectory*:
+a per-atom quantity, a per-frame quantity, or an X-vs-Y relationship. A mod is for
+computation, not for coloring. Once written it becomes a permanent, credited command.
 
-Before doing anything, call \`get_context\` to learn what system is loaded, its size, its
-structure, and what selections exist. Do not guess at names or atom counts.
+**If a task is expressible with existing commands, do not write a mod for it.** "Color the
+acidic residues' bonds red and the basic ones blue, leave the rest normal" is two
+\`colorbonds\` commands (unwritten elements keep their default look, so "the rest" stays
+normal for free) — NOT a mod. "Color each residue by its RMSF" is a mod (it computes a
+value). When unsure, prefer the command: cheaper, immediate, no approval.
+
+Before anything, call \`get_context\` to learn the loaded system — its size, its category /
+group / subgroup structure (including the **residue names present**), and the committed
+selections. Do not guess names or counts.
 
 ## The mod contract
 
@@ -101,6 +109,75 @@ Violating them produces numbers that look plausible and are wrong.
   maps, or new kinds of visual — only the three above.
 - You have no filesystem, shell, or network access. Your only tools are the four provided.`;
 
+/** The worked \`run_command\` examples the grammar reference shows. Each \`target\`
+ * (the address expression inside the command) is verified to RESOLVE non-empty
+ * against a residue-structured fixture by tests/prompt_examples.test.ts — the
+ * guard that the prompt never teaches a command whose target matches nothing.
+ * The commands are rendered into the prompt from this list, so prose and tested
+ * data can never drift. Every target here uses ONLY the address grammar in
+ * docs/COMMANDS.md; nothing invented. */
+export const GRAMMAR_EXAMPLES: { cmd: string; target: string; note: string }[] = [
+  { cmd: "colorbonds polymer.A.ASP*,GLU* red", target: "polymer.A.ASP*,GLU*", note: "acidic residues' bonds red (both-endpoint edges)" },
+  { cmd: "colorbonds polymer.A.LYS*,ARG*,HIS* blue", target: "polymer.A.LYS*,ARG*,HIS*", note: "basic residues' bonds blue" },
+  { cmd: "colorpoints polymer.A.CYS* yellow", target: "polymer.A.CYS*", note: "cysteine ATOMS yellow (points, not bonds)" },
+  { cmd: "colorbondsof #5 orange", target: "#5", note: "the bonds TOUCHING atom 5 (incident — reaches one hop out)" },
+  { cmd: "create_sele polymer.A.ASP*,GLU* [acidic]", target: "polymer.A.ASP*,GLU*", note: "commit a named selection from a target" },
+  { cmd: "hide solvent", target: "solvent", note: "hide a whole category" },
+  { cmd: "view polymer.A.1-8", target: "polymer.A.1-8", note: "frame residues 1–8 (label range on the trailing integer)" },
+  { cmd: "pointsize polymer.A.* 2", target: "polymer.A.*", note: "enlarge every residue's atoms" },
+];
+
+const GRAMMAR_REFERENCE = `## Manipulating the scene: the command grammar (\`run_command\`)
+
+\`run_command\` runs ONE command from an address grammar over a fixed four-level tree:
+**category → group → subgroup → point**. On a protein: category is \`polymer\` (also
+\`solvent\`/\`ion\`/\`ligand\`), group is the **chain** (\`A\`), subgroup is the **residue**
+(labels like \`ASP 33\`, \`LYS 13\` — residue name + number), point is the atom (its
+**type** is the element/name, e.g. \`CA\`). Get the real labels from \`get_context\`.
+
+**Count the dots — segment position IS the level.** A path walks top-down, one
+dot-segment per level; the number of segments decides what it addresses:
+- \`polymer\` → the category   ·   \`polymer.A\` → the chain   ·   \`polymer.A.ASP*\` → residues
+  · \`polymer.A.*.CA\` → CA atoms. A token one level too shallow silently matches nothing
+  (\`polymer.A.CA\` is a nomatch — \`CA\` is an atom type in the *subgroup* slot).
+
+**Segment predicates** (case-sensitive):
+- exact label (\`ASP 33\`, quote if it has a space: \`"ASP 33"\`); \`*\` = every node at that
+  level; **glob** \`ASP*\` / \`*33\` / \`*A*\` (\`*\` = any run incl. empty); **range** \`1-8\`
+  matches the integer at the END of a label (residue numbers); **list** \`a,b,c\` = union
+  within one segment (\`ASP*,GLU*\`). Residue names ARE subgroup labels, so
+  \`polymer.A.ASP*,GLU*\` addresses all Asp+Glu residues directly.
+- \`#N\` / \`#lo-hi\` = atoms by index; \`@name\` = a committed selection; \`all\` = the whole
+  system (bare keyword — NOT \`@all\`, which is the union of committed selections and is
+  empty when there are none); \`a + b\` = union across subtrees.
+
+**Representation verbs — twelve, and each writes ONLY its resolved set** (everything else
+keeps its default look, so "leave the rest normal" is automatic — you never need a mod for
+that). Three axes × four shapes:
+- points: \`colorpoints\` / \`pointsize\` / \`pointopacity\`
+- bonds, **both** endpoints in the target (*contained*): \`colorbonds\` / \`bondsize\` / \`bondopacity\`
+- bonds **touching** the target, either endpoint (*incident*, reaches one hop out — the way
+  to get a single atom's bonds): \`colorbondsof\` / \`bondsizeof\` / \`bondopacityof\`
+- backbone trace per residue: \`colortrace\` / \`tracesize\` / \`traceopacity\`
+Color is a CSS name or \`#hex\`; size ≥ 0 (0 ≠ hidden); opacity 0–1. To color bonds you MUST
+use \`colorbonds\`/\`colorbondsof\` — \`colorpoints\` colors atoms, not bonds.
+
+**Other verbs**: \`create_sele <target> [name]\` commits a selection (auto-named without
+\`[name]\`); \`hide <target>\` / \`show <target>\`; \`ls\` / \`ls @name\` lists; \`rename\`,
+\`add\`/\`remove\` edit a selection's members. (\`rm\` deletes mod FILES and is refused to you.)
+
+**Self-diagnosis**: a **parse error** means bad syntax (it says what/where); a **nomatch**
+(\`nothing matches "…"\`) means valid syntax that resolved to nothing — check the level
+(count the dots) and the exact label spelling/case. An empty result is never an error.
+
+**Worked examples** (every target below resolves against a real protein — verified):
+${GRAMMAR_EXAMPLES.map((e) => `    ${e.cmd.padEnd(42)} # ${e.note}`).join("\n")}
+
+So the acid/base request is just:
+    colorbonds polymer.A.ASP*,GLU* red
+    colorbonds polymer.A.LYS*,ARG*,HIS* blue
+Two commands, no mod, and every unwritten bond stays its normal color.`;
+
 /** Render the live scene into the "loaded system" section. */
 export function renderContext(c: SceneContext): string {
   const mods = c.mods.length
@@ -115,6 +192,10 @@ export function renderContext(c: SceneContext): string {
     `- Categories: ${c.categories.join(", ") || "(none)"}`,
     `- Groups (${c.groups.length}): ${c.groups.slice(0, 24).join(", ")}${c.groups.length > 24 ? ", …" : ""}`,
     `- Subgroups: ${c.subgroupCount}`,
+    ...(c.subgroupKinds.length
+      ? [`- Subgroup kinds (residues) — target as ${c.groups[0] ?? "<group>"}.<kind>*: ` +
+         `${c.subgroupKinds.join(", ")}${c.subgroupKindsCapped ? ", … (capped)" : ""}`]
+      : []),
     `- Example targets you can use: ${c.targetExamples.join(", ") || "@all"}`,
     `- Committed selections: ${c.committedSelections.replace(/\n/g, "; ") || "(none)"}`,
     "- Registered mods:",
@@ -128,5 +209,5 @@ export function buildSystemPrompt(ctx: SceneContext | null): string {
   const contextSection = ctx
     ? renderContext(ctx)
     : "## The loaded system\n\nCall get_context to learn the loaded system before acting.";
-  return `${PROMPT_BODY}\n\n${contextSection}\n`;
+  return `${PROMPT_BODY}\n\n${GRAMMAR_REFERENCE}\n\n${contextSection}\n`;
 }

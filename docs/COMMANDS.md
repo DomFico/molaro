@@ -536,6 +536,16 @@ skipped with a warning, never breaking the registry). The format is a
 readable header + the source — the point is that you can **read the code
 before running it**:
 
+> **One root — the VS Code workspace root.** `.molaro/mods/` lives at the
+> workspace root (`workspaceFolders[0]`), and **every** path agrees on it: the
+> startup scan, `write_mod`/`saveWorkspaceMod`, and `rm`. The assistant writes
+> there, you read there, `rm` deletes there — one folder, no ambiguity. (The
+> repo's own `viewer/.molaro/mods/` holds the shipped **reference/example** mods
+> — `rg`/`rmsd`/`rmsf` and the synthetic examples — as dev and test assets;
+> they are excluded from the packaged `.vsix`, so a fresh install starts with an
+> empty workspace `.molaro/mods/` that you fill by authoring mods or copying an
+> example. The corpus check can target either location with `--mods-dir`.)
+
 ```python
 # molaro-mod
 # name: index_ramp

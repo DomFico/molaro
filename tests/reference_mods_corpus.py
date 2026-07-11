@@ -71,14 +71,14 @@ SYSTEMS = [
 ]
 
 
-def _mod_code(name: str) -> str:
-    with open(os.path.join(MODS, f"{name}.py"), encoding="utf-8") as fh:
+def _mod_code(name: str, mods_dir: str = None) -> str:
+    with open(os.path.join(mods_dir or MODS, f"{name}.py"), encoding="utf-8") as fh:
         return fh.read()
 
 
-def run_values(source, name: str, target):
+def run_values(source, name: str, target, mods_dir: str = None):
     """Execute a mod through the real producer path; return its values list."""
-    reply = json.loads(run_mod(source, _mod_code(name), [int(i) for i in target], 120.0))
+    reply = json.loads(run_mod(source, _mod_code(name, mods_dir), [int(i) for i in target], 120.0))
     if "error" in reply:
         raise RuntimeError(f"{name}: {reply['error']}")
     return reply["values"]
@@ -216,11 +216,12 @@ def check_neutral_regression():
     return all(ok for _, ok, _ in checks), checks
 
 
-def verify_named_mod(mod_name, system_id, observable, selection=None, tol=TOL):
-    """Verify ANY named workspace mod (`.molaro/mods/<mod_name>.py`) — hand-written
-    or assistant-generated — against a corpus system's stored reference. Runs the
-    mod through the REAL producer path and compares the mean of its per-frame
-    series to the reference observable. Reports computed vs reference vs delta.
+def verify_named_mod(mod_name, system_id, observable, selection=None, tol=TOL, mods_dir=None):
+    """Verify ANY named workspace mod (`<mods_dir>/<mod_name>.py`) — hand-written
+    or assistant-generated, at the repo dir OR a workspace root — against a corpus
+    system's stored reference. Runs the mod through the REAL producer path and
+    compares the mean of its per-frame series to the reference observable. Reports
+    computed vs reference vs delta, plus the exact file path and its author.
 
     `selection` (an mdtraj atom-selection string) sets the target atom set; None =
     the whole system (empty target_indices), which is what the rg reference uses.
@@ -230,18 +231,18 @@ def verify_named_mod(mod_name, system_id, observable, selection=None, tol=TOL):
     ref = spec["manifest"]["reference_observables"][observable]["value"]
     traj = src.trajectory
     target = [int(i) for i in traj.topology.select(selection)] if selection else []
-    header = ", ".join(f"{h}" for h in [os.path.basename(src.name)])  # noqa: F841
+    path = os.path.abspath(os.path.join(mods_dir or MODS, f"{mod_name}.py"))
     # read the mod's author line for provenance (hand-written vs generated)
     author = "?"
-    for line in _mod_code(mod_name).splitlines():
+    for line in _mod_code(mod_name, mods_dir).splitlines():
         if line.startswith("# author:"):
             author = line.split(":", 1)[1].strip()
             break
-    vals = run_values(src, mod_name, target)
+    vals = run_values(src, mod_name, target, mods_dir)
     computed = float(np.mean(vals))
     delta = abs(computed - ref)
     return {
-        "mod": mod_name, "author": author, "system": system_id, "observable": observable,
+        "mod": mod_name, "author": author, "path": path, "system": system_id, "observable": observable,
         "selection": selection or "all atoms (whole system)",
         "n_target": len(target) or src.n_points, "n_frames": len(vals),
         "computed": computed, "reference": ref, "delta": delta, "pass": delta < tol, "tol": tol,
@@ -250,6 +251,7 @@ def verify_named_mod(mod_name, system_id, observable, selection=None, tol=TOL):
 
 def _report_named(r) -> int:
     print(f"\n=== verify mod '{r['mod']}' (author: {r['author']}) ===")
+    print(f"  file       : {r['path']}")
     print(f"  system     : {r['system']}")
     print(f"  observable : {r['observable']}")
     print(f"  atom set   : {r['selection']}  ({r['n_target']} atoms, {r['n_frames']} frames)")
@@ -303,8 +305,10 @@ if __name__ == "__main__":
     ap.add_argument("--system", default="03_adk_psf_dcd", help="corpus system id")
     ap.add_argument("--observable", default="rg_mean", help="stored reference observable key")
     ap.add_argument("--selection", help="mdtraj atom selection for the target set (default: whole system)")
+    ap.add_argument("--mods-dir", help="directory holding <mod>.py (default: the repo's viewer/.molaro/mods; "
+                                       "pass a workspace root's .molaro/mods to verify an assistant-authored mod)")
     args = ap.parse_args()
     if args.mod:
         raise SystemExit(_report_named(
-            verify_named_mod(args.mod, args.system, args.observable, args.selection)))
+            verify_named_mod(args.mod, args.system, args.observable, args.selection, mods_dir=args.mods_dir)))
     raise SystemExit(main())

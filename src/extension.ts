@@ -361,6 +361,17 @@ function openPanel(
     const allCategories = Array.isArray(h.categories) ? h.categories : [];
     const present = new Set(Array.isArray(h.points?.category) ? h.points.category : []);
     const categories = allCategories.filter((_, i) => present.has(i));
+    // The residue vocabulary: distinct FIRST TOKENS of subgroup labels ("ASP 33"
+    // → "ASP"), BOUNDED — a system with thousands of distinct kinds must not
+    // flood the context. Sorted, capped at SUBGROUP_KINDS_CAP.
+    const SUBGROUP_KINDS_CAP = 40;
+    const kindSet = new Set<string>();
+    for (const label of Object.values(h.subgroups ?? {})) {
+      const kind = String(label).trim().split(/\s+/)[0];
+      if (kind) kindSet.add(kind);
+    }
+    const allKinds = [...kindSet].sort();
+    const subgroupKinds = allKinds.slice(0, SUBGROUP_KINDS_CAP);
     return {
       system: h.name,
       nAtoms: h.n_points,
@@ -368,6 +379,8 @@ function openPanel(
       categories,
       groups: Object.values(h.groups ?? {}),
       subgroupCount: Object.keys(h.subgroups ?? {}).length,
+      subgroupKinds,
+      subgroupKindsCapped: allKinds.length > subgroupKinds.length,
       // The whole-system token is the BARE keyword `all` (address grammar);
       // `@all` is the union of committed SELECTIONS (empty with none), which is
       // what made the assistant's `@all` resolve to nothing. `categories` is now

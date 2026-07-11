@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 
 import {
   buildAgentOptions, buildToolDefs, configuredToolSurface, createToolServer,
-  blockedCommandReason, TOOL_NAMES, GATED_TOOLS, DISALLOWED_TOOLS, EXPECTED_TOOL_SURFACE, qualified,
+  blockedCommandReason, toolPolicy, TOOL_NAMES, GATED_TOOLS, DISALLOWED_TOOLS, EXPECTED_TOOL_SURFACE, qualified,
   type ToolDeps, type SceneContext,
 } from "../src/claudetools.ts";
 import { mapSdkMessage, approvalPreview, argsPreview, isRuntimeUnavailable, errorMessage, RUNTIME_UNAVAILABLE_HINT } from "../src/claudebackend.ts";
@@ -22,7 +22,8 @@ function sampleContext(): SceneContext {
   return {
     system: "adk", nAtoms: 3341, nFrames: 98,
     categories: ["polymer"], groups: ["A"], subgroupCount: 214,
-    targetExamples: ["@all", "polymer"], committedSelections: "(none)",
+    subgroupKinds: ["ALA", "ARG", "ASP", "GLU", "LYS"], subgroupKindsCapped: false,
+    targetExamples: ["all", "polymer"], committedSelections: "(none)",
     mods: [{ name: "myrmsf", produces: "per-point-scalar", axis: "color" }],
   };
 }
@@ -90,6 +91,33 @@ test("the gated tools are write_mod and run_mod (absent from allowedTools so can
   });
   assert.ok(!(opts.allowedTools ?? []).includes(qualified("write_mod")));
   assert.ok(!(opts.allowedTools ?? []).includes(qualified("run_mod")));
+});
+
+// ---- the permission-boundary allow-list (Part A: AskUserQuestion et al.) ----
+test("toolPolicy is an ALLOW-LIST: only our four MCP tools; everything else DENIED", () => {
+  assert.equal(toolPolicy(qualified("get_context")), "auto");
+  assert.equal(toolPolicy(qualified("run_command")), "auto");
+  assert.equal(toolPolicy(qualified("write_mod")), "gated");
+  assert.equal(toolPolicy(qualified("run_mod")), "gated");
+  // AskUserQuestion — a native user-dialog capability outside the init tool
+  // surface — and every other leaked/ambient tool is DENIED at canUseTool, even
+  // though it never appears in init.tools for the equality test to catch.
+  for (const t of ["AskUserQuestion", "Bash", "Edit", "Read", "WebSearch", "Task", "ToolSearch", "Skill",
+                   "get_context", "write_mod", "mcp__other__x", "mcp__molaro__delete"]) {
+    assert.equal(toolPolicy(t), "deny", `${t} must be denied at the permission boundary`);
+  }
+});
+
+test("no dialog/elicitation opt-in — the SDK fails closed on user dialogs", () => {
+  const opts = buildAgentOptions({
+    model: "m", apiKey: "k", toolServer: createToolServer(mockDeps()),
+    systemPrompt: "x", abortController: new AbortController(),
+  }) as Record<string, unknown>;
+  // AskUserQuestion rides `request_user_dialog`; omitting these entirely means no
+  // dialogs are ever emitted to the session.
+  assert.equal(opts.onUserDialog, undefined);
+  assert.equal(opts.dialogKinds, undefined);
+  assert.equal(opts.onElicitation, undefined);
 });
 
 // ---- the rm deny-list ------------------------------------------------------
@@ -225,9 +253,25 @@ test("system prompt injects live context AND keeps every correctness rule", () =
   assert.match(p, /nanometers/);                 // rule 2: units
   assert.match(p, /RMSD is selection-driven/);   // rule 3: superposition set
   assert.match(p, /Say what you computed/);      // rule 4: state the convention
-  assert.match(p, /AUTHORING MODS/);             // the working model
   assert.match(p, /adk/);                        // injected identifier
   assert.match(p, /3341/);                       // injected N
+});
+
+test("system prompt teaches the command grammar and the command-vs-mod choice (Part C)", () => {
+  const p = buildSystemPrompt(sampleContext());
+  // command-vs-mod guidance (corrected — run_command is primary, mods compute)
+  assert.match(p, /Use `run_command` for anything the viewer can already express/);
+  assert.match(p, /Write a mod only when you must COMPUTE something/);
+  assert.match(p, /do not write a mod for it/);
+  // the grammar reference: the level model + the bond verbs + residue targeting
+  assert.match(p, /category → group → subgroup → point/);
+  assert.match(p, /colorbonds/);                 // bond verbs exist
+  assert.match(p, /incident/);                   // contained vs incident
+  assert.match(p, /polymer\.A\.ASP\*,GLU\*/);    // residue-glob example
+  assert.match(p, /parse error/);                // self-diagnosis
+  // the injected residue vocabulary from get_context
+  assert.match(p, /Subgroup kinds \(residues\)/);
+  assert.match(p, /ASP/);
 });
 
 test("system prompt without context still instructs get_context first", () => {

@@ -20,7 +20,7 @@ import { query, type Options, type Query, type SDKMessage, type SDKUserMessage }
 
 import type { ClaudeCommand, ClaudeEvent } from "../webview/claudemodel.ts";
 import {
-  buildAgentOptions, createToolServer, GATED_TOOLS, MCP_SERVER_NAME,
+  buildAgentOptions, createToolServer, toolPolicy, MCP_SERVER_NAME,
   type SceneContext, type ToolDeps,
 } from "./claudetools.ts";
 import { buildSystemPrompt } from "./claudeprompt.ts";
@@ -44,8 +44,6 @@ export interface ClaudeBackend {
 }
 
 const bareName = (qualified: string): string => qualified.split("__").at(-1) ?? qualified;
-const isGated = (qualifiedOrBare: string): boolean =>
-  GATED_TOOLS.some((g) => qualifiedOrBare === g || qualifiedOrBare.endsWith(`__${g}`));
 
 /** A compact one-line args preview for the tool-proposed block (NOT the
  * approval preview — write_mod's approval preview is the full Python). */
@@ -244,13 +242,17 @@ export function createClaudeBackend(
       systemPrompt: buildSystemPrompt(ctx),
       abortController: abort,
     });
-    // The approval gate: gated tools are ABSENT from allowedTools, so this
-    // fires for them. Emit approval-required (ensuring tool-proposed precedes
-    // it), then block on the panel's approval-decision.
+    // The approval gate AND the permission-boundary allow-list. canUseTool fires
+    // for every tool not auto-approved (our gated two, plus anything that
+    // bypassed the deny-list/init surface). toolPolicy is an ALLOW-LIST: gated →
+    // approval; DENY everything else — a leaked SDK tool or a native capability
+    // (e.g. AskUserQuestion) emitted as a tool_use is refused here, not allowed.
     options.canUseTool = async (toolName, input, opts) => {
       const bare = bareName(toolName);
       const callId = (opts as { toolUseID?: string })?.toolUseID ?? `call-${Math.random().toString(36).slice(2)}`;
-      if (!isGated(toolName)) return { behavior: "allow" };
+      if (toolPolicy(toolName) !== "gated") {
+        return { behavior: "deny", message: `"${bare}" is not one of Molaro's tools.` };
+      }
       emit({ type: "tool-proposed", callId, toolName: bare, argsPreview: argsPreview(input) });
       post({ type: "approval-required", callId, toolName: bare, preview: approvalPreview(bare, input) });
       const decision = await new Promise<"approve" | "deny">((resolve) => {
