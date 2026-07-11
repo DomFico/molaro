@@ -61,9 +61,11 @@ export interface Recipe extends ModCommon {
 /** Type A — Python compute in the producer. */
 export interface AnalysisMod extends ModCommon {
   kind: "analysis";
-  /** The declared result kind — the routing key into the existing binding
-   * layer. (`command` is deliberately NOT a value here.) */
-  produces: "per-point-scalar" | "per-frame-series" | "scatter";
+  /** The declared result kind — the routing key. per-point-scalar/per-frame-
+   * series/scatter bind through the typed-result rails; `commands` returns a
+   * `list[str]` run through the command path at the mod-run boundary (NOT a
+   * TypedResult — the union stays closed at four). */
+  produces: "per-point-scalar" | "per-frame-series" | "scatter" | "commands";
   /** Required iff produces = per-point-scalar: which point axis the scalars
    * bind to. */
   axis?: "color" | "size" | "opacity";
@@ -179,8 +181,9 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
     return { ok: false, error: `kind must be "analysis" for mod files (got "${meta.kind ?? ""}")` };
   }
   const produces = meta.produces;
-  if (produces !== "per-point-scalar" && produces !== "per-frame-series" && produces !== "scatter") {
-    return { ok: false, error: `produces must be per-point-scalar | per-frame-series | scatter (got "${produces ?? ""}")` };
+  if (produces !== "per-point-scalar" && produces !== "per-frame-series" &&
+      produces !== "scatter" && produces !== "commands") {
+    return { ok: false, error: `produces must be per-point-scalar | per-frame-series | scatter | commands (got "${produces ?? ""}")` };
   }
   const axis = meta.axis;
   if (produces === "per-point-scalar") {
@@ -260,7 +263,25 @@ const finiteNumList = (v: unknown): v is number[] =>
 export function validateModValues(
   values: unknown,
   expect: ModRunExpectation,
-): { ok: true; values: number[] } | { ok: true; scatter: ScatterValues } | { ok: false; error: string } {
+): { ok: true; values: number[] } | { ok: true; scatter: ScatterValues }
+  | { ok: true; commands: string[] } | { ok: false; error: string } {
+  if (expect.produces === "commands") {
+    // The return must be a flat list of NON-EMPTY strings. Anything else →
+    // no execution. (Whether each string is a VALID command is checked at the
+    // execution boundary, all-or-nothing, before any command runs.)
+    if (!Array.isArray(values)) {
+      return { ok: false, error: `a commands mod must return a list of command strings, not ${typeof values}` };
+    }
+    for (let i = 0; i < values.length; i++) {
+      if (typeof values[i] !== "string") {
+        return { ok: false, error: `commands[${i}] is not a string (a commands mod returns list[str])` };
+      }
+      if ((values[i] as string).trim() === "") {
+        return { ok: false, error: `commands[${i}] is an empty string` };
+      }
+    }
+    return { ok: true, commands: values as string[] };
+  }
   if (expect.produces === "scatter") {
     if (!values || typeof values !== "object" || Array.isArray(values)) {
       return { ok: false, error: "a scatter mod must return a dict {x, y, frames?, xLabel?, yLabel?}" };

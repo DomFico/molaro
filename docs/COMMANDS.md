@@ -519,8 +519,32 @@ existing machinery (nothing new renders):
   **dict** `{"x": [...], "y": [...], "frames": [...]?, "xLabel": str?,
   "yLabel": str?}` (equal-length finite `x`/`y`; `frames`, if present,
   integer frame indices matching that length — the highlight/seek sync
-  hook). Drawn in the plot tab exactly like a scatter tool result. Every
-  other `produces` keeps the flat `list[float]` return.
+  hook). Drawn in the plot tab exactly like a scatter tool result.
+- `produces: commands` — the **macro** mod: `compute` returns a flat
+  **`list[str]`** of command strings (exactly as typed in the terminal), run
+  through the existing command path. No `axis`. Because it is Python with the
+  trajectory available, it can **compute first and then emit commands** (e.g.
+  compute a per-atom quantity, then `colorpoints` the atoms above a
+  threshold) — it is not limited to static strings. It is a saved, named,
+  credited, re-runnable *look or action* — the way to persist a
+  `colorbonds`/`colorpoints` styling that a `per-point-scalar` mod cannot
+  reproduce (that path maps through one built-in hue ramp and writes every
+  atom; a macro paints exact named colors and leaves the rest untouched).
+
+  The list is handled at the **mod-run boundary** — it is NOT a fifth
+  typed-result kind. Execution is **fail-closed and all-or-nothing**: the
+  return must be a list of non-empty strings, EVERY string is validated
+  (parsed + resolved, with no side effects) before ANY runs, and a parse
+  error in the third string runs **zero** commands, not two. A *nomatch* is
+  not an error (the rest still run; per-command outcomes are reported).
+  `rm` and invoking any mod (itself or another) are **refused** inside a
+  macro — enforced where the commands execute, so runtime-generated strings
+  can't launder around it. The whole invocation is **ONE undo stroke**: a
+  single `Ctrl+Z` reverses the entire macro. `mods` lists it with
+  `produces: commands`; a `commands` mod may be invoked bare (no target),
+  since it may ignore `target_indices`.
+
+  Every other `produces` keeps the flat `list[float]` return.
 
 **Invocation** is the same own-verb shape: `<modname> <target>`. The verb
 acknowledges immediately (`running <mod> on N points…`) and the outcome

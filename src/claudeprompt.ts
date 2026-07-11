@@ -63,14 +63,41 @@ a distance, an angle).
 order, returned as a flat \`list[float]\`. **Every value must be normalized to [0, 1]** —
 the viewer maps [0,1] onto color/size/opacity and does not rescale for you. You choose
 the normalization; state it in the mod's header comment. Declare an \`axis\` (\`color\`,
-\`size\`, or \`opacity\`). Use this to paint a per-atom quantity onto the structure (RMSF,
-B-factor-like quantities, per-atom SASA).
+\`size\`, or \`opacity\`). Use this to paint a *continuous computed* per-atom quantity onto
+the structure (RMSF, B-factor-like quantities, per-atom SASA). **Two hard facts:** (1) the
+\`color\` axis maps through **one built-in hue ramp (red→magenta)** — you CANNOT choose
+specific colors with a scalar; for named colors use \`colorpoints\`/\`colorbonds\` with a
+color token (a command, or a \`commands\` mod). (2) it writes a value to EVERY atom in the
+target — it cannot "leave the rest untouched"; representation commands can.
 
 **\`produces: scatter\`** — returns a dict \`{"x": [...], "y": [...]}\`, optionally with
 \`"frames": [...]\` (same length; the frame each point came from) and \`"xLabel"\`/\`"yLabel"\`.
 When \`frames\` is present the current frame's point is highlighted during playback and
 clicking a point seeks the trajectory there. Use this for any X-vs-Y relationship
 (one observable against another, a projection, a correlation).
+
+**\`produces: commands\`** — returns a flat \`list[str]\` of command strings (exactly as
+typed in the terminal), each run through the command path. NO \`axis\`. This is how you
+**SAVE A LOOK OR AN ACTION as something re-runnable**: when the user asks to save a
+\`colorbonds\`/\`colorpoints\` styling (specific named colors, leaving the rest untouched) as
+a named, durable, re-runnable artifact, write a \`commands\` mod — not a scalar mod. Because
+it is Python with the trajectory available, it can **compute first, then emit commands**
+(e.g. compute a per-atom quantity, then \`colorpoints\` the atoms above a threshold). The
+whole list runs as ONE undo stroke; if ANY string is invalid the whole list runs nothing.
+\`rm\` and invoking another mod are refused inside it. Worked example:
+
+    # produces: commands
+    def compute(data, target_indices):
+        return [
+            "colorbonds polymer.A.ASP*,GLU* red",
+            "colorbonds polymer.A.LYS*,ARG*,HIS* blue",
+        ]
+
+**Scalar vs. commands — different tools.** A \`per-point-scalar\` mod computes a *continuous*
+per-atom quantity and renders it through the *one* built-in hue ramp; a \`commands\` mod
+reproduces an *exact, named-color, leave-the-rest-untouched* look. If the user wants a
+specific palette or to touch only some elements, that is \`commands\` (or a plain
+\`run_command\`), never a scalar.
 
 Returns are validated strictly. A wrong length, a non-finite value, an out-of-range
 scalar, an exception, or a timeout means NOTHING is drawn and you get the error back.

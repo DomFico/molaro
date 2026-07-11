@@ -5051,9 +5051,62 @@ async function S30(): Promise<void> {
   });
 }
 
+// ============ S31: produces: commands — the macro mod, one undo stroke =========
+async function S31(): Promise<void> {
+  console.log("S31 — produces: commands (macro mod): color_ab runs two colorbonds as ONE undo stroke");
+  await withDriver(async (d) => {
+    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const logLines = () =>
+      d.evaluate<{ cls: string; text: string }[]>(
+        `[...document.querySelectorAll('#term-log .term-line')].map(l=>({cls:l.className,text:l.textContent}))`);
+    const typeInto = async (text: string): Promise<void> => {
+      const r = await d.evaluate<{ x: number; y: number }>(`(()=>{
+        const b=${el("term-input")}.getBoundingClientRect(); return {x:b.left+b.width/2, y:b.top+b.height/2};
+      })()`);
+      await d.click(r.x, r.y); await d.insertText(text); await d.key("Enter", "Enter", 13);
+    };
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const edgeChanged = (slot: string) => d.evaluate<number>(`(()=>{
+      const c=${V}.rep.state.edgeColor, s=window.${slot}; let n=0;
+      for (let i=0;i<c.length;i++) if (Math.abs(c[i]-s[i])>1e-6) n++; return n;
+    })()`);
+
+    // listed with produces: commands
+    const listing = (await cmd("mods")).message;
+    check("S31: color_ab appears in `mods` with produces: commands",
+      listing.includes(" color_ab — analysis · commands"), listing);
+
+    await d.evaluate(`void (window.__preE = Float32Array.from(${V}.rep.state.edgeColor))`);
+    const depth0 = await undoDepth();
+
+    // run the macro BARE (a commands mod may ignore target_indices)
+    await typeInto("color_ab");
+    await sleep(2000);
+    const lines = await logLines();
+    check("S31: the macro reports one-stroke + per-command outcomes",
+      lines.some((l) => /^color_ab → ran 2 commands \(one undo stroke\)/.test(l.text)),
+      JSON.stringify(lines.slice(-3)));
+
+    const changed = await edgeChanged("__preE");
+    check("S31: both colorbonds took effect (edges recolored)", changed > 100, `changed edge channels=${changed}`);
+    check("S31: the whole macro is exactly ONE undo stroke",
+      (await undoDepth()) === depth0 + 1, `undo depth ${depth0} → ${await undoDepth()}`);
+
+    // one Ctrl+Z reverses the ENTIRE macro (both colorbonds together)
+    await d.evaluate(`document.getElementById('term-input').blur()`);
+    await d.ctrlZ();
+    await sleep(400);
+    check("S31: one Ctrl+Z reverses the entire macro — edges back to pristine",
+      (await edgeChanged("__preE")) === 0 && (await undoDepth()) === depth0,
+      `residual=${await edgeChanged("__preE")} depth=${await undoDepth()}`);
+  }, 1180, 780, "/terminal");
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

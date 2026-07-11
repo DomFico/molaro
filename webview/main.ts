@@ -39,10 +39,10 @@ import { bulkCategories, buildTree } from "./classification.ts";
 import { flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
-import { createCommandRegistry, makeRunComplete, type CommandResult } from "./commands.ts";
+import { createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
 import { bindTypedResult } from "./claudebind.ts";
 import { parseTypedResult } from "./claudemodel.ts";
-import { registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
+import { listRecipes, registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
 import { makeAnalysisModHandler, isFileAlreadyGone } from "./commands.ts";
 import { parseTarget, resolveTarget, type Completion } from "./address.ts";
 import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
@@ -494,6 +494,9 @@ async function main(): Promise<void> {
   // Workspace analysis mods arrive from the host once it sees viewerInfo;
   // rebound onto the real installer once the command registry exists below.
   let installMods: (raw: unknown) => void = () => {};
+  // `produces: commands` mods run their emitted strings through the command
+  // path; late-bound once the command registry + validation registry exist.
+  let runCommandMod: (mod: AnalysisMod, cmds: string[]) => void = () => {};
   window.addEventListener("message", (e: MessageEvent) => {
     const msg = e.data as {
       type?: string; id?: number; text?: string; cursor?: number;
@@ -1334,6 +1337,11 @@ async function main(): Promise<void> {
           });
           asyncLine("ok",
             `${mod.name} → scatter "${mod.name}" (${checked.scatter.x.length} points) → the plot tab`);
+        } else if ("commands" in checked) {
+          // a `produces: commands` macro — validated (list of non-empty strings)
+          // here; the emitted strings are refused/pre-validated/executed as ONE
+          // undo stroke at the command-mod boundary below.
+          runCommandMod(mod, checked.commands);
         }
       } catch (err) {
         asyncLine("error",
@@ -1389,6 +1397,57 @@ async function main(): Promise<void> {
   runCommand = (text: string) => commands.runCommand(text);
   runComplete = makeRunComplete(commandContext, commands);
   bindResult = (raw: unknown) => bindTypedResult(commandContext, runCommand, raw);
+
+  // --- produces: commands (macro mods) ------------------------------------
+  // A no-op-WRITE clone of the command context: reads (resolution, @name
+  // existence, name collisions) stay REAL, writes do nothing. Running a command
+  // through a registry built on it PARSES + RESOLVES it without side effects, so
+  // every string in a macro can be validated BEFORE any of them runs.
+  const validationContext: typeof commandContext = {
+    ...commandContext,
+    focusPoints: () => {},
+    frameVisible: () => {},
+    flashPointRows: () => {},
+    commitEntries: (_entries, name) =>
+      name !== null && commandContext.committedEntries().has(name)
+        ? { error: `a selection named "${name}" already exists` }
+        : { name: name ?? "selection", points: 0 },
+    setRefsHidden: (ops) =>
+      ops.every((o) => commandContext.committedEntries().has(o.name)) ? { affected: 0, changed: 0 } : null,
+    setMembersHiddenIn: (name) =>
+      commandContext.committedEntries().has(name) ? { affected: 0, wholeHidden: false } : null,
+    clearSelectionHidden: (name) =>
+      commandContext.committedEntries().has(name) ? { affected: 0 } : null,
+    showPointsCovering: () => 0,
+    showAll: () => 0,
+    renameSelection: (oldName, newName) => {
+      const names = commandContext.committedEntries();
+      if (!names.has(oldName)) return { error: `no selection named "${oldName}"` };
+      if (newName !== oldName && names.has(newName)) return { error: `a selection named "${newName}" already exists` };
+      return { ok: true };
+    },
+    mutateMembers: (name) => (commandContext.committedEntries().has(name) ? { points: 0, remaining: 0 } : null),
+    deleteSelections: (names) =>
+      names.every((n) => commandContext.committedEntries().has(n)) ? { deleted: 0, points: 0 } : null,
+    colorPoints: () => 0, colorPointsEach: () => 0, sizePointsEach: () => 0, opacityPointsEach: () => 0,
+    colorEdges: () => 0, colorTrace: () => 0,
+    sizePoints: () => 0, sizeEdges: () => 0, sizeTrace: () => 0,
+    opacityPoints: () => 0, opacityEdges: () => 0, opacityTrace: () => 0,
+    runAnalysisMod: () => {}, // never reached — mod-invocation verbs refused first
+    armRmDeletion: () => {}, // never reached — rm refused first
+  };
+  const validationCommands = createCommandRegistry(validationContext);
+
+  runCommandMod = (mod: AnalysisMod, cmds: string[]): void => {
+    const outcome = runCommandMacro(mod.name, cmds, {
+      modNames: new Set(listRecipes().map((r) => r.name)),
+      validate: (c) => validationCommands.runCommand(c), // no-op-write ctx → no side effects
+      run: (c) => commands.runCommand(c),
+      beginStroke: () => model.beginStroke(),
+      endStroke: () => model.endStroke(),
+    });
+    asyncLine(outcome.status, outcome.message);
+  };
   // Workspace mod files (parsed host-side, one message at boot): register
   // each in the mod registry AND as its own verb. A name colliding with an
   // existing verb is skipped — a mod file can never shadow a built-in.

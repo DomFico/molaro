@@ -984,6 +984,13 @@ export function makeAnalysisModHandler(ctx: CommandContext, mod: AnalysisMod): C
   return (args: string): CommandResult => {
     const expr = args.trim();
     if (expr === "") {
+      // A commands mod MAY ignore target_indices, so bare invocation is allowed
+      // (empty target_indices = the whole system per the mod contract). The
+      // per-point/per-frame kinds need a target to bind their result to.
+      if (mod.produces === "commands") {
+        ctx.runAnalysisMod(mod, [], "");
+        return { status: "ok", message: `running ${mod.name}…` };
+      }
       return {
         status: "error",
         message: `${mod.name} needs a target — ${mod.name} <target> (e.g. ${mod.name} alpha.group-0)`,
@@ -996,6 +1003,69 @@ export function makeAnalysisModHandler(ctx: CommandContext, mod: AnalysisMod): C
       status: "ok",
       message: `running ${mod.name} on ${r.points.length} points…`,
     };
+  };
+}
+
+/** The refusal that follows a mod-emitted COMMAND (not the caller): `rm` and
+ * mod-invocation are forbidden inside a `produces: commands` macro. Enforced at
+ * the execution boundary — the guarantee, since the Python can generate strings
+ * the write_mod preview never showed. Returns a reason, or null to allow. */
+export function commandMacroRefusal(text: string, modNames: ReadonlySet<string>): string | null {
+  const verb = text.trim().split(/\s+/)[0] ?? "";
+  if (verb === "rm") {
+    return "`rm` is not allowed inside a mod (deletion is destructive and outside the undo model)";
+  }
+  if (modNames.has(verb)) {
+    return `invoking a mod ("${verb}") from inside a mod is not allowed (no recursion)`;
+  }
+  return null;
+}
+
+export interface CommandMacroDeps {
+  /** Every registered mod's verb name — mod-invocation is refused. */
+  modNames: ReadonlySet<string>;
+  /** Pre-validate a command WITHOUT side effects (parse + resolve). */
+  validate(cmd: string): CommandResult;
+  /** Execute a command for real. */
+  run(cmd: string): CommandResult;
+  /** Group the whole batch into ONE undo stroke. */
+  beginStroke(): void;
+  endStroke(): void;
+}
+
+/** Run a `produces: commands` mod's emitted strings — the FAIL-CLOSED,
+ * ALL-OR-NOTHING execution boundary. Refuses `rm`/mod-invocation and
+ * pre-validates EVERY string before executing ANY (a parse error in the third
+ * string runs zero commands, not two); a nomatch is not an error. On success
+ * runs all inside one undo stroke and reports per-command outcomes. */
+export function runCommandMacro(
+  name: string,
+  cmds: string[],
+  deps: CommandMacroDeps,
+): { status: "ok" | "error"; message: string } {
+  // 1a. refusals — the security guarantee, before anything runs
+  for (let i = 0; i < cmds.length; i++) {
+    const why = commandMacroRefusal(cmds[i], deps.modNames);
+    if (why) return { status: "error", message: `${name} → command ${i + 1} refused ("${cmds[i]}"): ${why}. Nothing ran.` };
+  }
+  // 1b. pre-validate every string (no side effects) — a parse/usage error → zero execution
+  for (let i = 0; i < cmds.length; i++) {
+    const v = deps.validate(cmds[i]);
+    if (v.status === "error") {
+      return { status: "error", message: `${name} → command ${i + 1} is invalid ("${cmds[i]}"): ${v.message}. Nothing ran.` };
+    }
+  }
+  // 2. execute all inside ONE reentrant stroke → one Ctrl+Z reverses the macro
+  deps.beginStroke();
+  const lines: string[] = [];
+  try {
+    for (const c of cmds) lines.push(`  ${c} → ${deps.run(c).message}`);
+  } finally {
+    deps.endStroke();
+  }
+  return {
+    status: "ok",
+    message: `${name} → ran ${cmds.length} command${cmds.length === 1 ? "" : "s"} (one undo stroke):\n${lines.join("\n")}`,
   };
 }
 

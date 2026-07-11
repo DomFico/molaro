@@ -10,6 +10,7 @@ import type { Header } from "../contract/contract.ts";
 import { buildTree } from "../webview/classification.ts";
 import { Hierarchy, type Entry } from "../webview/sets.ts";
 import {
+  commandMacroRefusal,
   createCommandRegistry,
   HELP_TEXT,
   isFileAlreadyGone,
@@ -17,7 +18,9 @@ import {
   parseColor,
   parseOpacity,
   parseSize,
+  runCommandMacro,
   type CommandContext,
+  type CommandResult,
 } from "../webview/commands.ts";
 import { listRecipes, registerRecipe, unregisterRecipe } from "../webview/recipes.ts";
 import { BIND_SIZE_MAX, bindTypedResult } from "../webview/claudebind.ts";
@@ -1344,4 +1347,80 @@ test("isFileAlreadyGone: ENOENT reconciles (unregister), other errors stay regis
   assert.ok(!isFileAlreadyGone("EACCES: permission denied, unlink '/x/rg.py'"));
   // the fileless-mod case (broken_ramp) is a distinct 'no file recorded' — not ENOENT
   assert.ok(!isFileAlreadyGone("no file recorded for this mod"));
+});
+
+// -- produces: commands — refusals + all-or-nothing (the macro-mod boundary) --
+function macroTracker() {
+  const calls = { validate: [] as string[], run: [] as string[], beginStroke: 0, endStroke: 0 };
+  const ok: CommandResult = { status: "ok", message: "ok" };
+  const make = (
+    validate: (c: string) => CommandResult = () => ok,
+    run: (c: string) => CommandResult = (c) => ({ status: "ok", message: `ran ${c}` }),
+  ) => ({
+    modNames: new Set(["rainbow", "color_ab"]),
+    validate: (c: string) => { calls.validate.push(c); return validate(c); },
+    run: (c: string) => { calls.run.push(c); return run(c); },
+    beginStroke: () => { calls.beginStroke++; },
+    endStroke: () => { calls.endStroke++; },
+  });
+  return { calls, make };
+}
+
+test("commandMacroRefusal: rm and mod-invocation refused; scene verbs allowed", () => {
+  const mods = new Set(["rainbow", "color_ab"]);
+  assert.match(commandMacroRefusal("rm all", mods)!, /rm.*not allowed/);
+  assert.match(commandMacroRefusal("color_ab all", mods)!, /invoking a mod.*recursion/);
+  assert.match(commandMacroRefusal("rainbow alpha", mods)!, /recursion/);
+  assert.equal(commandMacroRefusal("colorbonds alpha.group-0.* red", mods), null);
+  assert.equal(commandMacroRefusal("hide beta", mods), null);
+});
+
+test("runCommandMacro refuses rm anywhere in the list — executes NOTHING", () => {
+  const { calls, make } = macroTracker();
+  const r = runCommandMacro("m", ["colorbonds alpha red", "rm all", "hide beta"], make());
+  assert.equal(r.status, "error");
+  assert.match(r.message, /refused.*rm.*not allowed.*Nothing ran/s);
+  assert.equal(calls.run.length, 0, "no command executed");
+  assert.equal(calls.beginStroke, 0, "no undo stroke opened");
+});
+
+test("runCommandMacro refuses invoking a mod (no recursion) — executes NOTHING", () => {
+  const { calls, make } = macroTracker();
+  const r = runCommandMacro("color_ab", ["colorbonds alpha red", "color_ab all"], make());
+  assert.equal(r.status, "error");
+  assert.match(r.message, /invoking a mod.*Nothing ran/s);
+  assert.equal(calls.run.length, 0);
+});
+
+test("runCommandMacro: a parse error in the THIRD string runs ZERO commands", () => {
+  const { calls, make } = macroTracker();
+  const validate = (c: string): CommandResult =>
+    c.includes("BAD") ? { status: "error", message: "empty segment — \"..\" not allowed" } : { status: "ok", message: "" };
+  const r = runCommandMacro("m", ["colorbonds alpha red", "hide beta", "view a..b BAD"], make(validate));
+  assert.equal(r.status, "error");
+  assert.match(r.message, /command 3 is invalid.*Nothing ran/s);
+  assert.equal(calls.run.length, 0, "ZERO commands executed — not two");
+  assert.equal(calls.beginStroke, 0);
+});
+
+test("runCommandMacro: a nomatch is NOT an error — the rest still execute", () => {
+  const { calls, make } = macroTracker();
+  const validate = (c: string): CommandResult =>
+    c.includes("nothere") ? { status: "nomatch", message: "nothing matches" } : { status: "ok", message: "" };
+  const r = runCommandMacro("m", ["colorbonds alpha red", "colorbonds nothere blue"], make(validate));
+  assert.equal(r.status, "ok");
+  assert.equal(calls.run.length, 2, "both ran despite the nomatch");
+  assert.equal(calls.beginStroke, 1);
+  assert.equal(calls.endStroke, 1);
+});
+
+test("runCommandMacro: all valid → runs all in ONE stroke, reports per-command outcomes", () => {
+  const { calls, make } = macroTracker();
+  const r = runCommandMacro("look", ["colorbonds alpha red", "colorbonds beta blue"], make());
+  assert.equal(r.status, "ok");
+  assert.deepEqual(calls.run, ["colorbonds alpha red", "colorbonds beta blue"]);
+  assert.equal(calls.beginStroke, 1, "exactly one stroke opened");
+  assert.equal(calls.endStroke, 1, "and closed once → one undo stroke");
+  assert.match(r.message, /ran 2 commands \(one undo stroke\)/);
+  assert.match(r.message, /colorbonds alpha red → ran colorbonds alpha red/);
 });

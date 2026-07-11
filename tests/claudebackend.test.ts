@@ -274,6 +274,21 @@ test("system prompt teaches the command grammar and the command-vs-mod choice (P
   assert.match(p, /ASP/);
 });
 
+test("system prompt teaches produces: commands and the colormap fact (Brief 10)", () => {
+  const p = buildSystemPrompt(sampleContext());
+  // the macro mod: save a look/action as re-runnable commands
+  assert.match(p, /produces: commands/);
+  assert.match(p, /SAVE A LOOK OR AN ACTION/);
+  assert.match(p, /list\[str\]/);
+  // the colormap fact it guessed wrong in a live session
+  assert.match(p, /one built-in hue ramp \(red→magenta\)/);
+  assert.match(p, /CANNOT[\s\S]{0,30}colors with a scalar/i);
+  // scalar-vs-commands boundary
+  assert.match(p, /Scalar vs\. commands — different tools/);
+  // the worked example's target is one the grammar resolves (prompt_examples guards it)
+  assert.match(p, /colorbonds polymer\.A\.ASP\*,GLU\* red/);
+});
+
 test("system prompt without context still instructs get_context first", () => {
   assert.match(buildSystemPrompt(null), /Call get_context/);
 });

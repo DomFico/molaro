@@ -365,6 +365,11 @@ export class SelectionModel {
   private readonly undoStack: UndoOp[] = [];
   /** When non-null, undoable ops coalesce here (one paint stroke = one undo). */
   private strokeOps: UndoOp[] | null = null;
+  /** Stroke nesting depth — beginStroke/endStroke are REENTRANT: a command that
+   * internally strokes (create_sele/hide) can run inside an outer stroke (a
+   * commands mod's batch) without its endStroke closing the outer one. The
+   * compound entry is pushed only when the OUTERMOST stroke ends. */
+  private strokeDepth = 0;
   private readonly listeners = new Set<() => void>();
 
   constructor(hierarchy: Hierarchy) {
@@ -555,11 +560,16 @@ export class SelectionModel {
     return pts.concat(hpPts);
   }
 
-  /** Coalesce subsequent undoable ops into ONE undo entry (a paint stroke). */
+  /** Coalesce subsequent undoable ops into ONE undo entry (a paint stroke).
+   * Reentrant: nested begin/end pairs collapse into the outermost stroke. */
   beginStroke(): void {
-    if (this.strokeOps === null) this.strokeOps = [];
+    if (this.strokeDepth === 0) this.strokeOps = [];
+    this.strokeDepth++;
   }
   endStroke(): void {
+    if (this.strokeDepth === 0) return; // unbalanced end — nothing open
+    this.strokeDepth--;
+    if (this.strokeDepth > 0) return; // still inside an outer stroke
     const ops = this.strokeOps;
     this.strokeOps = null;
     if (!ops || ops.length === 0) return;
@@ -767,8 +777,9 @@ export class SelectionModel {
 
   /** Undo the most recent state change; returns affected points (null if none). */
   undo(): number[] | null {
-    // A stroke in progress is undone as a unit.
-    if (this.strokeOps && this.strokeOps.length > 0) this.endStroke();
+    // A stroke in progress is undone as a unit — force it closed regardless of
+    // nesting depth (a Ctrl+Z should never land mid-stroke, but be defensive).
+    if (this.strokeOps && this.strokeOps.length > 0) { this.strokeDepth = 1; this.endStroke(); }
     const op = this.undoStack.pop();
     if (!op) return null;
     const pts = op.undo();

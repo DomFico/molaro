@@ -182,6 +182,29 @@ test("validateModValues: the FAIL-CLOSED matrix — any violation binds nothing"
   }
 });
 
+test("validateModValues: the commands return — a flat list of NON-EMPTY strings", () => {
+  const cmds = { produces: "commands" as const, targetCount: 3, frameCount: 10 };
+  // good: a list of non-empty command strings
+  assert.deepEqual(
+    validateModValues(["colorbonds alpha red", "hide beta"], cmds),
+    { ok: true, commands: ["colorbonds alpha red", "hide beta"] });
+  assert.deepEqual(validateModValues([], cmds), { ok: true, commands: [] }, "empty list = no commands");
+  // fail-closed matrix
+  const bad: [unknown, RegExp][] = [
+    ["colorbonds alpha red", /must return a list/],          // a bare string, not a list
+    [{ 0: "x" }, /must return a list/],                       // a dict
+    [42, /must return a list/],
+    [["ok", 3, "ok"], /commands\[1\] is not a string/],      // a non-string element
+    [["ok", "", "ok"], /commands\[1\] is an empty string/],  // an empty string
+    [["  ", "ok"], /commands\[0\] is an empty string/],       // whitespace-only
+  ];
+  for (const [values, want] of bad) {
+    const r = validateModValues(values, cmds);
+    assert.ok(!r.ok, JSON.stringify(values));
+    if (!r.ok) assert.match(r.error, want, JSON.stringify(values));
+  }
+});
+
 test("validateModValues: the scatter dict return — good paths and the full fail matrix", () => {
   const expect = { produces: "scatter" as const, targetCount: 3, frameCount: 10 };
   const good = validateModValues(

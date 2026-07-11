@@ -124,9 +124,14 @@ def run_mod(source, code: str, target_indices, timeout_s: float) -> bytes:
                 if isinstance(values.get(key), str):
                     out[key] = values[key]
             return json.dumps({"values": out}).encode("utf-8")
+        # a `produces: commands` mod returns a flat list[str] — pass it through
+        # for the client to validate + run through the command path (the client
+        # re-validates against the mod's declared produces).
+        if isinstance(values, list) and all(isinstance(v, str) for v in values):
+            return json.dumps({"values": list(values)}).encode("utf-8")
         if not finite_floats(values):
             return json.dumps(
-                {"error": "compute must return a flat list of finite floats"}
+                {"error": "compute must return a flat list of finite floats (or a list of command strings)"}
             ).encode("utf-8")
         return json.dumps({"values": [float(v) for v in values]}).encode("utf-8")
     except ModTimeout as exc:
