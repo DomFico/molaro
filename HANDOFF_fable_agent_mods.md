@@ -400,24 +400,38 @@ type Mod = Recipe | AnalysisMod            // shared: name, origin, author?, sou
 Recipe      = { kind: "representation", axis: "point-color",
                 compute(points): number[], colormap(t): [r,g,b] }   // JS, webview (rainbow)
 AnalysisMod = { kind: "analysis",
-                produces: "per-point-scalar" | "per-frame-series" | "scatter",
-                axis?: "color"|"size"|"opacity",   // required iff per-point-scalar
+                produces: ModProduces,             // see MOD_PRODUCES below
+                axis?: ModAxis,                    // required iff per-point-scalar
                 code: string }                     // PYTHON, executed in the producer
 ```
 
-`produces` is **the routing key**: an analysis mod's validated output is
-packaged as a `TypedResult` of the declared kind and handed to §5's
-binding layer VERBATIM — no new binding, no new renderer. `command` is
-deliberately NOT a `produces` value (a mod that emits a command string is
-a macro — out of scope, decided, don't add it). `origin` gained
-`"workspace"`; it is ASSIGNED by the loader, never read from a file.
-`author`/`source`/`description` remain display-only opaque strings —
-nothing fetches or resolves them.
+`produces` is **the routing key**. It is now **single-sourced** — two
+`readonly const` arrays in `recipes.ts` are the ONE definition every
+consumer derives from (the type, the file parser/validator, the mods
+display, and — in the domain tier — the authoring tool's schema):
 
-`mods` lists everything, grouped by origin:
-`name — representation · point-color · by … · …` /
-`name — analysis · per-point-scalar → color · by …` /
-`name — analysis · scatter · by …`.
+```ts
+export const MOD_PRODUCES = ["per-point-scalar", "per-frame-series", "scatter", "commands"] as const;
+export const MOD_AXES     = ["color", "size", "opacity"] as const;
+```
+
+For the first three, an analysis mod's validated output is packaged as a
+`TypedResult` of that kind and handed to §5's binding layer VERBATIM — no
+new binding, no new renderer. **`commands` is the reversal of an earlier
+decision** (this doc once said "a mod that emits a command string is a
+macro — out of scope, don't add it"): a `commands` mod returns a
+`list[str]` run through the command path (§7.6). It is handled at the
+**mod-run boundary**, NOT as a `TypedResult` — so **the typed-result union
+is still closed at four**; `produces` is four while `TypedResult` is a
+different four (`commands` in, `command` out). Do not conflate them.
+
+`origin` gained `"workspace"`; it is ASSIGNED by the loader, never read
+from a file. `author`/`source`/`description` remain display-only opaque
+strings — nothing fetches or resolves them.
+
+`mods` lists everything, grouped by origin, rendering `produces`
+generically (`name — analysis · commands · by …`), so a new `produces`
+value shows up with no display change.
 
 ### 7.2 The file format (`.molaro/mods/*.py`)
 
@@ -439,12 +453,22 @@ mods ship to the viewer as ONE `modsLoaded` message on the viewer's
 each in the mod registry AND as its own verb — a name colliding with an
 existing command is skipped with a reported line, so **a file can never
 shadow a built-in**. `saveWorkspaceMod(mod)` (extension.ts) is the write
-path a later authoring step uses; there are no edit/delete commands.
-**Mods are the only thing persisted by this feature.** Built-ins
-(`rainbow`) stay code-registered. `.molaro/**` is excluded from the VSIX —
-it is user-workspace data, not extension content; the repo ships three
-examples (`index_ramp`, `frame_metric`, `xy_metric`) that appear when this
-repository itself is the open workspace.
+path an authoring step uses. **`rm <mod>` is the delete surface** (added
+after this was first written): a y/n-confirmed terminal verb that unlinks a
+workspace mod file and deregisters it. It resolves the file to delete ONLY
+through the scan's path-map (`modPaths`, name→scanned path), NEVER a path
+built from the name — so it can touch nothing outside `.molaro/mods` and
+refuses built-ins by construction; disk-first, then unregister the
+successes; it is NOT undoable (a disk operation is outside the undo model).
+Host and viewer reconcile through an explicit result message so registry
+and disk cannot disagree. **Mods are the only thing persisted by this
+feature.** Built-ins (`rainbow`) stay code-registered. `.molaro/**` is
+excluded from the VSIX — it is user-workspace data, not extension content;
+the repo ships neutral examples (`index_ramp` scalar→color, `frame_metric`
+series, `xy_metric` scatter, `color_ab` a `commands` macro over synthetic
+labels) that appear when this repository is the open workspace. (The same
+`.molaro/mods/` directory also holds the domain tier's reference mods,
+which THIS doc does not describe — see `HANDOFF_fable_assistant.md`.)
 
 ### 7.3 The Python compute contract
 
@@ -455,7 +479,8 @@ def compute(data, target_indices):
                      (data.give_header().n_frames / .n_points;
                       data.give_frames(start, count) — positions are
                       frame-major little-endian float32 BYTES; decode with
-                      struct.unpack_from, see the shipped examples)
+                      struct.unpack_from, see the shipped examples;
+                      data.labels — the label view, below)
     target_indices — list[int]: the resolved point set in HEADER ORDER
                      (empty list = the whole dataset, by contract)
     returns        — list[float]  (per-point-scalar: one per target index,
@@ -465,8 +490,29 @@ def compute(data, target_indices):
                   — OR, produces: scatter ONLY, the one widened shape:
                      {"x": [...], "y": [...], "frames": [...]?,
                       "xLabel": str?, "yLabel": str?}
+                  — OR, produces: commands ONLY: list[str] (§7.6)
     """
 ```
+
+**`data.labels` — the label vocabulary on the mod-facing handle.**
+`data.labels[i]` → `(category_label, group_label, subgroup_label)` for
+point index `i`, header-order indexed (same correspondence as
+`target_indices` and the frame-byte columns). It is a **read-only view**
+built from the header the producer already sends; it is **neutral
+information** — the opaque tree labels, nothing about what they mean — and
+so it is present on the **synthetic source too**, not just real datasets
+(unlike the domain tier's data handle, which this tier does not describe).
+The fallbacks it returns mirror the viewer's own label resolution
+(`sets.ts`), so a label a mod reads is byte-for-byte the label the grammar
+matches.
+
+*Why it exists:* a `commands` mod (§7.6) builds command STRINGS, and a
+command string names the grammar's vocabulary (`alpha.group-0.subgroup-3`).
+Without `data.labels` a mod would have to *guess* those labels from raw
+indices or some inferred scheme, which is right where it was written and
+wrong elsewhere — and, because **a nomatch is not an error** (§8), a wrong-
+but-well-formed address writes nothing and reports SUCCESS. `data.labels` is
+how a mod speaks the real vocabulary instead of guessing it.
 
 ### 7.4 The exec bridge (`run_mod`)
 
@@ -510,6 +556,47 @@ binding, and the most-tested function in the tier:
 - anything else — wrong type, wrong length, non-finite, out-of-range, a
   producer-side exception or timeout — binds NOTHING and reports why
   (traceback text included). Never a partial write.
+- `commands`: a flat list of NON-EMPTY strings → `{ok, commands}` (§7.6).
+
+### 7.6 `produces: commands` — the macro mod
+
+A `commands` mod's `compute` returns a `list[str]`, each an ordinary
+command string; the batch runs through **the exact command path a typed
+terminal command hits**. This is the "save a look/an action as a
+re-runnable artifact" capability — and because it is Python with the
+resident handle, it can **compute first, then emit commands** (derive a
+per-point quantity, then emit the verbs that act on it). It is NOT a
+`TypedResult`; it is handled at the mod-run boundary (`runCommandMacro` in
+`commands.ts`, pure + unit-tested), so the typed-result union stays closed.
+
+The execution boundary is the whole design, in order:
+
+1. **Refusals — the RUNTIME guarantee, not the prompt and not the file.**
+   `commandMacroRefusal` refuses `rm` and any mod-invocation (a verb in the
+   registry's mod names — no recursion). This is the load-bearing point: a
+   mod's Python **generates strings at run time**, so whatever a human read
+   in the file (or an approval preview) is NOT the protection — the string
+   `"rm all"` can be assembled from pieces the reader never saw. The refusal
+   must live where the string is about to RUN.
+2. **All-or-nothing pre-validation via the no-op-write context.** Before
+   ANY command runs, every string is parsed and resolved against a
+   **validation `CommandContext` whose ~20 write methods are overridden to
+   no-ops while its reads stay real** (resolution, `@name` existence, name
+   collisions). A parse/usage error in the third string runs ZERO commands,
+   not two. (A `nomatch` is not an error here — a dependent command that
+   references a not-yet-created `@name` still validates.)
+3. **One undo stroke.** The whole batch runs inside one
+   `beginStroke`/`endStroke` pair (§8), so one Ctrl+Z reverses the entire
+   macro.
+4. **All-nomatch is LOUD.** If EVERY command nomatches, the summary reports
+   that nothing matched and nothing was written (the existing `nomatch`
+   status, not a cheerful `ok`) — the silent-success trap for a mod that
+   addressed a vocabulary that isn't there. A *partial* nomatch stays a
+   normal `ok`.
+
+The producer side is trivial: `run_mod` passes a `list[str]` return through
+as `{values}` (before the numeric checks), and the client re-validates
+against the declared `produces`.
 
 ---
 
@@ -518,15 +605,24 @@ binding, and the most-tested function in the tier:
 1. **Fail-closed, no-partial-write, everywhere.** Every path from a typed
    result or a mod return to a visible change validates first and applies
    all-or-nothing. Error paths are byte- and depth-identical no-ops.
-2. **The typed-result union is CLOSED at four**, and `produces` at three.
-   An unknown kind errors; nothing guesses. Widening either means visiting
-   every closure point (§10) in one change.
+2. **The typed-result union is CLOSED at four**, and `produces` at FOUR
+   (`per-point-scalar` / `per-frame-series` / `scatter` / `commands`).
+   `commands` is NOT a typed-result member — it runs at the mod boundary,
+   so the union closure is untouched. An unknown kind errors; nothing
+   guesses. Widening either means visiting every closure point (§10) in one
+   change, and both sets derive from a single source (`MOD_PRODUCES` / the
+   `TypedResult` union), never two hand-synced lists (see the defect-class
+   rule below).
 3. **The panel↔backend contract is frozen.** The backend swaps behind it
    (§13); the panel never grows backend-specific behavior.
 4. **This tier reuses the rails, never re-implements them**: resolution =
    the exported `resolveTargetPoints` (view's loop); representation writes
    = the per-element writers (one `recordOp` stroke, LWW, own buffer, GPU
    sync in the writer); commands = `runCommand`. One undo stack, ever.
+   `beginStroke`/`endStroke` gained a **reentrant depth counter** (in
+   `sets.ts`): nested strokes coalesce, so a `commands` macro whose
+   individual verbs each stroke still collapses to ONE undo entry.
+   Backward-compatible — a balanced outer pair behaves exactly as before.
 5. **The line-series plot path is fixed.** The scatter generalization left
    it byte-identical (its unit tests are untouched); future plot work must
    keep both item types' existing behavior.
@@ -543,9 +639,26 @@ binding, and the most-tested function in the tier:
    `plot-ready`, never webview retention, and restore touches no undo.
 9. **Layout is the only panel persistence**, per-field fault-tolerant.
    Transcript/plot/scene state must not gain persistence casually.
-10. **Only the bare forms create/destroy**: mods load at startup and save
-    through `saveWorkspaceMod`; there is no edit/delete surface. Files
-    cannot shadow built-in verbs.
+10. **Mod create/destroy is disk-confined.** Mods load at startup, save
+    through `saveWorkspaceMod`, and delete through `rm` — which resolves the
+    file ONLY through the scan's path-map, never a name-derived path, so it
+    can touch nothing outside `.molaro/mods` and refuses built-ins. Files
+    cannot shadow built-in verbs. Deletion is not undoable.
+11. **The recurring defect class: "two lists that must agree."** It has
+    bitten this project three times — a tool deny-list vs. the real runtime
+    surface; a system-prompt vs. the real grammar; a tool schema vs. the mod
+    system's `produces`. Each time the bug was a second copy of a contract
+    that drifted from the first. **The durable fix is ALWAYS a single source
+    or an equality assertion that fails the moment one side changes — never
+    a careful hand-sync.** Apply this to any new duplicated contract:
+    `MOD_PRODUCES`/`MOD_AXES` are the pattern (one `const`, everything
+    derives; a test asserts the derived-elsewhere copy equals it).
+12. **The silent-failure class: "a nomatch is not an error."** Resolving an
+    address to nothing is correct grammar discipline (an empty result is
+    legitimate), but it means a **wrong-but-well-formed** address writes
+    nothing and reports success. Anything that GENERATES addresses (a
+    `commands` mod, a future generator) must check them against reality, not
+    assume them — hence `data.labels`, and hence all-nomatch being loud.
 
 ---
 
@@ -579,6 +692,18 @@ recurrence risk:
   before this), `plot-ready` → re-push the held item, `viewerInfo` →
   ship `modsLoaded`. If you add a host→webview push at creation time,
   give it a ready signal.
+- **The relay-drop trap — the harness can be MORE capable than
+  production.** `rm`'s y/n answer travels terminal→host→viewer, but the
+  host's relay list did not forward `confirm-answer`, so the confirmed
+  delete was dropped on the floor: **every `rm` was silently broken in real
+  VS Code while the E2E stayed green** — the in-page harness loops relay
+  types back into one page, so it delivered the answer itself and masked the
+  dead relay. Lesson with teeth: a green E2E on the loopback harness does
+  NOT prove a host relay route exists; when a message must cross the
+  terminal↔viewer boundary in production, confirm the host actually
+  forwards its `type` (the forward-list is now a single tested predicate,
+  `relaysTerminalMessageToViewer`), and probe cross-webview paths in a real
+  workbench, not only the harness.
 - **The sync-command/async-compute pattern.** The command layer is
   synchronous; producer round-trips are not. The follow-up-`commandResult`
   (id -1) pattern is the whole solution — do not add a parallel async
@@ -618,18 +743,21 @@ recurrence risk:
 | ★ `webview/plothost.ts` | Host orchestration, pure + shared: raw-kind interception, validation, the ONE held item, re-push, seek/frame routing, `nFrames()`. |
 | `webview/plotmodel.ts` | The pure plot math: scales, `frameToX`/`xToFrame`, `valueToX`/`valueToY`, `pointsFor`, `nearestPoint`, the fixed viewBox constants. |
 | `webview/plot.ts`, `webview/plothud.ts` | The plot page (dumb renderer of `plotSeries`/`plotScatter`/`plotFrame`; click→`plotSeek`; `plot-ready`) and its shared skeleton/CSS. |
-| ★ `webview/recipes.ts` | The `Mod` union (`Recipe`/`AnalysisMod`), the registry, the mod FILE format (`parseModFile`/`serializeMod`, `MOD_FILE_MAGIC`), and `validateModValues` — the fail-closed gate. Shared by webview, host, bridge, tests. |
-| `webview/commands.ts` | This tier's additions only: `makeAnalysisModHandler`, the `mods` listing's kind·produces display, `/claude`'s registry stub, ctx members (`colorPointsEach`, `sizePointsEach`, `opacityPointsEach`, `runAnalysisMod`), `resolveTargetPoints` exported. |
-| `webview/main.ts` | Wiring: the claude-bind handler + raw-kind guard, `runAnalysisMod` (round-trip → validate → route → `asyncLine`), `installMods`, `viewerInfo`/`frameChanged` emission, `seekFrame`, the per-element writer closures. |
-| `webview/terminal.ts`, `webview/terminalhud.ts` | The `/claude` intercept, event routing to the panel, bind forwarding, the split skeleton (`#term-stack`/`#claude-root`/`#claude-divider`/`#term-root`), the harness glue (`__TERMINAL_HARNESS__`: stub + plotHost in-page). |
-| `src/extension.ts` | The plot panel (`viewerPlot`), plotHost + stub instantiation (on ready signals), relay routes (`claude-bind`/`claude-bind-result`, viewer-posted plot binds), the `.molaro/mods` loader (skip-and-warn) + `saveWorkspaceMod`, `modsLoaded` push. |
+| ★ `webview/recipes.ts` | The `Mod` union (`Recipe`/`AnalysisMod`), `MOD_PRODUCES`/`MOD_AXES` (the single-source consts), the registry, the mod FILE format (`parseModFile`/`serializeMod`, `MOD_FILE_MAGIC`), and `validateModValues` (incl. the `commands` branch) — the fail-closed gate. Shared by webview, host, bridge, tests. |
+| ★ `webview/commands.ts` | `makeAnalysisModHandler`, the `mods` listing's kind·produces display, `/claude`'s registry stub, ctx members (`…Each`, `runAnalysisMod`), `resolveTargetPoints` exported — AND the macro boundary: `runCommandMacro` + `commandMacroRefusal` (pure, §7.6). |
+| `webview/main.ts` | Wiring: the claude-bind handler + raw-kind guard, `runAnalysisMod` (round-trip → validate → route → `asyncLine`), `runCommandMod` + the no-op-write validation context, `installMods`, `viewerInfo`/`frameChanged` emission, `seekFrame`, the per-element writer closures. |
+| `webview/sets.ts` | (Lower tier, called not forked) — but the **reentrant `beginStroke`/`endStroke` depth counter** (§8) lives here; a macro coalesces to one undo entry through it. |
+| `webview/terminal.ts`, `webview/terminalhud.ts` | The `/claude` intercept, event routing to the panel, bind forwarding, the split skeleton, the harness glue (`__TERMINAL_HARNESS__`: stub + plotHost in-page). |
+| `src/extension.ts` | The plot panel (`viewerPlot`), plotHost + backend instantiation (on ready signals), relay routes, the `.molaro/mods` loader (skip-and-warn) + `saveWorkspaceMod`, the `rm` delete host action (`modPaths` path-map + reconcile), `modsLoaded` push. |
+| `src/hostmessages.ts` | Pure host predicates: `relaysTerminalMessageToViewer` (the terminal→viewer forward-list — the `rm` relay-bug fix, §9) and `resolveModDeletion` (the shared path-map delete discipline). |
 | `src/broker.ts`, `webview/transport.ts` | `run_mod` added to the request unions (protocol plumbing only). |
-| ★ `producer/serve.py` | The `run_mod` branch: exec + `compute(source, indices)` + the SIGALRM timeout + `{values}|{error, traceback}` replies (list and scatter-dict shapes). |
-| `.molaro/mods/{index_ramp,frame_metric,xy_metric}.py` | The three shipped synthetic example mods (scalar→color, series, scatter). |
-| `tests/bridge.ts` | The harness page: loopback type list, sessionStorage state shim, `__HARNESS_MODS__` (real files + the `broken_ramp` fail-closed fixture), the plot surface under the terminal stack. |
+| ★ `producer/serve.py` | The `run_mod` branch: exec + `compute(source, indices)` + the SIGALRM timeout + `{values}|{error, traceback}` replies (list, scatter-dict, and `list[str]` command shapes). |
+| ★ `producer/source.py` | The mod-facing `DataSource` — the `labels` accessor (`LabelView`, §7.3) built from the header; neutral, present on the synthetic source. (A domain-only accessor also lives on this base class; it is the domain tier's, not described here.) |
+| `.molaro/mods/{index_ramp,frame_metric,xy_metric,color_ab}.py` | The shipped synthetic example mods (scalar→color, series, scatter, `commands` macro). |
+| `tests/bridge.ts` | The harness page: loopback type list (incl. `confirm-answer`), sessionStorage state shim, `__HARNESS_MODS__` (real files + the `broken_ramp` fail-closed fixture), the plot surface under the terminal stack. |
 | `tests/claude.test.ts`, `tests/plot.test.ts`, `tests/claudelayout.test.ts` | This tier's unit suites (contract, reducer, stub; plot model + plothost; layout model + persistence). |
-| `tests/commands.test.ts`, `tests/recipes.test.ts`, `tests/producer_protocol.test.ts` | This tier's blocks inside shared suites (bind dispatch + mod verbs; file format + validation matrices; the `run_mod` protocol incl. the live timeout). |
-| ★ `tests/redesign.ts` S23–S28 | The E2E suite for this tier (§11). |
+| `tests/commands.test.ts`, `tests/recipes.test.ts`, `tests/producer_protocol.test.ts`, `tests/hostmessages.test.ts` | This tier's blocks inside shared suites (bind dispatch + mod verbs + `runCommandMacro`; file format + validation + `MOD_PRODUCES` equality; the `run_mod` protocol; the relay-forward + delete-discipline predicates). |
+| ★ `tests/redesign.ts` S23–S29, S31 | The neutral E2E scenarios for this tier (§11); S30 is the domain tier's. |
 
 ---
 
@@ -641,20 +769,29 @@ harness loads `dist/` bundles):
 
 ```
 npm run typecheck                 # tsc --noEmit, everything incl. tests
-npm test                          # 13 unit suites, node --test
+npm test                          # the unit suites, node --test
 npm run build                     # esbuild → dist/ (main, terminal, plot)
-node tests/redesign.ts            # E2E, headless Chrome/CDP (S0–S28)
-node tests/redesign.ts S24 S28    # any subset
+node tests/redesign.ts            # E2E, headless Chrome/CDP (S0–S31)
+node tests/redesign.ts S24 S31    # any subset
 node tests/terminal_smoke.ts      # the terminal/panel surface over the loopback relay
 python3 -m tests.test_roundtrip   # producer wire round-trip
-npm run package                   # → viewer-0.1.0.vsix
-code --install-extension viewer-0.1.0.vsix --force
+npm run package                   # → bash scripts/package-all.sh (below)
 ```
 
-At the time of writing: **257 unit / 680 E2E / 105 smoke**, all green
-(counts drift; the shapes below are the durable part). This tier's
-scenarios — each runnable alone, all on the harness's synthetic N=6000,
-T=150 dataset:
+`npm run package` no longer emits a single ambiguous bare `.vsix` — it runs
+`scripts/package-all.sh`, producing **platform-targeted** VSIXs
+(`viewer-0.1.0-<platform>.vsix`). This is a domain-tier concern (the reason
+is the assistant's platform-native binary; see
+`HANDOFF_fable_assistant.md`), recorded here only because it changes the
+package command. A stale bare `.vsix` once masked two briefs' worth of
+work by being reinstalled instead of the fresh build — never leave one
+around.
+
+At the time of writing: **~322 unit / ~712 E2E (S0–S31) / 105 smoke**, all
+green (counts drift; the shapes below are the durable part). This tier's
+neutral scenarios — each runnable alone, on the harness's synthetic dataset
+(S30 additionally runs against a real dataset via `VIEWER_PYTHON`, a domain
+concern):
 
 - **S23** — the panel shell: split/focus, streaming, the approval gate
   (approve/deny), the sentinel error, cancel, both auth states, both
@@ -679,6 +816,16 @@ T=150 dataset:
   the synthetic loop, the static and malformed paths, replacement both
   ways (series⇄scatter), and the `xy_metric` Python mod with the
   overlap-tolerant seek assertion.
+- **S29** — `rm`: deleting a workspace mod, y/n-confirmed, the fail-safe
+  (a non-`y` answer cancels), the registry/disk reconcile, and that the
+  deletion is NOT undoable.
+- **S30** — the domain tier's real-dataset reference-mod check (runs only
+  with `VIEWER_PYTHON` pointing at an interpreter that has the domain
+  packages). Listed for range completeness; its content is domain and
+  lives in `HANDOFF_fable_assistant.md`.
+- **S31** — `produces: commands`: the synthetic `color_ab` macro runs two
+  colorbonds as ONE undo stroke (depth-counter proof), and one Ctrl+Z
+  reverses the whole macro.
 
 The smoke (`terminal_smoke.ts`) remains the only automated coverage of
 the terminal SURFACE (typing, history, Tab, `/claude` toggling, a scripted
@@ -715,41 +862,51 @@ validates shape only, and maps them to visuals. That indifference is why
 the boundary exists and why it held.
 
 **Out of scope — not read, not described, do not widen the fence**: the
-producer-side data adapters, real-dataset tests
-(`tests/acceptance_corpus.py`), the sibling directories
+producer-side data adapters, the real-dataset correctness harness
+(`tests/reference_mods_corpus.py`), the sibling directories
 (`benchmark_systems/`, `md-viewer/`), and `README.md` (domain-framed;
-link-only). All validation in this tier was synthetic-only
-(`producer/synthetic.py`). No sandboxing layer (decided: user-approved
-code, timeout + validation only). No fifth result kind, no charting
-library, no overlaid plot items, no mod parameters beyond the target, no
-network anywhere — `source`/`author` stay display-only strings. And per
-the top of this doc: no domain interpretation, anywhere, ever.
+link-only) — all of which belong to the domain tier
+(`HANDOFF_fable_assistant.md`). All validation in this tier was
+synthetic-only (`producer/synthetic.py`). No sandboxing layer (decided:
+user-approved code, timeout + validation only). No fifth result kind, no
+charting library, no overlaid plot items, no mod parameters beyond the
+target, no network anywhere — `source`/`author` stay display-only strings.
+And per the top of this doc: no domain interpretation, anywhere, ever.
 
 ---
 
-## 13. The next direction — the swap seam, described neutrally
+## 13. The swap seam — now filled, and why nothing here changed
 
-Exactly one reserved seam remains, and it was built to be swapped:
-**`webview/claudestub.ts` is a placeholder for a real assistant backend.**
+The one reserved seam of this tier — **`webview/claudestub.ts` as a
+placeholder for a real assistant backend** — **has since been filled.** A
+real backend now sits at that boundary in production; the stub remains
+behind the `molaro.assistant.useStub` setting and is what every neutral
+test in this doc still runs against. The important fact for THIS tier is
+what did *not* change: the panel contract, the binding, the plot, the mod
+system, and every §8 invariant hold on both sides of the swap, exactly as
+designed. The fence held — the stub swapped out and nothing above it moved.
 
-The swap point's shape, all of which already exists and none of which
-changes: the backend is created by the extension host on the terminal's
-`claude-ready` signal, receives the frozen panel→backend commands
-(`user-message` / `approval-decision` / `cancel`), emits the frozen
-backend→panel events (§3.1) over the same relay, and gets host-supplied
-context through its options (today: `frameCount()`). Everything a backend
-can DO is already expressible: stream text, propose tools, gate them on
-approval, and attach typed results that the binding layer routes — plus
-authoring **mod files** through the existing save path
-(`saveWorkspaceMod` serializes an `AnalysisMod` to `.molaro/mods/`,
-where the startup scan and the own-verb registration already make it
-runnable and `mods` already attributes it).
+The swap point's shape, unchanged: the backend is created by the host on
+the terminal's `claude-ready` signal, receives the frozen panel→backend
+commands, emits the frozen backend→panel events (§3.1), and gets
+host-supplied context through its options. Everything a backend can DO is
+still exactly what the stub could: stream text, propose tools, gate them on
+approval, attach typed results the binding routes, and author/delete mod
+files through the existing save/`rm` paths.
 
-What the real backend computes, how it is prompted, and what its tools
-are named is deliberately NOT this document's business — the panel, the
-contract, the binding, the plot, and the mod system are all indifferent
-to it, and a future agent on this tier needs only the guarantee that the
-contract and the fences above hold on both sides of the swap. Do not
-design past the seam: no credential flows, no network plumbing, no
-contract extensions "for the real backend" — when it arrives, it speaks
-the contract that is already frozen, or the swap has failed.
+**What the real backend is — its model, its prompt, its tools, its auth,
+its security model, and everything domain-aware — is deliberately NOT this
+document's business, and must never leak into it.** That is a separate,
+domain-aware document: **`HANDOFF_fable_assistant.md`**. This tier stays
+blind to it by design; a future neutral agent extends this tier while
+remaining as domain-free as its author. If a change here seems to *need* a
+fact about the real backend, the change is on the wrong side of the fence.
+
+**Still reserved, still not designed here:** the neutral tier is now the
+thing to GUARD. The typed-result union stays closed at four, the grammar is
+sufficient, the binding and undo model are correct. The one known
+capability gap — a per-point value that varies per frame (a fifth
+result kind, with an `N × T` memory cost) — is described in the domain doc
+and must not be designed from this tier. If a task seems to require
+changing the union, the grammar, the binding, or the undo model, **stop and
+report** — that is the signal that it belongs to a decision, not a patch.
