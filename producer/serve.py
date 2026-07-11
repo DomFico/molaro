@@ -131,6 +131,19 @@ def run_mod(source, code: str, target_indices, timeout_s: float) -> bytes:
         return json.dumps({"values": [float(v) for v in values]}).encode("utf-8")
     except ModTimeout as exc:
         return json.dumps({"error": str(exc)}).encode("utf-8")
+    except ModuleNotFoundError as exc:
+        # A missing scientific package (typically mdtraj) is a SETUP problem, not
+        # a bug in the mod — say so actionably instead of a bare traceback (the
+        # Python preflight for the "first mod run" path).
+        return json.dumps({
+            "error": (
+                f"{exc.msg}. Analysis mods run in the producer's Python "
+                f"({sys.executable}); this interpreter is missing a required package. "
+                "Point the extension at an interpreter that has it (mdtraj etc.) via the "
+                "VIEWER_PYTHON environment variable — see README.md (Python for analysis mods)."
+            ),
+            "traceback": traceback.format_exc(),
+        }).encode("utf-8")
     except Exception as exc:
         return json.dumps(
             {"error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()}
@@ -140,7 +153,23 @@ def run_mod(source, code: str, target_indices, timeout_s: float) -> bytes:
         signal.signal(signal.SIGALRM, prev_handler)
 
 
+def log_mdtraj_preflight() -> None:
+    """Report at startup whether analysis mods will be able to run: mdtraj must be
+    importable in THIS interpreter. Logged (not fatal) — the synthetic source and
+    the viewer work without it; only analysis mods need it."""
+    try:
+        import mdtraj  # noqa: F401
+        log.info("preflight: mdtraj available (analysis mods can run) — interpreter %s", sys.executable)
+    except ModuleNotFoundError:
+        log.warning(
+            "preflight: mdtraj NOT importable in %s — analysis mods will fail. "
+            "Set VIEWER_PYTHON to an interpreter that has mdtraj (see README.md).",
+            sys.executable,
+        )
+
+
 def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO) -> None:
+    log_mdtraj_preflight()
     header = source.give_header()
     header_json = header_to_json(header).encode("utf-8")
     log.info(

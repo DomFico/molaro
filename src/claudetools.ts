@@ -78,6 +78,15 @@ export interface SceneContext {
   mods: { name: string; produces: string; axis?: string; description?: string }[];
 }
 
+/** Example targets get_context advertises to the model. The whole-system token
+ * is the BARE `all` keyword (NOT `@all`, which is the union of committed
+ * selections); category names are valid top-level grammar targets. Callers pass
+ * ONLY present (non-empty) categories, so every example resolves non-empty —
+ * enforced against the real resolver by tests/get_context.test.ts. */
+export function buildTargetExamples(presentCategories: string[]): string[] {
+  return ["all", ...presentCategories.slice(0, 3)];
+}
+
 export interface WriteModSpec {
   name: string;
   produces: "per-point-scalar" | "per-frame-series" | "scatter";

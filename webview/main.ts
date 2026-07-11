@@ -43,7 +43,7 @@ import { createCommandRegistry, makeRunComplete, type CommandResult } from "./co
 import { bindTypedResult } from "./claudebind.ts";
 import { parseTypedResult } from "./claudemodel.ts";
 import { registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
-import { makeAnalysisModHandler } from "./commands.ts";
+import { makeAnalysisModHandler, isFileAlreadyGone } from "./commands.ts";
 import { parseTarget, resolveTarget, type Completion } from "./address.ts";
 import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
 import { pickPoint, selectionBounds } from "./picking.ts";
@@ -1259,11 +1259,22 @@ async function main(): Promise<void> {
     if (deleted.length > 0) {
       lines.push(`deleted ${deleted.length} mod${deleted.length === 1 ? "" : "s"}: ${deleted.join(", ")}`);
     }
+    let hardFail = false;
     for (const f of failed) {
-      lines.push(`failed: ${f.name} — ${f.error} (still registered)`);
+      // A file that's already gone (removed outside the app) is not a persistent
+      // failure — reconcile: unregister so the registry matches disk, and say so.
+      // Any OTHER unlink failure leaves it registered and is a real error.
+      if (isFileAlreadyGone(f.error)) {
+        unregisterRecipe(f.name);
+        commands.unregister(f.name);
+        lines.push(`${f.name} — its file was already gone; unregistered`);
+      } else {
+        hardFail = true;
+        lines.push(`failed: ${f.name} — ${f.error} (still registered)`);
+      }
     }
     if (lines.length === 0) lines.push("rm: nothing was deleted");
-    asyncLine(failed.length > 0 ? "error" : "ok", lines.join("\n"));
+    asyncLine(hardFail ? "error" : "ok", lines.join("\n"));
   };
   let modRunSeq = 0;
   const runAnalysisMod = (mod: AnalysisMod, points: number[], expr: string): void => {

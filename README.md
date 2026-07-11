@@ -24,14 +24,70 @@ download-and-convert dance.
   maps them onto the same contract, **validated on 9 benchmark systems** spanning
   file formats and molecular edge cases (units, periodic wrapping, coarse-grained
   beads, virtual sites, membranes, nucleic/protein backbones).
+- A **terminal command layer** — an address grammar over the category/group/
+  subgroup/point tree with selections, hiding/showing, color/size/opacity
+  representations, and a **plot tab** for per-frame series and scatters
+  ([docs/COMMANDS.md](docs/COMMANDS.md)).
+- **Analysis mods** — hand-written or assistant-authored Python analyses saved to
+  `.molaro/mods/*.py`, run in the producer against the live `mdtraj.Trajectory`,
+  their results binding to the viewer (a curve, a coloring, a scatter). The
+  reference mods (Rg, RMSD, RMSF) are verified against the corpus to `1e-4` nm.
+- **The `/claude` analysis assistant** — a real assistant on the
+  [Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk) that authors and
+  runs mods for you, with a locked-down four-tool surface and human approval of
+  the Python before it runs. See **[The analysis assistant](#the-analysis-assistant)**.
 
-**Direction being built:** an **agent-driven analysis and visualization layer** —
-letting a Claude agent drive selection, styling, and analysis over the neutral
-contract. This layer is *not wired up yet*; the contract was deliberately designed
-to carry every number such a layer would need while staying appearance-free, so it
-can be added without touching the producer or renderer.
+Open source under the [MIT License](LICENSE). (The Claude Agent SDK dependency is
+under its own proprietary license; Molaro's own code stays MIT.)
 
-Open source under the [MIT License](LICENSE).
+## Quick start
+
+1. **Install** the `.vsix` for your platform (see [Platform support](#platform-support)).
+2. **Open a viewer:** Command Palette → **Point Viewer: Open** (a synthetic
+   dataset), or right-click a trajectory/structure file → **Open in Point Viewer**.
+3. **Open the terminal** (the panel's *Terminal* button) and drive the scene with
+   the command grammar, or type **`/claude`** to talk to the analysis assistant.
+
+## The analysis assistant
+
+`/claude` opens a conversation panel. The assistant’s job is to **author and run
+analysis mods**: it writes a `.molaro/mods/*.py`, you approve the full Python, it
+runs against the live trajectory, and its result binds to the viewer.
+
+- **API key (required).** Molaro is a distributed extension, so it uses Anthropic
+  **API-key** auth (not a claude.ai login). Run **“Molaro: Set Anthropic API Key”**
+  (stored in VS Code SecretStorage) or set `ANTHROPIC_API_KEY`. The model is set by
+  `molaro.assistant.model`.
+- **The tool surface is exactly four** — `get_context`, `write_mod` (approval = the
+  full Python), `run_mod`, `run_command` (no filesystem, shell, network; `rm` and
+  raw Python are refused). See [docs/COMMANDS.md](docs/COMMANDS.md).
+
+### Platform support
+
+The Agent SDK runs the assistant through a **platform-native binary**, so the
+assistant is available only in the `.vsix` built for your platform:
+
+| package | assistant | size |
+|---|---|---|
+| **linux-x64** | ✅ works | ~85 MB (bundles the native binary) |
+| darwin-x64 / darwin-arm64 / win32-x64 | ⛔ unavailable, says so in the panel | small |
+
+On the non-linux-x64 builds the **viewer, terminal, grammar, plot, selections, and
+hand-written mods all work normally** — only the `/claude` assistant is gated off,
+and the panel reports it plainly (`disconnected`, with a hint) rather than failing
+silently. Build all targets with `scripts/package-all.sh`.
+
+## Python for analysis mods
+
+Analysis mods execute in the **producer’s Python interpreter** and need **mdtraj**
+(and numpy) importable there. The synthetic dataset and the viewer itself need
+none of this — only analysis mods do.
+
+- Point the extension at a capable interpreter with the **`VIEWER_PYTHON`**
+  environment variable (an **absolute** path), e.g. a conda env:
+  `VIEWER_PYTHON=/path/to/miniforge3/envs/mdbench/bin/python`.
+- If the configured interpreter lacks mdtraj, the producer says so at startup and
+  a mod run returns a clear message naming `VIEWER_PYTHON` — not a bare traceback.
 
 ---
 

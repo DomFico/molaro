@@ -216,6 +216,50 @@ def check_neutral_regression():
     return all(ok for _, ok, _ in checks), checks
 
 
+def verify_named_mod(mod_name, system_id, observable, selection=None, tol=TOL):
+    """Verify ANY named workspace mod (`.molaro/mods/<mod_name>.py`) — hand-written
+    or assistant-generated — against a corpus system's stored reference. Runs the
+    mod through the REAL producer path and compares the mean of its per-frame
+    series to the reference observable. Reports computed vs reference vs delta.
+
+    `selection` (an mdtraj atom-selection string) sets the target atom set; None =
+    the whole system (empty target_indices), which is what the rg reference uses.
+    """
+    spec = resolve_system(system_id)
+    src = MdtrajSource(spec["topology"], spec["trajectory"], spec["name"], spec["ligand_residues"])
+    ref = spec["manifest"]["reference_observables"][observable]["value"]
+    traj = src.trajectory
+    target = [int(i) for i in traj.topology.select(selection)] if selection else []
+    header = ", ".join(f"{h}" for h in [os.path.basename(src.name)])  # noqa: F841
+    # read the mod's author line for provenance (hand-written vs generated)
+    author = "?"
+    for line in _mod_code(mod_name).splitlines():
+        if line.startswith("# author:"):
+            author = line.split(":", 1)[1].strip()
+            break
+    vals = run_values(src, mod_name, target)
+    computed = float(np.mean(vals))
+    delta = abs(computed - ref)
+    return {
+        "mod": mod_name, "author": author, "system": system_id, "observable": observable,
+        "selection": selection or "all atoms (whole system)",
+        "n_target": len(target) or src.n_points, "n_frames": len(vals),
+        "computed": computed, "reference": ref, "delta": delta, "pass": delta < tol, "tol": tol,
+    }
+
+
+def _report_named(r) -> int:
+    print(f"\n=== verify mod '{r['mod']}' (author: {r['author']}) ===")
+    print(f"  system     : {r['system']}")
+    print(f"  observable : {r['observable']}")
+    print(f"  atom set   : {r['selection']}  ({r['n_target']} atoms, {r['n_frames']} frames)")
+    print(f"  computed   : {r['computed']:.10f} nm")
+    print(f"  reference  : {r['reference']:.10f} nm")
+    print(f"  delta      : {r['delta']:.2e} nm   (tolerance {r['tol']:.0e})")
+    print(f"  {'PASS' if r['pass'] else 'FAIL — DISCREPANCY (do not loosen the tolerance)'}")
+    return 0 if r["pass"] else 1
+
+
 def main() -> int:
     print(f"corpus root: {corpus_root()}   tolerance: {TOL:.0e} nm (absolute)\n")
     total_ok = True
@@ -253,4 +297,14 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser(description="Verify reference mods against the corpus.")
+    ap.add_argument("--mod", help="verify a single named workspace mod (.molaro/mods/<name>.py)")
+    ap.add_argument("--system", default="03_adk_psf_dcd", help="corpus system id")
+    ap.add_argument("--observable", default="rg_mean", help="stored reference observable key")
+    ap.add_argument("--selection", help="mdtraj atom selection for the target set (default: whole system)")
+    args = ap.parse_args()
+    if args.mod:
+        raise SystemExit(_report_named(
+            verify_named_mod(args.mod, args.system, args.observable, args.selection)))
     raise SystemExit(main())

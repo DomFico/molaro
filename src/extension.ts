@@ -26,7 +26,8 @@ import { parseModFile, serializeMod, type AnalysisMod, type Mod } from "../webvi
 import { parseClaudeCommand, type ClaudeCommand } from "../webview/claudemodel.ts";
 import { createClaudeStub } from "../webview/claudestub.ts";
 import { createClaudeBackend, type ClaudeBackend } from "./claudebackend.ts";
-import type { SceneContext } from "./claudetools.ts";
+import { buildTargetExamples, type SceneContext } from "./claudetools.ts";
+import { relaysTerminalMessageToViewer } from "./hostmessages.ts";
 import { clearApiKey, NO_KEY_HINT, promptAndStoreApiKey, resolveApiKey } from "./claudeauth.ts";
 import { createPlotHost } from "../webview/plothost.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
@@ -69,6 +70,7 @@ interface HeaderPeek {
   categories: string[];
   groups: Record<string, string>;
   subgroups: Record<string, string>;
+  points: { category: number[] };
 }
 
 interface OpenArgs {
@@ -353,7 +355,12 @@ function openPanel(
     const mods = loadWorkspaceMods(producerLog, modPaths).map((m) => ({
       name: m.name, produces: m.produces, axis: m.axis, description: m.description,
     }));
-    const categories = Array.isArray(h.categories) ? h.categories : [];
+    // Only categories that ACTUALLY have points — the header lists every domain
+    // category (list(CATEGORIES)), most empty on any given system; advertising an
+    // empty one gives the model a target that resolves to nothing.
+    const allCategories = Array.isArray(h.categories) ? h.categories : [];
+    const present = new Set(Array.isArray(h.points?.category) ? h.points.category : []);
+    const categories = allCategories.filter((_, i) => present.has(i));
     return {
       system: h.name,
       nAtoms: h.n_points,
@@ -361,7 +368,12 @@ function openPanel(
       categories,
       groups: Object.values(h.groups ?? {}),
       subgroupCount: Object.keys(h.subgroups ?? {}).length,
-      targetExamples: ["@all", ...categories.slice(0, 3)],
+      // The whole-system token is the BARE keyword `all` (address grammar);
+      // `@all` is the union of committed SELECTIONS (empty with none), which is
+      // what made the assistant's `@all` resolve to nothing. `categories` is now
+      // only the present ones, so every example resolves non-empty — the
+      // resolve-every-example guard (tests/get_context.test.ts) enforces it.
+      targetExamples: buildTargetExamples(categories),
       committedSelections: ls.message,
       mods,
     };
@@ -468,10 +480,11 @@ function openPanel(
     );
     terminal.webview.html = renderTerminalHtml(terminal.webview, context.extensionUri);
     terminal.webview.onDidReceiveMessage((msg: { type?: string }) => {
-      if (msg?.type === "command" || msg?.type === "complete" || msg?.type === "claude-bind") {
-        // per-frame-series claude-binds belong to the PLOT — the plot host
-        // consumes them (validate, hold, draw, answer the ⤷ outcome);
-        // everything else relays to the VIEWER's binding rails as before.
+      if (relaysTerminalMessageToViewer(msg?.type)) {
+        // Relay to the VIEWER. per-frame-series claude-binds belong to the PLOT
+        // — the plot host consumes them (validate, hold, draw, answer the ⤷
+        // outcome); everything else (incl. confirm-answer, rm's y/n) relays to
+        // the viewer. Dropping confirm-answer here made `rm` fail silently.
         if (plotHost.handleTerminalMessage(msg)) return;
         void panel.webview.postMessage(msg);
         return;

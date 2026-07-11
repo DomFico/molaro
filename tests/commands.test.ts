@@ -12,6 +12,7 @@ import { Hierarchy, type Entry } from "../webview/sets.ts";
 import {
   createCommandRegistry,
   HELP_TEXT,
+  isFileAlreadyGone,
   makeAnalysisModHandler,
   parseColor,
   parseOpacity,
@@ -1333,4 +1334,14 @@ test("CommandRegistry.unregister removes a verb from dispatch and the completion
   assert.equal(registry.runCommand("zz_verb").status, "error");
   assert.match(registry.runCommand("zz_verb").message, /unknown command/);
   assert.ok(!registry.verbs().includes("zz_verb"));
+});
+
+// -- rm reconciliation: a file already gone vs a real failure (Part A) --------
+test("isFileAlreadyGone: ENOENT reconciles (unregister), other errors stay registered", () => {
+  assert.ok(isFileAlreadyGone("ENOENT: no such file or directory, unlink '/x/rg_all.py'"));
+  assert.ok(isFileAlreadyGone("no such file"));
+  // a real failure — must NOT be reconciled (leaves the mod registered)
+  assert.ok(!isFileAlreadyGone("EACCES: permission denied, unlink '/x/rg.py'"));
+  // the fileless-mod case (broken_ramp) is a distinct 'no file recorded' — not ENOENT
+  assert.ok(!isFileAlreadyGone("no file recorded for this mod"));
 });

@@ -1141,6 +1141,14 @@ export function makeModsHandler(): CommandHandler {
  * undo stack, and the prompt says so. If nothing is deletable, no prompt
  * is armed at all.
  */
+/** An unlink error from the host meaning the file is already gone (removed
+ * outside the app). `rm` reconciles these by unregistering the mod so the
+ * registry matches disk — it is NOT a persistent failure. Any OTHER unlink
+ * error is a real failure that leaves the mod registered and is reported. */
+export function isFileAlreadyGone(error: string): boolean {
+  return /ENOENT|no such file/i.test(error);
+}
+
 export function makeRmHandler(ctx: CommandContext): CommandHandler {
   return (args: string): CommandResult => {
     const selector = args.trim();
