@@ -42,7 +42,7 @@ import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
 import { createCommandRegistry, makeRunComplete, type CommandResult } from "./commands.ts";
 import { bindTypedResult } from "./claudebind.ts";
 import { parseTypedResult } from "./claudemodel.ts";
-import { registerRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
+import { registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
 import { makeAnalysisModHandler } from "./commands.ts";
 import { parseTarget, resolveTarget, type Completion } from "./address.ts";
 import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
@@ -530,8 +530,28 @@ async function main(): Promise<void> {
       installMods((msg as { mods?: unknown }).mods);
       return;
     }
+    if (msg?.type === "confirm-answer") {
+      // the terminal's answer to the LATEST confirmation prompt: y acts,
+      // anything else cancels — and clears the stash either way, so the
+      // viewer-side slot can never go stale against the terminal's
+      if ((msg as { yes?: boolean }).yes === true) confirmRmDeletion();
+      else cancelRmDeletion();
+      return;
+    }
+    if (msg?.type === "rm-mods-result") {
+      finishRmDeletion(msg as unknown as {
+        deleted?: string[]; failed?: { name: string; error: string }[];
+      });
+      return;
+    }
     transport.handleMessage(e.data);
   });
+  // rm wiring — late-bound below (needs the registry). NOT undoable and
+  // never on the undo stack: the filesystem is outside the undo model.
+  let confirmRmDeletion: () => void = () => {};
+  let cancelRmDeletion: () => void = () => {};
+  let finishRmDeletion: (r: { deleted?: string[]; failed?: { name: string; error: string }[] }) => void =
+    () => {};
   // late-bound once the player exists (the listener is live before boot ends)
   let seekFrame: (frame: number) => void = () => {};
 
@@ -1212,6 +1232,39 @@ async function main(): Promise<void> {
   const asyncLine = (status: "ok" | "error", message: string): void => {
     host.postMessage({ type: "commandResult", id: -1, status, message });
   };
+  // rm: the names awaiting the terminal's y answer (armed by the verb).
+  let pendingRm: string[] | null = null;
+  cancelRmDeletion = (): void => {
+    pendingRm = null;
+  };
+  confirmRmDeletion = (): void => {
+    const names = pendingRm;
+    pendingRm = null;
+    if (!names || names.length === 0) {
+      asyncLine("error", "rm: nothing pending to confirm");
+      return;
+    }
+    // files delete HOST-side FIRST; unregistration follows what SUCCEEDED
+    // (rm-mods-result below), so the registry re-derives from disk truth
+    host.postMessage({ type: "rm-mods", names });
+  };
+  finishRmDeletion = (r): void => {
+    const deleted = Array.isArray(r.deleted) ? r.deleted : [];
+    const failed = Array.isArray(r.failed) ? r.failed : [];
+    for (const name of deleted) {
+      unregisterRecipe(name);
+      commands.unregister(name); // its own-verb goes with it
+    }
+    const lines: string[] = [];
+    if (deleted.length > 0) {
+      lines.push(`deleted ${deleted.length} mod${deleted.length === 1 ? "" : "s"}: ${deleted.join(", ")}`);
+    }
+    for (const f of failed) {
+      lines.push(`failed: ${f.name} — ${f.error} (still registered)`);
+    }
+    if (lines.length === 0) lines.push("rm: nothing was deleted");
+    asyncLine(failed.length > 0 ? "error" : "ok", lines.join("\n"));
+  };
   let modRunSeq = 0;
   const runAnalysisMod = (mod: AnalysisMod, points: number[], expr: string): void => {
     void (async () => {
@@ -1317,6 +1370,9 @@ async function main(): Promise<void> {
     opacityEdges,
     opacityTrace,
     runAnalysisMod,
+    armRmDeletion: (names: string[]) => {
+      pendingRm = names; // single slot — a newer rm replaces it
+    },
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);

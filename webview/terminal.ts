@@ -18,6 +18,7 @@ import { parseClaudeCommand, parseClaudeEvent } from "./claudemodel.ts";
 import { mountClaudePanel } from "./claudepanel.ts";
 import { createClaudeStub } from "./claudestub.ts";
 import { createPlotHost } from "./plothost.ts";
+import { createPromptGate } from "./prompt.ts";
 
 declare function acquireVsCodeApi(): {
   postMessage(msg: unknown): void;
@@ -85,6 +86,24 @@ function main(): void {
       if (plotHost.handleViewerMessage(e.data)) return; // viewerInfo / frameChanged
       if (plotHost.handlePlotMessage(e.data)) return; // plotSeek / plot-ready
       if (plotHost.handleTerminalMessage(e.data)) return; // series claude-binds
+      if ((e.data as { type?: string } | undefined)?.type === "rm-mods") {
+        // the extension host's file deletion, emulated: the bridge's
+        // node-side /rm-mods endpoint unlinks under .molaro/mods only
+        const names = (e.data as { names?: string[] }).names ?? [];
+        void fetch("/rm-mods", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ names }),
+        })
+          .then(async (r) => {
+            const out = (await r.json()) as { deleted: string[]; failed: unknown[] };
+            loop({ type: "rm-mods-result", ...out });
+          })
+          .catch(() => {
+            loop({ type: "rm-mods-result", deleted: [], failed: names.map((n) => ({ name: n, error: "bridge rm failed" })) });
+          });
+        return;
+      }
       const cmd = parseClaudeCommand(e.data);
       if (cmd) stub?.handle(cmd);
     });
@@ -97,6 +116,13 @@ function main(): void {
     log.appendChild(el);
     log.scrollTop = log.scrollHeight;
   };
+
+  // The single pending-confirmation slot (webview/prompt.ts): while armed,
+  // the NEXT input is the answer, never a command — y/yes acts, anything
+  // else cancels fail-safe. Armed by a commandResult carrying confirm:true;
+  // discarded by `clear`. The answer routes back as {confirm-answer, yes}
+  // so the viewer's own pending stash clears on cancel too.
+  const promptGate = createPromptGate();
 
   // Completion previews (candidate lists / cap hints) are INFORMATIONAL: a
   // repeated Tab on an unchanged input must not stack duplicate copies. We
@@ -152,9 +178,15 @@ function main(): void {
       });
       return;
     }
-    const m = e.data as CommandResultMsg | CompleteResultMsg | undefined;
+    const m = e.data as (CommandResultMsg & { confirm?: boolean }) | CompleteResultMsg | undefined;
     if (m?.type === "commandResult") {
       print(m.status === "error" ? "term-err" : m.status === "nomatch" ? "term-nomatch" : "term-ok", m.message);
+      if (m.confirm === true) {
+        promptGate.arm(m.message, (yes) => {
+          host.postMessage({ type: "confirm-answer", yes });
+          if (!yes) print("term-nomatch", "cancelled — nothing deleted");
+        });
+      }
       return;
     }
     if (m?.type === "completeResult") {
@@ -191,12 +223,27 @@ function main(): void {
       history.push(text);
       histAt = -1;
       draft = "";
+      if (promptGate.pending() !== null) {
+        // a confirmation is outstanding: this input IS the answer, never a
+        // command — even "clear" or a valid verb typed here only cancels
+        print("term-echo", `› ${text}`);
+        promptGate.offer(text);
+        input.value = "";
+        return;
+      }
       if (text === "clear") {
         // Terminal-local: wipes this log only — never reaches viewer state,
         // creates no undo step. (The panel's "Clear" button is a different
         // operation: it discards the pending target.)
         log.replaceChildren();
         lastPreview = null;
+        // defensive: a cleared terminal has no outstanding prompt. (Typed
+        // `clear` WHILE pending never reaches here — the gate consumes it
+        // as a cancel answer, which is the fail-safe intent.)
+        if (promptGate.pending() !== null) {
+          promptGate.discard();
+          host.postMessage({ type: "confirm-answer", yes: false });
+        }
         input.value = "";
         return;
       }

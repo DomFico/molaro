@@ -80,7 +80,9 @@ test("registerRecipe: a name → recipe map future recipes register into", () =>
 
 import {
   parseModFile,
+  resolveModSelector,
   serializeMod,
+  unregisterRecipe,
   validateModValues,
   MOD_FILE_MAGIC,
   type AnalysisMod,
@@ -232,4 +234,43 @@ def compute(data, target_indices):
 `, "workspace");
   assert.ok(!bad.ok);
   if (!bad.ok) assert.match(bad.error, /axis is only valid on per-point-scalar/);
+});
+
+test("resolveModSelector: names, + unions, all (workspace only), the three buckets", () => {
+  const mods: AnalysisMod[] = [
+    { name: "aa_mod", kind: "analysis", produces: "per-frame-series", code: "def compute(d,t):\n pass", origin: "workspace" },
+    { name: "bb_mod", kind: "analysis", produces: "per-frame-series", code: "def compute(d,t):\n pass", origin: "workspace" },
+  ];
+  const pool = [rainbow, ...mods];
+  assert.deepEqual(resolveModSelector("aa_mod", pool),
+    { workspace: ["aa_mod"], builtins: [], nomatch: [] }, "bare name");
+  assert.deepEqual(resolveModSelector("aa_mod + bb_mod", pool),
+    { workspace: ["aa_mod", "bb_mod"], builtins: [], nomatch: [] }, "+ union");
+  assert.deepEqual(resolveModSelector("all", pool),
+    { workspace: ["aa_mod", "bb_mod"], builtins: [], nomatch: [] },
+    "all = every WORKSPACE mod — never built-ins");
+  assert.deepEqual(resolveModSelector("nothere", pool),
+    { workspace: [], builtins: [], nomatch: ["nothere"] }, "nomatch");
+  assert.deepEqual(resolveModSelector("rainbow + aa_mod + nothere", pool),
+    { workspace: ["aa_mod"], builtins: ["rainbow"], nomatch: ["nothere"] },
+    "a mixed selector fills all three buckets");
+  const deduped = resolveModSelector("aa_mod + aa_mod + all", pool);
+  assert.ok(!("error" in deduped));
+  if (!("error" in deduped)) {
+    assert.deepEqual(deduped.workspace, ["aa_mod", "bb_mod"], "deduped, selector order first");
+  }
+  assert.deepEqual(resolveModSelector("aa_mod + ", pool),
+    { error: "empty term in the mod selector — rm <name> [+ <name>…] or rm all" });
+});
+
+test("unregisterRecipe removes a mod from the registry (and only that mod)", () => {
+  registerRecipe({
+    name: "zz_doomed", kind: "analysis", produces: "per-frame-series",
+    code: "def compute(d,t):\n pass", origin: "workspace",
+  });
+  assert.ok(getRecipe("zz_doomed"));
+  assert.equal(unregisterRecipe("zz_doomed"), true);
+  assert.equal(getRecipe("zz_doomed"), undefined);
+  assert.ok(getRecipe("rainbow"), "neighbors untouched");
+  assert.equal(unregisterRecipe("zz_doomed"), false, "second delete is a no-op");
 });

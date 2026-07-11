@@ -18,7 +18,7 @@ import {
   parseSize,
   type CommandContext,
 } from "../webview/commands.ts";
-import { registerRecipe } from "../webview/recipes.ts";
+import { listRecipes, registerRecipe, unregisterRecipe } from "../webview/recipes.ts";
 import { BIND_SIZE_MAX, bindTypedResult } from "../webview/claudebind.ts";
 
 function makeHeader(): Header {
@@ -52,6 +52,7 @@ function makeRegistry() {
   const colorEachOps: { points: number[]; rgb: number[] }[] = [];
   const eachOps: { kind: "size" | "opacity"; points: number[]; values: number[] }[] = [];
   const modRuns: { name: string; points: number[]; expr: string }[] = [];
+  const rmArms: string[][] = [];
   const edgeOps: { edgeIds: number[]; rgb: [number, number, number] }[] = [];
   // a chain over the 3 points: edge 0 sits inside c0 ({0,1}); edge 1 crosses
   // the category boundary (point 1 in c0, point 2 in c1) — the contained-vs-
@@ -252,12 +253,15 @@ function makeRegistry() {
     runAnalysisMod: (mod, points, expr) => {
       modRuns.push({ name: mod.name, points: [...points], expr });
     },
+    armRmDeletion: (names) => {
+      rmArms.push([...names]);
+    },
   };
   return {
     registry: createCommandRegistry(ctx),
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
-    colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, sels,
+    colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, rmArms, sels,
   };
 }
 
@@ -1261,4 +1265,72 @@ test("mods lists analysis mods with kind · produces → axis alongside attribut
   assert.ok(lines.includes("  stub-series — analysis · per-frame-series"), lines.join("|"));
   assert.ok(lines.indexOf("built-in:") < lines.indexOf("workspace:"),
     "registration order groups built-ins first");
+});
+
+// -- rm: the destructive verb's resolution/refusal/prompt buckets -----------------
+
+test("rm: usage, nomatch, and the built-in refusal — none of them arm a prompt", () => {
+  const { registry, rmArms } = makeRegistry();
+  const bare = registry.runCommand("rm");
+  assert.equal(bare.status, "error");
+  assert.match(bare.message, /rm <name> \[\+ <name>…\] or rm all/);
+  const nomatch = registry.runCommand("rm nothere");
+  assert.equal(nomatch.status, "nomatch");
+  assert.match(nomatch.message, /no mod named "nothere"[\s\S]*nothing to delete/);
+  assert.equal(nomatch.confirm, undefined);
+  const builtin = registry.runCommand("rm rainbow");
+  assert.equal(builtin.status, "error");
+  assert.match(builtin.message,
+    /"rainbow" is built-in — code, not a file; it cannot be deleted[\s\S]*nothing to delete/);
+  assert.equal(builtin.confirm, undefined, "refusal-only never prompts");
+  // `rm all` against whatever the SHARED module registry currently holds
+  // (earlier tests register workspace stubs): empty → nomatch, else a
+  // prompt listing exactly the workspace names
+  const ws = listRecipes().filter((m) => m.origin !== "built-in").map((m) => m.name);
+  const allRes = registry.runCommand("rm all");
+  if (ws.length === 0) {
+    assert.equal(allRes.status, "nomatch");
+    assert.equal(allRes.message, "no workspace mods to delete");
+    assert.equal(rmArms.length, 0, "nothing was ever armed");
+  } else {
+    assert.equal(allRes.confirm, true);
+    assert.match(allRes.message, new RegExp(`will delete ${ws.length} workspace mods?: ${ws.join(", ")}`));
+    assert.deepEqual(rmArms, [ws], "armed = every workspace mod, never built-ins");
+  }
+});
+
+test("rm: a deletable selector prompts (confirm:true) and arms EXACTLY the workspace names", () => {
+  registerRecipe({
+    name: "zz_rm_a", kind: "analysis", produces: "per-frame-series",
+    code: "def compute(d,t):\n pass", origin: "workspace",
+  });
+  registerRecipe({
+    name: "zz_rm_b", kind: "analysis", produces: "per-frame-series",
+    code: "def compute(d,t):\n pass", origin: "workspace",
+  });
+  try {
+    const { registry, rmArms } = makeRegistry();
+    const r = registry.runCommand("rm rainbow + zz_rm_a + nothere + zz_rm_b");
+    assert.equal(r.status, "ok");
+    assert.equal(r.confirm, true, "the terminal arms its pending slot on this");
+    assert.match(r.message, /"rainbow" is built-in/, "mixed selector still refuses the built-in");
+    assert.match(r.message, /no mod named "nothere"/);
+    assert.match(r.message, /will delete 2 workspace mods: zz_rm_a, zz_rm_b/,
+      "the confirmation states EXACTLY what will be deleted");
+    assert.match(r.message, /CANNOT be undone\. y\/n\?/);
+    assert.deepEqual(rmArms, [["zz_rm_a", "zz_rm_b"]], "armed = the deletable names only");
+  } finally {
+    unregisterRecipe("zz_rm_a");
+    unregisterRecipe("zz_rm_b");
+  }
+});
+
+test("CommandRegistry.unregister removes a verb from dispatch and the completion pool", () => {
+  const { registry } = makeRegistry();
+  registry.register("zz_verb", () => ({ status: "ok", message: "hi" }), "test");
+  assert.equal(registry.runCommand("zz_verb").status, "ok");
+  assert.equal(registry.unregister("zz_verb"), true);
+  assert.equal(registry.runCommand("zz_verb").status, "error");
+  assert.match(registry.runCommand("zz_verb").message, /unknown command/);
+  assert.ok(!registry.verbs().includes("zz_verb"));
 });

@@ -18,7 +18,7 @@
  */
 import * as vscode from "vscode";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { ProducerBroker } from "./broker.ts";
@@ -123,7 +123,10 @@ function modsDir(): string | null {
  * parser; a malformed file is SKIPPED with a reported warning (one bad mod
  * must never break startup or the registry). Loaded files get origin
  * "workspace" (assigned here, never read from the file). */
-function loadWorkspaceMods(log: vscode.OutputChannel): AnalysisMod[] {
+function loadWorkspaceMods(
+  log: vscode.OutputChannel,
+  modPaths?: Map<string, string>,
+): AnalysisMod[] {
   const dir = modsDir();
   if (!dir) return [];
   let files: string[];
@@ -132,12 +135,18 @@ function loadWorkspaceMods(log: vscode.OutputChannel): AnalysisMod[] {
   } catch {
     return []; // no .molaro/mods — nothing to load
   }
+  modPaths?.clear();
   const mods: AnalysisMod[] = [];
   for (const file of files) {
     try {
       const parsed = parseModFile(readFileSync(join(dir, file), "utf-8"), "workspace");
-      if (parsed.ok) mods.push(parsed.mod);
-      else log.appendLine(`[mods] skipped ${file}: ${parsed.error}`);
+      if (parsed.ok) {
+        mods.push(parsed.mod);
+        // rm's name → file map: deletion uses ONLY paths recorded by this
+        // scan (the mod's name comes from the header, not the filename),
+        // which is what confines rm to .molaro/mods forever
+        modPaths?.set(parsed.mod.name, join(dir, file));
+      } else log.appendLine(`[mods] skipped ${file}: ${parsed.error}`);
     } catch (err) {
       log.appendLine(`[mods] skipped ${file}: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -233,6 +242,8 @@ function openPanel(
   // viewer-side (webview/commands.ts).
   let terminal: vscode.WebviewPanel | null = null;
   let claudeStub: ClaudeStub | null = null;
+  /** rm's name → file map, populated ONLY by the mod scan (and save). */
+  const modPaths = new Map<string, string>();
 
   // The plot panel — a third editor webview, create-on-demand. The HOST
   // holds the active series (plothost.ts, shared with the harness glue) and
@@ -329,7 +340,10 @@ function openPanel(
       // viewerInfo doubles as the viewer's boot signal — the workspace mods
       // ship once its listeners are provably live (the claude-ready lesson)
       if (msg?.type === "viewerInfo") {
-        void panel.webview.postMessage({ type: "modsLoaded", mods: loadWorkspaceMods(producerLog) });
+        void panel.webview.postMessage({
+          type: "modsLoaded",
+          mods: loadWorkspaceMods(producerLog, modPaths),
+        });
       }
       return;
     }
@@ -337,6 +351,31 @@ function openPanel(
       // a VIEWER-originated series (an analysis mod's result) rides the same
       // plot route tool results do; scalar/command kinds never come this way
       plotHost.handleTerminalMessage(msg);
+      return;
+    }
+    if (msg?.type === "rm-mods") {
+      // rm's confirmed deletion: unlink ONLY paths recorded by the mod
+      // scan (never derived from names — rm can touch nothing outside
+      // .molaro/mods). Reply with what actually happened; the viewer
+      // unregisters only the successes.
+      const names = (msg as unknown as { names?: string[] }).names ?? [];
+      const deleted: string[] = [];
+      const failed: { name: string; error: string }[] = [];
+      for (const name of names) {
+        const file = modPaths.get(name);
+        if (!file) {
+          failed.push({ name, error: "no file recorded for this mod" });
+          continue;
+        }
+        try {
+          unlinkSync(file);
+          modPaths.delete(name);
+          deleted.push(name);
+        } catch (err) {
+          failed.push({ name, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      void panel.webview.postMessage({ type: "rm-mods-result", deleted, failed });
       return;
     }
     if (msg?.type === "toProducer" && msg.request) {

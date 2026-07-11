@@ -320,3 +320,54 @@ export function validateModValues(
   }
   return { ok: true, values: values as number[] };
 }
+
+// -- rm: mod-name selector resolution + runtime unregistration --------------------
+
+export function unregisterRecipe(name: string): boolean {
+  return recipes.delete(name);
+}
+
+/** The buckets an rm selector resolves to. */
+export interface ModSelection {
+  /** Deletable: workspace mods, in selector order, deduped. */
+  workspace: string[];
+  /** Named but refused: built-ins are code, not files. */
+  builtins: string[];
+  /** Named but unknown. */
+  nomatch: string[];
+}
+
+/** Resolve an rm selector against MOD NAMES — a different namespace from
+ * the point grammar (the point resolver is deliberately NOT in this path).
+ * Syntactic conventions only are shared: terms split on `+`, `all` is a
+ * keyword when it is the whole term (and means all WORKSPACE mods, never
+ * built-ins), everything else is an exact name. Pure and total: an empty
+ * selector is the one error. */
+export function resolveModSelector(
+  selector: string,
+  mods: readonly Mod[],
+): ModSelection | { error: string } {
+  const terms = selector.split("+").map((t) => t.trim());
+  if (terms.some((t) => t === "")) {
+    return { error: "empty term in the mod selector — rm <name> [+ <name>…] or rm all" };
+  }
+  const byName = new Map(mods.map((m) => [m.name, m]));
+  const seen = new Set<string>();
+  const out: ModSelection = { workspace: [], builtins: [], nomatch: [] };
+  const bucket = (name: string): void => {
+    if (seen.has(name)) return;
+    seen.add(name);
+    const mod = byName.get(name);
+    if (!mod) out.nomatch.push(name);
+    else if (mod.origin === "built-in") out.builtins.push(name);
+    else out.workspace.push(name);
+  };
+  for (const term of terms) {
+    if (term === "all") {
+      for (const m of mods) if (m.origin !== "built-in") bucket(m.name);
+    } else {
+      bucket(term);
+    }
+  }
+  return out;
+}

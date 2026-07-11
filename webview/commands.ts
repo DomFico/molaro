@@ -29,6 +29,7 @@ import type { TreeModel } from "./classification.ts";
 import {
   getRecipe,
   listRecipes,
+  resolveModSelector,
   type AnalysisMod,
   type Mod,
   type RecipeOrigin,
@@ -40,6 +41,12 @@ export type CommandStatus = "ok" | "nomatch" | "error";
 export interface CommandResult {
   status: CommandStatus;
   message: string;
+  /** Set by a verb whose action needs a y/n CONFIRMATION before it runs:
+   * the message is the prompt, and the terminal arms its single pending
+   * slot — the NEXT input is the answer, never a command. Only `rm` sets
+   * this today; the slot is general (webview/prompt.ts) but one-at-a-time
+   * by design. */
+  confirm?: boolean;
 }
 
 /** A verb implementation: receives the text after the verb (trimmed). */
@@ -193,6 +200,12 @@ export interface CommandContext {
    * (validated FAIL-CLOSED, bound through the EXISTING rails per the mod's
    * declared `produces`, reported as a follow-up terminal line). */
   runAnalysisMod(mod: AnalysisMod, points: number[], expr: string): void;
+  /** rm: stash the workspace mod names awaiting the terminal's y answer
+   * (a single slot — a newer rm replaces it). On confirmation the wiring
+   * deletes files HOST-side FIRST, then unregisters only what succeeded,
+   * so the registry re-derives from disk truth. NOT undoable and NOT on
+   * the undo stack — the filesystem is outside the undo model. */
+  armRmDeletion(names: string[]): void;
 }
 
 export class CommandRegistry {
@@ -200,6 +213,12 @@ export class CommandRegistry {
 
   register(verb: string, handler: CommandHandler, description = ""): void {
     this.entries.set(verb, { handler, description });
+  }
+
+  /** Remove a verb (rm's deregistration of a deleted mod's own-verb — the
+   * only caller; built-ins are never unregistered). */
+  unregister(verb: string): boolean {
+    return this.entries.delete(verb);
   }
 
   /** Registered verb names (completion pool — grows with every new verb). */
@@ -1111,6 +1130,51 @@ export function makeModsHandler(): CommandHandler {
   };
 }
 
+/**
+ * `rm <mod-selector>` — delete WORKSPACE mod files, gated on a y/n
+ * confirmation. The selector names MODS, not points (resolveModSelector —
+ * the point resolver is deliberately not in this path): bare names, `+`
+ * unions, and `all` (= all workspace mods, never built-ins). Built-ins are
+ * code, not files — naming one is an explicit refusal, and a mixed
+ * selector refuses the built-ins while confirming the deletable rest. The
+ * FIRST destructive, non-undoable terminal operation: rm never touches the
+ * undo stack, and the prompt says so. If nothing is deletable, no prompt
+ * is armed at all.
+ */
+export function makeRmHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const selector = args.trim();
+    if (selector === "") {
+      return {
+        status: "error",
+        message: "rm needs a mod selector — rm <name> [+ <name>…] or rm all (workspace mods only)",
+      };
+    }
+    const sel = resolveModSelector(selector, listRecipes());
+    if ("error" in sel) return { status: "error", message: sel.error };
+    const refusals = sel.builtins.map(
+      (n) => `"${n}" is built-in — code, not a file; it cannot be deleted`);
+    const unknowns = sel.nomatch.map((n) => `no mod named "${n}"`);
+    if (sel.workspace.length === 0) {
+      const lines = [...refusals, ...unknowns];
+      if (lines.length === 0) {
+        return { status: "nomatch", message: "no workspace mods to delete" }; // rm all, empty
+      }
+      lines.push("nothing to delete");
+      return { status: sel.builtins.length > 0 ? "error" : "nomatch", message: lines.join("\n") };
+    }
+    ctx.armRmDeletion(sel.workspace);
+    const lines = [
+      ...refusals,
+      ...unknowns,
+      `will delete ${sel.workspace.length} workspace mod${sel.workspace.length === 1 ? "" : "s"}: ` +
+        sel.workspace.join(", "),
+      "files are removed from disk — this CANNOT be undone. y/n?",
+    ];
+    return { status: "ok", message: lines.join("\n"), confirm: true };
+  };
+}
+
 /** `rename @name [new]` — exactly one committed selection, bracketed new
  * name, routed through the model's unique-name rename (one undo op, exact
  * parity with the panel's inline rename). */
@@ -1376,6 +1440,8 @@ export const HELP_TEXT = [
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  mods         list the recipe registry: name, axis, origin, and credit",
   "               (author · source, display-only; recipes, not verbs)",
+  "  rm <mods>    delete WORKSPACE mod files (rm <name> [+ <name>…] · rm all);",
+  "               y/n confirmed, built-ins refused, NOT undoable",
   "  rename @name [new]  rename a selection · clear  wipe the terminal log",
   "  /claude      toggle the conversation panel above the terminal (its own",
   "               input; tool calls gate on approve/deny; typed results drive",
@@ -1499,6 +1565,11 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "mods",
     makeModsHandler(),
     "read-only listing of the recipe registry: each recipe's name, axis, origin, and credit (bare — takes no target)",
+  );
+  registry.register(
+    "rm",
+    makeRmHandler(ctx),
+    "delete WORKSPACE mod files (y/n confirmed, NOT undoable): rm <name> [+ <name>…] · rm all — built-ins are refused",
   );
   registry.register(
     "rename",

@@ -26,6 +26,8 @@
  * Screenshots + [PASS]/[FAIL] lines; evidence in reports/redesign/.
  * Run from viewer/ (after npm run build):  node tests/redesign.ts [S0 S1 ...]
  */
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+
 import { E2EDriver, sleep } from "./e2e_driver.ts";
 
 const REPORT = "reports/redesign";
@@ -4802,9 +4804,139 @@ async function S28(): Promise<void> {
   }, 1180, 780, "/terminal");
 }
 
+
+async function S29(): Promise<void> {
+  console.log("S29 — rm: deleting workspace mods, y/n confirmed, fail-safe, not undoable");
+  // node-side fixtures: a throwaway mod file, plus snapshots of the shipped
+  // examples so `rm all` can be exercised for real and then RESTORED
+  const modsDir = ".molaro/mods";
+  const fixtureFile = `${modsDir}/zz_fixture.py`;
+  const examples = ["frame_metric.py", "index_ramp.py", "xy_metric.py"]
+    .map((f) => `${modsDir}/${f}`);
+  const snapshots = new Map(examples.map((f) => [f, readFileSync(f, "utf-8")]));
+  writeFileSync(fixtureFile, [
+    "# molaro-mod",
+    "# name: zz_fixture",
+    "# kind: analysis",
+    "# produces: per-frame-series",
+    "",
+    "def compute(data, target_indices):",
+    "    return [0.0] * data.give_header().n_frames",
+    "",
+  ].join("\n"), "utf-8");
+  try {
+    await withDriver(async (d) => {
+      const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+      const cmd = (text: string) =>
+        d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+      const logLines = () =>
+        d.evaluate<{ cls: string; text: string }[]>(
+          `[...document.querySelectorAll('#term-log .term-line')].map(l=>({cls:l.className,text:l.textContent}))`);
+      const lastLine = async () => (await logLines()).at(-1);
+      const submit = async (text: string): Promise<void> => {
+        const r = await d.evaluate<{ x: number; y: number }>(`(()=>{
+          const b=${el("term-input")}.getBoundingClientRect();
+          return {x:b.left+b.width/2, y:b.top+b.height/2};
+        })()`);
+        await d.click(r.x, r.y);
+        await d.insertText(text);
+        await d.key("Enter", "Enter", 13);
+        await sleep(350);
+      };
+      const listsMod = async (name: string): Promise<boolean> =>
+        (await cmd("mods")).message.includes(` ${name} — `);
+
+      // -- the fixture loads, lists, and is invocable ---------------------------
+      check("S29: the fixture mod loads and lists", await listsMod("zz_fixture"));
+      await submit("zz_fixture all");
+      check("S29: …and its verb is invocable",
+        (await logLines()).some((l) => l.text === "running zz_fixture on 6000 points…"));
+      await sleep(600); // let its series land; not the subject here
+
+      // -- rm prompts; an UNRECOGNIZED answer cancels and is NOT executed --------
+      await submit("rm zz_fixture");
+      let last = await lastLine();
+      check("S29: rm prompts with exactly what will be deleted + the irreversibility note",
+        last?.text === "will delete 1 workspace mod: zz_fixture\nfiles are removed from disk — this CANNOT be undone. y/n?" &&
+          /term-ok/.test(last?.cls ?? ""),
+        JSON.stringify(last));
+      await submit("view alpha"); // looks like a command — it is an ANSWER
+      check("S29: an unrecognized answer CANCELS and never runs as a command",
+        (await lastLine())?.text === "cancelled — nothing deleted" &&
+          !(await logLines()).some((l) => l.text === "focused 400 points"));
+      check("S29: …the mod is fully intact (file, listing)",
+        existsSync(fixtureFile) && (await listsMod("zz_fixture")));
+
+      // -- n cancels; a command-looking answer that IS "clear" also cancels ------
+      await submit("rm zz_fixture");
+      await submit("n");
+      check("S29: n cancels — nothing deleted",
+        (await lastLine())?.text === "cancelled — nothing deleted" && existsSync(fixtureFile));
+      await submit("rm zz_fixture");
+      const linesBefore = (await logLines()).length;
+      await submit("clear"); // while pending, even `clear` is just an answer
+      check("S29: `clear` typed as an answer cancels (fail-safe) and does NOT wipe the log",
+        (await lastLine())?.text === "cancelled — nothing deleted" &&
+          (await logLines()).length > linesBefore && existsSync(fixtureFile));
+
+      // -- y deletes: disk, listing, and the verb all agree -----------------------
+      await submit("rm zz_fixture");
+      await submit("y");
+      await sleep(500); // host round-trip + async outcome line
+      check("S29: y deletes — the outcome line reports it",
+        (await logLines()).some((l) => l.text === "deleted 1 mod: zz_fixture"));
+      check("S29: …file gone from disk", !existsSync(fixtureFile));
+      check("S29: …gone from the listing", !(await listsMod("zz_fixture")));
+      const dead = await cmd("zz_fixture all");
+      check("S29: …and its verb no longer resolves",
+        dead.status === "error" && dead.message === "unknown command: zz_fixture");
+
+      // -- built-in refusal and nomatch never prompt -------------------------------
+      await submit("rm rainbow");
+      check("S29: a built-in is refused by name, nothing deleted",
+        (await lastLine())?.text === '"rainbow" is built-in — code, not a file; it cannot be deleted\nnothing to delete');
+      await submit("help rm"); // proves NO pending prompt swallowed this
+      check("S29: …and no prompt was armed (the next input ran as a command)",
+        /delete WORKSPACE mod files/.test((await lastLine())?.text ?? ""));
+      await submit("rm nonexistent");
+      check("S29: an unknown name nomatches without prompting",
+        (await lastLine())?.text === 'no mod named "nonexistent"\nnothing to delete' &&
+          /term-nomatch/.test((await lastLine())?.cls ?? ""));
+
+      // -- rm all: exactly the workspace mods; built-ins survive; partial failure --
+      await submit("rm all");
+      last = await lastLine();
+      check("S29: rm all lists EXACTLY the workspace mods in the prompt",
+        /will delete 4 workspace mods: frame_metric, index_ramp, xy_metric, broken_ramp/.test(last?.text ?? ""),
+        JSON.stringify(last));
+      await submit("y");
+      await sleep(600);
+      const outcome = (await logLines()).find((l) => /^deleted 3 mods:/.test(l.text));
+      check("S29: …y deletes the file-backed three and reports the fileless one as FAILED",
+        outcome?.text === "deleted 3 mods: frame_metric, index_ramp, xy_metric\n" +
+          "failed: broken_ramp — no file recorded for this mod (still registered)",
+        JSON.stringify(outcome));
+      check("S29: …the three are gone from disk", examples.every((f) => !existsSync(f)));
+      const listing = (await cmd("mods")).message;
+      check("S29: …registry agrees with disk: broken_ramp stays, the three are gone, rainbow survives",
+        listing.includes(" broken_ramp — ") && listing.includes(" rainbow — ") &&
+          !listing.includes(" index_ramp — ") && !listing.includes(" frame_metric — ") &&
+          !listing.includes(" xy_metric — "),
+        listing);
+      check("S29: …the built-in still works",
+        (await cmd("rainbow alpha.group-0.subgroup-0")).status === "ok");
+    }, 1180, 780, "/terminal");
+  } finally {
+    // restore everything the test touched — the shipped examples come back,
+    // the fixture goes away
+    for (const [file, text] of snapshots) writeFileSync(file, text, "utf-8");
+    if (existsSync(fixtureFile)) unlinkSync(fixtureFile);
+  }
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

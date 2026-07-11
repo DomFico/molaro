@@ -49,6 +49,7 @@ point types `anchor` and `t0`–`t3`).
 | `traceopacity <expr> <a>` | Alpha for polyline vertices whose **subgroup** contains a resolved point | `traceopacity alpha 0.7` |
 | `rainbow <expr>` | Color those points an even hue ramp in resolution order (the first **recipe**: per-point values, not one constant; one undo stroke) | `rainbow alpha.group-0` |
 | `mods` | List the **recipe registry** (read-only): each recipe's name, axis, origin, and credit — bare, takes no target | `mods` |
+| `rm <mods>` | Delete **workspace mod files** (y/n confirmed, **not undoable**; built-ins refused) | `rm index_ramp + xy_metric` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |
 | `rename @name [new]` | Rename a committed selection | `rename @selection_1 [ring]` |
 | `add @name <tree-target>` | Add tree-addressed entries as **members** at their natural level (no `@` on the right) | `add @ring alpha.group-0` |
@@ -586,6 +587,36 @@ follows. Long listings share `ls`'s display cap.
 `mods` is bare — it inspects the vocabulary, not the scene, so it takes no
 target; any trailing argument is a usage error. Read-only: no state, no
 undo impact.
+
+### Deleting workspace mods: `rm`
+
+```
+> rm index_ramp + xy_metric
+will delete 2 workspace mods: index_ramp, xy_metric
+files are removed from disk — this CANNOT be undone. y/n?
+> y
+deleted 2 mods: index_ramp, xy_metric
+```
+
+`rm <name> [+ <name>…]` / `rm all` deletes **workspace mod files** from
+`.molaro/mods/` and unregisters them (they leave `mods` and their verbs
+stop resolving). The selector names **mods, not points** — bare names,
+`+` unions, and `all`, which always means all *workspace* mods.
+
+- **Built-ins are refused by name** (`rainbow` is code, not a file); a
+  mixed selector refuses the built-ins and confirms the deletable rest —
+  the prompt states exactly which mods will be deleted.
+- **It asks first.** `rm` prints what will be deleted and waits: the next
+  input is the answer, not a command. `y`/`yes` deletes; `n`/`no` — or
+  ANYTHING else, including something that looks like a command — cancels
+  and deletes nothing (fail-safe). `clear` discards a pending prompt.
+- **It cannot be undone.** The undo stack covers scene state, not the
+  filesystem. Files are deleted first and only what actually succeeded is
+  unregistered, so a partial failure (a locked or missing file) is
+  reported by name and the failed mod stays registered.
+- If nothing is deletable (unknown names, only built-ins, or no workspace
+  mods), `rm` reports and never prompts. It touches nothing outside
+  `.molaro/mods/`.
 
 ## Listing: `ls`
 

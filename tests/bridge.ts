@@ -18,7 +18,7 @@
  * Run from viewer/:  node tests/bridge.ts --port 8940 --n-points 5000 --n-frames 600
  */
 import http from "node:http";
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -199,7 +199,9 @@ const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* ht
               // plot orchestration: the viewer's frame signals and the plot
               // page's own posts loop back for the in-page plot-host glue
               msg.type === "viewerInfo" || msg.type === "frameChanged" ||
-              msg.type === "plotSeek" || msg.type === "plot-ready") {
+              msg.type === "plotSeek" || msg.type === "plot-ready" ||
+              // rm: the confirmation answer and the deletion round-trip
+              msg.type === "confirm-answer" || msg.type === "rm-mods") {
             setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: msg })), 0);
             return;
           }
@@ -268,7 +270,44 @@ const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* ht
 </html>`;
 
 const server = http.createServer((req, res) => {
-  if (req.method === "POST" && req.url === "/rpc") {
+  if (req.method === "POST" && req.url === "/rm-mods") {
+    // the extension host's rm-mods handler, emulated node-side: unlink ONLY
+    // files found by a fresh scan of .molaro/mods (names map to files via
+    // each file's parsed header, exactly like the host's recorded map)
+    const body: Buffer[] = [];
+    req.on("data", (d: Buffer) => body.push(d));
+    req.on("end", () => {
+      let names: string[] = [];
+      try {
+        names = (JSON.parse(Buffer.concat(body).toString("utf-8")) as { names?: string[] }).names ?? [];
+      } catch { /* fall through to empty */ }
+      const dir = join(root, ".molaro", "mods");
+      const paths = new Map<string, string>();
+      try {
+        for (const f of readdirSync(dir).filter((x) => x.endsWith(".py"))) {
+          const parsed = parseModFile(readFileSync(join(dir, f), "utf-8"), "workspace");
+          if (parsed.ok) paths.set(parsed.mod.name, join(dir, f));
+        }
+      } catch { /* no dir */ }
+      const deleted: string[] = [];
+      const failed: { name: string; error: string }[] = [];
+      for (const name of names) {
+        const file = paths.get(name);
+        if (!file) {
+          failed.push({ name, error: "no file recorded for this mod" });
+          continue;
+        }
+        try {
+          unlinkSync(file);
+          deleted.push(name);
+        } catch (err) {
+          failed.push({ name, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ deleted, failed }));
+    });
+  } else if (req.method === "POST" && req.url === "/rpc") {
     const body: Buffer[] = [];
     req.on("data", (d: Buffer) => body.push(d));
     req.on("end", () => {
