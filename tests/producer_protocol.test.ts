@@ -131,3 +131,61 @@ test("producer crash surfaces as onExit, not a hang", async () => {
   assert.match(s.exitReason!, /exited unexpectedly/);
   s.broker.dispose();
 });
+
+test("run_mod: exec against the resident dataset — values, errors, tracebacks, timeout", async () => {
+  const s = startSession(["--n-points", "60", "--n-frames", "12"]);
+  try {
+    const runMod = async (code: string, target_indices: number[], timeout_s?: number) => {
+      s.broker.send({ type: "run_mod", code, target_indices, ...(timeout_s ? { timeout_s } : {}) });
+      return JSON.parse(new TextDecoder().decode(await s.next())) as {
+        values?: number[]; error?: string; traceback?: string;
+      };
+    };
+
+    // a valid compute: sees the EXACT indices, in order, and the dataset handle
+    const ok = await runMod(
+      "def compute(data, target_indices):\n" +
+      "    n = data.give_header().n_frames\n" +
+      "    return [i / 10 for i in target_indices] + [float(n)]\n",
+      [3, 1, 4],
+    );
+    assert.deepEqual(ok.values, [0.3, 0.1, 0.4, 12],
+      "indices arrive verbatim + the resident header is reachable");
+
+    // a raising compute answers a structured error WITH the traceback text
+    const boom = await runMod(
+      "def compute(data, target_indices):\n    raise ValueError('synthetic failure')\n", []);
+    assert.match(boom.error!, /ValueError: synthetic failure/);
+    assert.match(boom.traceback!, /Traceback[\s\S]*ValueError: synthetic failure/);
+
+    // exec-time errors (bad syntax), a missing compute, and a bad return shape
+    assert.match((await runMod("def compute(:\n", [])).error!, /SyntaxError/);
+    assert.match((await runMod("x = 1\n", [])).error!, /must define compute/);
+    assert.match((await runMod(
+      "def compute(data, target_indices):\n    return 'nope'\n", [])).error!,
+      /flat list of finite floats/);
+    assert.match((await runMod(
+      "def compute(data, target_indices):\n    return [float('nan')]\n", [])).error!,
+      /flat list of finite floats/);
+
+    // the wall-clock timeout aborts a runaway compute and the producer LIVES ON
+    const slow = await runMod(
+      "def compute(data, target_indices):\n" +
+      "    while True:\n        pass\n",
+      [], 0.5);
+    assert.match(slow.error!, /timed out after 0.5s/);
+    const after = await runMod(
+      "def compute(data, target_indices):\n    return [1.0]\n", []);
+    assert.deepEqual(after.values, [1], "the producer still answers after a timeout");
+
+    // FIFO integrity: a frames request queued behind a mod still round-trips
+    s.broker.send({ type: "run_mod", code: "def compute(d, t):\n    return []\n", target_indices: [] });
+    s.broker.send({ type: "frames", start: 0, count: 1 });
+    const modReply = JSON.parse(new TextDecoder().decode(await s.next()));
+    assert.deepEqual(modReply.values, []);
+    const frameBytes = await s.next();
+    assert.ok(frameBytes.length > 100, "the frames response follows in order");
+  } finally {
+    s.broker.dispose();
+  }
+});

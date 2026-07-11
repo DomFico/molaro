@@ -3856,8 +3856,8 @@ async function S22(): Promise<void> {
     const lines = (r.message ?? "").split("\n");
     check("S22: recipes are grouped under their origin header",
       lines[0] === "built-in:", JSON.stringify(lines));
-    check("S22: rainbow's line carries name, axis, and the FULL credit",
-      lines[1] === "  rainbow — point-color · by Dominic Fico · https://github.com/DomFico/molaro",
+    check("S22: rainbow's line carries name, kind, axis, and the FULL credit",
+      lines[1] === "  rainbow — representation · point-color · by Dominic Fico · https://github.com/DomFico/molaro",
       JSON.stringify(lines));
     check("S22: recipes ONLY — no command verbs in the listing",
       !r.message.includes("colorpoints") && !r.message.includes("create_sele"),
@@ -4501,9 +4501,166 @@ async function S26(): Promise<void> {
   }, 1180, 780, "/terminal");
 }
 
+async function S27(): Promise<void> {
+  console.log("S27 — authorable mods: Python compute in the producer, routed by declared kind");
+
+  // ---- part 1, the "/" route: the per-point mod end-to-end — index
+  // alignment, the fail-closed no-write, one-stroke undo, and the pixel proof.
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const snap = (slot: string) =>
+      d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.color))`);
+    const buffersEqual = (slot: string) =>
+      d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.color, s=window.${slot};
+        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) return false;
+        return true;
+      })()`);
+    // async mod outcomes ride the commandResult channel — capture them
+    await d.evaluate(`void (window.__lines = [],
+      window.addEventListener('message', (e) => {
+        if (e.data?.type === 'commandResult' && e.data.id === -1) window.__lines.push(e.data);
+      }))`);
+    const lastAsync = () =>
+      d.evaluate<{ status: string; message: string } | null>(`window.__lines.at(-1) ?? null`);
+
+    // -- the loaded workspace mods appear in `mods` with kind + attribution ------
+    const listing = await cmd("mods");
+    check("S27: workspace mod files load and list with kind · produces · credit",
+      listing.message.includes("workspace:") &&
+        listing.message.includes("  index_ramp — analysis · per-point-scalar → color · by Example Author · https://github.com/DomFico/molaro") &&
+        listing.message.includes("  frame_metric — analysis · per-frame-series · by Example Author"),
+      listing.message);
+
+    // -- invoke: sync acknowledgement, async outcome, INDEX ALIGNMENT ------------
+    await snap("__pristine");
+    const baseDepth = await undoDepth();
+    const run = await cmd("index_ramp alpha.group-0.subgroup-0");
+    check("S27: the verb acknowledges and hands off (100 resolved points)",
+      run.status === "ok" && run.message === "running index_ramp on 100 points…",
+      JSON.stringify(run));
+    await sleep(1500); // producer round-trip + bind
+    const outcome = await lastAsync();
+    check("S27: the async outcome line reports the bind",
+      outcome?.status === "ok" &&
+        outcome?.message === `index_ramp → colored 100 points of "alpha.group-0.subgroup-0" from scalars`,
+      JSON.stringify(outcome));
+    const audit = await d.evaluate<{ match: boolean; changed: number; first: number[]; last: number[] }>(`(()=>{
+      const v=${V}; const c=v.rep.state.color; const s=window.__pristine;
+      const changed=[];
+      for (let p=0;p<c.length/3;p++) {
+        if (c[3*p]!==s[3*p]||c[3*p+1]!==s[3*p+1]||c[3*p+2]!==s[3*p+2]) changed.push(p);
+      }
+      const want=[...new Set(v.debug.resolvePoints("alpha.group-0.subgroup-0"))].sort((a,b)=>a-b);
+      const pts=v.debug.resolvePoints("alpha.group-0.subgroup-0");
+      const rgb=(p)=>[c[3*p],c[3*p+1],c[3*p+2]];
+      return { changed: changed.length,
+               match: changed.length===want.length && changed.every((p,i)=>p===want[i]),
+               first: rgb(pts[0]), last: rgb(pts[pts.length-1]) };
+    })()`);
+    check("S27: INDEX ALIGNMENT — the values land on EXACTLY the resolved elements",
+      audit.match && audit.changed === 100, JSON.stringify(audit));
+    check("S27: the Python ramp maps through the colormap (first red, last magenta)",
+      audit.first[0] === 1 && audit.first[1] === 0 && audit.first[2] === 0 &&
+        audit.last[0] === 1 && audit.last[1] === 0 && audit.last[2] === 1,
+      JSON.stringify(audit));
+    check("S27: one producer-computed bind = ONE undo stroke",
+      (await undoDepth()) === baseDepth + 1);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S27: …and one Ctrl+Z reverses it completely",
+      (await buffersEqual("__pristine")) && (await undoDepth()) === baseDepth);
+
+    // -- the broken mod: fail-closed, nothing written, no stroke -----------------
+    await snap("__quiet");
+    const broken = await cmd("broken_ramp alpha.group-0.subgroup-0");
+    check("S27: a broken mod still acknowledges (the failure is downstream)",
+      broken.status === "ok", JSON.stringify(broken));
+    await sleep(1500);
+    const failed = await lastAsync();
+    check("S27: …then fails CLOSED with the validation error",
+      failed?.status === "error" &&
+        /broken_ramp failed: per-point-scalar values must be in \[0,1\] — got 2\.5/.test(failed?.message ?? ""),
+      JSON.stringify(failed));
+    check("S27: …and wrote NOTHING, pushed NOTHING",
+      (await buffersEqual("__quiet")) && (await undoDepth()) === baseDepth);
+    const unknown = await cmd("no_such_mod alpha");
+    check("S27: an unregistered mod name is an unknown command",
+      unknown.status === "error" && unknown.message === "unknown command: no_such_mod");
+
+    // -- the pixel proof: producer-computed colors reach the GPU ------------------
+    await cmd("index_ramp alpha.group-0.subgroup-0");
+    await sleep(1500);
+    await cmd("hide @solvent");
+    await cmd("bondopacity alpha.group-0.subgroup-0 0");
+    await cmd("traceopacity alpha 0");
+    await cmd("view alpha.group-0.subgroup-0");
+    await sleep(1400);
+    const pts = await d.evaluate<number[]>(`${V}.debug.resolvePoints("alpha.group-0.subgroup-0")`);
+    const pA = pts[0];
+    const pB = pts[Math.floor(pts.length * 0.4)];
+    await cmd(`pointsize #${pA} 12`);
+    await cmd(`pointsize #${pB} 12`);
+    const proj = await d.evaluate<{ a: { x: number; y: number; front: boolean }; b: { x: number; y: number; front: boolean } }>(
+      `({ a: ${V}.debug.projectPoint(${pA}), b: ${V}.debug.projectPoint(${pB}) })`);
+    check("S27: pixel probes project on-screen, apart",
+      proj.a.front && proj.b.front &&
+        Math.hypot(proj.a.x - proj.b.x, proj.a.y - proj.b.y) > 12, JSON.stringify(proj));
+    await sleep(200);
+    const shot = await d.captureB64(`${REPORT}/S27_pixels.png`);
+    const px = await d.evaluate<{ a: number[]; b: number[] }>(`(async () => {
+      const img = new Image();
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${shot}"; });
+      const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+      const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+      const at = (x, y) => [...g.getImageData(Math.round(x), Math.round(y), 1, 1).data.slice(0, 3)];
+      return { a: at(${proj.a.x}, ${proj.a.y}), b: at(${proj.b.x}, ${proj.b.y}) };
+    })()`);
+    check("S27: the Python-computed ramp RENDERS (red-dominant start)",
+      px.a[0] > px.a[1] + 60 && px.a[0] > px.a[2] + 60, JSON.stringify(px));
+    check("S27: …with a different, green-dominant mid point",
+      px.b[1] > px.b[0] + 60 && px.b[1] > px.b[2] + 40, JSON.stringify(px));
+  });
+
+  // ---- part 2, the "/terminal" route: the per-frame-series mod → the plot.
+  await withDriver(async (d) => {
+    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+    const typeInto = async (id: string, text: string): Promise<void> => {
+      const r = await d.evaluate<{ x: number; y: number }>(`(()=>{
+        const b=${el(id)}.getBoundingClientRect();
+        return {x:b.left+b.width/2, y:b.top+b.height/2};
+      })()`);
+      await d.click(r.x, r.y);
+      await d.insertText(text);
+      await d.key("Enter", "Enter", 13);
+    };
+    const logLines = () =>
+      d.evaluate<{ cls: string; text: string }[]>(
+        `[...document.querySelectorAll('#term-log .term-line')].map(l=>({cls:l.className,text:l.textContent}))`);
+
+    await typeInto("term-input", "frame_metric all");
+    await sleep(2500); // resolve 6000 pts + the producer walks all 150 frames
+    const lines = await logLines();
+    check("S27: the series mod acknowledges, then reports the plot hand-off",
+      lines.some((l) => l.text === "running frame_metric on 6000 points…") &&
+        lines.some((l) => l.text === `frame_metric → series "frame_metric" (150 frames) → the plot tab`),
+      JSON.stringify(lines.slice(-3)));
+    check("S27: …and the plot DRAWS it — one vertex per frame, labeled by the mod",
+      await d.evaluate<boolean>(`(${el("plot-line")}.getAttribute('points') ?? '').split(' ').length === 150 &&
+        ${el("plot-label")}.textContent === 'frame_metric'`),
+      await d.evaluate<string>(`${el("plot-label")}.textContent`));
+    check("S27: the playhead marker is live on the mod's series",
+      await d.evaluate<boolean>(`!${el("plot-marker")}.hasAttribute('hidden')`));
+
+    await d.screenshot(`${REPORT}/S27_series.png`);
+  }, 1180, 780, "/terminal");
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

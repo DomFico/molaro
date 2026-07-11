@@ -500,24 +500,80 @@ color-mapping step.
 - Recipes live in an in-memory registry (name → recipe) the verb resolves
   through; parameters and other axes are future work.
 
+### Analysis mods — Python compute in the producer
+
+A mod is one of two kinds. **Representation** mods (like `rainbow`) compute
+in the webview over geometry only. **Analysis** mods carry Python source
+that executes **in the producer process against the loaded dataset**, and
+declare what they produce — the declaration is the routing key into the
+existing machinery (nothing new renders):
+
+- `produces: per-point-scalar` (+ an `axis`: color / size / opacity) — one
+  value in `[0,1]` per resolved point, bound through the same per-element
+  write rails as `rainbow` (one undo stroke, last-write-wins; the mod owns
+  its own normalization).
+- `produces: per-frame-series` — one **raw** value per frame, drawn in the
+  plot tab exactly like a series tool result.
+
+**Invocation** is the same own-verb shape: `<modname> <target>`. The verb
+acknowledges immediately (`running <mod> on N points…`) and the outcome
+prints as a follow-up line when the producer answers — computation may
+take a moment, and frame streaming queues behind it (bounded by a 5 s
+timeout). Errors — a Python exception (with its traceback), a timeout, a
+wrong-length or out-of-range return — **bind nothing** and report the
+reason; validation is fail-closed and never partial-writes.
+
+**Mod files.** Analysis mods persist as one Python file per mod under
+`.molaro/mods/` in the workspace, loaded at startup (a malformed file is
+skipped with a warning, never breaking the registry). The format is a
+readable header + the source — the point is that you can **read the code
+before running it**:
+
+```python
+# molaro-mod
+# name: index_ramp
+# kind: analysis
+# produces: per-point-scalar
+# axis: color
+# author: Example Author
+# description: a normalized index ramp over the target
+
+def compute(data, target_indices):
+    n = max(len(target_indices) - 1, 1)
+    return [i / n for i in range(len(target_indices))]
+```
+
+`compute(data, target_indices)` is the fixed contract: `data` is the
+dataset handle already resident in the producer (`data.give_header()`,
+`data.give_frames(start, count)`); `target_indices` is the resolved point
+set in header order (`scalars[i]` binds to `target_indices[i]`); the
+return is a flat `list[float]` — one per target index for
+`per-point-scalar`, one per frame for `per-frame-series`. Loaded files get
+origin `workspace` (built-ins are code, not files). This is user-approved
+code — there is no sandbox; the protections are validation and the
+timeout.
+
 ### Listing the registry: `mods`
 
 ```
 > mods
 built-in:
-  rainbow — point-color · by Dominic Fico · https://github.com/DomFico/molaro
+  rainbow — representation · point-color · by Dominic Fico · https://github.com/DomFico/molaro
+workspace:
+  index_ramp — analysis · per-point-scalar → color · by Example Author · https://github.com/DomFico/molaro
+  frame_metric — analysis · per-frame-series · by Example Author · https://github.com/DomFico/molaro
 ```
 
 `mods` is the registry's read-face — the vocabulary-side parallel to `ls`
 (`ls` lists committed selections, which are *scene* state; `mods` lists the
-registered recipes, which are *vocabulary* state). One line per recipe,
-grouped by **origin** (`built-in` today; the type admits future origins),
-showing the recipe's name, its axis, and its **credit**. It lists recipes
-only — the built-in command verbs stay with `help`/`?`.
+registered mods, which are *vocabulary* state). One line per mod, grouped
+by **origin**, showing the mod's name, its **kind** (and, for analysis
+mods, what it produces), and its **credit**. It lists mods only — the
+built-in command verbs stay with `help`/`?`.
 
-Every recipe carries attribution: a required `origin`, plus optional
-`author` and `source` strings shown for credit. These are **display-only
-opaque strings** — nothing resolves, fetches, validates, or acts on them; a
+Every mod carries attribution: a required `origin`, plus optional `author`
+and `source` strings shown for credit. These are **display-only opaque
+strings** — nothing resolves, fetches, validates, or acts on them; a
 `source` that looks like a URL is a citation, not a reference the viewer
 follows. Long listings share `ls`'s display cap.
 

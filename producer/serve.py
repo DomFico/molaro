@@ -2,11 +2,14 @@
 
 Serves the logical protocol over stdio:
 - stdin:  length-framed requests — 4-byte little-endian length prefix, then that
-  many bytes of UTF-8 JSON: {"type": "header"} or
-  {"type": "frames", "start": int, "count": int}.
+  many bytes of UTF-8 JSON: {"type": "header"},
+  {"type": "frames", "start": int, "count": int}, or
+  {"type": "run_mod", "code": str, "target_indices": [int], "timeout_s"?: float}
+  (execute a mod's compute(data, target_indices) against the resident dataset;
+  answers {"values": [float]} or {"error": str, "traceback"?: str}).
 - stdout: length-framed responses, strictly FIFO with requests. Payload is the
-  Header JSON (UTF-8), a FrameChunk binary envelope, or — if a request was
-  invalid — a JSON object {"error": "..."}.
+  Header JSON (UTF-8), a FrameChunk binary envelope, a run_mod JSON reply, or —
+  if a request was invalid — a JSON object {"error": "..."}.
 
 stdout is the protocol channel and carries nothing else. All logging goes to
 stderr; sys.stdout is rebound to stderr after the protocol stream is captured,
@@ -19,9 +22,12 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
+import signal
 import struct
 import sys
+import traceback
 from typing import BinaryIO, Optional
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -49,6 +55,63 @@ def write_framed(stream: BinaryIO, payload: bytes) -> None:
     stream.write(struct.pack("<I", len(payload)))
     stream.write(payload)
     stream.flush()
+
+
+DEFAULT_MOD_TIMEOUT_S = 5.0
+
+
+class ModTimeout(Exception):
+    pass
+
+
+def run_mod(source, code: str, target_indices, timeout_s: float) -> bytes:
+    """Execute a mod's `compute(data, target_indices)` against the RESIDENT
+    dataset handle and return the response payload (JSON bytes).
+
+    Deliberately NOT a sandbox — mods are user-approved code (the approval
+    gate lives upstream); the requirement here is robust error handling and
+    a wall-clock timeout so a runaway mod can't hang the producer. The
+    timeout uses SIGALRM/setitimer (serve() runs in the main thread), which
+    genuinely aborts the compute mid-flight; frame requests queue behind a
+    running compute (single FIFO process), bounded by this timeout.
+
+    Any failure — exec error, a raising compute, a timeout, a non-list
+    return — answers {"error", "traceback"} and binds NOTHING downstream.
+    """
+    if not isinstance(code, str) or not code.strip():
+        return json.dumps({"error": "run_mod: empty code"}).encode("utf-8")
+    if not isinstance(target_indices, list) or not all(isinstance(i, int) for i in target_indices):
+        return json.dumps({"error": "run_mod: target_indices must be a list of ints"}).encode("utf-8")
+
+    def on_alarm(_sig, _frame):
+        raise ModTimeout(f"mod timed out after {timeout_s}s")
+
+    prev_handler = signal.signal(signal.SIGALRM, on_alarm)
+    signal.setitimer(signal.ITIMER_REAL, max(timeout_s, 0.01))
+    try:
+        namespace: dict = {}
+        exec(compile(code, "<mod>", "exec"), namespace)  # noqa: S102 — deliberate, see docstring
+        fn = namespace.get("compute")
+        if not callable(fn):
+            return json.dumps({"error": "the code must define compute(data, target_indices)"}).encode("utf-8")
+        values = fn(source, target_indices)
+        if not isinstance(values, list) or not all(
+            isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
+            for v in values
+        ):
+            return json.dumps(
+                {"error": "compute must return a flat list of finite floats"}
+            ).encode("utf-8")
+        return json.dumps({"values": [float(v) for v in values]}).encode("utf-8")
+    except ModTimeout as exc:
+        return json.dumps({"error": str(exc)}).encode("utf-8")
+    except Exception as exc:
+        return json.dumps(
+            {"error": f"{type(exc).__name__}: {exc}", "traceback": traceback.format_exc()}
+        ).encode("utf-8")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, prev_handler)
 
 
 def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO) -> None:
@@ -79,6 +142,14 @@ def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO) -> None:
                 chunk = source.give_frames(start, count)
                 payload = encode_frame_chunk(chunk, header)
                 log.debug("frames [%d, %d) -> %d bytes", start, start + count, len(payload))
+            elif rtype == "run_mod":
+                timeout_s = request.get("timeout_s", DEFAULT_MOD_TIMEOUT_S)
+                if not isinstance(timeout_s, (int, float)) or timeout_s <= 0:
+                    timeout_s = DEFAULT_MOD_TIMEOUT_S
+                payload = run_mod(
+                    source, request.get("code"), request.get("target_indices"), float(timeout_s)
+                )
+                log.debug("run_mod -> %d bytes", len(payload))
             else:
                 raise ContractError(f"unknown request type {rtype!r}")
         except Exception as exc:  # keep FIFO 1:1 — every request gets a response

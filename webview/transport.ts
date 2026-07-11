@@ -10,7 +10,8 @@
 
 export type ProducerRequest =
   | { type: "header" }
-  | { type: "frames"; start: number; count: number };
+  | { type: "frames"; start: number; count: number }
+  | { type: "run_mod"; code: string; target_indices: number[]; timeout_s?: number };
 
 export type HostMessage =
   | { type: "fromProducer"; payload: Uint8Array | ArrayBuffer }

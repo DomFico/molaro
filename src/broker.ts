@@ -17,9 +17,13 @@ import { frameChunkEnvelopeSize } from "../contract/contract.ts";
 import { FrameParser, frameMessage } from "./framing.ts";
 
 export interface ProducerRequest {
-  type: "header" | "frames";
+  type: "header" | "frames" | "run_mod";
   start?: number;
   count?: number;
+  /** run_mod: the mod's Python source + resolved element indices. */
+  code?: string;
+  target_indices?: number[];
+  timeout_s?: number;
 }
 
 export interface BrokerOptions {

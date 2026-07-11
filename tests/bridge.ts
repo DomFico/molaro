@@ -18,7 +18,7 @@
  * Run from viewer/:  node tests/bridge.ts --port 8940 --n-points 5000 --n-frames 600
  */
 import http from "node:http";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -26,9 +26,37 @@ import { parseArgs } from "node:util";
 import { ProducerBroker } from "../src/broker.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
 import { PLOT_BODY, PLOT_CSS } from "../webview/plothud.ts";
+import { parseModFile, type AnalysisMod } from "../webview/recipes.ts";
 import { TERMINAL_BODY, TERMINAL_CSS } from "../webview/terminalhud.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+// The harness's workspace mods: the REAL example files from .molaro/mods
+// (the same pure parser the extension host uses) plus one deliberately
+// broken runtime mod (out-of-range scalars) so the fail-closed no-write
+// path is drivable end-to-end.
+function harnessMods(): AnalysisMod[] {
+  const mods: AnalysisMod[] = [];
+  try {
+    for (const f of readdirSync(join(root, ".molaro", "mods")).filter((x) => x.endsWith(".py")).sort()) {
+      const parsed = parseModFile(readFileSync(join(root, ".molaro", "mods", f), "utf-8"), "workspace");
+      if (parsed.ok) mods.push(parsed.mod);
+      else console.error(`[bridge] skipped mod ${f}: ${parsed.error}`);
+    }
+  } catch {
+    /* no .molaro/mods — fine */
+  }
+  mods.push({
+    name: "broken_ramp",
+    kind: "analysis",
+    produces: "per-point-scalar",
+    axis: "color",
+    code: "def compute(data, target_indices):\n    return [2.5 for _ in target_indices]\n",
+    origin: "workspace",
+    description: "harness-only: returns out-of-range scalars (the fail-closed path)",
+  });
+  return mods;
+}
 const { values: args } = parseArgs({
   options: {
     port: { type: "string", default: "8940" },
@@ -129,6 +157,17 @@ const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* ht
           dispatchSeq++;
         }
       };
+      // Mirror the extension host's workspace-mod push: when the viewer
+      // announces itself (viewerInfo), ship the parsed .molaro/mods files —
+      // the same signal-then-push pattern production uses.
+      window.__HARNESS_MODS__ = ${JSON.stringify(harnessMods())};
+      window.addEventListener("message", (e) => {
+        if (e.data?.type === "viewerInfo") {
+          setTimeout(() => window.dispatchEvent(new MessageEvent("message", {
+            data: { type: "modsLoaded", mods: window.__HARNESS_MODS__ },
+          })), 0);
+        }
+      });
       // webview state shim: sessionStorage-backed so persisted layout
       // survives a same-tab reload (the E2E restore assertion) but never
       // leaks across browser launches / reused chrome profiles.

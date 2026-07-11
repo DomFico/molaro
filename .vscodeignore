@@ -29,3 +29,7 @@ tsconfig.json
 *.vsix
 producer/CONTRACT_FIT_AUDIT.md
 HANDOFF*.md
+
+# Workspace mod examples — .molaro/ is USER-WORKSPACE data (the extension
+# loads mods from the opened workspace, not from itself).
+.molaro/**

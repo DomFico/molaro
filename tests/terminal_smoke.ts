@@ -629,10 +629,12 @@ try {
 
   // the recipe registry read-face through the real relay
   lastLine = await runLine("mods");
-  check("mods lists the registry grouped by origin, with rainbow's credit",
+  check("mods lists built-ins AND workspace mods, grouped, with kind and credit",
     /term-ok/.test(lastLine?.cls ?? "") &&
-      lastLine?.text ===
-        "built-in:\n  rainbow — point-color · by Dominic Fico · https://github.com/DomFico/molaro",
+      (lastLine?.text ?? "").startsWith(
+        "built-in:\n  rainbow — representation · point-color · by Dominic Fico · https://github.com/DomFico/molaro") &&
+      (lastLine?.text ?? "").includes("workspace:") &&
+      (lastLine?.text ?? "").includes("  index_ramp — analysis · per-point-scalar → color · by Example Author"),
     JSON.stringify(lastLine));
   lastLine = await runLine("mods rainbow");
   check("mods with stray arguments is the usage error",

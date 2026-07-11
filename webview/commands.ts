@@ -26,7 +26,13 @@ import {
   type TargetAst,
 } from "./address.ts";
 import type { TreeModel } from "./classification.ts";
-import { getRecipe, listRecipes, type Recipe, type RecipeOrigin } from "./recipes.ts";
+import {
+  getRecipe,
+  listRecipes,
+  type AnalysisMod,
+  type Mod,
+  type RecipeOrigin,
+} from "./recipes.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
 
 export type CommandStatus = "ok" | "nomatch" | "error";
@@ -181,6 +187,12 @@ export interface CommandContext {
   /** bondopacity/bondopacityof share the ONE edge-opacity buffer. */
   opacityEdges(edgeIds: readonly number[], opacity: number): number;
   opacityTrace(vertexIds: readonly number[], opacity: number): number;
+  /** Type A (analysis) mods: fire the producer round-trip for `mod` on the
+   * resolved indices. Fire-and-forget from the verb's view — the sync
+   * return is the "running…" line; the outcome arrives asynchronously
+   * (validated FAIL-CLOSED, bound through the EXISTING rails per the mod's
+   * declared `produces`, reported as a follow-up terminal line). */
+  runAnalysisMod(mod: AnalysisMod, points: number[], expr: string): void;
 }
 
 export class CommandRegistry {
@@ -928,12 +940,43 @@ export function makeRainbowHandler(ctx: CommandContext): CommandHandler {
       };
     }
     const recipe = getRecipe("rainbow");
-    if (!recipe) return { status: "error", message: 'no recipe named "rainbow"' };
+    if (!recipe || recipe.kind !== "representation") {
+      return { status: "error", message: 'no representation mod named "rainbow"' };
+    }
     const r = resolveTargetPoints(ctx, expr);
     if ("status" in r) return r;
     const scalars = recipe.compute(r.points);
     const n = applyColorScalars(ctx, r.points, scalars, recipe.colormap);
     return { status: "ok", message: `colored ${n} points rainbow` };
+  };
+}
+
+/**
+ * The own-verb handler for a Type A (analysis) mod: resolve the target
+ * through the SAME resolver every verb uses, then hand off to the async
+ * producer round-trip (ctx.runAnalysisMod — exec in the producer, validate
+ * FAIL-CLOSED, bind through the EXISTING rails per the mod's declared
+ * `produces`). The sync return is the "running…" acknowledgement; the
+ * outcome prints as a follow-up terminal line. A per-frame-series mod takes
+ * a target too (its Python may use or ignore it); `all` is the natural
+ * whole-dataset target.
+ */
+export function makeAnalysisModHandler(ctx: CommandContext, mod: AnalysisMod): CommandHandler {
+  return (args: string): CommandResult => {
+    const expr = args.trim();
+    if (expr === "") {
+      return {
+        status: "error",
+        message: `${mod.name} needs a target — ${mod.name} <target> (e.g. ${mod.name} alpha.group-0)`,
+      };
+    }
+    const r = resolveTargetPoints(ctx, expr);
+    if ("status" in r) return r;
+    ctx.runAnalysisMod(mod, r.points, expr);
+    return {
+      status: "ok",
+      message: `running ${mod.name} on ${r.points.length} points…`,
+    };
   };
 }
 
@@ -1036,8 +1079,12 @@ export function makeLsHandler(ctx: CommandContext): CommandHandler {
  * command verbs stay with help/?.
  */
 export function makeModsHandler(): CommandHandler {
-  const recipeLine = (r: Recipe): string => {
-    let line = `  ${r.name} — ${r.axis}`;
+  const recipeLine = (r: Mod): string => {
+    let line = `  ${r.name} — `;
+    line +=
+      r.kind === "representation"
+        ? `representation · ${r.axis}`
+        : `analysis · ${r.produces}${r.produces === "per-point-scalar" ? ` → ${r.axis}` : ""}`;
     if (r.author) line += ` · by ${r.author}`;
     if (r.source) line += ` · ${r.source}`;
     return line;
@@ -1049,7 +1096,7 @@ export function makeModsHandler(): CommandHandler {
     const all = listRecipes();
     if (all.length === 0) return { status: "ok", message: "no recipes" };
     // group by origin, first-seen order; registration order within a group
-    const byOrigin = new Map<RecipeOrigin, Recipe[]>();
+    const byOrigin = new Map<RecipeOrigin, Mod[]>();
     for (const r of all) {
       const group = byOrigin.get(r.origin);
       if (group) group.push(r);

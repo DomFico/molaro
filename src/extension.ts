@@ -18,8 +18,11 @@
  */
 import * as vscode from "vscode";
 import { randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 import { ProducerBroker } from "./broker.ts";
+import { parseModFile, serializeMod, type AnalysisMod, type Mod } from "../webview/recipes.ts";
 import { parseClaudeCommand } from "../webview/claudemodel.ts";
 import { createClaudeStub, type ClaudeStub } from "../webview/claudestub.ts";
 import { createPlotHost } from "../webview/plothost.ts";
@@ -108,6 +111,51 @@ export function activate(context: vscode.ExtensionContext): void {
       },
     ),
   );
+}
+
+/** The workspace mod directory (persistence lives here; nothing else does). */
+function modsDir(): string | null {
+  const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+  return ws ? join(ws, ".molaro", "mods") : null;
+}
+
+/** Startup scan of `.molaro/mods/*.py` — parse each with the shared pure
+ * parser; a malformed file is SKIPPED with a reported warning (one bad mod
+ * must never break startup or the registry). Loaded files get origin
+ * "workspace" (assigned here, never read from the file). */
+function loadWorkspaceMods(log: vscode.OutputChannel): AnalysisMod[] {
+  const dir = modsDir();
+  if (!dir) return [];
+  let files: string[];
+  try {
+    files = readdirSync(dir).filter((f) => f.endsWith(".py")).sort();
+  } catch {
+    return []; // no .molaro/mods — nothing to load
+  }
+  const mods: AnalysisMod[] = [];
+  for (const file of files) {
+    try {
+      const parsed = parseModFile(readFileSync(join(dir, file), "utf-8"), "workspace");
+      if (parsed.ok) mods.push(parsed.mod);
+      else log.appendLine(`[mods] skipped ${file}: ${parsed.error}`);
+    } catch (err) {
+      log.appendLine(`[mods] skipped ${file}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  if (mods.length > 0) log.appendLine(`[mods] loaded ${mods.length} workspace mod(s) from ${dir}`);
+  return mods;
+}
+
+/** The save path a later authoring step writes through: serialize a mod to
+ * `.molaro/mods/<name>.py`. Analysis mods only (serializeMod refuses R
+ * mods — they are code, not files). */
+export function saveWorkspaceMod(mod: Mod): string {
+  const dir = modsDir();
+  if (!dir) throw new Error("no workspace folder — nowhere to save mods");
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${mod.name}.py`);
+  writeFileSync(file, serializeMod(mod), "utf-8");
+  return file;
 }
 
 async function pickFile(): Promise<vscode.Uri | undefined> {
@@ -277,10 +325,23 @@ function openPanel(
   });
 
   panel.webview.onDidReceiveMessage((msg: { type?: string; request?: unknown }) => {
-    if (plotHost.handleViewerMessage(msg)) return; // viewerInfo / frameChanged
+    if (plotHost.handleViewerMessage(msg)) {
+      // viewerInfo doubles as the viewer's boot signal — the workspace mods
+      // ship once its listeners are provably live (the claude-ready lesson)
+      if (msg?.type === "viewerInfo") {
+        void panel.webview.postMessage({ type: "modsLoaded", mods: loadWorkspaceMods(producerLog) });
+      }
+      return;
+    }
+    if (msg?.type === "claude-bind") {
+      // a VIEWER-originated series (an analysis mod's result) rides the same
+      // plot route tool results do; scalar/command kinds never come this way
+      plotHost.handleTerminalMessage(msg);
+      return;
+    }
     if (msg?.type === "toProducer" && msg.request) {
       try {
-        broker.send(msg.request as { type: "header" | "frames" });
+        broker.send(msg.request as { type: "header" | "frames" | "run_mod" });
       } catch (err) {
         void panel.webview.postMessage({
           type: "producerExit",

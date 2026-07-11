@@ -1,30 +1,53 @@
 /**
- * Recipes — stored, named functions over a resolved target that write a
- * representation buffer. A recipe is the generalization of the twelve fixed
- * representation verbs (which write one CONSTANT value) into ones that
- * COMPUTE a value that varies per element as a function of the resolved set.
+ * Mods (recipes) — stored, named functions over a resolved target. Two kinds,
+ * tagged explicitly:
  *
- * The contract: a recipe produces, for a resolved point set, a per-element
- * scalar in [0, 1] (`compute`), and its axis renders those scalars through a
- * `colormap` (scalar → RGB) before the write. The scalar-then-colormap split
- * is deliberate: the mapping-and-write step (applyColorScalars in
- * commands.ts) takes an array of scalars and does not know where they came
- * from, so a future scalar source reuses the identical step. Do not collapse
- * a recipe into a direct RGB function.
+ *   kind: "representation" (Type R) — JS compute in the webview over the
+ *     resolved point set, geometry-only (rainbow: per-element scalar in
+ *     [0,1] rendered through a colormap into the point-color buffer). The
+ *     scalar-then-colormap split is deliberate — the mapping-and-write step
+ *     (applyColorScalars in commands.ts) never knows the scalar source.
  *
- * The registry below is STORAGE ONLY — a name → recipe map a future
- * read-face can list. No listing command, no serialization, no files.
+ *   kind: "analysis" (Type A) — PYTHON compute executed in the PRODUCER
+ *     process against the loaded dataset (`code` defines
+ *     `compute(data, target_indices) -> list[float]`). `produces` is the
+ *     ROUTING KEY: the returned floats are validated FAIL-CLOSED and
+ *     packaged as a TypedResult of the declared kind, then handed to the
+ *     EXISTING binding layer (per-point-scalar → the per-element write
+ *     rails; per-frame-series → the plot tab). `command` is deliberately
+ *     not a produces value — a mod that just emits a command is a macro,
+ *     out of scope. The typed-result union stays closed.
  *
- * Pure module: no DOM, no Three — unit-tested directly under `node --test`.
+ * Analysis mods persist as files under `.molaro/mods/` — a plain Python
+ * file with a `# molaro-mod` magic first line and `# key: value` header
+ * comments before the source, so a human can READ THE CODE before running
+ * it (the whole point of the format; parse/serialize below round-trip it).
+ * Built-ins are not files; loaded files get origin "workspace".
+ *
+ * The registry is storage + lookup; `mods` lists it. Pure module: no DOM,
+ * no fs — file IO lives with the hosts; this module owns the format.
  */
 
-/** Where a recipe came from. Only "built-in" exists today; the union is
- * shaped to admit future origins (e.g. "user", "community") without a
- * migration — `mods` groups its listing by this field. */
-export type RecipeOrigin = "built-in";
+/** Where a mod came from. Built-ins are code-registered; "workspace" is
+ * assigned by the file loader (never trusted from the file itself). */
+export type RecipeOrigin = "built-in" | "workspace";
 
-export interface Recipe {
+export type ModKind = "representation" | "analysis";
+
+/** Metadata every mod carries regardless of kind. */
+interface ModCommon {
   name: string;
+  origin: RecipeOrigin;
+  /** Attribution / provenance — DISPLAY-ONLY credit `mods` lists. Nothing
+   * anywhere resolves, fetches, validates, or acts on these strings. */
+  author?: string;
+  source?: string;
+  description?: string;
+}
+
+/** Type R — the existing webview/JS recipe shape, retagged. */
+export interface Recipe extends ModCommon {
+  kind: "representation";
   /** The buffer family the recipe writes. Only the point-color axis exists
    * today; the field is here so later axes extend the shape, not fork it. */
   axis: "point-color";
@@ -33,15 +56,23 @@ export interface Recipe {
   compute(points: readonly number[]): number[];
   /** scalar in [0,1] → RGB, each component in [0,1]. */
   colormap(t: number): [number, number, number];
-  /** Attribution / provenance — DISPLAY-ONLY credit `mods` lists. Nothing
-   * anywhere resolves, fetches, validates, or acts on these strings. */
-  origin: RecipeOrigin;
-  /** Opaque display string: who authored the recipe. */
-  author?: string;
-  /** Opaque display string: where the recipe came from (e.g. a repository
-   * URL). NEVER fetched — credit, not a reference. */
-  source?: string;
 }
+
+/** Type A — Python compute in the producer. */
+export interface AnalysisMod extends ModCommon {
+  kind: "analysis";
+  /** The declared result kind — the routing key into the existing binding
+   * layer. (`command` is deliberately NOT a value here.) */
+  produces: "per-point-scalar" | "per-frame-series";
+  /** Required iff produces = per-point-scalar: which point axis the scalars
+   * bind to. */
+  axis?: "color" | "size" | "opacity";
+  /** Python source defining `compute(data, target_indices) -> list[float]`,
+   * executed in the producer against the resident dataset handle. */
+  code: string;
+}
+
+export type Mod = Recipe | AnalysisMod;
 
 /** Pure HSV → RGB (h in degrees, s/v in [0,1]; returns RGB in [0,1]). */
 export function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
@@ -67,6 +98,7 @@ export const RAINBOW_HUE_MAX = 300;
  * sweep. A single-point set yields [0] (no divide-by-zero). */
 export const rainbow: Recipe = {
   name: "rainbow",
+  kind: "representation",
   axis: "point-color",
   compute: (points) => points.map((_, i) => i / Math.max(points.length - 1, 1)),
   colormap: (t) => hsvToRgb(t * RAINBOW_HUE_MAX, 1, 1),
@@ -75,22 +107,165 @@ export const rainbow: Recipe = {
   source: "https://github.com/DomFico/molaro",
 };
 
-// -- the in-memory recipe registry (storage only) -------------------------------
+// -- the in-memory mod registry ---------------------------------------------------
 
-const recipes = new Map<string, Recipe>();
+const recipes = new Map<string, Mod>();
 
-export function registerRecipe(recipe: Recipe): void {
-  recipes.set(recipe.name, recipe);
+export function registerRecipe(mod: Mod): void {
+  recipes.set(mod.name, mod);
 }
 
-export function getRecipe(name: string): Recipe | undefined {
+export function getRecipe(name: string): Mod | undefined {
   return recipes.get(name);
 }
 
-/** Every registered recipe, in registration order — the read accessor the
+/** Every registered mod, in registration order — the read accessor the
  * `mods` listing enumerates through. */
-export function listRecipes(): Recipe[] {
+export function listRecipes(): Mod[] {
   return [...recipes.values()];
 }
 
 registerRecipe(rainbow);
+
+// -- the mod FILE format (analysis mods only — R mods are code) --------------------
+//
+//   # molaro-mod
+//   # name: index_ramp
+//   # kind: analysis
+//   # produces: per-point-scalar
+//   # axis: color
+//   # author: …            (optional)
+//   # source: …            (optional)
+//   # description: …       (optional)
+//
+//   def compute(data, target_indices):
+//       ...
+//
+// The header is `# key: value` lines directly after the magic line; the
+// first non-header line starts the Python source. One mod per file.
+
+export const MOD_FILE_MAGIC = "# molaro-mod";
+
+const NAME_RE = /^[a-z][a-z0-9_-]*$/;
+
+export type ModParseResult =
+  | { ok: true; mod: AnalysisMod }
+  | { ok: false; error: string };
+
+/** Parse one mod file's text. Fail-closed and total: any shape violation is
+ * a reported error, never a throw — the loader skips-and-warns, so one bad
+ * file can never break startup or the registry. `origin` is ASSIGNED by the
+ * caller (the loader passes "workspace"), never read from the file. */
+export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult {
+  const lines = text.split("\n");
+  if ((lines[0] ?? "").trim() !== MOD_FILE_MAGIC) {
+    return { ok: false, error: `missing "${MOD_FILE_MAGIC}" magic first line` };
+  }
+  const meta: Record<string, string> = {};
+  let i = 1;
+  for (; i < lines.length; i++) {
+    const m = /^#\s*([a-z][a-z-]*)\s*:\s*(.*)$/.exec(lines[i]);
+    if (!m) break; // first non-header line starts the code
+    meta[m[1]] = m[2].trim();
+  }
+  const code = lines.slice(i).join("\n").trim();
+  const name = meta.name ?? "";
+  if (!NAME_RE.test(name)) {
+    return { ok: false, error: `invalid or missing name "${name}" (want ${NAME_RE})` };
+  }
+  if (meta.kind !== "analysis") {
+    return { ok: false, error: `kind must be "analysis" for mod files (got "${meta.kind ?? ""}")` };
+  }
+  const produces = meta.produces;
+  if (produces !== "per-point-scalar" && produces !== "per-frame-series") {
+    return { ok: false, error: `produces must be per-point-scalar | per-frame-series (got "${produces ?? ""}")` };
+  }
+  const axis = meta.axis;
+  if (produces === "per-point-scalar") {
+    if (axis !== "color" && axis !== "size" && axis !== "opacity") {
+      return { ok: false, error: `per-point-scalar mods need axis: color | size | opacity (got "${axis ?? ""}")` };
+    }
+  } else if (axis !== undefined) {
+    return { ok: false, error: "axis is only valid on per-point-scalar mods" };
+  }
+  if (!/\bdef\s+compute\s*\(/.test(code)) {
+    return { ok: false, error: "the code must define compute(data, target_indices)" };
+  }
+  const mod: AnalysisMod = {
+    name,
+    kind: "analysis",
+    produces,
+    ...(produces === "per-point-scalar" ? { axis: axis as "color" | "size" | "opacity" } : {}),
+    code,
+    origin,
+    ...(meta.author ? { author: meta.author } : {}),
+    ...(meta.source ? { source: meta.source } : {}),
+    ...(meta.description ? { description: meta.description } : {}),
+  };
+  return { ok: true, mod };
+}
+
+/** Serialize an analysis mod back to the file format (the save path a later
+ * authoring step writes through). Representation mods are JS — they have no
+ * file form; refusing keeps the format honest. */
+export function serializeMod(mod: Mod): string {
+  if (mod.kind !== "analysis") {
+    throw new Error("only analysis mods serialize to files (representation mods are code)");
+  }
+  const head = [
+    MOD_FILE_MAGIC,
+    `# name: ${mod.name}`,
+    `# kind: analysis`,
+    `# produces: ${mod.produces}`,
+    ...(mod.axis ? [`# axis: ${mod.axis}`] : []),
+    ...(mod.author ? [`# author: ${mod.author}`] : []),
+    ...(mod.source ? [`# source: ${mod.source}`] : []),
+    ...(mod.description ? [`# description: ${mod.description}`] : []),
+  ];
+  return `${head.join("\n")}\n\n${mod.code}\n`;
+}
+
+// -- fail-closed validation of an analysis mod's returned floats -------------------
+
+export interface ModRunExpectation {
+  produces: AnalysisMod["produces"];
+  /** per-point-scalar: the resolved target size. */
+  targetCount: number;
+  /** per-frame-series: the dataset's frame count. */
+  frameCount: number;
+}
+
+/** THE fail-closed gate between the producer's reply and any binding: the
+ * return must be a list of finite numbers of the EXACT expected length for
+ * the declared kind (and within [0,1] for per-point-scalar — the binding
+ * layer's existing contract; the mod owns its own normalization). Any
+ * violation → an error and NOTHING is bound. Never partial-write. */
+export function validateModValues(
+  values: unknown,
+  expect: ModRunExpectation,
+): { ok: true; values: number[] } | { ok: false; error: string } {
+  if (!Array.isArray(values)) {
+    return { ok: false, error: `compute returned ${typeof values}, not a list of floats` };
+  }
+  const want = expect.produces === "per-point-scalar" ? expect.targetCount : expect.frameCount;
+  const unit = expect.produces === "per-point-scalar" ? "target index" : "frame";
+  if (values.length !== want) {
+    return {
+      ok: false,
+      error: `compute returned ${values.length} values — expected exactly ${want} (one per ${unit})`,
+    };
+  }
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (typeof v !== "number" || !Number.isFinite(v)) {
+      return { ok: false, error: `compute returned a non-finite value at [${i}]` };
+    }
+    if (expect.produces === "per-point-scalar" && (v < 0 || v > 1)) {
+      return {
+        ok: false,
+        error: `per-point-scalar values must be in [0,1] — got ${v} at [${i}] (the mod owns its normalization)`,
+      };
+    }
+  }
+  return { ok: true, values: values as number[] };
+}

@@ -42,6 +42,8 @@ import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
 import { createCommandRegistry, makeRunComplete, type CommandResult } from "./commands.ts";
 import { bindTypedResult } from "./claudebind.ts";
 import { parseTypedResult } from "./claudemodel.ts";
+import { registerRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
+import { makeAnalysisModHandler } from "./commands.ts";
 import { parseTarget, resolveTarget, type Completion } from "./address.ts";
 import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
 import { pickPoint, selectionBounds } from "./picking.ts";
@@ -489,6 +491,9 @@ async function main(): Promise<void> {
     ok: false,
     message: "viewer is still loading",
   });
+  // Workspace analysis mods arrive from the host once it sees viewerInfo;
+  // rebound onto the real installer once the command registry exists below.
+  let installMods: (raw: unknown) => void = () => {};
   window.addEventListener("message", (e: MessageEvent) => {
     const msg = e.data as {
       type?: string; id?: number; text?: string; cursor?: number;
@@ -516,6 +521,10 @@ async function main(): Promise<void> {
       // the plot's click-to-seek — the EXACT setter the scrubber drives;
       // the display loop picks it up and re-syncs the scrubber itself
       seekFrame(Number((msg as { frame?: number }).frame ?? 0));
+      return;
+    }
+    if (msg?.type === "modsLoaded") {
+      installMods((msg as { mods?: unknown }).mods);
       return;
     }
     transport.handleMessage(e.data);
@@ -1193,6 +1202,71 @@ async function main(): Promise<void> {
   const sizeTrace = makeRepWriter(rep.state.traceSize, 1, () => {});
   const opacityTrace = makeRepWriter(rep.state.traceOpacity, 1, syncTraceSlots);
 
+  // -- Type A (analysis) mods: the async producer round-trip ---------------------
+  // Follow-up terminal lines ride the commandResult channel — the terminal
+  // prints every commandResult (ids are not used for printing), so an async
+  // outcome is just a second line after the verb's sync "running…" one.
+  const asyncLine = (status: "ok" | "error", message: string): void => {
+    host.postMessage({ type: "commandResult", id: -1, status, message });
+  };
+  let modRunSeq = 0;
+  const runAnalysisMod = (mod: AnalysisMod, points: number[], expr: string): void => {
+    void (async () => {
+      try {
+        const bytes = await transport.request({
+          type: "run_mod",
+          code: mod.code,
+          target_indices: points,
+        });
+        const reply = JSON.parse(new TextDecoder().decode(bytes)) as {
+          values?: unknown;
+          error?: string;
+          traceback?: string;
+        };
+        if (typeof reply.error === "string") {
+          const tb = reply.traceback ? `\n${reply.traceback.trimEnd()}` : "";
+          asyncLine("error", `${mod.name} failed: ${reply.error}${tb}`);
+          return;
+        }
+        // THE fail-closed gate: exact length for the declared kind, finite,
+        // in [0,1] for per-point scalars. Any violation binds NOTHING.
+        const checked = validateModValues(reply.values, {
+          produces: mod.produces,
+          targetCount: points.length,
+          frameCount: nFrames,
+        });
+        if (!checked.ok) {
+          asyncLine("error", `${mod.name} failed: ${checked.error} — nothing bound`);
+          return;
+        }
+        if (mod.produces === "per-point-scalar") {
+          // the EXISTING binding entry, verbatim — resolution, mapping,
+          // one-stroke undo, and the double length-guard all come with it
+          const outcome = bindResult({
+            kind: "per-point-scalar",
+            target: expr,
+            axis: mod.axis ?? "color",
+            scalars: checked.values,
+          });
+          asyncLine(outcome.ok ? "ok" : "error", `${mod.name} → ${outcome.message}`);
+        } else {
+          // the EXISTING plot route: the host consumes series claude-binds
+          // (plothost) exactly as it does for tool results
+          host.postMessage({
+            type: "claude-bind",
+            callId: `mod-${++modRunSeq}`,
+            result: { kind: "per-frame-series", label: mod.name, values: checked.values },
+          });
+          asyncLine("ok",
+            `${mod.name} → series "${mod.name}" (${checked.values.length} frames) → the plot tab`);
+        }
+      } catch (err) {
+        asyncLine("error",
+          `${mod.name} failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    })();
+  };
+
   const commandContext = {
     hierarchy,
     tree: fullTree, // the SAME model the bottom tree renders — click parity
@@ -1231,11 +1305,34 @@ async function main(): Promise<void> {
     opacityPoints,
     opacityEdges,
     opacityTrace,
+    runAnalysisMod,
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);
   runComplete = makeRunComplete(commandContext, commands);
   bindResult = (raw: unknown) => bindTypedResult(commandContext, runCommand, raw);
+  // Workspace mod files (parsed host-side, one message at boot): register
+  // each in the mod registry AND as its own verb. A name colliding with an
+  // existing verb is skipped — a mod file can never shadow a built-in.
+  installMods = (raw: unknown): void => {
+    if (!Array.isArray(raw)) return;
+    for (const entry of raw) {
+      const mod = entry as AnalysisMod;
+      if (!mod || mod.kind !== "analysis" || typeof mod.name !== "string" ||
+          typeof mod.code !== "string") continue;
+      if (commands.verbs().includes(mod.name)) {
+        asyncLine("error", `mod "${mod.name}" skipped — the name is already a command`);
+        continue;
+      }
+      registerRecipe(mod);
+      commands.register(
+        mod.name,
+        makeAnalysisModHandler(commandContext, mod),
+        `analysis mod (${mod.produces}${mod.axis ? ` → ${mod.axis}` : ""})` +
+          `${mod.description ? `: ${mod.description}` : ""} — ${mod.name} <target>`,
+      );
+    }
+  };
   document.getElementById("terminal-btn")?.addEventListener("click", () => {
     host.postMessage({ type: "openTerminal" });
   });

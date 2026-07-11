@@ -12,6 +12,7 @@ import { Hierarchy, type Entry } from "../webview/sets.ts";
 import {
   createCommandRegistry,
   HELP_TEXT,
+  makeAnalysisModHandler,
   parseColor,
   parseOpacity,
   parseSize,
@@ -50,6 +51,7 @@ function makeRegistry() {
   const colorOps: { points: number[]; rgb: [number, number, number] }[] = [];
   const colorEachOps: { points: number[]; rgb: number[] }[] = [];
   const eachOps: { kind: "size" | "opacity"; points: number[]; values: number[] }[] = [];
+  const modRuns: { name: string; points: number[]; expr: string }[] = [];
   const edgeOps: { edgeIds: number[]; rgb: [number, number, number] }[] = [];
   // a chain over the 3 points: edge 0 sits inside c0 ({0,1}); edge 1 crosses
   // the category boundary (point 1 in c0, point 2 in c1) — the contained-vs-
@@ -247,12 +249,15 @@ function makeRegistry() {
       opacityOps.push({ kind: "trace", ids: [...vertexIds], opacity });
       return vertexIds.length;
     },
+    runAnalysisMod: (mod, points, expr) => {
+      modRuns.push({ name: mod.name, points: [...points], expr });
+    },
   };
   return {
     registry: createCommandRegistry(ctx),
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
-    colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, sels,
+    colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, sels,
   };
 }
 
@@ -1075,7 +1080,7 @@ test("mods: lists the registry — rainbow grouped under built-in with its credi
   const lines = r.message.split("\n");
   assert.ok(lines.includes("built-in:"), "grouped by origin");
   assert.ok(
-    lines.includes("  rainbow — point-color · by Dominic Fico · https://github.com/DomFico/molaro"),
+    lines.includes("  rainbow — representation · point-color · by Dominic Fico · https://github.com/DomFico/molaro"),
     r.message);
   assert.ok(lines.indexOf("built-in:") < lines.findIndex((l) => l.startsWith("  rainbow")),
     "recipe rows sit under their origin header");
@@ -1088,6 +1093,7 @@ test("mods: attribution renders for ANY recipe's credit; author/source stay opti
   // rainbow-specific; a bare stub pins that credit fields are optional
   registerRecipe({
     name: "stub-credit",
+    kind: "representation",
     axis: "point-color",
     compute: (points) => points.map(() => 0),
     colormap: () => [0, 0, 0],
@@ -1097,6 +1103,7 @@ test("mods: attribution renders for ANY recipe's credit; author/source stay opti
   });
   registerRecipe({
     name: "stub-plain",
+    kind: "representation",
     axis: "point-color",
     compute: (points) => points.map(() => 0),
     colormap: () => [0, 0, 0],
@@ -1104,9 +1111,9 @@ test("mods: attribution renders for ANY recipe's credit; author/source stay opti
   });
   const { registry } = makeRegistry();
   const lines = registry.runCommand("mods").message.split("\n");
-  assert.ok(lines.includes("  stub-credit — point-color · by Stub Author · stub-source-string"),
+  assert.ok(lines.includes("  stub-credit — representation · point-color · by Stub Author · stub-source-string"),
     lines.join("|"));
-  assert.ok(lines.includes("  stub-plain — point-color"), "no credit fields → the bare line");
+  assert.ok(lines.includes("  stub-plain — representation · point-color"), "no credit fields → the bare line");
 });
 
 test("mods: stray arguments are a usage error, nothing listed", () => {
@@ -1213,4 +1220,45 @@ test("bind: the union is CLOSED — unknown kinds and junk error, never guess", 
     assert.match(out.message, /unrecognized result payload/, JSON.stringify(raw));
   }
   assert.equal(colorEachOps.length + eachOps.length + commits.length, 0, "wrote nothing");
+});
+
+// -- Type A (analysis) mod verbs: resolve → hand off, routing by produces --------
+
+test("an analysis mod verb resolves like every verb and hands off the EXACT indices", () => {
+  const { registry, ctx, modRuns } = makeRegistry();
+  const mod = {
+    name: "index_ramp", kind: "analysis" as const, produces: "per-point-scalar" as const,
+    axis: "color" as const, code: "def compute(data, target_indices):\n    return []",
+    origin: "workspace" as const,
+  };
+  registry.register("index_ramp", makeAnalysisModHandler(ctx, mod), "test mod");
+  const res = registry.runCommand("index_ramp c0");
+  assert.equal(res.status, "ok");
+  assert.equal(res.message, "running index_ramp on 2 points…", "the sync acknowledgement");
+  assert.deepEqual(modRuns, [{ name: "index_ramp", points: [0, 1], expr: "c0" }],
+    "view's exact header-ordered resolution, handed off verbatim");
+  // nomatch / bare / parse errors NEVER reach the producer
+  assert.equal(registry.runCommand("index_ramp nothere").status, "nomatch");
+  assert.equal(registry.runCommand("index_ramp").status, "error");
+  assert.equal(registry.runCommand("index_ramp c0.[x]").status, "error");
+  assert.equal(modRuns.length, 1, "only the valid invocation ran");
+});
+
+test("mods lists analysis mods with kind · produces → axis alongside attribution", () => {
+  registerRecipe({
+    name: "stub-analysis", kind: "analysis", produces: "per-point-scalar", axis: "opacity",
+    code: "def compute(d, t):\n    return []", origin: "workspace", author: "Example Author",
+  });
+  registerRecipe({
+    name: "stub-series", kind: "analysis", produces: "per-frame-series",
+    code: "def compute(d, t):\n    return []", origin: "workspace",
+  });
+  const { registry } = makeRegistry();
+  const lines = registry.runCommand("mods").message.split("\n");
+  assert.ok(lines.includes("workspace:"), "workspace mods group separately from built-ins");
+  assert.ok(lines.includes("  stub-analysis — analysis · per-point-scalar → opacity · by Example Author"),
+    lines.join("|"));
+  assert.ok(lines.includes("  stub-series — analysis · per-frame-series"), lines.join("|"));
+  assert.ok(lines.indexOf("built-in:") < lines.indexOf("workspace:"),
+    "registration order groups built-ins first");
 });
