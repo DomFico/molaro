@@ -17,3 +17,26 @@ export const TERMINAL_MESSAGES_TO_VIEWER = [
 export function relaysTerminalMessageToViewer(type: string | undefined): boolean {
   return (TERMINAL_MESSAGES_TO_VIEWER as readonly string[]).includes(type ?? "");
 }
+
+/**
+ * Resolve which file a deletion of mod `name` would remove, using ONLY the
+ * scanned mod path-map — NEVER a path derived from `name`. This is rm's
+ * path-map discipline, shared so `delete_mod` (the gated tool) cannot drift from
+ * it: built-ins (code, never scanned), unknown names, and path-traversal strings
+ * are simply absent from the map, so they resolve to a refusal and nothing
+ * outside `.molaro/mods` can ever be touched. Pure — the caller does the unlink.
+ */
+export function resolveModDeletion(
+  modPaths: ReadonlyMap<string, string>,
+  name: string,
+): { file: string } | { refused: string } {
+  const file = modPaths.get(name);
+  if (file === undefined) {
+    return {
+      refused:
+        `"${name}" is not a workspace mod under .molaro/mods — nothing deleted ` +
+        `(built-ins can't be deleted; delete_mod only removes scanned mod files).`,
+    };
+  }
+  return { file };
+}

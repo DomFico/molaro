@@ -38,7 +38,7 @@ function makeHeader(): Header {
   return {
     version: "0.1.0", name: "adk-like", n_points: category.length, n_frames: 98, units: "nm", bbox: null,
     points: {
-      type: category.map(() => "C"),
+      type: ["C", "N", "O", "C", "N", "O", "S", "C"], // element-symbol point types
       group_id: [10, 10, 10, 11, 11, 12, 12, 12],
       subgroup_id: [100, 100, 101, 102, 102, 103, 103, 103],
       category,
@@ -50,6 +50,11 @@ function makeHeader(): Header {
   };
 }
 
+/** the distinct point types get_context advertises, sorted (host computation). */
+function presentPointTypes(header: Header): string[] {
+  return [...new Set(header.points.type.map((t) => String(t).trim()).filter(Boolean))].sort();
+}
+
 test("every target get_context advertises resolves to a NON-EMPTY set", () => {
   const header = makeHeader();
   const examples = buildTargetExamples(presentCategories(header));
@@ -57,6 +62,18 @@ test("every target get_context advertises resolves to a NON-EMPTY set", () => {
     const n = resolveCount(header, ex);
     assert.ok(n > 0, `advertised target "${ex}" must resolve non-empty — got ${n}`);
   }
+});
+
+test("every advertised point type resolves via `*.*.*.<type>` (Part A — the CPK fix)", () => {
+  const header = makeHeader();
+  const types = presentPointTypes(header);
+  assert.deepEqual(types, ["C", "N", "O", "S"], "distinct element types, sorted");
+  for (const t of types) {
+    // exactly the address get_context tells the model to use for a type class
+    assert.ok(resolveCount(header, `*.*.*.${t}`) > 0, `advertised point type "${t}" must resolve as *.*.*.${t}`);
+  }
+  // a type NOT present resolves to nothing (so we never advertise it)
+  assert.equal(resolveCount(header, "*.*.*.H"), 0, "an absent type resolves to nothing — correctly not advertised");
 });
 
 test("`all` is the whole-system token; `@all` (the reported bug) resolves to nothing", () => {

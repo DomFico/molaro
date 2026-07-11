@@ -25,9 +25,10 @@ import { ProducerBroker } from "./broker.ts";
 import { parseModFile, serializeMod, type AnalysisMod, type Mod } from "../webview/recipes.ts";
 import { parseClaudeCommand, type ClaudeCommand } from "../webview/claudemodel.ts";
 import { createClaudeStub } from "../webview/claudestub.ts";
+import { DEFAULT_COLOR, DEFAULT_OPACITY, DEFAULT_SIZE } from "../webview/representation.ts";
 import { createClaudeBackend, type ClaudeBackend } from "./claudebackend.ts";
 import { buildTargetExamples, type SceneContext } from "./claudetools.ts";
-import { relaysTerminalMessageToViewer } from "./hostmessages.ts";
+import { relaysTerminalMessageToViewer, resolveModDeletion } from "./hostmessages.ts";
 import { clearApiKey, NO_KEY_HINT, promptAndStoreApiKey, resolveApiKey } from "./claudeauth.ts";
 import { createPlotHost } from "../webview/plothost.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
@@ -70,7 +71,7 @@ interface HeaderPeek {
   categories: string[];
   groups: Record<string, string>;
   subgroups: Record<string, string>;
-  points: { category: number[] };
+  points: { category: number[]; type: string[] };
 }
 
 interface OpenArgs {
@@ -216,6 +217,13 @@ function loadWorkspaceMods(
   }
   if (mods.length > 0) log.appendLine(`[mods] loaded ${mods.length} workspace mod(s) from ${dir}`);
   return mods;
+}
+
+/** Render a 0..1 RGB triple as `#rrggbb` for display (the base color the model
+ * is told about — representation.ts holds the numeric source of truth). */
+function rgbToHex([r, g, b]: readonly [number, number, number]): string {
+  const h = (v: number) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, "0");
+  return `#${h(r)}${h(g)}${h(b)}`;
 }
 
 /** The save path a later authoring step writes through: serialize a mod to
@@ -372,6 +380,17 @@ function openPanel(
     }
     const allKinds = [...kindSet].sort();
     const subgroupKinds = allKinds.slice(0, SUBGROUP_KINDS_CAP);
+    // The point-type vocabulary: distinct point `type` strings (on a molecular
+    // system, atom element symbols — C/N/O/…), sorted and capped like the
+    // residue kinds. This is what makes `*.*.*.C` addressable instead of an
+    // index list. Same cap; every advertised value resolves (get_context guard).
+    const typeSet = new Set<string>();
+    for (const t of Array.isArray(h.points?.type) ? h.points.type : []) {
+      const tt = String(t).trim();
+      if (tt) typeSet.add(tt);
+    }
+    const allTypes = [...typeSet].sort();
+    const pointTypes = allTypes.slice(0, SUBGROUP_KINDS_CAP);
     return {
       system: h.name,
       nAtoms: h.n_points,
@@ -381,6 +400,16 @@ function openPanel(
       subgroupCount: Object.keys(h.subgroups ?? {}).length,
       subgroupKinds,
       subgroupKindsCapped: allKinds.length > subgroupKinds.length,
+      pointTypes,
+      pointTypesCapped: allTypes.length > pointTypes.length,
+      // The real base look (representation.ts is the single source) so the model
+      // states the true baseline for "put it back to normal" instead of guessing
+      // — though undo is the reliable way back (Part C).
+      baseLook: {
+        pointSize: DEFAULT_SIZE,
+        opacity: DEFAULT_OPACITY,
+        color: rgbToHex(DEFAULT_COLOR),
+      },
       // The whole-system token is the BARE keyword `all` (address grammar);
       // `@all` is the union of committed SELECTIONS (empty with none), which is
       // what made the assistant's `@all` resolve to nothing. `categories` is now
@@ -414,6 +443,34 @@ function openPanel(
     return { name: spec.name, file };
   };
 
+  // The GATED delete_mod tool's host action. Refuses everything that is not a
+  // scanned workspace mod (built-ins/unknown/traversal, by construction — see
+  // resolveModDeletion), unlinks the file, then reconciles the viewer registry
+  // through the SAME `rm-mods-result` path rm uses (finishRmDeletion unregisters
+  // the mod + its verb) so registry and disk cannot disagree. Reached only after
+  // the approval gate; the tool surfaces {ok:false} as a refusal to the model.
+  const deleteAssistantMod = (name: string): { ok: boolean; message: string } => {
+    // Refresh the scan so modPaths reflects disk, then resolve ONLY via the map.
+    loadWorkspaceMods(producerLog, modPaths);
+    const resolved = resolveModDeletion(modPaths, name);
+    if ("refused" in resolved) return { ok: false, message: resolved.refused };
+    let alreadyGone = false;
+    try {
+      unlinkSync(resolved.file);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        return { ok: false, message: `delete_mod failed: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      alreadyGone = true; // already removed on disk — still reconcile the registry
+    }
+    modPaths.delete(name);
+    void panel.webview.postMessage({ type: "rm-mods-result", deleted: [name], failed: [] });
+    return {
+      ok: true,
+      message: `deleted mod "${name}" (${resolved.file})${alreadyGone ? " — its file was already gone" : ""} — unregistered.`,
+    };
+  };
+
   const createRealBackend = async (): Promise<void> => {
     if (claudeBackend) return;
     const { model } = assistantConfig();
@@ -429,6 +486,7 @@ function openPanel(
           return c;
         },
         writeMod: async (spec) => saveAssistantMod(spec),
+        deleteMod: async (name) => deleteAssistantMod(name),
         runMod: (name, target) => runViewerCommand(`${name} ${target}`.trim()),
         runCommand: (text) => runViewerCommand(text),
         analysisModNames,

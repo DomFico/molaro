@@ -1,15 +1,22 @@
 /**
- * The assistant's tool surface — FOUR in-process MCP tools, and the hard
+ * The assistant's tool surface — FIVE in-process MCP tools, and the hard
  * lockdown around them. PURE-ish (the SDK `tool()`/`createSdkMcpServer()`
  * factories + injected host callbacks); no vscode, no live query — unit-tested
  * under `node --test`.
  *
+ * The invariant is NOT "exactly four/five tools"; it is **destructive
+ * operations are never ungated**. `run_command` and macro execution refuse `rm`
+ * because those paths are ungated — nothing the user approves. `delete_mod` is a
+ * GATED tool: it surfaces an approve/deny block naming the exact mod and file,
+ * and nothing happens without a click — so it is allowed to delete where the
+ * ungated paths are not.
+ *
  * The security fence lives here, asserted by test:
- *  - `buildAgentOptions` restricts `allowedTools` to EXACTLY our four MCP tools,
- *    lists the SDK's built-ins in `disallowedTools`, and sets `settingSources`
- *    to [] so no user/project `.claude/` config (tools, permissions, MCP
- *    servers) is loaded. If the model could reach Bash/Edit/Read, every gate in
- *    this system would be a fiction.
+ *  - `buildAgentOptions` restricts `allowedTools` to EXACTLY our (ungated) MCP
+ *    tools, lists the SDK's built-ins in `disallowedTools`, and sets
+ *    `settingSources` to [] so no user/project `.claude/` config (tools,
+ *    permissions, MCP servers) is loaded. If the model could reach
+ *    Bash/Edit/Read, every gate in this system would be a fiction.
  *  - `run_command` refuses `rm` (and any analysis-mod invocation) at the tool
  *    boundary — a returned error the model can see, not a prompt it can talk
  *    around. All destructive or Python-executing actions route through the
@@ -22,13 +29,15 @@ import { MOD_AXES, MOD_PRODUCES, type ModAxis, type ModProduces } from "../webvi
 export const MCP_SERVER_NAME = "molaro";
 
 /** The bare tool names our MCP server exposes. */
-export const TOOL_NAMES = ["get_context", "write_mod", "run_mod", "run_command"] as const;
+export const TOOL_NAMES = ["get_context", "write_mod", "run_mod", "run_command", "delete_mod"] as const;
 export type ToolName = (typeof TOOL_NAMES)[number];
 
-/** Gated tools require human approval (they write files / execute Python). The
- * ungated two are auto-allowed: `get_context` is read-only, `run_command` runs
- * only undoable scene verbs (with the deny-list below). */
-export const GATED_TOOLS: ToolName[] = ["write_mod", "run_mod"];
+/** Gated tools require human approval (they write/delete files or execute
+ * Python). The ungated two are auto-allowed: `get_context` is read-only,
+ * `run_command` runs only undoable scene verbs (with the deny-list below).
+ * `delete_mod` is gated precisely BECAUSE it is destructive — the approve/deny
+ * block is what makes file deletion permissible from the assistant at all. */
+export const GATED_TOOLS: ToolName[] = ["write_mod", "run_mod", "delete_mod"];
 
 /** The MCP-qualified name the SDK matches against `allowedTools`. */
 export const qualified = (name: ToolName): string => `mcp__${MCP_SERVER_NAME}__${name}`;
@@ -45,7 +54,7 @@ export const qualified = (name: ToolName): string => `mcp__${MCP_SERVER_NAME}__$
  * it is EXACTLY one of our four. An allow-list, not a deny-list. */
 export function toolPolicy(toolName: string): "auto" | "gated" | "deny" {
   if (toolName === qualified("get_context") || toolName === qualified("run_command")) return "auto";
-  if (toolName === qualified("write_mod") || toolName === qualified("run_mod")) return "gated";
+  if (GATED_TOOLS.some((t) => toolName === qualified(t))) return "gated";
   return "deny";
 }
 
@@ -94,10 +103,20 @@ export interface SceneContext {
    * vocabulary the model globs as `<group>.<kind>*`, not guesses. */
   subgroupKinds: string[];
   subgroupKindsCapped: boolean;
+  /** The distinct POINT types present (on a molecular system, the atom's
+   * element symbol: C, N, O, …), CAPPED — the vocabulary the model addresses
+   * with the grammar's 4th segment as `*.*.*.<type>` (e.g. all carbons),
+   * instead of a per-index list. Same shape/guard as subgroupKinds. */
+  pointTypes: string[];
+  pointTypesCapped: boolean;
   /** e.g. "alpha.group-0" — a few real, constructible target examples. */
   targetExamples: string[];
   committedSelections: string;
   mods: { name: string; produces: ModProduces; axis?: ModAxis; description?: string }[];
+  /** The viewer's base look for any element not written by a command — the real
+   * defaults from representation.ts, so the model states the true baseline
+   * instead of guessing (and knows undo restores it). */
+  baseLook: { pointSize: number; opacity: number; color: string };
 }
 
 /** Example targets get_context advertises to the model. The whole-system token
@@ -123,6 +142,11 @@ export interface WriteModSpec {
 export interface ToolDeps {
   getContext(): Promise<SceneContext>;
   writeMod(spec: WriteModSpec): Promise<{ name: string; file: string }>;
+  /** Delete a WORKSPACE mod file and reconcile the registry. Refuses (ok:false)
+   * anything not a scanned `.molaro/mods/*.py` mod — built-ins, unknown names,
+   * traversal — by construction (it deletes only paths the mod scan recorded,
+   * never a path derived from `name`). Reached only after the approval gate. */
+  deleteMod(name: string): Promise<{ ok: boolean; message: string }>;
   runMod(name: string, target: string): Promise<{ ok: boolean; message: string }>;
   runCommand(text: string): Promise<{ ok: boolean; message: string }>;
   /** Analysis-mod names, so run_command can refuse Python-executing verbs and
@@ -169,12 +193,18 @@ export function buildToolDefs(deps: ToolDeps) {
         ? `Subgroup kinds (residue names — target as <group>.<kind>*, e.g. ${c.groups[0] ?? "A"}.${c.subgroupKinds[0]}*): ` +
           `${c.subgroupKinds.join(", ")}${c.subgroupKindsCapped ? ", … (capped)" : ""}\n`
         : "";
+      const types = c.pointTypes.length
+        ? `Point types (atom elements — target a whole class across the system as *.*.*.<type>, ` +
+          `e.g. *.*.*.${c.pointTypes[0]}): ${c.pointTypes.join(", ")}${c.pointTypesCapped ? ", … (capped)" : ""}\n`
+        : "";
+      const base = `Base look (defaults for any element not written by a command; undo restores these): ` +
+        `point size ${c.baseLook.pointSize}, opacity ${c.baseLook.opacity}, color ${c.baseLook.color}\n`;
       return ok(
         `System: ${c.system}\nAtoms (N): ${c.nAtoms}\nFrames (T): ${c.nFrames}\n` +
         `Categories: ${c.categories.join(", ") || "(none)"}\n` +
         `Groups (${c.groups.length}): ${c.groups.slice(0, 24).join(", ")}${c.groups.length > 24 ? ", …" : ""}\n` +
-        `Subgroups: ${c.subgroupCount}\n` + kinds +
-        `Example targets: ${c.targetExamples.join(", ") || "@all"}\n` +
+        `Subgroups: ${c.subgroupCount}\n` + kinds + types + base +
+        `Example targets: ${c.targetExamples.join(", ") || "all"}\n` +
         `Committed selections:\n${c.committedSelections}\n` +
         `Registered mods:\n${modLines}`,
       );
@@ -243,7 +273,21 @@ export function buildToolDefs(deps: ToolDeps) {
     },
   );
 
-  return { get_context: getContext, write_mod: writeMod, run_mod: runMod, run_command: runCommand };
+  const deleteMod = tool(
+    "delete_mod",
+    "Delete a workspace mod file (.molaro/mods/<name>.py) and unregister it. " +
+      "GATED: the human sees the mod name and file path and must approve before " +
+      "anything is deleted. Only workspace mods can be deleted — built-ins are " +
+      "refused, and nothing outside .molaro/mods is ever touched. Use it to clean " +
+      "up YOUR OWN scratch/debug mods; do not delete the user's mods unless asked.",
+    { name: z.string().describe("the workspace mod's name (as shown in get_context)") },
+    async (args) => {
+      const r = await deps.deleteMod(String(args.name));
+      return r.ok ? ok(r.message) : err(r.message);
+    },
+  );
+
+  return { get_context: getContext, write_mod: writeMod, run_mod: runMod, run_command: runCommand, delete_mod: deleteMod };
 }
 
 /** Build the in-process MCP server holding our four tools. The gated tools

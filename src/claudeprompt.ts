@@ -151,7 +151,12 @@ Violating them produces numbers that look plausible and are wrong.
 - If an analysis genuinely doesn't fit one of the three result kinds, say so plainly
   rather than forcing it into the wrong shape. You cannot produce histograms, contact
   maps, or new kinds of visual — only the three above.
-- You have no filesystem, shell, or network access. Your only tools are the four provided.`;
+- **Clean up after yourself.** \`delete_mod(name)\` removes a workspace mod file (it is
+  gated — the user approves each deletion). Use it to delete YOUR OWN scratch/debug mods
+  (a superseded \`*_v2\`, a failed experiment) so the user's library doesn't fill with
+  artifacts. Do NOT delete the user's own mods unless they ask; built-ins can't be deleted.
+- You have no filesystem, shell, or network access. Your only tools are the five provided
+  (get_context, run_command, run_mod, write_mod, delete_mod).`;
 
 /** The worked \`run_command\` examples the grammar reference shows. Each \`target\`
  * (the address expression inside the command) is verified to RESOLVE non-empty
@@ -164,6 +169,7 @@ export const GRAMMAR_EXAMPLES: { cmd: string; target: string; note: string }[] =
   { cmd: "colorbonds polymer.A.ASP*,GLU* red", target: "polymer.A.ASP*,GLU*", note: "acidic residues' bonds red (both-endpoint edges)" },
   { cmd: "colorbonds polymer.A.LYS*,ARG*,HIS* blue", target: "polymer.A.LYS*,ARG*,HIS*", note: "basic residues' bonds blue" },
   { cmd: "colorpoints polymer.A.CYS* yellow", target: "polymer.A.CYS*", note: "cysteine ATOMS yellow (points, not bonds)" },
+  { cmd: "colorpoints *.*.*.C gray", target: "*.*.*.C", note: "EVERY carbon atom (4th segment = point type) — CPK by element, whole system, no index list" },
   { cmd: "colorbondsof #5 orange", target: "#5", note: "the bonds TOUCHING atom 5 (incident — reaches one hop out)" },
   { cmd: "create_sele polymer.A.ASP*,GLU* [acidic]", target: "polymer.A.ASP*,GLU*", note: "commit a named selection from a target" },
   { cmd: "hide solvent", target: "solvent", note: "hide a whole category" },
@@ -185,6 +191,17 @@ dot-segment per level; the number of segments decides what it addresses:
   · \`polymer.A.*.CA\` → CA atoms. A token one level too shallow silently matches nothing
   (\`polymer.A.CA\` is a nomatch — \`CA\` is an atom type in the *subgroup* slot).
 
+**The 4th segment matches a point's TYPE** (on a molecule, its element — C/N/O/…; the exact
+set is in \`get_context\`). To address a whole CLASS of atoms across the entire system, wildcard
+the first three levels and name the type: \`*.*.*.C\` = every carbon. This is how you do
+CPK/color-by-element — five short commands (\`colorpoints *.*.*.C gray\`, \`*.*.*.N blue\`,
+\`*.*.*.O red\`, …), never a per-atom \`#index\` list.
+
+**Address economy — this matters.** Prefer label/type targets (\`polymer.A.ASP*\`, \`*.*.*.C\`)
+over enumerating atoms by index. An \`#index\` list is a LAST resort for a handful of specific
+atoms; a command thousands of characters long means you're using the wrong addressing axis —
+stop and find the label or type that names the class compactly (it almost always exists).
+
 **Segment predicates** (case-sensitive):
 - exact label (\`ASP 33\`, quote if it has a space: \`"ASP 33"\`); \`*\` = every node at that
   level; **glob** \`ASP*\` / \`*33\` / \`*A*\` (\`*\` = any run incl. empty); **range** \`1-8\`
@@ -204,7 +221,10 @@ that). Three axes × four shapes:
   to get a single atom's bonds): \`colorbondsof\` / \`bondsizeof\` / \`bondopacityof\`
 - backbone trace per residue: \`colortrace\` / \`tracesize\` / \`traceopacity\`
 Color is a CSS name or \`#hex\`; size ≥ 0 (0 ≠ hidden); opacity 0–1. To color bonds you MUST
-use \`colorbonds\`/\`colorbondsof\` — \`colorpoints\` colors atoms, not bonds.
+use \`colorbonds\`/\`colorbondsof\` — \`colorpoints\` colors atoms, not bonds. The viewer's base
+look (default point size / opacity / color for anything unwritten) is in \`get_context\`; to
+put a write back to normal the reliable way is **undo (Ctrl+Z)**, which restores the exact
+base look — do not re-apply a guessed default.
 
 **Other verbs**: \`create_sele <target> [name]\` commits a selection (auto-named without
 \`[name]\`); \`hide <target>\` / \`show <target>\`; \`ls\` / \`ls @name\` lists; \`rename\`,
@@ -240,6 +260,12 @@ export function renderContext(c: SceneContext): string {
       ? [`- Subgroup kinds (residues) — target as ${c.groups[0] ?? "<group>"}.<kind>*: ` +
          `${c.subgroupKinds.join(", ")}${c.subgroupKindsCapped ? ", … (capped)" : ""}`]
       : []),
+    ...(c.pointTypes.length
+      ? [`- Point types (atom elements) — target a class across the system as *.*.*.<type>: ` +
+         `${c.pointTypes.join(", ")}${c.pointTypesCapped ? ", … (capped)" : ""}`]
+      : []),
+    `- Base look (defaults, restored by undo): point size ${c.baseLook.pointSize}, ` +
+      `opacity ${c.baseLook.opacity}, color ${c.baseLook.color}`,
     `- Example targets you can use: ${c.targetExamples.join(", ") || "all"}`,
     `- Committed selections: ${c.committedSelections.replace(/\n/g, "; ") || "(none)"}`,
     "- Registered mods:",

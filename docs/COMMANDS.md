@@ -74,6 +74,13 @@ level, **top-down**. The number of segments decides what the path addresses:
 A path never auto-descends: `alpha.group-0` is the group, not its subgroups or
 points. Five or more segments is a parse error.
 
+To address a whole **class of points by type** across the entire system, wildcard
+the first three levels and name the type in the 4th segment: `*.*.*.C` is every
+point of type `C`. On a molecule the point type is the atom's element, so this is
+how you do CPK / color-by-element compactly — `colorpoints *.*.*.C gray`,
+`colorpoints *.*.*.N blue`, … — instead of an atom-by-atom `#index` list. The
+type vocabulary present on the loaded system is reported by `get_context`.
+
 Resolution mirrors **exactly what the panel tree shows**. A group whose points
 span several categories appears in the tree under each of those categories,
 listing only that category's subgroups — and paths follow the same branches:
@@ -964,18 +971,23 @@ the managed-agent tools it also carries — `Task`, `Cron*`, `Workflow`, `Skill`
 a user's claude.ai Gmail/Drive/Calendar connectors), and by loading no
 `.claude` settings. Because a deny-list can only catch names we thought to
 write down, the guarantee is a test that reads the SDK's **actual** runtime tool
-surface (the `init` message) and asserts it equals exactly our four — failing the
+surface (the `init` message) and asserts it equals exactly our five — failing the
 moment anything else appears:
 
 | tool | approval | what it does |
 |---|---|---|
-| `get_context` | none (read-only) | Reports the loaded system's shape and scene state. |
+| `get_context` | none (read-only) | Reports the loaded system's shape and scene state (including the point-type vocabulary and the base look). |
 | `write_mod` | **required** | Writes a `.molaro/mods/*.py`; **the approval preview is the full Python source**. |
 | `run_mod` | **required** | Runs a mod on a target; the typed result binds to the viewer. |
 | `run_command` | none (undoable) | Runs one grammar command. **Refuses `rm` and analysis-mod runs** at the tool boundary. |
+| `delete_mod` | **required** | Deletes a workspace mod file (`.molaro/mods/<name>.py`) and unregisters it; **built-ins and anything outside that directory are refused by construction** (the same path-map discipline `rm` uses). |
 
 Gated tools surface as an **approve/deny** block in the panel — for `write_mod`,
-the complete Python you're about to save; nothing runs unseen. `run_command` is
+the complete Python you're about to save; for `delete_mod`, the mod name and file
+path; nothing runs unseen. The invariant is not a fixed tool count but that
+**destructive operations are never ungated**: `run_command` and macro execution
+stay closed to `rm` because they are *ungated* paths, while `delete_mod` may
+delete precisely *because* it is gated behind an approval. `run_command` is
 undoable and ungated, but **cannot** delete files (`rm`) or execute Python (an
 analysis mod) — those go only through the gated tools. When a mod fails, the
 producer's **traceback** is returned to the assistant so it can fix the mod and

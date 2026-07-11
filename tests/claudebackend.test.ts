@@ -16,6 +16,8 @@ import {
 } from "../src/claudetools.ts";
 import { mapSdkMessage, approvalPreview, argsPreview, isRuntimeUnavailable, errorMessage, RUNTIME_UNAVAILABLE_HINT } from "../src/claudebackend.ts";
 import { MOD_AXES, MOD_PRODUCES } from "../webview/recipes.ts";
+import { commandMacroRefusal } from "../webview/commands.ts";
+import { resolveModDeletion } from "../src/hostmessages.ts";
 import { buildSystemPrompt } from "../src/claudeprompt.ts";
 import { parseClaudeEvent, type ClaudeEvent } from "../webview/claudemodel.ts";
 
@@ -24,17 +26,33 @@ function sampleContext(): SceneContext {
     system: "adk", nAtoms: 3341, nFrames: 98,
     categories: ["polymer"], groups: ["A"], subgroupCount: 214,
     subgroupKinds: ["ALA", "ARG", "ASP", "GLU", "LYS"], subgroupKindsCapped: false,
+    pointTypes: ["C", "N", "O", "S"], pointTypesCapped: false,
     targetExamples: ["all", "polymer"], committedSelections: "(none)",
     mods: [{ name: "myrmsf", produces: "per-point-scalar", axis: "color" }],
+    baseLook: { pointSize: 3, opacity: 1, color: "#e6e6e6" },
   };
 }
 
-interface Calls { runCommand: string[]; runMod: [string, string][]; writeMod: unknown[] }
-function mockDeps(over: Partial<ToolDeps> = {}): ToolDeps & { calls: Calls } {
-  const calls: Calls = { runCommand: [], runMod: [], writeMod: [] };
+interface Calls { runCommand: string[]; runMod: [string, string][]; writeMod: unknown[]; unlinked: string[] }
+function mockDeps(
+  over: Partial<ToolDeps> = {},
+  // a fake path-map with ONE workspace scratch mod — built-ins/traversal are
+  // absent, exactly as on the host (modPaths holds only scanned mod files).
+  modPaths: Map<string, string> = new Map([["scratch_cpk", "/ws/.molaro/mods/scratch_cpk.py"]]),
+): ToolDeps & { calls: Calls } {
+  const calls: Calls = { runCommand: [], runMod: [], writeMod: [], unlinked: [] };
   return {
     getContext: async () => sampleContext(),
     writeMod: async (s) => { calls.writeMod.push(s); return { name: s.name, file: `/ws/.molaro/mods/${s.name}.py` }; },
+    // faithful to the host deleteAssistantMod: resolve via the SAME path-map
+    // discipline (resolveModDeletion), "unlink" only mapped paths, then report.
+    deleteMod: async (name) => {
+      const r = resolveModDeletion(modPaths, name);
+      if ("refused" in r) return { ok: false, message: r.refused };
+      calls.unlinked.push(r.file);
+      modPaths.delete(name);
+      return { ok: true, message: `deleted mod "${name}" (${r.file}) — unregistered.` };
+    },
     runMod: async (n, t) => { calls.runMod.push([n, t]); return { ok: true, message: `ran ${n} on ${t}` }; },
     runCommand: async (t) => { calls.runCommand.push(t); return { ok: true, message: `ran ${t}` }; },
     analysisModNames: () => ["myrmsf"],
@@ -61,8 +79,8 @@ test("lockdown config: only our two ungated tools auto-approved; built-ins + Too
   });
   const surf = configuredToolSurface(opts);
 
-  // the four MCP tools exist; the two ungated are auto-allowed, the two gated absent
-  assert.deepEqual([...TOOL_NAMES].sort(), ["get_context", "run_command", "run_mod", "write_mod"].sort());
+  // the FIVE MCP tools exist; the two ungated are auto-allowed, the three gated absent
+  assert.deepEqual([...TOOL_NAMES].sort(), ["delete_mod", "get_context", "run_command", "run_mod", "write_mod"].sort());
   assert.deepEqual(
     new Set(surf.allowed),
     new Set([qualified("get_context"), qualified("run_command")]),
@@ -84,22 +102,27 @@ test("lockdown config: only our two ungated tools auto-approved; built-ins + Too
   assert.equal((opts.env as Record<string, string>).ANTHROPIC_API_KEY, "sk-test");
 });
 
-test("the gated tools are write_mod and run_mod (absent from allowedTools so canUseTool fires)", () => {
-  assert.deepEqual([...GATED_TOOLS].sort(), ["run_mod", "write_mod"].sort());
+test("the gated tools are write_mod, run_mod and delete_mod (absent from allowedTools so canUseTool fires)", () => {
+  assert.deepEqual([...GATED_TOOLS].sort(), ["delete_mod", "run_mod", "write_mod"].sort());
   const opts = buildAgentOptions({
     model: "m", apiKey: "k", toolServer: createToolServer(mockDeps()),
     systemPrompt: "x", abortController: new AbortController(),
   });
   assert.ok(!(opts.allowedTools ?? []).includes(qualified("write_mod")));
   assert.ok(!(opts.allowedTools ?? []).includes(qualified("run_mod")));
+  assert.ok(!(opts.allowedTools ?? []).includes(qualified("delete_mod")), "delete_mod is gated → not auto-approved");
+  // delete_mod is a DESTRUCTIVE tool, so its policy MUST be gated (approval),
+  // never auto — the invariant is 'destructive ops are never ungated'.
+  assert.equal(toolPolicy(qualified("delete_mod")), "gated");
 });
 
 // ---- the permission-boundary allow-list (Part A: AskUserQuestion et al.) ----
-test("toolPolicy is an ALLOW-LIST: only our four MCP tools; everything else DENIED", () => {
+test("toolPolicy is an ALLOW-LIST: only our five MCP tools; everything else DENIED", () => {
   assert.equal(toolPolicy(qualified("get_context")), "auto");
   assert.equal(toolPolicy(qualified("run_command")), "auto");
   assert.equal(toolPolicy(qualified("write_mod")), "gated");
   assert.equal(toolPolicy(qualified("run_mod")), "gated");
+  assert.equal(toolPolicy(qualified("delete_mod")), "gated");
   // AskUserQuestion — a native user-dialog capability outside the init tool
   // surface — and every other leaked/ambient tool is DENIED at canUseTool, even
   // though it never appears in init.tools for the equality test to catch.
@@ -218,12 +241,71 @@ test("write_mod accepts a commands mod through the save path (no axis required)"
   assert.equal(saved.axis, undefined);
 });
 
+// ---- delete_mod: the fifth, GATED tool (Part B — the full bar) --------------
+test("delete_mod approval preview names the mod and its file path (nothing deleted unseen)", () => {
+  const prev = approvalPreview("delete_mod", { name: "scratch_cpk" });
+  assert.match(prev, /delete_mod/);
+  assert.match(prev, /scratch_cpk/);
+  assert.match(prev, /\.molaro\/mods\/scratch_cpk\.py/);
+  assert.match(prev, /permanently/i);
+});
+
+test("delete_mod deletes ONLY a scanned workspace mod, via the path-map (approve path)", async () => {
+  const deps = mockDeps();
+  const res = await buildToolDefs(deps).delete_mod.handler({ name: "scratch_cpk" }, {});
+  assert.equal(res.isError, false, text(res));
+  assert.deepEqual(deps.calls.unlinked, ["/ws/.molaro/mods/scratch_cpk.py"],
+    "it unlinked exactly the mapped path — never one derived from the name");
+  assert.match(text(res), /deleted mod "scratch_cpk".*unregistered/s);
+});
+
+test("delete_mod REFUSES a built-in — nothing is deleted", async () => {
+  const deps = mockDeps(); // modPaths has no built-in (they are code, never scanned)
+  const res = await buildToolDefs(deps).delete_mod.handler({ name: "rainbow" }, {});
+  assert.equal(res.isError, true);
+  assert.match(text(res), /not a workspace mod/);
+  assert.equal(deps.calls.unlinked.length, 0, "no unlink happened");
+});
+
+test("delete_mod REFUSES a path-traversal / non-mod name — nothing outside .molaro/mods is touched", async () => {
+  const deps = mockDeps();
+  for (const bad of ["../../etc/passwd", "/etc/shadow", "scratch_cpk/../../x", "nope"]) {
+    const res = await buildToolDefs(deps).delete_mod.handler({ name: bad }, {});
+    assert.equal(res.isError, true, bad);
+    assert.match(text(res), /not a workspace mod/, bad);
+  }
+  assert.equal(deps.calls.unlinked.length, 0, "not a single unlink for any refused name");
+});
+
+test("resolveModDeletion: the path-map discipline — only mapped names resolve, everything else refuses", () => {
+  const modPaths = new Map([["scratch_cpk", "/ws/.molaro/mods/scratch_cpk.py"]]);
+  assert.deepEqual(resolveModDeletion(modPaths, "scratch_cpk"), { file: "/ws/.molaro/mods/scratch_cpk.py" });
+  for (const bad of ["rainbow", "../../etc/passwd", "scratch_cpk.py", "unknown"]) {
+    const r = resolveModDeletion(modPaths, bad);
+    assert.ok("refused" in r, `${bad} must refuse (absent from the scanned map)`);
+  }
+});
+
+test("rm stays refused where it always was — run_command AND macro execution (must not regress)", () => {
+  // run_command boundary (ungated path)
+  assert.match(blockedCommandReason("rm all", ["myrmsf"])!, /cannot run `rm`/);
+  assert.match(blockedCommandReason("rm scratch_cpk", [])!, /destructive/);
+  // macro execution boundary (ungated path) — delete_mod being gated does NOT
+  // relax these; they are the ungated paths and stay closed.
+  assert.match(commandMacroRefusal("rm all", new Set())!, /rm.*not allowed/);
+});
+
 test("get_context reports the LIVE system shape (nothing hardcoded)", async () => {
   const res = await buildToolDefs(mockDeps()).get_context.handler({}, {});
   assert.match(text(res), /System: adk/);
   assert.match(text(res), /Atoms \(N\): 3341/);
   assert.match(text(res), /Frames \(T\): 98/);
   assert.match(text(res), /myrmsf/);
+  // Part A — point types advertised with the *.*.*.<type> address form
+  assert.match(text(res), /Point types.*C, N, O, S/);
+  assert.match(text(res), /\*\.\*\.\*\.C/);
+  // Part C — the real base look (not a guessed size of 1)
+  assert.match(text(res), /Base look.*point size 3, opacity 1, color #e6e6e6/);
 });
 
 // ---- contract conformance of the message mapper ----------------------------

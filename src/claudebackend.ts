@@ -68,6 +68,10 @@ export function approvalPreview(bareTool: string, input: Record<string, unknown>
   if (bareTool === "run_mod") {
     return `run_mod → run "${String(input.name ?? "?")}" on target "${String(input.target ?? "?")}"`;
   }
+  if (bareTool === "delete_mod") {
+    const name = String(input.name ?? "?");
+    return `delete_mod → DELETE mod "${name}" (.molaro/mods/${name}.py). This removes the file permanently.`;
+  }
   return `${bareTool} ${JSON.stringify(input)}`;
 }
 
