@@ -84,7 +84,9 @@ import {
   serializeMod,
   unregisterRecipe,
   validateModValues,
+  MOD_AXES,
   MOD_FILE_MAGIC,
+  MOD_PRODUCES,
   type AnalysisMod,
 } from "../webview/recipes.ts";
 
@@ -296,4 +298,36 @@ test("unregisterRecipe removes a mod from the registry (and only that mod)", () 
   assert.equal(getRecipe("zz_doomed"), undefined);
   assert.ok(getRecipe("rainbow"), "neighbors untouched");
   assert.equal(unregisterRecipe("zz_doomed"), false, "second delete is a no-op");
+});
+
+// -- Brief #10a: MOD_PRODUCES / MOD_AXES as the single source ------------------
+test("MOD_PRODUCES is exactly the four supported kinds, and parseModFile validates against it", () => {
+  assert.deepEqual([...MOD_PRODUCES].sort(),
+    ["commands", "per-frame-series", "per-point-scalar", "scatter"].sort());
+  // EVERY supported produces value parses (with axis where required)
+  for (const p of MOD_PRODUCES) {
+    const axisLine = p === "per-point-scalar" ? "# axis: color\n" : "";
+    const file = `${MOD_FILE_MAGIC}\n# name: m\n# kind: analysis\n# produces: ${p}\n${axisLine}\ndef compute(data, target_indices):\n    return []\n`;
+    const r = parseModFile(file, "workspace");
+    assert.ok(r.ok, `parseModFile must accept produces: ${p}${r.ok ? "" : " — " + r.error}`);
+    if (r.ok) assert.equal(r.mod.produces, p);
+  }
+  // a value NOT in MOD_PRODUCES is rejected, and the message names the real set
+  const bad = parseModFile(`${MOD_FILE_MAGIC}\n# name: m\n# kind: analysis\n# produces: histogram\n\ndef compute(d,t): return []\n`, "workspace");
+  assert.ok(!bad.ok);
+  if (!bad.ok) for (const p of MOD_PRODUCES) assert.ok(bad.error.includes(p), `error should list ${p}`);
+});
+
+test("a commands mod round-trips through serialize → parse (the write_mod file path is valid)", () => {
+  const mod: AnalysisMod = {
+    name: "macro", kind: "analysis", produces: "commands", origin: "workspace",
+    author: "Molaro assistant", description: "a saved look",
+    code: 'def compute(data, target_indices):\n    return ["colorbonds alpha red"]',
+  };
+  const parsed = parseModFile(serializeMod(mod), "workspace");
+  assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+  if (parsed.ok) {
+    assert.equal(parsed.mod.produces, "commands");
+    assert.equal(parsed.mod.axis, undefined, "a commands mod has no axis");
+  }
 });

@@ -17,6 +17,7 @@
  */
 import { tool, createSdkMcpServer, type Options } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
+import { MOD_AXES, MOD_PRODUCES, type ModAxis, type ModProduces } from "../webview/recipes.ts";
 
 export const MCP_SERVER_NAME = "molaro";
 
@@ -96,7 +97,7 @@ export interface SceneContext {
   /** e.g. "alpha.group-0" — a few real, constructible target examples. */
   targetExamples: string[];
   committedSelections: string;
-  mods: { name: string; produces: string; axis?: string; description?: string }[];
+  mods: { name: string; produces: ModProduces; axis?: ModAxis; description?: string }[];
 }
 
 /** Example targets get_context advertises to the model. The whole-system token
@@ -110,8 +111,8 @@ export function buildTargetExamples(presentCategories: string[]): string[] {
 
 export interface WriteModSpec {
   name: string;
-  produces: "per-point-scalar" | "per-frame-series" | "scatter";
-  axis?: "color" | "size" | "opacity";
+  produces: ModProduces;
+  axis?: ModAxis;
   description: string;
   code: string;
 }
@@ -185,13 +186,17 @@ export function buildToolDefs(deps: ToolDeps) {
     "Write (or overwrite) an analysis mod as a .molaro/mods/<name>.py file. The " +
       "FULL Python source is shown to the human for approval before it is saved. " +
       "`produces` is one of per-point-scalar (declare axis: color|size|opacity), " +
-      "per-frame-series, or scatter. Author it to the mod contract in the system " +
-      "prompt. This does not run it — call run_mod after it is saved.",
+      "per-frame-series, scatter, or commands (a macro returning list[str] — no " +
+      "axis). Author it to the mod contract in the system prompt. This does not " +
+      "run it — call run_mod after it is saved.",
     {
       name: z.string().describe("mod name: lowercase, [a-z][a-z0-9_-]*"),
-      produces: z.enum(["per-point-scalar", "per-frame-series", "scatter"]),
-      axis: z.enum(["color", "size", "opacity"]).optional()
-        .describe("required when produces is per-point-scalar"),
+      // DERIVED from the mod system's single source (recipes.MOD_PRODUCES /
+      // MOD_AXES) so this schema can never drift from what the parser accepts —
+      // the whole point of Brief #10a. Asserted in tests/recipes.test.ts.
+      produces: z.enum(MOD_PRODUCES),
+      axis: z.enum(MOD_AXES).optional()
+        .describe("required when produces is per-point-scalar; omit for the others"),
       description: z.string().describe("one line: what the mod computes"),
       code: z.string().describe("the complete Python source defining compute(data, target_indices)"),
     },

@@ -15,6 +15,7 @@ import {
   type ToolDeps, type SceneContext,
 } from "../src/claudetools.ts";
 import { mapSdkMessage, approvalPreview, argsPreview, isRuntimeUnavailable, errorMessage, RUNTIME_UNAVAILABLE_HINT } from "../src/claudebackend.ts";
+import { MOD_AXES, MOD_PRODUCES } from "../webview/recipes.ts";
 import { buildSystemPrompt } from "../src/claudeprompt.ts";
 import { parseClaudeEvent, type ClaudeEvent } from "../webview/claudemodel.ts";
 
@@ -178,6 +179,43 @@ test("write_mod saves through the host path and reports registration", async () 
   assert.equal(res.isError, false);
   assert.equal(deps.calls.writeMod.length, 1);
   assert.match(text(res), /wrote mod "rg"/);
+});
+
+// ---- Brief #10a: write_mod's schema MUST equal the mod system's produces ----
+// The point of this test: if a new produces (or axis) value is added to one side
+// and not the other, this fails. write_mod's z.enum is DERIVED from MOD_PRODUCES,
+// so these are the same array object — but assert it so a future hardcode regresses loudly.
+test("write_mod's produces/axis enums equal the mod system's supported values", () => {
+  const schema = buildToolDefs(mockDeps()).write_mod.inputSchema as Record<string, any>;
+  assert.deepEqual([...schema.produces.options].sort(), [...MOD_PRODUCES].sort(),
+    "write_mod.produces must offer exactly what the mod parser/validator accept");
+  assert.deepEqual([...schema.axis.unwrap().options].sort(), [...MOD_AXES].sort(),
+    "write_mod.axis must offer exactly the per-point-scalar axes");
+});
+
+test("write_mod schema accepts every real produces (incl. commands) and rejects invented ones", () => {
+  const schema = buildToolDefs(mockDeps()).write_mod.inputSchema as Record<string, any>;
+  for (const p of MOD_PRODUCES) {
+    assert.ok(schema.produces.safeParse(p).success, `produces: ${p} must parse`);
+  }
+  assert.ok(schema.produces.safeParse("commands").success, "commands is a first-class produces here");
+  assert.ok(!schema.produces.safeParse("histogram").success, "an unsupported produces is rejected at the schema");
+  // axis is optional — a commands mod legitimately omits it
+  assert.ok(schema.axis.safeParse(undefined).success, "axis may be omitted (commands/series/scatter)");
+  assert.ok(schema.axis.safeParse("color").success);
+  assert.ok(!schema.axis.safeParse("width").success, "an unsupported axis is rejected");
+});
+
+test("write_mod accepts a commands mod through the save path (no axis required)", async () => {
+  const deps = mockDeps();
+  const res = await buildToolDefs(deps).write_mod.handler(
+    { name: "ab_look", produces: "commands", axis: undefined, description: "the a/b look", code: 'def compute(d,t): return ["colorbonds alpha red"]' }, {},
+  );
+  assert.equal(res.isError, false, text(res));
+  assert.equal(deps.calls.writeMod.length, 1);
+  const saved = deps.calls.writeMod[0] as { produces: string; axis?: string };
+  assert.equal(saved.produces, "commands");
+  assert.equal(saved.axis, undefined);
 });
 
 test("get_context reports the LIVE system shape (nothing hardcoded)", async () => {

@@ -34,6 +34,20 @@ export type RecipeOrigin = "built-in" | "workspace";
 
 export type ModKind = "representation" | "analysis";
 
+/** THE single source of truth for the analysis-mod result kinds. Every place
+ * that enumerates them — this type, the file parser/validator, the `write_mod`
+ * MCP schema, `mods` display, docs — derives from or is asserted against THIS.
+ * A `write_mod` schema that hardcoded a stale subset (missing `commands`) is the
+ * bug this closes: two lists that must agree, only one updated. See
+ * tests/recipes.test.ts for the equality guard. */
+export const MOD_PRODUCES = ["per-point-scalar", "per-frame-series", "scatter", "commands"] as const;
+export type ModProduces = (typeof MOD_PRODUCES)[number];
+
+/** The point axes a `per-point-scalar` mod binds to — the single source the
+ * `write_mod` schema and the parser both derive from / are asserted against. */
+export const MOD_AXES = ["color", "size", "opacity"] as const;
+export type ModAxis = (typeof MOD_AXES)[number];
+
 /** Metadata every mod carries regardless of kind. */
 interface ModCommon {
   name: string;
@@ -61,14 +75,14 @@ export interface Recipe extends ModCommon {
 /** Type A — Python compute in the producer. */
 export interface AnalysisMod extends ModCommon {
   kind: "analysis";
-  /** The declared result kind — the routing key. per-point-scalar/per-frame-
-   * series/scatter bind through the typed-result rails; `commands` returns a
-   * `list[str]` run through the command path at the mod-run boundary (NOT a
-   * TypedResult — the union stays closed at four). */
-  produces: "per-point-scalar" | "per-frame-series" | "scatter" | "commands";
+  /** The declared result kind (see MOD_PRODUCES — the single source). per-point-
+   * scalar/per-frame-series/scatter bind through the typed-result rails;
+   * `commands` returns a `list[str]` run through the command path at the mod-run
+   * boundary (NOT a TypedResult — the union stays closed at four). */
+  produces: ModProduces;
   /** Required iff produces = per-point-scalar: which point axis the scalars
-   * bind to. */
-  axis?: "color" | "size" | "opacity";
+   * bind to (see MOD_AXES). */
+  axis?: ModAxis;
   /** Python source defining `compute(data, target_indices)`, executed in
    * the producer against the resident dataset handle. Returns a flat
    * `list[float]` — EXCEPT `produces: scatter`, which returns a dict
@@ -181,14 +195,13 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
     return { ok: false, error: `kind must be "analysis" for mod files (got "${meta.kind ?? ""}")` };
   }
   const produces = meta.produces;
-  if (produces !== "per-point-scalar" && produces !== "per-frame-series" &&
-      produces !== "scatter" && produces !== "commands") {
-    return { ok: false, error: `produces must be per-point-scalar | per-frame-series | scatter | commands (got "${produces ?? ""}")` };
+  if (!(MOD_PRODUCES as readonly string[]).includes(produces ?? "")) {
+    return { ok: false, error: `produces must be ${MOD_PRODUCES.join(" | ")} (got "${produces ?? ""}")` };
   }
   const axis = meta.axis;
   if (produces === "per-point-scalar") {
-    if (axis !== "color" && axis !== "size" && axis !== "opacity") {
-      return { ok: false, error: `per-point-scalar mods need axis: color | size | opacity (got "${axis ?? ""}")` };
+    if (!(MOD_AXES as readonly string[]).includes(axis ?? "")) {
+      return { ok: false, error: `per-point-scalar mods need axis: ${MOD_AXES.join(" | ")} (got "${axis ?? ""}")` };
     }
   } else if (axis !== undefined) {
     return { ok: false, error: "axis is only valid on per-point-scalar mods" };
@@ -199,8 +212,8 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
   const mod: AnalysisMod = {
     name,
     kind: "analysis",
-    produces,
-    ...(produces === "per-point-scalar" ? { axis: axis as "color" | "size" | "opacity" } : {}),
+    produces: produces as ModProduces, // validated against MOD_PRODUCES above
+    ...(produces === "per-point-scalar" ? { axis: axis as ModAxis } : {}),
     code,
     origin,
     ...(meta.author ? { author: meta.author } : {}),
