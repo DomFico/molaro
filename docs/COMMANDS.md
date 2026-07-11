@@ -560,6 +560,76 @@ origin `workspace` (built-ins are code, not files). This is user-approved
 code — there is no sandbox; the protections are validation and the
 timeout.
 
+#### The trajectory API inside `compute`
+
+For molecular datasets, `data.trajectory` is the **live
+[`mdtraj.Trajectory`](https://mdtraj.org)** backing the loaded system — so a
+mod can call mdtraj's own analyses directly instead of reimplementing them.
+It is **`None`** when the source has no trajectory (the synthetic dataset); a
+domain analysis should check this and fail closed:
+
+```python
+def compute(data, target_indices):
+    traj = data.trajectory
+    if traj is None:
+        raise RuntimeError("this analysis needs a trajectory-backed dataset")
+    ...
+```
+
+Raising (or returning a wrong-shaped result) binds nothing and reports the
+reason — the fail-closed contract already described.
+
+**What's reachable** off `data.trajectory` (standard mdtraj):
+
+- `traj.xyz` — `(n_frames, n_atoms, 3)` float32 coordinates, **in nanometers**.
+- `traj.topology` — atoms, residues, chains, bonds; `traj.topology.select("…")`
+  runs an [atom-selection query](https://mdtraj.org/latest/atom_selection.html)
+  (e.g. `"name CA"`, `"protein"`, `"resname BNZ"`, `"name P"`) and returns atom
+  indices; `traj.atom_slice(indices)` returns a sub-trajectory.
+- `traj.n_frames`, `traj.n_atoms`, `traj.unitcell_vectors`, `traj.time`.
+- All of `mdtraj`: `md.rmsd`, `md.rmsf`, `md.compute_rg`, `md.compute_phi`,
+  `md.compute_distances`, … (`import mdtraj as md`; `numpy` is available too).
+
+**Index alignment — the load-bearing guarantee.** Point index `i` in header
+order **is** atom index `i` in `traj.topology` **and** column `i` in
+`traj.xyz`. So `target_indices` (header order) can index the trajectory
+directly: `traj.atom_slice(target_indices)` is exactly the selected atoms, in
+the selected order. For a `per-point-scalar` mod this is what makes
+`values[k]` land on `target_indices[k]` — verified against a real system in
+`tests/reference_mods_corpus.py`.
+
+**Units are nanometers** everywhere mdtraj touches — it normalizes every
+container format to nm on read. Never multiply by 10; a length that looks
+10× off is a unit bug, not a scale choice.
+
+**Return contract by `produces`** (unchanged — the trajectory is just a richer
+`data`):
+
+- `per-point-scalar`: `list[float]` of length `len(target_indices)`, in that
+  order, **each normalized to `[0,1]` by the mod itself** (it decides what
+  "high" means — e.g. min-max over the returned set).
+- `per-frame-series`: `list[float]` of length `n_frames`, **raw** (the plot
+  auto-scales).
+- `scatter`: the dict shape above.
+
+**Definitional care** — the traps that separate a plausible number from a
+correct one (each is a real choice the reference mods document in their
+headers):
+
+- **Mass weighting** — `md.compute_rg` and a mass-weighted radius differ from
+  a geometric one; state which you mean.
+- **Superposition** — `md.rmsd(traj, traj, frame=0)` superposes by default;
+  RMSD with vs. without alignment are different observables.
+- **Atom subset** — computing over all atoms vs. a `select(...)` subset
+  changes the value; keep a subset run coherent (align on and measure the same
+  atoms).
+- **float32 accumulation** — `md.compute_rg` reduces in float32; for a tight
+  match to a float64 reference, reduce coordinates in float64 yourself.
+
+The shipped reference mods `rg`, `rmsd`, and `rmsf` (in `.molaro/mods/`) are
+worked examples of all of the above, each verified against the benchmark
+corpus to `1e-4` nm.
+
 ### Listing the registry: `mods`
 
 ```

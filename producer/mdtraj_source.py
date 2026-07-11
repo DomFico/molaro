@@ -79,7 +79,26 @@ class MdtrajSource(DataSource):
         self.n_points = int(traj.n_atoms)
         self.n_frames = int(traj.n_frames)
 
+        # Retain the live trajectory so mods can use mdtraj's own analyses
+        # (Rg, RMSD, RMSF, …) directly. Its atom order is the header's point
+        # order (both derive from `topology_path`), and traj.xyz equals the
+        # bytes give_frames emits — both asserted in the corpus test. Exposed
+        # read-only via the `trajectory` property; nm throughout (see class
+        # docstring — mdtraj normalizes every container to nm on read).
+        self._trajectory = traj
+
         self._build_header_fields()
+
+    @property
+    def trajectory(self):
+        """The live ``mdtraj.Trajectory`` backing this source (nm, frame-major).
+
+        Point index ``i`` == atom index ``i`` in ``trajectory.topology`` ==
+        column ``i`` in ``trajectory.xyz`` — so a mod given ``target_indices``
+        in header order can slice the trajectory with those same indices. See
+        the mod-facing API in docs/COMMANDS.md.
+        """
+        return self._trajectory
 
     # -- Header construction ---------------------------------------------------
 

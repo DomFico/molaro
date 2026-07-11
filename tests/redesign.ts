@@ -26,7 +26,7 @@
  * Screenshots + [PASS]/[FAIL] lines; evidence in reports/redesign/.
  * Run from viewer/ (after npm run build):  node tests/redesign.ts [S0 S1 ...]
  */
-import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 
 import { E2EDriver, sleep } from "./e2e_driver.ts";
 
@@ -4811,9 +4811,16 @@ async function S29(): Promise<void> {
   // examples so `rm all` can be exercised for real and then RESTORED
   const modsDir = ".molaro/mods";
   const fixtureFile = `${modsDir}/zz_fixture.py`;
-  const examples = ["frame_metric.py", "index_ramp.py", "xy_metric.py"]
-    .map((f) => `${modsDir}/${f}`);
+  // Snapshot EVERY shipped workspace mod file (neutral examples + the domain
+  // reference mods) so `rm all` can be exercised for real and then restored.
+  // Derived from a scan, not a fixed list, so adding a mod file never silently
+  // leaves it deleted after this test. Registry order = sorted filenames, then
+  // the fileless `broken_ramp` the harness appends last.
+  const shippedFiles = readdirSync(modsDir).filter((f) => f.endsWith(".py")).sort();
+  const examples = shippedFiles.map((f) => `${modsDir}/${f}`);
   const snapshots = new Map(examples.map((f) => [f, readFileSync(f, "utf-8")]));
+  const shippedNames = shippedFiles.map((f) => f.replace(/\.py$/, ""));
+  const allWorkspace = [...shippedNames, "broken_ramp"];
   writeFileSync(fixtureFile, [
     "# molaro-mod",
     "# name: zz_fixture",
@@ -4907,21 +4914,21 @@ async function S29(): Promise<void> {
       await submit("rm all");
       last = await lastLine();
       check("S29: rm all lists EXACTLY the workspace mods in the prompt",
-        /will delete 4 workspace mods: frame_metric, index_ramp, xy_metric, broken_ramp/.test(last?.text ?? ""),
+        last?.text === `will delete ${allWorkspace.length} workspace mods: ${allWorkspace.join(", ")}\n` +
+          "files are removed from disk — this CANNOT be undone. y/n?",
         JSON.stringify(last));
       await submit("y");
       await sleep(600);
-      const outcome = (await logLines()).find((l) => /^deleted 3 mods:/.test(l.text));
-      check("S29: …y deletes the file-backed three and reports the fileless one as FAILED",
-        outcome?.text === "deleted 3 mods: frame_metric, index_ramp, xy_metric\n" +
+      const outcome = (await logLines()).find((l) => /^deleted \d+ mods:/.test(l.text));
+      check("S29: …y deletes the file-backed mods and reports the fileless one as FAILED",
+        outcome?.text === `deleted ${shippedNames.length} mods: ${shippedNames.join(", ")}\n` +
           "failed: broken_ramp — no file recorded for this mod (still registered)",
         JSON.stringify(outcome));
-      check("S29: …the three are gone from disk", examples.every((f) => !existsSync(f)));
+      check("S29: …the file-backed mods are gone from disk", examples.every((f) => !existsSync(f)));
       const listing = (await cmd("mods")).message;
-      check("S29: …registry agrees with disk: broken_ramp stays, the three are gone, rainbow survives",
+      check("S29: …registry agrees with disk: broken_ramp stays, the file-backed mods are gone, rainbow survives",
         listing.includes(" broken_ramp — ") && listing.includes(" rainbow — ") &&
-          !listing.includes(" index_ramp — ") && !listing.includes(" frame_metric — ") &&
-          !listing.includes(" xy_metric — "),
+          shippedNames.every((n) => !listing.includes(` ${n} — `)),
         listing);
       check("S29: …the built-in still works",
         (await cmd("rainbow alpha.group-0.subgroup-0")).status === "ok");
@@ -4934,9 +4941,119 @@ async function S29(): Promise<void> {
   }
 }
 
+// ====================== S30: reference mods on the REAL adk system ============
+// The domain reference mods (rg / rmsf) end to end on the hero system — a real
+// mdtraj producer under the mdbench interpreter, driven through the terminal.
+// Numerical correctness vs the corpus is proved separately (and exhaustively) by
+// tests/reference_mods_corpus.py; S30 proves the BINDING on real data: a
+// per-frame-series drawing a real Rg curve with a live playhead, and a
+// per-point-scalar RMSF coloring the structure then undoing in one stroke.
+// Requires mdtraj (mdbench) + the corpus checkout — VIEWER_PYTHON overrides the
+// interpreter; serve.py resolves the sibling benchmark_systems tree itself.
+const MDBENCH_PY = process.env.VIEWER_PYTHON ?? "/home/dom/miniforge3/envs/mdbench/bin/python";
+
+async function withRealDriver(fn: (d: E2EDriver) => Promise<void>, route = "/terminal"): Promise<void> {
+  portBase += 2;
+  const d = new E2EDriver({
+    bridgePort: portBase, cdpPort: portBase + 300, width: 1180, height: 780,
+    producerArgs: ["--system", "03_adk_psf_dcd"],
+    python: MDBENCH_PY,
+  });
+  try {
+    await d.start();
+    await d.navigate(route);
+    await sleep(6500); // real mdtraj load (PDB + DCD, 3341 atoms × 98 frames)
+    await fn(d);
+  } finally {
+    await d.dispose();
+  }
+}
+
+async function S30(): Promise<void> {
+  console.log("S30 — reference mods on the REAL adk trajectory: rg curve + rmsf color/undo");
+  await withRealDriver(async (d) => {
+    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const logLines = () =>
+      d.evaluate<{ cls: string; text: string }[]>(
+        `[...document.querySelectorAll('#term-log .term-line')].map(l=>({cls:l.className,text:l.textContent}))`);
+    const typeInto = async (text: string): Promise<void> => {
+      const r = await d.evaluate<{ x: number; y: number }>(`(()=>{
+        const b=${el("term-input")}.getBoundingClientRect();
+        return {x:b.left+b.width/2, y:b.top+b.height/2};
+      })()`);
+      await d.click(r.x, r.y);
+      await d.insertText(text);
+      await d.key("Enter", "Enter", 13);
+    };
+
+    // the real system loaded: 3341 atoms (adk) — rep.state.color is per-point RGB
+    const nPts = await d.evaluate<number>(`${V}.rep.state.color.length / 3`);
+    check("S30: the real adk system is loaded (3341 atoms)", nPts === 3341, `pointCount=${nPts}`);
+
+    // the reference mods are registered vocabulary, with kind + produces
+    const listing = (await cmd("mods")).message;
+    check("S30: rg / rmsd / rmsf appear in `mods` with their kind and produces",
+      listing.includes(" rg — analysis · per-frame-series") &&
+        listing.includes(" rmsd — analysis · per-frame-series") &&
+        listing.includes(" rmsf — analysis · per-point-scalar → color"),
+      listing);
+
+    // -- rg: a per-frame-series → a real curve in the plot, one vertex per frame --
+    await typeInto("rg all");
+    await sleep(2500);
+    const rgLines = await logLines();
+    check("S30: rg acknowledges over all atoms, then reports the plot hand-off",
+      rgLines.some((l) => l.text === "running rg on 3341 points…") &&
+        rgLines.some((l) => l.text === 'rg → series "rg" (98 frames) → the plot tab'),
+      JSON.stringify(rgLines.slice(-3)));
+    check("S30: …the plot draws the Rg curve — one vertex per frame, labeled `rg`",
+      await d.evaluate<boolean>(`(${el("plot-line")}.getAttribute('points') ?? '').trim().split(' ').length === 98 &&
+        ${el("plot-label")}.textContent === 'rg'`),
+      await d.evaluate<string>(`${el("plot-label")}.textContent`));
+    // the playhead is live and moving (the harness autoplays the 98 frames)
+    const mx1 = await d.evaluate<number>(`Number(${el("plot-marker")}.getAttribute('x1') ?? -1)`);
+    await sleep(700);
+    const mx2 = await d.evaluate<number>(`Number(${el("plot-marker")}.getAttribute('x1') ?? -1)`);
+    check("S30: …the playhead marker is live and tracks playback",
+      !(await d.evaluate<boolean>(`${el("plot-marker")}.hasAttribute('hidden')`)) && mx1 >= 0 && mx2 !== mx1,
+      `marker x1: ${mx1} → ${mx2}`);
+    await d.screenshot(`${REPORT}/S30_rg_curve.png`);
+
+    // -- rmsf: a per-point-scalar → color, one undo stroke -----------------------
+    await d.evaluate(`void (window.__preRmsf = Float32Array.from(${V}.rep.state.color))`);
+    await typeInto("rmsf all");
+    await sleep(2000);
+    const rfLines = await logLines();
+    check("S30: rmsf acknowledges, then reports the color hand-off",
+      rfLines.some((l) => l.text === "running rmsf on 3341 points…") &&
+        rfLines.some((l) => /^rmsf → colored 3341 points of .* from scalars$/.test(l.text)),
+      JSON.stringify(rfLines.slice(-3)));
+    const changed = await d.evaluate<number>(`(()=>{
+      const c=${V}.rep.state.color, s=window.__preRmsf; let n=0;
+      for(let i=0;i<c.length;i++) if(Math.abs(c[i]-s[i])>0.02) n++; return n;
+    })()`);
+    check("S30: …RMSF recolors the structure (many points change from pristine)",
+      changed > 300, `changed color channels=${changed}`);
+    await d.screenshot(`${REPORT}/S30_rmsf_color.png`);
+
+    // undo: the viewer's Ctrl+Z ignores INPUT focus, so blur the terminal first
+    await d.evaluate(`document.getElementById('term-input').blur()`);
+    await d.ctrlZ();
+    await sleep(400);
+    const residual = await d.evaluate<number>(`(()=>{
+      const c=${V}.rep.state.color, s=window.__preRmsf; let n=0;
+      for(let i=0;i<c.length;i++) if(Math.abs(c[i]-s[i])>1e-4) n++; return n;
+    })()`);
+    check("S30: …and undoes in ONE stroke — every color channel back to pristine",
+      residual === 0, `residual differing channels=${residual}`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];
