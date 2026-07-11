@@ -142,12 +142,50 @@ function toolResultText(content: unknown): string {
   return "(no output)";
 }
 
+/** Spawn the SDK with the REAL hardened options (a fake key) and read the
+ * model's TRUE runtime tool surface + MCP servers from the `init` system
+ * message — the authoritative allow-list check. `init` is emitted locally
+ * before any API call, so a fake key and no network suffice; we abort the
+ * moment we have it. This is what the surface test asserts equality against —
+ * a deny-list can only catch names we thought to write down; this reads what
+ * the SDK actually exposes. */
+export async function probeRuntimeToolSurface(
+  deps: ToolDeps,
+  timeoutMs = 20000,
+): Promise<{ tools: string[]; mcpServers: string[] }> {
+  const abortController = new AbortController();
+  const options = buildAgentOptions({
+    model: "claude-sonnet-5",
+    apiKey: "sk-ant-surface-probe",
+    toolServer: createToolServer(deps),
+    systemPrompt: "runtime tool-surface probe",
+    abortController,
+  });
+  const timer = setTimeout(() => abortController.abort(), timeoutMs);
+  try {
+    for await (const msg of query({ prompt: "probe", options })) {
+      const m = msg as { type?: string; subtype?: string; tools?: string[]; mcp_servers?: { name: string }[] };
+      if (m.type === "system" && m.subtype === "init") {
+        return {
+          tools: (m.tools ?? []).slice().sort(),
+          mcpServers: (m.mcp_servers ?? []).map((s) => s.name).sort(),
+        };
+      }
+    }
+    throw new Error("no init system message before the stream ended");
+  } finally {
+    clearTimeout(timer);
+    abortController.abort();
+  }
+}
+
 export function createClaudeBackend(
   post: (ev: ClaudeEvent) => void,
   deps: BackendDeps,
 ): ClaudeBackend {
   let apiKey = deps.apiKey;
   let active = false;               // a turn is in flight
+  let started = false;              // the query loop has been launched
   let disposed = false;
 
   // Streaming input: user messages are pushed into this queue; the query
@@ -224,9 +262,15 @@ export function createClaudeBackend(
         : { behavior: "deny", message: "The user denied this tool call in the Molaro panel." };
     };
 
-    queryHandle = query({ prompt: makeInputIterable(), options });
+    const input = makeInputIterable(); // sets pushInput/closeInput synchronously
+    started = true;
     void (async () => {
       try {
+        // query() is called INSIDE the try: it can throw synchronously when the
+        // SDK runtime is unavailable (missing/wrong-platform native binary), and
+        // that must surface through the contract, not escape as an unhandled
+        // rejection (which would leave the panel hung — the bug this guards).
+        queryHandle = query({ prompt: input, options });
         for await (const msg of queryHandle) {
           if (disposed) break;
           for (const ev of mapSdkMessage(msg)) {
@@ -239,10 +283,23 @@ export function createClaudeBackend(
       } catch (e) {
         if (!disposed) {
           post({ type: "error", message: errorMessage(e) });
+          // if the SDK RUNTIME itself is unavailable (e.g. the native binary is
+          // missing / wrong platform — the assistant cannot run at all on this
+          // machine), reflect it in the status line too, so the user isn't left
+          // with a connected indicator over a dead assistant.
+          if (isRuntimeUnavailable(e)) {
+            post({ type: "auth-status", state: "disconnected", hint: RUNTIME_UNAVAILABLE_HINT });
+          }
           post({ type: "turn-complete" });
         }
       } finally {
+        // the loop only exits on error/dispose (a healthy multi-turn query never
+        // returns between turns) — reset so the NEXT message re-attempts and, on
+        // a hard runtime failure, re-reports loudly rather than silently dropping.
         active = false;
+        started = false;
+        queryHandle = null;
+        closeInput?.();
       }
     })();
   };
@@ -272,7 +329,7 @@ export function createClaudeBackend(
         return;
       }
       active = true;
-      if (!queryHandle) {
+      if (!started) {
         void startQuery().then(() => pushInput?.(userMessage(cmd.text)));
       } else {
         pushInput?.(userMessage(cmd.text));
@@ -296,8 +353,25 @@ export function createClaudeBackend(
   };
 }
 
-function errorMessage(e: unknown): string {
+export const RUNTIME_UNAVAILABLE_HINT =
+  "The assistant runtime isn't available on this platform. The Claude Agent SDK needs its " +
+  "native binary, which this build ships only for its packaged platform.";
+
+/** True when the SDK could not launch its agent runtime at all (missing/wrong
+ * platform native binary, or the executable failed to spawn) — a hard, machine-
+ * level unavailability, distinct from an auth or rate-limit error. Must surface
+ * loudly through the contract, never as a hang or silent no-op. */
+export function isRuntimeUnavailable(e: unknown): boolean {
+  const raw = (e instanceof Error ? e.message : String(e)).toLowerCase();
+  return /native cli binary|executable not found|failed to launch|pathtoclaudecodeexecutable|enoent/.test(raw);
+}
+
+export function errorMessage(e: unknown): string {
   const raw = e instanceof Error ? e.message : String(e);
+  if (isRuntimeUnavailable(e)) {
+    return `The analysis assistant can't start on this platform — ${RUNTIME_UNAVAILABLE_HINT} ` +
+      "The rest of Molaro (viewer, terminal, mods) works normally.";
+  }
   if (/api key|401|authentication|x-api-key/i.test(raw)) {
     return "Anthropic API authentication failed — check your API key (Molaro: Set Anthropic API Key).";
   }

@@ -11,10 +11,10 @@ import assert from "node:assert/strict";
 
 import {
   buildAgentOptions, buildToolDefs, configuredToolSurface, createToolServer,
-  blockedCommandReason, TOOL_NAMES, GATED_TOOLS, SDK_BUILTIN_TOOLS, qualified,
+  blockedCommandReason, TOOL_NAMES, GATED_TOOLS, DISALLOWED_TOOLS, EXPECTED_TOOL_SURFACE, qualified,
   type ToolDeps, type SceneContext,
 } from "../src/claudetools.ts";
-import { mapSdkMessage, approvalPreview, argsPreview } from "../src/claudebackend.ts";
+import { mapSdkMessage, approvalPreview, argsPreview, isRuntimeUnavailable, errorMessage, RUNTIME_UNAVAILABLE_HINT } from "../src/claudebackend.ts";
 import { buildSystemPrompt } from "../src/claudeprompt.ts";
 import { parseClaudeEvent, type ClaudeEvent } from "../webview/claudemodel.ts";
 
@@ -46,8 +46,12 @@ const text = (res: unknown): string => {
   return String(c?.[0]?.text ?? "");
 };
 
-// ---- the lockdown (the single most important test) -------------------------
-test("tool-surface lockdown: ONLY our four MCP tools, no built-ins, no external settings", () => {
+// ---- the lockdown config (the BELT; the guarantee is tests/tool_surface.test.ts) ----
+// The real allow-list guarantee is the runtime-equality test, which reads the
+// SDK's ACTUAL surface. These assert the config that produces it — and that the
+// deny-list mistake (asserting only names we remembered) is not repeated: no
+// built-in is auto-allowed, ToolSearch is disallowed, MCP is strict.
+test("lockdown config: only our two ungated tools auto-approved; built-ins + ToolSearch disallowed; MCP strict; no external settings", () => {
   const opts = buildAgentOptions({
     model: "claude-sonnet-5", apiKey: "sk-test",
     toolServer: createToolServer(mockDeps()), systemPrompt: "x",
@@ -55,20 +59,23 @@ test("tool-surface lockdown: ONLY our four MCP tools, no built-ins, no external 
   });
   const surf = configuredToolSurface(opts);
 
-  // exactly the four MCP tools exist; the two ungated are auto-allowed
+  // the four MCP tools exist; the two ungated are auto-allowed, the two gated absent
   assert.deepEqual([...TOOL_NAMES].sort(), ["get_context", "run_command", "run_mod", "write_mod"].sort());
   assert.deepEqual(
     new Set(surf.allowed),
     new Set([qualified("get_context"), qualified("run_command")]),
   );
-  // NOTHING outside our MCP namespace is allowed
+  assert.deepEqual([...EXPECTED_TOOL_SURFACE].sort(), TOOL_NAMES.map(qualified).sort());
+  // NOTHING outside our MCP namespace is auto-allowed
   for (const t of surf.allowed) assert.ok(surf.mcpTools.includes(t), `allowed "${t}" is one of ours`);
-  // every SDK built-in is explicitly disallowed — Bash/Edit/Read/Write/WebSearch and the rest
-  for (const b of ["Bash", "Edit", "Read", "Write", "WebSearch", "Grep", "Glob", "Task", "NotebookEdit"]) {
-    assert.ok(surf.disallowed.includes(b), `built-in "${b}" is disallowed`);
-    assert.ok(!surf.allowed.includes(b), `built-in "${b}" is NOT allowed`);
+  // built-ins + ToolSearch are disallowed and never auto-allowed
+  for (const b of ["Bash", "Edit", "Read", "Write", "WebSearch", "Grep", "Task", "ToolSearch"]) {
+    assert.ok(surf.disallowed.includes(b), `"${b}" is disallowed`);
+    assert.ok(!surf.allowed.includes(b), `"${b}" is NOT allowed`);
   }
-  assert.deepEqual([...SDK_BUILTIN_TOOLS].sort(), [...(opts.disallowedTools ?? [])].sort());
+  assert.deepEqual([...DISALLOWED_TOOLS].sort(), [...(opts.disallowedTools ?? [])].sort());
+  // MCP restricted to exactly the servers we pass (drops ambient connectors)
+  assert.equal((opts as { strictMcpConfig?: boolean }).strictMcpConfig, true);
   // no user/project .claude settings pulled in
   assert.deepEqual(surf.settingSources, []);
   // the key reaches the SDK only through the subprocess env
@@ -190,6 +197,25 @@ test("a failed tool_result maps to a tool-result with ok:false", () => {
   const ev = mapSdkMessage(usr as never)[0];
   assert.equal(ev.type, "tool-result");
   assert.equal((ev as { ok: boolean }).ok, false);
+});
+
+// ---- runtime-unavailable error path (Part B) -------------------------------
+test("a missing/wrong-platform native binary is detected as runtime-unavailable", () => {
+  assert.equal(isRuntimeUnavailable(new Error("Native CLI binary for darwin-arm64 not found. Reinstall …")), true);
+  assert.equal(isRuntimeUnavailable(new Error("Claude Code executable not found at …")), true);
+  assert.equal(isRuntimeUnavailable(new Error("spawn ENOENT")), true);
+  // ordinary errors are NOT runtime-unavailable
+  assert.equal(isRuntimeUnavailable(new Error("401 authentication_error")), false);
+  assert.equal(isRuntimeUnavailable(new Error("rate limit 429")), false);
+});
+
+test("runtime-unavailable maps to a clear, actionable message; auth/rate errors keep their own", () => {
+  const m = errorMessage(new Error("Native CLI binary for win32-x64 not found."));
+  assert.ok(m.includes("can't start on this platform"), m);
+  assert.ok(m.includes(RUNTIME_UNAVAILABLE_HINT.slice(0, 30)), m);
+  assert.ok(m.includes("viewer, terminal, mods) works normally"), m); // the rest still works
+  assert.match(errorMessage(new Error("401 x-api-key invalid")), /authentication failed/);
+  assert.match(errorMessage(new Error("429 rate_limit")), /rate limit/);
 });
 
 // ---- system prompt ---------------------------------------------------------

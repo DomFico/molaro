@@ -887,9 +887,15 @@ a hint. The model is set by `molaro.assistant.model` (default a current Sonnet).
 
 **The tool surface — exactly four, and nothing else.** The assistant has access
 to four in-process tools and no others — no filesystem, shell, search, or
-network. The SDK's built-in tools are disabled (`allowedTools` is our tools
-only, the built-ins are in `disallowedTools`, and no user/project `.claude`
-settings are loaded):
+network. `allowedTools` only auto-*approves*, so the lockdown is enforced by
+disallowing every non-molaro tool the SDK ships (its file/shell built-ins **and**
+the managed-agent tools it also carries — `Task`, `Cron*`, `Workflow`, `Skill`,
+`ToolSearch`, …), by `strictMcpConfig` (which drops any ambient MCP server, e.g.
+a user's claude.ai Gmail/Drive/Calendar connectors), and by loading no
+`.claude` settings. Because a deny-list can only catch names we thought to
+write down, the guarantee is a test that reads the SDK's **actual** runtime tool
+surface (the `init` message) and asserts it equals exactly our four — failing the
+moment anything else appears:
 
 | tool | approval | what it does |
 |---|---|---|
@@ -904,6 +910,12 @@ undoable and ungated, but **cannot** delete files (`rm`) or execute Python (an
 analysis mod) — those go only through the gated tools. When a mod fails, the
 producer's **traceback** is returned to the assistant so it can fix the mod and
 try again.
+
+**Platform support.** The Claude Agent SDK runs the assistant through a
+platform-native binary, so this build's assistant works on the platform the
+`.vsix` was packaged for. On an unsupported platform the assistant cannot start —
+the panel reports it plainly (`disconnected`, with an error explaining the
+platform limit); the rest of Molaro (viewer, terminal, mods) is unaffected.
 
 ## Tab completion — stateless and two-stage
 

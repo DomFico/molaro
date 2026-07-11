@@ -32,14 +32,34 @@ export const GATED_TOOLS: ToolName[] = ["write_mod", "run_mod"];
 /** The MCP-qualified name the SDK matches against `allowedTools`. */
 export const qualified = (name: ToolName): string => `mcp__${MCP_SERVER_NAME}__${name}`;
 
-/** Every built-in tool the Agent SDK can ship — named explicitly in
- * `disallowedTools` so they are stripped from the model's context entirely,
- * belt-and-suspenders with the allowedTools allowlist and the canUseTool
- * deny-by-default. */
-export const SDK_BUILTIN_TOOLS = [
+/** The EXPECTED runtime tool surface — exactly our four MCP tools and nothing
+ * else. This is the allow-list the surface test asserts EQUALITY against; any
+ * tool the SDK actually exposes beyond this set is a leak and fails the test.
+ * `allowedTools` only auto-APPROVES; it does not remove — so the guarantee is
+ * enforced by (a) disallowing every non-molaro tool below, (b) strictMcpConfig
+ * dropping ambient MCP servers, and (c) the runtime-equality test as the guard
+ * that catches anything the deny-list missed or a future SDK adds. */
+export const EXPECTED_TOOL_SURFACE: string[] = TOOL_NAMES.map(qualified);
+
+/** Every non-molaro tool the SDK can surface, named for `disallowedTools` so it
+ * is stripped from the model's context entirely. This is deliberately broad —
+ * the SDK's own file/shell built-ins (Bash/Edit/Read/…) AND the managed-agent
+ * orchestration tools it also ships (Task/Cron/Workflow/Skill/ToolSearch/…),
+ * the latter discovered only by enumerating the REAL runtime surface, not by
+ * recollection. A by-name deny-list is inherently incomplete, which is exactly
+ * why it is the BELT and the runtime-equality surface test is the guarantee:
+ * disallow suppresses today's known tools (ToolSearch included), the test fails
+ * the moment any unnamed tool appears. */
+export const DISALLOWED_TOOLS = [
+  // the SDK's file/shell/search built-ins
   "Bash", "Edit", "MultiEdit", "Write", "Read", "NotebookEdit", "NotebookRead",
-  "Glob", "Grep", "LS", "WebFetch", "WebSearch", "Task", "TodoWrite",
-  "KillShell", "BashOutput", "ExitPlanMode",
+  "Glob", "Grep", "LS", "WebFetch", "WebSearch", "TodoWrite", "KillShell",
+  "BashOutput", "ExitPlanMode", "SlashCommand", "Task", "Agent",
+  // the managed-agent orchestration tools the SDK also ships
+  "Artifact", "CronCreate", "CronDelete", "CronList", "DesignSync",
+  "EnterWorktree", "ExitWorktree", "Monitor", "PushNotification", "RemoteTrigger",
+  "ReportFindings", "ScheduleWakeup", "SendMessage", "Skill",
+  "TaskCreate", "TaskGet", "TaskList", "TaskUpdate", "ToolSearch", "Workflow",
 ];
 
 /** The live scene shape `get_context` reports, assembled host-side from the
@@ -214,9 +234,16 @@ export function buildAgentOptions(params: {
     systemPrompt: params.systemPrompt,
     // ONLY our four tools are pre-approved; the two gated ones are intentionally
     // ABSENT so canUseTool fires for them (mapped to the panel's approval gate).
+    // NOTE: allowedTools only auto-APPROVES — it does not restrict the surface;
+    // that is what disallowedTools + strictMcpConfig (below) are for.
     allowedTools: [qualified("get_context"), qualified("run_command")],
-    // Strip every built-in from the model's context entirely.
-    disallowedTools: SDK_BUILTIN_TOOLS,
+    // Strip every non-molaro tool from the model's context entirely (belt).
+    disallowedTools: DISALLOWED_TOOLS,
+    // Restrict MCP to EXACTLY the servers we pass — drop any ambient MCP server
+    // the environment would otherwise inject (e.g. the user's claude.ai
+    // connectors: Gmail, Drive, Calendar). Without this, `settingSources: []`
+    // alone does NOT stop MCP discovery.
+    strictMcpConfig: true,
     // Do NOT load the user's ~/.claude or project .claude settings — this is a
     // gated product surface, not a general coding agent.
     settingSources: [],
