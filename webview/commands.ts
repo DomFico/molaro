@@ -1037,12 +1037,17 @@ export interface CommandMacroDeps {
  * ALL-OR-NOTHING execution boundary. Refuses `rm`/mod-invocation and
  * pre-validates EVERY string before executing ANY (a parse error in the third
  * string runs zero commands, not two); a nomatch is not an error. On success
- * runs all inside one undo stroke and reports per-command outcomes. */
+ * runs all inside one undo stroke and reports per-command outcomes.
+ *
+ * If EVERY command nomatches, the summary is loud (`nomatch` status, not a
+ * cheerful `ok`): the mod addressed labels that don't exist, so nothing was
+ * written — the silent-success trap for a mod that guessed labels instead of
+ * reading `data.labels`. A PARTIAL nomatch stays a normal `ok`. */
 export function runCommandMacro(
   name: string,
   cmds: string[],
   deps: CommandMacroDeps,
-): { status: "ok" | "error"; message: string } {
+): { status: "ok" | "nomatch" | "error"; message: string } {
   // 1a. refusals — the security guarantee, before anything runs
   for (let i = 0; i < cmds.length; i++) {
     const why = commandMacroRefusal(cmds[i], deps.modNames);
@@ -1058,14 +1063,29 @@ export function runCommandMacro(
   // 2. execute all inside ONE reentrant stroke → one Ctrl+Z reverses the macro
   deps.beginStroke();
   const lines: string[] = [];
+  let matched = 0; // commands that resolved to something (status !== nomatch)
   try {
-    for (const c of cmds) lines.push(`  ${c} → ${deps.run(c).message}`);
+    for (const c of cmds) {
+      const r = deps.run(c);
+      if (r.status !== "nomatch") matched++;
+      lines.push(`  ${c} → ${r.message}`);
+    }
   } finally {
     deps.endStroke();
   }
+  const body = lines.join("\n");
+  // every command nomatched → nothing was written. Say so plainly instead of
+  // reporting success (the whole point of Part B). Reuses the existing nomatch
+  // signal — not a new error class.
+  if (cmds.length > 0 && matched === 0) {
+    return {
+      status: "nomatch",
+      message: `${name} → nothing matched: all ${cmds.length} command${cmds.length === 1 ? "" : "s"} nomatched, so nothing was written (check the target labels against data.labels):\n${body}`,
+    };
+  }
   return {
     status: "ok",
-    message: `${name} → ran ${cmds.length} command${cmds.length === 1 ? "" : "s"} (one undo stroke):\n${lines.join("\n")}`,
+    message: `${name} → ran ${cmds.length} command${cmds.length === 1 ? "" : "s"} (one undo stroke):\n${body}`,
   };
 }
 

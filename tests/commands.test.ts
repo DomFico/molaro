@@ -1414,6 +1414,32 @@ test("runCommandMacro: a nomatch is NOT an error — the rest still execute", ()
   assert.equal(calls.endStroke, 1);
 });
 
+test("runCommandMacro: EVERY command nomatches → loud nomatch summary, not cheerful ok (Part B)", () => {
+  const { calls, make } = macroTracker();
+  // validate passes (labels are grammatically fine), but at RUN time each one
+  // resolves to nothing — the guessed-label trap.
+  const pass = (): CommandResult => ({ status: "ok", message: "" });
+  const run = (): CommandResult => ({ status: "nomatch", message: "nothing matches" });
+  const r = runCommandMacro("dssp", ["colorbonds polymer.C.* red", "colorbonds polymer.D.* blue"], make(pass, run));
+  assert.equal(r.status, "nomatch", "all-nomatch is surfaced, not reported as success");
+  assert.match(r.message, /nothing matched/i);
+  assert.match(r.message, /nothing was written/i);
+  assert.match(r.message, /data\.labels/, "the message points the mod at the fix");
+  assert.equal(calls.run.length, 2, "it still ran everything — the batch is just empty of matches");
+  assert.equal(calls.beginStroke, 1);
+  assert.equal(calls.endStroke, 1, "one stroke, balanced");
+});
+
+test("runCommandMacro: a PARTIAL nomatch stays a normal ok (one match is enough)", () => {
+  const { make } = macroTracker();
+  const pass = (): CommandResult => ({ status: "ok", message: "" });
+  const run = (c: string): CommandResult =>
+    c.includes("good") ? { status: "ok", message: "colored 5 edges" } : { status: "nomatch", message: "nothing matches" };
+  const r = runCommandMacro("m", ["colorbonds good red", "colorbonds nothere blue"], make(pass, run));
+  assert.equal(r.status, "ok", "one real match keeps the macro a success");
+  assert.match(r.message, /ran 2 commands/);
+});
+
 test("runCommandMacro: all valid → runs all in ONE stroke, reports per-command outcomes", () => {
   const { calls, make } = macroTracker();
   const r = runCommandMacro("look", ["colorbonds alpha red", "colorbonds beta blue"], make());

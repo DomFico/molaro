@@ -1232,7 +1232,7 @@ async function main(): Promise<void> {
   // Follow-up terminal lines ride the commandResult channel — the terminal
   // prints every commandResult (ids are not used for printing), so an async
   // outcome is just a second line after the verb's sync "running…" one.
-  const asyncLine = (status: "ok" | "error", message: string): void => {
+  const asyncLine = (status: "ok" | "nomatch" | "error", message: string): void => {
     host.postMessage({ type: "commandResult", id: -1, status, message });
   };
   // rm: the names awaiting the terminal's y answer (armed by the verb).

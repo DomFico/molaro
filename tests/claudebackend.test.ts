@@ -327,6 +327,20 @@ test("system prompt teaches produces: commands and the colormap fact (Brief 10)"
   assert.match(p, /colorbonds polymer\.A\.ASP\*,GLU\* red/);
 });
 
+test("system prompt teaches data.labels, all-vs-@all, and the trajectory-None guard (Brief 11)", () => {
+  const p = buildSystemPrompt(sampleContext());
+  // C1 — address by data.labels, never a guessed chain label
+  assert.match(p, /data\.labels\[i\]/);
+  assert.match(p, /chr\(65 \+ chain\.index\)/, "it names the specific anti-pattern it forbids");
+  assert.match(p, /\(category, group, subgroup\)/);
+  // the worked example READS the group label from data.labels (an f-string target)
+  assert.match(p, /data\.labels\[\(target_indices or \[0\]\)\[0\]\]/);
+  // C2 — whole system is `all`, not `@all`
+  assert.match(p, /use the bare keyword `all` — not `@all`/);
+  // C3 — the trajectory can be None; guard it
+  assert.match(p, /if data\.trajectory is None:/);
+});
+
 test("system prompt without context still instructs get_context first", () => {
   assert.match(buildSystemPrompt(null), /Call get_context/);
 });

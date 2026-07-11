@@ -613,6 +613,42 @@ def compute(data, target_indices):
 Raising (or returning a wrong-shaped result) binds nothing and reports the
 reason — the fail-closed contract already described.
 
+#### The viewer's labels inside `compute`: `data.labels`
+
+A `commands` mod builds command strings, which name the viewer's **labels**
+(`polymer.A."ASP 33"`). `data.labels` gives a mod those exact strings so it
+addresses real labels instead of guessing them:
+
+```python
+data.labels[i]          # -> ("polymer", "A", "ASP 33")  — (category, group, subgroup)
+len(data.labels)        # n_points
+```
+
+`data.labels[i]` is the **category, group, and subgroup names the viewer
+displays and the address grammar matches** for point index `i`, taken from the
+header the producer already builds. It is **header-order indexed** — the same
+correspondence as `data.trajectory` and `target_indices`, so `data.labels[i]`
+describes the same atom as column `i` of `traj.xyz`. It is present for **every**
+source, the synthetic one included (labels are neutral information, not domain
+information), and is **read-only**.
+
+Use it to build targets — never infer a group label from an mdtraj chain index
+(`chr(65 + chain.index)`), which is right only by luck and silently nomatches
+the moment a chain isn't named `A`/`B`/`C`:
+
+```python
+# produces: commands — colour each chain's acidic residues, addressed by the
+# viewer's OWN group label rather than a guessed one.
+def compute(data, target_indices):
+    idx = target_indices or range(len(data.labels))
+    groups = sorted({data.labels[i][:2] for i in idx})   # {(category, group)}
+    return [f"colorbonds {cat}.{grp}.ASP*,GLU* red" for cat, grp in groups]
+```
+
+If every command a mod emits nomatches, the run reports plainly that nothing
+matched (and nothing was written) — a mod addressing labels that don't exist is
+visible, not a silent success.
+
 **What's reachable** off `data.trajectory` (standard mdtraj):
 
 - `traj.xyz` — `(n_frames, n_atoms, 3)` float32 coordinates, **in nanometers**.

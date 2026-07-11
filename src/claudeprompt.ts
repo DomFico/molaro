@@ -45,11 +45,22 @@ A mod file defines exactly one function:
         return <values>
 
 - \`data.trajectory\` is a live **mdtraj Trajectory** object, already loaded in memory.
-  Use mdtraj freely. This is the real trajectory — not a copy, not a summary.
+  Use mdtraj freely. This is the real trajectory — not a copy, not a summary. But it can
+  be \`None\` (the synthetic source has no trajectory): a mod that needs coordinates or
+  topology MUST check \`if data.trajectory is None:\` and fail closed with a clear message,
+  never assume it exists.
+- \`data.labels[i]\` is the viewer's OWN label for point (atom) \`i\`: a tuple
+  \`(category, group, subgroup)\` of the exact strings the address grammar matches — e.g.
+  \`("polymer", "A", "ASP 33")\`. Header-order indexed, same as \`target_indices\`. **When a
+  \`commands\` mod builds a target string, take the category/group/subgroup names from here —
+  never infer a chain/group label** (e.g. \`chr(65 + chain.index)\`), which is right only by
+  luck and silently nomatches the moment a chain isn't named \`A\`/\`B\`/\`C\` (the grammar
+  matches nothing and you colour nothing while reporting success). \`data.labels\` is present
+  for every system, the synthetic one included, and is read-only.
 - \`target_indices\` is a list of atom indices (ints) that the user's target resolved to,
   in trajectory atom order. An empty list means the whole system.
-- **Atom index i in \`target_indices\` is atom i in \`data.trajectory.topology\`.** This
-  correspondence is guaranteed and verified. Use it directly.
+- **Atom index i in \`target_indices\` is atom i in \`data.trajectory.topology\` and in
+  \`data.labels\`.** This correspondence is guaranteed and verified. Use it directly.
 
 Every mod declares what it \`produces\`, which determines both its return shape and where
 its result appears on screen:
@@ -84,13 +95,19 @@ a named, durable, re-runnable artifact, write a \`commands\` mod — not a scala
 it is Python with the trajectory available, it can **compute first, then emit commands**
 (e.g. compute a per-atom quantity, then \`colorpoints\` the atoms above a threshold). The
 whole list runs as ONE undo stroke; if ANY string is invalid the whole list runs nothing.
-\`rm\` and invoking another mod are refused inside it. Worked example:
+\`rm\` and invoking another mod are refused inside it. **Build every target from
+\`data.labels\`, and for the whole system use the bare keyword \`all\` — not \`@all\`.**
+Worked example (reads the group label instead of guessing it):
 
     # produces: commands
     def compute(data, target_indices):
+        # The group (chain) label is whatever the VIEWER calls it — READ it from
+        # data.labels[i] -> (category, group, subgroup). Never chr(65 + chain.index):
+        # that is wrong the moment a chain isn't named A/B/C, and nomatches silently.
+        category, group, _ = data.labels[(target_indices or [0])[0]]
         return [
-            "colorbonds polymer.A.ASP*,GLU* red",
-            "colorbonds polymer.A.LYS*,ARG*,HIS* blue",
+            f"colorbonds {category}.{group}.ASP*,GLU* red",
+            f"colorbonds {category}.{group}.LYS*,ARG*,HIS* blue",
         ]
 
 **Scalar vs. commands — different tools.** A \`per-point-scalar\` mod computes a *continuous*
@@ -223,7 +240,7 @@ export function renderContext(c: SceneContext): string {
       ? [`- Subgroup kinds (residues) — target as ${c.groups[0] ?? "<group>"}.<kind>*: ` +
          `${c.subgroupKinds.join(", ")}${c.subgroupKindsCapped ? ", … (capped)" : ""}`]
       : []),
-    `- Example targets you can use: ${c.targetExamples.join(", ") || "@all"}`,
+    `- Example targets you can use: ${c.targetExamples.join(", ") || "all"}`,
     `- Committed selections: ${c.committedSelections.replace(/\n/g, "; ") || "(none)"}`,
     "- Registered mods:",
     mods,
