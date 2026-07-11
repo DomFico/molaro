@@ -205,7 +205,9 @@ function openPanel(
     );
     terminal.webview.html = renderTerminalHtml(terminal.webview, context.extensionUri);
     terminal.webview.onDidReceiveMessage((msg: { type?: string }) => {
-      if (msg?.type === "command" || msg?.type === "complete") {
+      if (msg?.type === "command" || msg?.type === "complete" || msg?.type === "claude-bind") {
+        // claude-bind: a typed tool-result forwarded to the VIEWER, where
+        // the binding rails live (resolver, writers, command execution).
         void panel.webview.postMessage(msg);
         return;
       }
@@ -246,7 +248,10 @@ function openPanel(
       }
     } else if (msg?.type === "openTerminal") {
       openTerminal();
-    } else if (msg?.type === "commandResult" || msg?.type === "completeResult") {
+    } else if (
+      msg?.type === "commandResult" || msg?.type === "completeResult" ||
+      msg?.type === "claude-bind-result"
+    ) {
       void terminal?.webview.postMessage(msg);
     }
   });

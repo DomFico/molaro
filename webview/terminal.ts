@@ -105,6 +105,27 @@ function main(): void {
     const claudeEvent = parseClaudeEvent(e.data);
     if (claudeEvent) {
       claudePanel.handleEvent(claudeEvent);
+      // A typed result rides the same event; the transcript printed the
+      // summary above — the BINDING is a separate consumer, executed
+      // viewer-side where the rails live. Forward the RAW payload (the
+      // viewer's dispatch is the validation gate, so malformed/unknown
+      // kinds come back as binding errors, never guesses).
+      if (claudeEvent.type === "tool-result") {
+        const raw = (e.data as { result?: unknown }).result;
+        if (raw !== undefined) {
+          host.postMessage({ type: "claude-bind", callId: claudeEvent.callId, result: raw });
+        }
+      }
+      return;
+    }
+    const bindMsg = e.data as
+      | { type?: string; callId?: string; ok?: boolean; message?: string }
+      | undefined;
+    if (bindMsg?.type === "claude-bind-result") {
+      claudePanel.setBindOutcome(String(bindMsg.callId ?? ""), {
+        ok: bindMsg.ok === true,
+        message: String(bindMsg.message ?? ""),
+      });
       return;
     }
     const m = e.data as CommandResultMsg | CompleteResultMsg | undefined;

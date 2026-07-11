@@ -18,6 +18,7 @@ import {
   type CommandContext,
 } from "../webview/commands.ts";
 import { registerRecipe } from "../webview/recipes.ts";
+import { BIND_SIZE_MAX, bindTypedResult } from "../webview/claudebind.ts";
 
 function makeHeader(): Header {
   const category = [0, 0, 1];
@@ -48,6 +49,7 @@ function makeRegistry() {
   const memberOps: { name: string; mode: "add" | "remove"; entries: Entry[] }[] = [];
   const colorOps: { points: number[]; rgb: [number, number, number] }[] = [];
   const colorEachOps: { points: number[]; rgb: number[] }[] = [];
+  const eachOps: { kind: "size" | "opacity"; points: number[]; values: number[] }[] = [];
   const edgeOps: { edgeIds: number[]; rgb: [number, number, number] }[] = [];
   // a chain over the 3 points: edge 0 sits inside c0 ({0,1}); edge 1 crosses
   // the category boundary (point 1 in c0, point 2 in c1) — the contained-vs-
@@ -203,6 +205,14 @@ function makeRegistry() {
       colorEachOps.push({ points: [...points], rgb: [...rgb] });
       return points.length;
     },
+    sizePointsEach: (points, values) => {
+      eachOps.push({ kind: "size", points: [...points], values: [...values] });
+      return points.length;
+    },
+    opacityPointsEach: (points, values) => {
+      eachOps.push({ kind: "opacity", points: [...points], values: [...values] });
+      return points.length;
+    },
     edges,
     colorEdges: (edgeIds, rgb) => {
       edgeOps.push({ edgeIds: [...edgeIds], rgb });
@@ -240,8 +250,9 @@ function makeRegistry() {
   };
   return {
     registry: createCommandRegistry(ctx),
+    ctx,
     calls, commits, hiddenState, refOps, memberOps,
-    colorOps, colorEachOps, edgeOps, traceOps, sizeOps, opacityOps, sels,
+    colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, sels,
   };
 }
 
@@ -1119,4 +1130,84 @@ test("rainbow: nomatch / usage / parse errors write NOTHING", () => {
   assert.equal(parseErr.status, "error");
   assert.equal(colorEachOps.length, 0, "no path wrote anything");
   assert.ok(registry.verbs().includes("rainbow"), "registered like every verb");
+});
+
+// -- the typed-result binding (claudebind.ts) — dispatch on the stub ctx ----------
+
+function makeBinder() {
+  const made = makeRegistry();
+  const run = (raw: unknown) =>
+    bindTypedResult(made.ctx, (t) => made.registry.runCommand(t), raw);
+  return { ...made, run };
+}
+
+test("bind per-point-scalar color: header-ordered points through the built-in colormap", () => {
+  const { run, colorEachOps } = makeBinder();
+  // c0 = {0,1}: scalars 0 and 1 → the hue sweep's ends (red, magenta)
+  const out = run({ kind: "per-point-scalar", target: "c0", axis: "color", scalars: [0, 1] });
+  assert.equal(out.ok, true, out.message);
+  assert.match(out.message, /colored 2 points of "c0" from scalars/);
+  assert.equal(colorEachOps.length, 1, "one per-element write = one stroke");
+  assert.deepEqual(colorEachOps[0].points, [0, 1], "view's exact resolution order");
+  assert.deepEqual(colorEachOps[0].rgb, [1, 0, 0, 1, 0, 1], "scalar 0 → red, 1 → magenta");
+});
+
+test("bind per-point-scalar size/opacity: [0,1] maps to the axis range, per element", () => {
+  const { run, eachOps } = makeBinder();
+  const sized = run({ kind: "per-point-scalar", target: "all", axis: "size", scalars: [0, 0.5, 1] });
+  assert.equal(sized.ok, true, sized.message);
+  assert.deepEqual(eachOps[0],
+    { kind: "size", points: [0, 1, 2], values: [0, BIND_SIZE_MAX / 2, BIND_SIZE_MAX] },
+    "size: t*6 — a fixed visual range, never an interpretation");
+  const faded = run({ kind: "per-point-scalar", target: "all", axis: "opacity", scalars: [0, 0.5, 1] });
+  assert.equal(faded.ok, true, faded.message);
+  assert.deepEqual(eachOps[1],
+    { kind: "opacity", points: [0, 1, 2], values: [0, 0.5, 1] },
+    "opacity: identity — [0,1] IS its range");
+});
+
+test("bind command: runs the exact command path and changes scene state", () => {
+  const { run, commits } = makeBinder();
+  const out = run({ kind: "command", command: "create_sele c0 [assistant_pick]" });
+  assert.equal(out.ok, true, out.message);
+  assert.match(out.message, /^create_sele c0 \[assistant_pick\] → created "assistant_pick"/);
+  assert.equal(commits.length, 1, "the command really committed a selection");
+  const bad = run({ kind: "command", command: "view nothere" });
+  assert.equal(bad.ok, false, "a nomatch command is a failed binding");
+  assert.match(bad.message, /nothing matches/);
+});
+
+test("bind per-frame-series: the RESERVED placeholder — acknowledged, nothing written", () => {
+  const { run, colorEachOps, eachOps, commits } = makeBinder();
+  const out = run({ kind: "per-frame-series", label: "example_series", values: [0, 0.5, 1] });
+  assert.equal(out.ok, true);
+  assert.match(out.message, /series "example_series" received \(3 values\) — plot view not available yet/);
+  assert.equal(colorEachOps.length + eachOps.length + commits.length, 0, "wrote nothing");
+});
+
+test("bind: length mismatch writes NOTHING and errors (no partial writes)", () => {
+  const { run, colorEachOps, eachOps } = makeBinder();
+  const out = run({ kind: "per-point-scalar", target: "c0", axis: "color", scalars: [0.5] });
+  assert.equal(out.ok, false);
+  assert.match(out.message, /scalar count mismatch: 1 values for 2 points of "c0" — nothing written/);
+  const nomatch = run({ kind: "per-point-scalar", target: "nothere", axis: "size", scalars: [1] });
+  assert.equal(nomatch.ok, false);
+  assert.match(nomatch.message, /nothing matches "nothere"/);
+  assert.equal(colorEachOps.length + eachOps.length, 0, "no path wrote anything");
+});
+
+test("bind: the union is CLOSED — unknown kinds and junk error, never guess", () => {
+  const { run, colorEachOps, eachOps, commits } = makeBinder();
+  for (const raw of [
+    { kind: "per-point-vector", target: "c0", scalars: [1] },
+    { kind: "command" },                                   // missing field
+    { kind: "per-point-scalar", target: "c0", axis: "hue", scalars: [1] }, // bad axis
+    { kind: "per-point-scalar", target: "c0", axis: "color", scalars: ["x"] }, // bad values
+    null, 42, "command", {},
+  ]) {
+    const out = run(raw);
+    assert.equal(out.ok, false, JSON.stringify(raw));
+    assert.match(out.message, /unrecognized result payload/, JSON.stringify(raw));
+  }
+  assert.equal(colorEachOps.length + eachOps.length + commits.length, 0, "wrote nothing");
 });

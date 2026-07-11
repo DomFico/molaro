@@ -13,9 +13,13 @@ import {
   markDecision,
   parseClaudeCommand,
   parseClaudeEvent,
+  parseTypedResult,
+  setBindOutcome,
   type AssistantTurn,
   type ClaudeCommand,
   type ClaudeEvent,
+  type ToolResultEvent,
+  type TypedResult,
 } from "../webview/claudemodel.ts";
 import { createClaudeStub } from "../webview/claudestub.ts";
 
@@ -32,12 +36,51 @@ test("every event round-trips through the JSON wire and the parser", () => {
     { type: "approval-required", callId: "call-2", toolName: "example_tool_b", preview: "example_tool_b on subgroup-3" },
     { type: "tool-result", callId: "call-1", ok: true, summary: "example_tool_a completed on group-0" },
     { type: "tool-result", callId: "call-2", ok: false, summary: "denied — example_tool_b did not run" },
+    // typed results ride the same event — one of each kind
+    { type: "tool-result", callId: "call-3", ok: true, summary: "scalars",
+      result: { kind: "per-point-scalar", target: "#0-99", axis: "color", scalars: [0, 0.5, 1] } },
+    { type: "tool-result", callId: "call-4", ok: true, summary: "ran",
+      result: { kind: "command", command: "create_sele alpha.group-0" } },
+    { type: "tool-result", callId: "call-5", ok: true, summary: "series",
+      result: { kind: "per-frame-series", label: "example_series", values: [1, 2, 3] } },
     { type: "turn-complete" },
     { type: "error", message: "stub error — triggered by sentinel" },
   ];
   for (const ev of events) {
     assert.deepEqual(parseClaudeEvent(JSON.parse(JSON.stringify(ev))), ev, ev.type);
   }
+});
+
+test("parseTypedResult: the closed union round-trips; junk and unknown kinds are null", () => {
+  const kinds: TypedResult[] = [
+    { kind: "per-point-scalar", target: "alpha.group-0", axis: "size", scalars: [0, 1] },
+    { kind: "per-point-scalar", target: "#0-9", axis: "opacity", scalars: [] },
+    { kind: "command", command: "view alpha" },
+    { kind: "per-frame-series", label: "example_series", values: [0.25] },
+  ];
+  for (const r of kinds) {
+    assert.deepEqual(parseTypedResult(JSON.parse(JSON.stringify(r))), r, r.kind);
+  }
+  for (const junk of [
+    null, 7, "command", {},
+    { kind: "per-point-vector", target: "a", scalars: [1] },   // unknown kind
+    { kind: "per-point-scalar", target: "a", axis: "hue", scalars: [1] },
+    { kind: "per-point-scalar", target: "a", axis: "color", scalars: [Infinity] },
+    { kind: "command" },
+    { kind: "per-frame-series", label: "x", values: ["y"] },
+  ]) {
+    assert.equal(parseTypedResult(junk), null, JSON.stringify(junk));
+  }
+});
+
+test("a malformed result never poisons the event: summary parses, result is dropped", () => {
+  const ev = parseClaudeEvent({
+    type: "tool-result", callId: "c", ok: true, summary: "still prints",
+    result: { kind: "nope" },
+  }) as ToolResultEvent | null;
+  assert.ok(ev, "the event itself is valid");
+  assert.equal(ev.summary, "still prints");
+  assert.equal(ev.result, undefined, "the invalid payload is left to the binding gate");
 });
 
 test("every command round-trips through the JSON wire and the parser", () => {
@@ -118,6 +161,19 @@ test("a gated tool resolves on decision: approve → ok result, deny → error r
   }
 });
 
+test("setBindOutcome lands on the callId's block, ok or error", () => {
+  const s = createTranscript();
+  addUserMessage(s, "go");
+  applyEvent(s, { type: "tool-proposed", callId: "call-1", toolName: "example_tool_a", argsPreview: "{}" });
+  const block = (s.items[1] as AssistantTurn).blocks[0];
+  assert.equal(block.bind, null, "no binding until the viewer answers");
+  setBindOutcome(s, "call-1", { ok: true, message: "colored 100 points" });
+  assert.deepEqual(block.bind, { ok: true, message: "colored 100 points" });
+  setBindOutcome(s, "call-1", { ok: false, message: "scalar count mismatch" });
+  assert.deepEqual(block.bind, { ok: false, message: "scalar count mismatch" });
+  setBindOutcome(s, "no-such-call", { ok: true, message: "x" }); // unknown id: no-op
+});
+
 test("error renders an error item; auth-status drives the display state", () => {
   const s = createTranscript();
   assert.equal(s.auth, null);
@@ -160,16 +216,52 @@ test("stub: the scripted turn — deltas, an auto-approved tool, then a WAITING 
     "tool-proposed", "tool-result",       // auto-approved: no approval-required
     "tool-proposed", "approval-required", // gated: …and the script WAITS here
   ]);
+  // the auto tool's result carries a TYPED payload: color scalars spanning
+  // the full [0,1] over a dataset-independent #index target
+  const auto = events[5] as ToolResultEvent;
+  assert.equal(auto.result?.kind, "per-point-scalar");
+  if (auto.result?.kind === "per-point-scalar") {
+    assert.equal(auto.result.target, "#0-99");
+    assert.equal(auto.result.axis, "color");
+    assert.equal(auto.result.scalars.length, 100);
+    assert.equal(auto.result.scalars[0], 0);
+    assert.equal(auto.result.scalars[99], 1);
+  }
   const gate = events[events.length - 1] as { callId: string };
   await sleep(30);
   assert.equal(events.length, 8, "nothing more until the panel decides");
   stub.handle({ type: "approval-decision", callId: gate.callId, decision: "approve" });
   await sleep(30);
   assert.deepEqual(types().slice(8), ["tool-result", "turn-complete"]);
-  const result = events[8] as { ok: boolean; callId: string };
+  const result = events[8] as ToolResultEvent;
   assert.equal(result.ok, true);
   assert.equal(result.callId, gate.callId);
+  // approval literally gates a scene change: the approved result is a command
+  assert.deepEqual(result.result, { kind: "command", command: "create_sele alpha.group-0" });
   stub.dispose();
+});
+
+test("stub: the sentinel turns cover every result kind (size/opacity/series/mismatch)", async () => {
+  const expects: [string, (r: TypedResult | undefined) => boolean][] = [
+    ["scalar-size", (r) => r?.kind === "per-point-scalar" && r.axis === "size" &&
+      r.target === "#100-149" && r.scalars.length === 50],
+    ["scalar-opacity", (r) => r?.kind === "per-point-scalar" && r.axis === "opacity" &&
+      r.target === "#150-199" && r.scalars.length === 50],
+    ["series-demo", (r) => r?.kind === "per-frame-series" &&
+      r.label === "example_series" && r.values.length === 24],
+    ["mismatch-demo", (r) => r?.kind === "per-point-scalar" && r.target === "#0-9" &&
+      r.scalars.length === 5], // 5 values for 10 points — the no-write error path
+  ];
+  for (const [sentinel, good] of expects) {
+    const { events, stub, types } = collector();
+    stub.handle({ type: "user-message", text: `please ${sentinel} now` });
+    await sleep(50);
+    assert.deepEqual(types().slice(1),
+      ["assistant-text", "tool-proposed", "tool-result", "turn-complete"], sentinel);
+    const result = events.find((e) => e.type === "tool-result") as ToolResultEvent;
+    assert.ok(good(result.result), `${sentinel}: ${JSON.stringify(result.result)}`);
+    stub.dispose();
+  }
 });
 
 test("stub: deny yields ok:false; callIds stay unique across turns", async () => {

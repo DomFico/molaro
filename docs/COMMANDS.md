@@ -644,12 +644,33 @@ input for the verbs above — two input surfaces, one relay):
 - Assistant replies **stream** into the transcript.
 - Tool calls render as inline blocks (tool name + args preview). Some run
   directly; a **gated** tool shows **approve / deny** buttons and runs only
-  on approval (deny produces an error-styled result). Result summaries are
-  display-only text — nothing in this panel drives the viewer.
+  on approval (deny produces an error-styled result).
 - A **stop** button interrupts the in-flight turn; the input re-enables
   when the turn completes.
 - A thin status line shows the backend's connection state and hint —
   display only, no credential entry.
+
+**Typed results drive the viewer.** A tool result may carry a typed
+payload beyond its display summary; the viewer binds it on the existing
+rails and the outcome renders as an italic `⤷` line in the tool's block
+(error-styled when the binding refuses). The closed set of kinds:
+
+- **per-point scalars** — one value per point (already normalized to
+  `[0,1]`) over a target address, applied to a point axis: **color**
+  through the built-in hue colormap, **size** as `0…6` (2× the base
+  size), **opacity** as-is. `scalars[i]` matches the *i*-th point of the
+  target in header order — the same resolution `view`/`rainbow` use; a
+  count mismatch writes **nothing**. The write is one undo stroke,
+  last-write-wins, exactly like a hand-typed representation verb.
+- **command** — a command string run through the exact path a typed
+  terminal command takes (so an approved tool can, say, `create_sele` a
+  selection); undo comes from the verb itself.
+- **per-frame series** — recognized but **reserved**: the transcript
+  acknowledges it (`plot view not available yet`); its synced plot is a
+  future step.
+
+An unknown kind is an error, never a guess. Nothing beyond these three
+exists.
 
 The panel currently talks to a **scripted stub backend** (no assistant, no
 network); the real backend will replace it behind the identical message

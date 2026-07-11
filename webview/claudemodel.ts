@@ -42,13 +42,39 @@ export interface ApprovalRequiredEvent {
   toolName: string;
   preview: string;
 }
+/**
+ * The typed payload a tool-result may carry — a CLOSED union; an unknown
+ * kind is an error at the binding, never a guess. The transcript never
+ * reads it (summary stays the display string); the BINDING layer
+ * (claudebind.ts, viewer-side) is a separate consumer that turns it into
+ * scene changes on the existing rails.
+ *
+ * per-point-scalar: scalars arrive ALREADY normalized to [0,1] — the
+ * binding maps [0,1] → visual and never normalizes or interprets
+ * magnitudes. scalars[i] corresponds to the i-th point of `target`
+ * resolved in HEADER ORDER (rainbow's exact ordering contract); a length
+ * mismatch writes nothing.
+ *
+ * per-frame-series: RESERVED — recognized and acknowledged, its renderer
+ * (a synced plot) is a separate step; today it reaches a placeholder.
+ */
+export type TypedResult =
+  | { kind: "per-point-scalar"; target: string; axis: "color" | "size" | "opacity"; scalars: number[] }
+  | { kind: "command"; command: string }
+  | { kind: "per-frame-series"; label: string; values: number[] };
+
 export interface ToolResultEvent {
   type: "tool-result";
   callId: string;
   ok: boolean;
   /** OPAQUE display string — the panel shows it and does nothing else with
-   * it (binding results to the scene is a separate, future concern). */
+   * it; any scene effect comes only from `result`. */
   summary: string;
+  /** The typed payload, when the tool produced one. parseClaudeEvent
+   * attaches it only when valid; the binding dispatch re-validates the raw
+   * wire value through the SAME parseTypedResult, so malformed payloads
+   * surface as binding errors without touching the transcript. */
+  result?: TypedResult;
 }
 export interface TurnCompleteEvent {
   type: "turn-complete";
@@ -87,6 +113,34 @@ export type ClaudeCommand = UserMessageCommand | ApprovalDecisionCommand | Cance
 // place wire data becomes typed (both hosts call them — no ad-hoc casts).
 
 const isStr = (x: unknown): x is string => typeof x === "string";
+const isNumArr = (x: unknown): x is number[] =>
+  Array.isArray(x) && x.every((v) => typeof v === "number" && Number.isFinite(v));
+
+/** THE closed-union gate for typed results — the single validator both the
+ * event parser and the viewer-side binding dispatch call. Unknown kinds and
+ * malformed shapes are null (the binding turns that into an error). No
+ * range clamping: scalars are contractually [0,1] and whatever produced
+ * them owns their normalization. */
+export function parseTypedResult(x: unknown): TypedResult | null {
+  if (!x || typeof x !== "object") return null;
+  const m = x as Record<string, unknown>;
+  switch (m.kind) {
+    case "per-point-scalar":
+      return isStr(m.target) &&
+        (m.axis === "color" || m.axis === "size" || m.axis === "opacity") &&
+        isNumArr(m.scalars)
+        ? { kind: "per-point-scalar", target: m.target, axis: m.axis, scalars: m.scalars }
+        : null;
+    case "command":
+      return isStr(m.command) ? { kind: "command", command: m.command } : null;
+    case "per-frame-series":
+      return isStr(m.label) && isNumArr(m.values)
+        ? { kind: "per-frame-series", label: m.label, values: m.values }
+        : null;
+    default:
+      return null;
+  }
+}
 
 export function parseClaudeEvent(x: unknown): ClaudeEvent | null {
   if (!x || typeof x !== "object") return null;
@@ -108,10 +162,15 @@ export function parseClaudeEvent(x: unknown): ClaudeEvent | null {
       return isStr(m.callId) && isStr(m.toolName) && isStr(m.preview)
         ? { type: "approval-required", callId: m.callId, toolName: m.toolName, preview: m.preview }
         : null;
-    case "tool-result":
-      return isStr(m.callId) && typeof m.ok === "boolean" && isStr(m.summary)
-        ? { type: "tool-result", callId: m.callId, ok: m.ok, summary: m.summary }
-        : null;
+    case "tool-result": {
+      if (!(isStr(m.callId) && typeof m.ok === "boolean" && isStr(m.summary))) return null;
+      const ev: ToolResultEvent = { type: "tool-result", callId: m.callId, ok: m.ok, summary: m.summary };
+      // attach only a VALID typed result; a malformed one is still forwarded
+      // raw by the terminal and errors at the binding dispatch (same gate)
+      const typed = m.result === undefined ? null : parseTypedResult(m.result);
+      if (typed) ev.result = typed;
+      return ev;
+    }
     case "turn-complete":
       return { type: "turn-complete" };
     case "error":
@@ -148,6 +207,10 @@ export interface ToolBlock {
    * the user's decision (null while the buttons are live). */
   approval: { preview: string; decision: "approve" | "deny" | null } | null;
   result: { ok: boolean; summary: string } | null;
+  /** The viewer's binding outcome for this call's typed result (fed by the
+   * claude-bind-result transport reply, like markDecision — panel-local,
+   * not a contract event). null = no typed result / not yet bound. */
+  bind: { ok: boolean; message: string } | null;
 }
 export interface UserTurn {
   kind: "user";
@@ -200,6 +263,17 @@ export function markDecision(
   if (block?.approval) block.approval.decision = decision;
 }
 
+/** The viewer's answer to a forwarded typed result — rendered as the tool
+ * block's binding line (ok or error styling). */
+export function setBindOutcome(
+  state: TranscriptState,
+  callId: string,
+  outcome: { ok: boolean; message: string },
+): void {
+  const block = state.toolIndex.get(callId);
+  if (block) block.bind = outcome;
+}
+
 function openTurn(state: TranscriptState): AssistantTurn {
   if (!state.openTurn) {
     state.openTurn = { kind: "assistant", text: "", blocks: [] };
@@ -223,6 +297,7 @@ export function applyEvent(state: TranscriptState, ev: ClaudeEvent): void {
         argsPreview: ev.argsPreview,
         approval: null,
         result: null,
+        bind: null,
       };
       openTurn(state).blocks.push(block);
       state.toolIndex.set(ev.callId, block);

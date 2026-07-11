@@ -71,6 +71,9 @@ export const TERMINAL_CSS = /* css */ `
   .cl-result { margin-top: 4px; }
   .cl-result.ok { color: #bfffe4; }
   .cl-result.err { color: #e8a9a9; }
+  .cl-bind { margin-top: 2px; font-style: italic; }
+  .cl-bind.ok { color: #9fbde8; }
+  .cl-bind.err { color: #e8a9a9; }
   .cl-error { color: #e8a9a9; border: 1px solid #6a3a3a; border-radius: 3px;
     padding: 4px 8px; background: #2a2022; white-space: pre-wrap; }
   #claude-inputrow { flex: none; display: flex; align-items: center; gap: 6px;

@@ -3946,7 +3946,7 @@ async function S23(): Promise<void> {
     let blocks = await toolBlocks();
     check("S23: the auto-approved tool: proposed→ok result, NO approval row",
       blocks[0]?.head === "example_tool_a" && !blocks[0]?.approval &&
-        blocks[0]?.result === "example_tool_a completed on group-0" &&
+        blocks[0]?.result === "example_tool_a produced 100 color scalars" &&
         /\bok\b/.test(blocks[0]?.resultCls ?? ""),
       JSON.stringify(blocks[0]));
     check("S23: the gated tool renders live approve/deny and NO result yet",
@@ -3960,7 +3960,7 @@ async function S23(): Promise<void> {
     await sleep(250);
     blocks = await toolBlocks();
     check("S23: approve → ok-styled result on the gated block",
-      blocks[1]?.result === "example_tool_b completed on subgroup-3" &&
+      blocks[1]?.result === "example_tool_b ran create_sele alpha.group-0" &&
         /\bok\b/.test(blocks[1]?.resultCls ?? "") && blocks[1]?.buttons === 0,
       JSON.stringify(blocks[1]));
     check("S23: turn-complete re-enables the input, hides cancel",
@@ -4028,9 +4028,244 @@ async function S23(): Promise<void> {
   }, 1180, 780, "/terminal");
 }
 
+async function S24(): Promise<void> {
+  console.log("S24 — typed results drive the viewer (per-point scalars + command through claude-bind)");
+
+  // ---- part 1, the "/" route: the viewer-side binding itself — writes, undo,
+  // mapping, error paths, and the MANDATORY pixel proof. claude-bind messages
+  // are injected through the same message path the relay delivers them on.
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const snap = (slot: string, buf = "color") =>
+      d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.${buf}))`);
+    const buffersEqual = (slot: string, buf = "color") =>
+      d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.${buf}, s=window.${slot};
+        if (c.length !== s.length) return false;
+        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) return false;
+        return true;
+      })()`);
+    // capture the viewer's claude-bind-result replies (the shim loops them back)
+    await d.evaluate(`void (window.__binds = [],
+      window.addEventListener('message', (e) => {
+        if (e.data?.type === 'claude-bind-result') window.__binds.push(e.data);
+      }))`);
+    const bind = async (result: string): Promise<{ ok: boolean; message: string }> => {
+      const n = await d.evaluate<number>(`window.__binds.length`);
+      await d.evaluate(`window.dispatchEvent(new MessageEvent('message', { data:
+        { type: 'claude-bind', callId: 'probe', result: ${result} } }))`);
+      await sleep(120);
+      return d.evaluate(`window.__binds[${n}]`);
+    };
+
+    await snap("__pristine");
+    const baseDepth = await undoDepth();
+
+    // -- per-point-scalar color: header-ordered write through the built-in colormap
+    let out = await bind(`{ kind: 'per-point-scalar', target: '#0-99', axis: 'color',
+      scalars: Array.from({length:100},(_,i)=>i/99) }`);
+    check("S24: color scalars bind ok with the action message",
+      out.ok === true && out.message === `colored 100 points of "#0-99" from scalars`,
+      JSON.stringify(out));
+    const audit = await d.evaluate<{ changed: number; exact: boolean; first: number[]; last: number[] }>(`(()=>{
+      const v=${V}; const c=v.rep.state.color; const s=window.__pristine;
+      const changed=[];
+      for (let p=0;p<c.length/3;p++) {
+        if (c[3*p]!==s[3*p]||c[3*p+1]!==s[3*p+1]||c[3*p+2]!==s[3*p+2]) changed.push(p);
+      }
+      const rgb=(p)=>[c[3*p],c[3*p+1],c[3*p+2]];
+      return { changed: changed.length,
+               exact: changed.every((p,i)=>p===i) && changed.length===100,
+               first: rgb(0), last: rgb(99) };
+    })()`);
+    check("S24: EXACTLY the 100 resolved points changed, scalar[i] → point i (header order)",
+      audit.exact, JSON.stringify(audit));
+    check("S24: scalar 0 → red, scalar 1 → magenta (the built-in colormap's ends)",
+      audit.first[0] === 1 && audit.first[1] === 0 && audit.first[2] === 0 &&
+        audit.last[0] === 1 && audit.last[1] === 0 && audit.last[2] === 1,
+      JSON.stringify(audit));
+    check("S24: the bind is exactly ONE undo stroke", (await undoDepth()) === baseDepth + 1);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S24: one Ctrl+Z reverses the typed-result change completely",
+      (await buffersEqual("__pristine")) && (await undoDepth()) === baseDepth);
+
+    // -- size and opacity: [0,1] → axis range, per element ----------------------
+    await snap("__preSize", "size");
+    out = await bind(`{ kind: 'per-point-scalar', target: '#100-149', axis: 'size',
+      scalars: Array.from({length:50},(_,i)=>i/49) }`);
+    check("S24: size scalars bind ok", out.ok === true, JSON.stringify(out));
+    check("S24: size maps t → t*6 per element (0..2× base)",
+      await d.evaluate<boolean>(`(()=>{
+        const s=${V}.rep.state.size;
+        for (let i=0;i<50;i++) {
+          if (s[100+i] !== Math.fround((i/49)*6)) return false;
+        }
+        return s[99]===Math.fround(3) && s[150]===Math.fround(3); // neighbors untouched
+      })()`));
+    out = await bind(`{ kind: 'per-point-scalar', target: '#150-199', axis: 'opacity',
+      scalars: Array.from({length:50},(_,i)=>i/49) }`);
+    check("S24: opacity scalars bind ok and map IDENTITY ([0,1] is the range)",
+      out.ok === true && await d.evaluate<boolean>(`(()=>{
+        const o=${V}.rep.state.opacity;
+        for (let i=0;i<50;i++) if (o[150+i] !== Math.fround(i/49)) return false;
+        return o[149]===Math.fround(1) && o[200]===Math.fround(1);
+      })()`), JSON.stringify(out));
+    await d.ctrlZ(); // pop opacity
+    await d.ctrlZ(); // pop size
+    await sleep(120);
+    check("S24: the scalar strokes unwind cleanly", await buffersEqual("__preSize", "size"));
+
+    // -- command: the exact typed-command path, undo from the verb --------------
+    const committedBefore = await d.evaluate<number>(`${V}.model.committed().length`);
+    out = await bind(`{ kind: 'command', command: 'create_sele alpha.group-0' }`);
+    check("S24: a command result runs through the command layer and changes the scene",
+      out.ok === true && /^create_sele alpha\.group-0 → created "selection_\d+"/.test(out.message) &&
+        (await d.evaluate<number>(`${V}.model.committed().length`)) === committedBefore + 1,
+      JSON.stringify(out));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S24: …and the verb's own undo reverses it",
+      (await d.evaluate<number>(`${V}.model.committed().length`)) === committedBefore);
+
+    // -- the reserved series placeholder + the error paths ----------------------
+    await snap("__quiet");
+    const depthQuiet = await undoDepth();
+    out = await bind(`{ kind: 'per-frame-series', label: 'example_series',
+      values: Array.from({length:24},(_,i)=>i/23) }`);
+    check("S24: per-frame-series reaches the RESERVED placeholder (no view yet)",
+      out.ok === true &&
+        out.message === `series "example_series" received (24 values) — plot view not available yet`,
+      JSON.stringify(out));
+    out = await bind(`{ kind: 'per-point-scalar', target: '#0-9', axis: 'color',
+      scalars: [0, 0.25, 0.5, 0.75, 1] }`);
+    check("S24: a scalar-count mismatch errors and writes NOTHING",
+      out.ok === false &&
+        out.message === `scalar count mismatch: 5 values for 10 points of "#0-9" — nothing written`,
+      JSON.stringify(out));
+    out = await bind(`{ kind: 'per-point-vector', target: '#0-9', scalars: [1] }`);
+    check("S24: an unknown kind is an error, never a guess",
+      out.ok === false && /unrecognized result payload \(kind "per-point-vector"\)/.test(out.message),
+      JSON.stringify(out));
+    out = await bind(`{ kind: 'per-point-scalar', target: 'nothere', axis: 'color', scalars: [] }`);
+    check("S24: a nomatch target is the resolver's own message",
+      out.ok === false && /nothing matches "nothere"/.test(out.message), JSON.stringify(out));
+    check("S24: …none of them wrote or pushed anything",
+      (await buffersEqual("__quiet")) && (await undoDepth()) === depthQuiet);
+
+    // -- the MANDATORY pixel proof: bound colors reach the GPU ------------------
+    await bind(`{ kind: 'per-point-scalar', target: '#0-99', axis: 'color',
+      scalars: Array.from({length:100},(_,i)=>i/99) }`);
+    await cmd("hide @solvent");
+    await cmd("bondopacity #0-99 0"); // edge lines pollute sprite-center samples
+    await cmd("traceopacity alpha 0");
+    await cmd("view #0-99");
+    await sleep(1400); // camera tween settles
+    const pts = await d.evaluate<number[]>(`${V}.debug.resolvePoints("#0-99")`);
+    const pA = pts[0]; // scalar 0 → red
+    const pB = pts[40]; // scalar ≈0.4 → green
+    await cmd(`pointsize #${pA} 12`);
+    await cmd(`pointsize #${pB} 12`);
+    const proj = await d.evaluate<{ a: { x: number; y: number; front: boolean }; b: { x: number; y: number; front: boolean } }>(
+      `({ a: ${V}.debug.projectPoint(${pA}), b: ${V}.debug.projectPoint(${pB}) })`);
+    check("S24: both sample points project on-screen, apart",
+      proj.a.front && proj.b.front &&
+        Math.hypot(proj.a.x - proj.b.x, proj.a.y - proj.b.y) > 12, JSON.stringify(proj));
+    await sleep(200);
+    const shot = await d.captureB64(`${REPORT}/S24_pixels.png`);
+    const px = await d.evaluate<{ a: number[]; b: number[] }>(`(async () => {
+      const img = new Image();
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${shot}"; });
+      const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+      const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+      const at = (x, y) => [...g.getImageData(Math.round(x), Math.round(y), 1, 1).data.slice(0, 3)];
+      return { a: at(${proj.a.x}, ${proj.a.y}), b: at(${proj.b.x}, ${proj.b.y}) };
+    })()`);
+    check("S24: the bound ramp RENDERS — start red-dominant",
+      px.a[0] > px.a[1] + 60 && px.a[0] > px.a[2] + 60, JSON.stringify(px));
+    check("S24: …and the mid point renders a DIFFERENT, green-dominant color",
+      px.b[1] > px.b[0] + 60 && px.b[1] > px.b[2] + 40, JSON.stringify(px));
+  });
+
+  // ---- part 2, the "/terminal" route: the full pipe — stub result → panel
+  // transcript → forwarded bind → viewer state → outcome line in the block.
+  await withDriver(async (d) => {
+    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+    const typeInto = async (id: string, text: string): Promise<void> => {
+      const r = await d.evaluate<{ x: number; y: number }>(`(()=>{
+        const b=${el(id)}.getBoundingClientRect();
+        return {x:b.left+b.width/2, y:b.top+b.height/2};
+      })()`);
+      await d.click(r.x, r.y);
+      await d.insertText(text);
+      await d.key("Enter", "Enter", 13);
+    };
+    const bindLines = () =>
+      d.evaluate<{ cls: string; text: string }[]>(
+        `[...document.querySelectorAll('#claude-transcript .cl-bind')]
+          .map(n=>({cls:n.className, text:n.textContent}))`);
+
+    await typeInto("term-input", "/claude");
+    await sleep(150);
+    await typeInto("claude-input", "look at the target");
+    await sleep(700); // stream + auto tool + gate
+    let lines = await bindLines();
+    check("S24: the auto tool's color result binds THROUGH THE PIPE (outcome line in its block)",
+      lines[0]?.text === `⤷ colored 100 points of "#0-99" from scalars` &&
+        /\bok\b/.test(lines[0]?.cls ?? ""), JSON.stringify(lines));
+    check("S24: …and the viewer's buffer really changed (varying per element)",
+      await d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.color;
+        return (c[0]!==c[3*99]||c[1]!==c[3*99+1]||c[2]!==c[3*99+2]);
+      })()`));
+    const committedBefore = await d.evaluate<number>(`${V}.model.committed().length`);
+    await d.evaluate(`[...document.querySelectorAll('.cl-approve')].at(-1).click()`);
+    await sleep(350);
+    lines = await bindLines();
+    check("S24: the APPROVED command result creates a selection in the viewer",
+      (await d.evaluate<number>(`${V}.model.committed().length`)) === committedBefore + 1 &&
+        /^⤷ create_sele alpha\.group-0 → created "selection_\d+"/.test(lines[1]?.text ?? ""),
+      JSON.stringify(lines));
+
+    await typeInto("claude-input", "please series-demo now");
+    await sleep(500);
+    lines = await bindLines();
+    check("S24: the series result reaches the reserved placeholder line",
+      lines[2]?.text === `⤷ series "example_series" received (24 values) — plot view not available yet` &&
+        /\bok\b/.test(lines[2]?.cls ?? ""), JSON.stringify(lines[2]));
+
+    const sizeSnap = await d.evaluate<string>(`JSON.stringify([...${V}.rep.state.size.slice(0, 220)])`);
+    await d.evaluate(`void (window.__preMismatch = Float32Array.from(${V}.rep.state.color))`);
+    await typeInto("claude-input", "please mismatch-demo now");
+    await sleep(500);
+    lines = await bindLines();
+    check("S24: the mismatch result renders an ERROR outcome and writes nothing",
+      lines[3]?.text === `⤷ scalar count mismatch: 5 values for 10 points of "#0-9" — nothing written` &&
+        /\berr\b/.test(lines[3]?.cls ?? "") &&
+        (await d.evaluate<boolean>(`(()=>{
+          const c=${V}.rep.state.color, s=window.__preMismatch;
+          for (let i=0;i<c.length;i++) if (c[i]!==s[i]) return false;
+          return true;
+        })()`)), JSON.stringify(lines[3]));
+
+    await typeInto("claude-input", "please scalar-size now");
+    await sleep(500);
+    check("S24: the size sentinel binds through the pipe (t*6 at #100-149)",
+      await d.evaluate<boolean>(`(()=>{
+        const s=${V}.rep.state.size;
+        for (let i=0;i<50;i++) if (s[100+i] !== Math.fround((i/49)*6)) return false;
+        return true;
+      })()`) && sizeSnap !== await d.evaluate<string>(`JSON.stringify([...${V}.rep.state.size.slice(0, 220)])`));
+
+    await d.screenshot(`${REPORT}/S24_pipe.png`);
+  }, 1180, 780, "/terminal");
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

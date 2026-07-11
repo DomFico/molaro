@@ -135,6 +135,12 @@ export interface CommandContext {
    * points' order. Same buffer, same one-stroke recordOp discipline, same
    * LWW and GPU sync as colorPoints; only the value shape differs. */
   colorPointsEach(points: readonly number[], rgb: readonly number[]): number;
+  /** The per-element siblings on the other two point axes — same factory,
+   * same discipline (one stroke, LWW, own buffer, GPU sync); `values` is
+   * one value per point in the points' order. Consumed by the typed-result
+   * binding (claudebind.ts); no verb writes through these yet. */
+  sizePointsEach(points: readonly number[], values: readonly number[]): number;
+  opacityPointsEach(points: readonly number[], values: readonly number[]): number;
   /** The contract's edge list — endpoint point-index pairs, in header order.
    * colorbonds/colorbondsof test these endpoints against the resolved point
    * set; edge ids (indexes into this list) key the edge-color buffer. */
@@ -580,8 +586,9 @@ function resolveRepArgs<T>(
  * included): view's EXACT resolution and dedupe, factored out of
  * resolveRepArgs so verbs WITHOUT a trailing value token (the recipes) hit
  * the same code, never a re-implementation. Errors/nomatch come back as the
- * CommandResult. */
-function resolveTargetPoints(
+ * CommandResult. Exported for the typed-result binding (claudebind.ts) —
+ * the same header-ordered point set, never a local copy. */
+export function resolveTargetPoints(
   ctx: CommandContext,
   expr: string,
 ): { points: number[] } | CommandResult {
@@ -1324,7 +1331,8 @@ export const HELP_TEXT = [
   "               (author · source, display-only; recipes, not verbs)",
   "  rename @name [new]  rename a selection · clear  wipe the terminal log",
   "  /claude      toggle the conversation panel above the terminal (its own",
-  "               input; tool calls gate on approve/deny; stub backend today)",
+  "               input; tool calls gate on approve/deny; typed results drive",
+  "               the view — per-point scalars/commands; stub backend today)",
   "  add @name <tree-target>     add tree entries as members (natural level)",
   "  remove @name <member-pred>  drop matched STORED members (never carves);",
   "               remove @name all = empty it (it remains) · remove @name =",

@@ -40,6 +40,7 @@ import { flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
 import { createCommandRegistry, makeRunComplete, type CommandResult } from "./commands.ts";
+import { bindTypedResult } from "./claudebind.ts";
 import { parseTarget, resolveTarget, type Completion } from "./address.ts";
 import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
 import { pickPoint, selectionBounds } from "./picking.ts";
@@ -481,8 +482,17 @@ async function main(): Promise<void> {
     candidates: [],
     applied: "",
   });
+  // Typed tool-results forwarded from the conversation panel (claude-bind);
+  // rebound onto the real binding once the command context exists below.
+  let bindResult: (raw: unknown) => { ok: boolean; message: string } = () => ({
+    ok: false,
+    message: "viewer is still loading",
+  });
   window.addEventListener("message", (e: MessageEvent) => {
-    const msg = e.data as { type?: string; id?: number; text?: string; cursor?: number };
+    const msg = e.data as {
+      type?: string; id?: number; text?: string; cursor?: number;
+      callId?: string; result?: unknown;
+    };
     if (msg?.type === "command") {
       const result = runCommand(String(msg.text ?? ""));
       host.postMessage({ type: "commandResult", id: msg.id, ...result });
@@ -491,6 +501,11 @@ async function main(): Promise<void> {
     if (msg?.type === "complete") {
       const result = runComplete(String(msg.text ?? ""), Number(msg.cursor ?? 0));
       host.postMessage({ type: "completeResult", id: msg.id, ...result });
+      return;
+    }
+    if (msg?.type === "claude-bind") {
+      const outcome = bindResult(msg.result);
+      host.postMessage({ type: "claude-bind-result", callId: msg.callId, ...outcome });
       return;
     }
     transport.handleMessage(e.data);
@@ -1152,6 +1167,8 @@ async function main(): Promise<void> {
   const fillEdgesHook = (): void => parts.fillEdges();
   const colorPoints = makeRepWriter(rep.state.color, 3, repDirty);
   const colorPointsEach = makeRepEachWriter(rep.state.color, 3, repDirty);
+  const sizePointsEach = makeRepEachWriter(rep.state.size, 1, repDirty);
+  const opacityPointsEach = makeRepEachWriter(rep.state.opacity, 1, repDirty);
   const sizePoints = makeRepWriter(rep.state.size, 1, repDirty);
   const opacityPoints = makeRepWriter(rep.state.opacity, 1, repDirty);
   const colorEdges = makeRepWriter(rep.state.edgeColor, 3, fillEdgesHook);
@@ -1187,6 +1204,8 @@ async function main(): Promise<void> {
     deleteSelections,
     colorPoints,
     colorPointsEach,
+    sizePointsEach,
+    opacityPointsEach,
     edges: header.edges,
     colorEdges,
     traceVertices,
@@ -1201,6 +1220,7 @@ async function main(): Promise<void> {
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);
   runComplete = makeRunComplete(commandContext, commands);
+  bindResult = (raw: unknown) => bindTypedResult(commandContext, runCommand, raw);
   document.getElementById("terminal-btn")?.addEventListener("click", () => {
     host.postMessage({ type: "openTerminal" });
   });

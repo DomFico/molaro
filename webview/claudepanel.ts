@@ -17,6 +17,7 @@ import {
   applyEvent,
   createTranscript,
   markDecision,
+  setBindOutcome,
   type ClaudeCommand,
   type ClaudeEvent,
   type TranscriptItem,
@@ -26,6 +27,9 @@ export interface ClaudePanel {
   toggle(): void;
   isOpen(): boolean;
   handleEvent(ev: ClaudeEvent): void;
+  /** The viewer's claude-bind-result reply for a call's typed result —
+   * renders as the tool block's binding line. */
+  setBindOutcome(callId: string, outcome: { ok: boolean; message: string }): void;
 }
 
 export function mountClaudePanel(send: (cmd: ClaudeCommand) => void): ClaudePanel {
@@ -106,6 +110,12 @@ export function mountClaudePanel(send: (cmd: ClaudeCommand) => void): ClaudePane
         res.textContent = block.result.summary;
         b.appendChild(res);
       }
+      if (block.bind) {
+        const bind = document.createElement("div");
+        bind.className = `cl-bind ${block.bind.ok ? "ok" : "err"}`;
+        bind.textContent = `⤷ ${block.bind.message}`;
+        b.appendChild(bind);
+      }
       wrap.appendChild(b);
     }
     return wrap;
@@ -157,6 +167,10 @@ export function mountClaudePanel(send: (cmd: ClaudeCommand) => void): ClaudePane
     },
     handleEvent(ev: ClaudeEvent): void {
       applyEvent(state, ev);
+      render();
+    },
+    setBindOutcome(callId: string, outcome: { ok: boolean; message: string }): void {
+      setBindOutcome(state, callId, outcome);
       render();
     },
   };

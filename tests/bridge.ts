@@ -143,7 +143,8 @@ const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* ht
               // the page, where terminal.ts's harness glue feeds the SAME
               // stub module (see __TERMINAL_HARNESS__ below).
               msg.type === "user-message" || msg.type === "approval-decision" ||
-              msg.type === "cancel" || msg.type === "claude-ready") {
+              msg.type === "cancel" || msg.type === "claude-ready" ||
+              msg.type === "claude-bind" || msg.type === "claude-bind-result") {
             setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: msg })), 0);
             return;
           }
