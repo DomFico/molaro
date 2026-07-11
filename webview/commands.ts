@@ -26,7 +26,7 @@ import {
   type TargetAst,
 } from "./address.ts";
 import type { TreeModel } from "./classification.ts";
-import { getRecipe } from "./recipes.ts";
+import { getRecipe, listRecipes, type Recipe, type RecipeOrigin } from "./recipes.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
 
 export type CommandStatus = "ok" | "nomatch" | "error";
@@ -1018,6 +1018,45 @@ export function makeLsHandler(ctx: CommandContext): CommandHandler {
   };
 }
 
+/**
+ * `mods` — READ-ONLY listing of the RECIPE REGISTRY (no state, no undo):
+ * the vocabulary-side parallel to `ls` (ls lists committed selections —
+ * scene state; mods lists the registered recipes — vocabulary state). One
+ * line per recipe, grouped by origin, showing name, axis, and credit
+ * (author/source when present — DISPLAY-ONLY opaque strings; nothing
+ * resolves or fetches them). Bare only: it inspects the vocabulary, not
+ * the scene, so any argument is a usage error. Recipes only — the built-in
+ * command verbs stay with help/?.
+ */
+export function makeModsHandler(): CommandHandler {
+  const recipeLine = (r: Recipe): string => {
+    let line = `  ${r.name} — ${r.axis}`;
+    if (r.author) line += ` · by ${r.author}`;
+    if (r.source) line += ` · ${r.source}`;
+    return line;
+  };
+  return (args: string): CommandResult => {
+    if (args !== "") {
+      return { status: "error", message: "mods takes no arguments — it lists the recipe registry" };
+    }
+    const all = listRecipes();
+    if (all.length === 0) return { status: "ok", message: "no recipes" };
+    // group by origin, first-seen order; registration order within a group
+    const byOrigin = new Map<RecipeOrigin, Recipe[]>();
+    for (const r of all) {
+      const group = byOrigin.get(r.origin);
+      if (group) group.push(r);
+      else byOrigin.set(r.origin, [r]);
+    }
+    const lines: string[] = [];
+    for (const [origin, group] of byOrigin) {
+      lines.push(`${origin}:`);
+      for (const r of group) lines.push(recipeLine(r));
+    }
+    return { status: "ok", message: capLines(lines, "recipes") };
+  };
+}
+
 /** `rename @name [new]` — exactly one committed selection, bracketed new
  * name, routed through the model's unique-name rename (one undo op, exact
  * parity with the panel's inline rename). */
@@ -1281,6 +1320,8 @@ export const HELP_TEXT = [
   "               resolution order (the first recipe: per-point values,",
   "               not one constant; one undo stroke)",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
+  "  mods         list the recipe registry: name, axis, origin, and credit",
+  "               (author · source, display-only; recipes, not verbs)",
   "  rename @name [new]  rename a selection · clear  wipe the terminal log",
   "  add @name <tree-target>     add tree entries as members (natural level)",
   "  remove @name <member-pred>  drop matched STORED members (never carves);",
@@ -1396,6 +1437,11 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "ls",
     makeLsHandler(ctx),
     "read-only listing: ls = selections · ls @name = its members · ls <path> = a node's contents",
+  );
+  registry.register(
+    "mods",
+    makeModsHandler(),
+    "read-only listing of the recipe registry: each recipe's name, axis, origin, and credit (bare — takes no target)",
   );
   registry.register(
     "rename",

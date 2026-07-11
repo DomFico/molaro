@@ -3838,9 +3838,44 @@ async function S21(): Promise<void> {
   });
 }
 
+async function S22(): Promise<void> {
+  console.log("S22 — mods: the recipe registry read-face (attribution, grouped by origin)");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+
+    const baseDepth = await undoDepth();
+    const r = await cmd("mods");
+    check("S22: mods lists the registry", r.status === "ok", JSON.stringify(r));
+    const lines = (r.message ?? "").split("\n");
+    check("S22: recipes are grouped under their origin header",
+      lines[0] === "built-in:", JSON.stringify(lines));
+    check("S22: rainbow's line carries name, axis, and the FULL credit",
+      lines[1] === "  rainbow — point-color · by Dominic Fico · https://github.com/DomFico/molaro",
+      JSON.stringify(lines));
+    check("S22: recipes ONLY — no command verbs in the listing",
+      !r.message.includes("colorpoints") && !r.message.includes("create_sele"),
+      r.message);
+
+    const stray = await cmd("mods rainbow");
+    check("S22: stray arguments are the usage error, nothing listed",
+      stray.status === "error" &&
+        stray.message === "mods takes no arguments — it lists the recipe registry",
+      JSON.stringify(stray));
+    check("S22: read-only — neither call touched the undo stack",
+      (await undoDepth()) === baseDepth);
+
+    const helped = await cmd("help mods");
+    check("S22: help mods describes the verb through the registry",
+      helped.status === "ok" && /recipe registry/.test(helped.message),
+      JSON.stringify(helped));
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

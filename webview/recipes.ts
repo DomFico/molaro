@@ -18,6 +18,11 @@
  * Pure module: no DOM, no Three — unit-tested directly under `node --test`.
  */
 
+/** Where a recipe came from. Only "built-in" exists today; the union is
+ * shaped to admit future origins (e.g. "user", "community") without a
+ * migration — `mods` groups its listing by this field. */
+export type RecipeOrigin = "built-in";
+
 export interface Recipe {
   name: string;
   /** The buffer family the recipe writes. Only the point-color axis exists
@@ -28,6 +33,14 @@ export interface Recipe {
   compute(points: readonly number[]): number[];
   /** scalar in [0,1] → RGB, each component in [0,1]. */
   colormap(t: number): [number, number, number];
+  /** Attribution / provenance — DISPLAY-ONLY credit `mods` lists. Nothing
+   * anywhere resolves, fetches, validates, or acts on these strings. */
+  origin: RecipeOrigin;
+  /** Opaque display string: who authored the recipe. */
+  author?: string;
+  /** Opaque display string: where the recipe came from (e.g. a repository
+   * URL). NEVER fetched — credit, not a reference. */
+  source?: string;
 }
 
 /** Pure HSV → RGB (h in degrees, s/v in [0,1]; returns RGB in [0,1]). */
@@ -57,6 +70,9 @@ export const rainbow: Recipe = {
   axis: "point-color",
   compute: (points) => points.map((_, i) => i / Math.max(points.length - 1, 1)),
   colormap: (t) => hsvToRgb(t * RAINBOW_HUE_MAX, 1, 1),
+  origin: "built-in",
+  author: "Dominic Fico",
+  source: "https://github.com/DomFico/molaro",
 };
 
 // -- the in-memory recipe registry (storage only) -------------------------------
@@ -69,6 +85,12 @@ export function registerRecipe(recipe: Recipe): void {
 
 export function getRecipe(name: string): Recipe | undefined {
   return recipes.get(name);
+}
+
+/** Every registered recipe, in registration order — the read accessor the
+ * `mods` listing enumerates through. */
+export function listRecipes(): Recipe[] {
+  return [...recipes.values()];
 }
 
 registerRecipe(rainbow);

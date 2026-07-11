@@ -627,6 +627,19 @@ try {
       lastLine?.text === "rainbow needs a target — rainbow <target> (e.g. rainbow alpha.group-0)",
     JSON.stringify(lastLine));
 
+  // the recipe registry read-face through the real relay
+  lastLine = await runLine("mods");
+  check("mods lists the registry grouped by origin, with rainbow's credit",
+    /term-ok/.test(lastLine?.cls ?? "") &&
+      lastLine?.text ===
+        "built-in:\n  rainbow — point-color · by Dominic Fico · https://github.com/DomFico/molaro",
+    JSON.stringify(lastLine));
+  lastLine = await runLine("mods rainbow");
+  check("mods with stray arguments is the usage error",
+    /term-err/.test(lastLine?.cls ?? "") &&
+      lastLine?.text === "mods takes no arguments — it lists the recipe registry",
+    JSON.stringify(lastLine));
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();

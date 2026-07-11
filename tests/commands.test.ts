@@ -17,6 +17,7 @@ import {
   parseSize,
   type CommandContext,
 } from "../webview/commands.ts";
+import { registerRecipe } from "../webview/recipes.ts";
 
 function makeHeader(): Header {
   const category = [0, 0, 1];
@@ -1054,6 +1055,56 @@ test("rainbow: full grammar rides the shared resolve core (@name, all, leaf)", (
   assert.equal(registry.runCommand("rainbow c0.g0.s0.a").message, "colored 1 points rainbow");
   assert.deepEqual(colorEachOps[1], { points: [0], rgb: [1, 0, 0] });
   assert.equal(registry.runCommand("rainbow all").message, "colored 3 points rainbow");
+});
+
+test("mods: lists the registry — rainbow grouped under built-in with its credit", () => {
+  const { registry } = makeRegistry();
+  const r = registry.runCommand("mods");
+  assert.equal(r.status, "ok");
+  const lines = r.message.split("\n");
+  assert.ok(lines.includes("built-in:"), "grouped by origin");
+  assert.ok(
+    lines.includes("  rainbow — point-color · by Dominic Fico · https://github.com/DomFico/molaro"),
+    r.message);
+  assert.ok(lines.indexOf("built-in:") < lines.findIndex((l) => l.startsWith("  rainbow")),
+    "recipe rows sit under their origin header");
+  assert.ok(!r.message.includes("colorpoints") && !r.message.includes("view"),
+    "recipes only — verb discoverability stays with help/?");
+});
+
+test("mods: attribution renders for ANY recipe's credit; author/source stay optional", () => {
+  // a stub with distinct provenance strings proves the credit display isn't
+  // rainbow-specific; a bare stub pins that credit fields are optional
+  registerRecipe({
+    name: "stub-credit",
+    axis: "point-color",
+    compute: (points) => points.map(() => 0),
+    colormap: () => [0, 0, 0],
+    origin: "built-in",
+    author: "Stub Author",
+    source: "stub-source-string",
+  });
+  registerRecipe({
+    name: "stub-plain",
+    axis: "point-color",
+    compute: (points) => points.map(() => 0),
+    colormap: () => [0, 0, 0],
+    origin: "built-in",
+  });
+  const { registry } = makeRegistry();
+  const lines = registry.runCommand("mods").message.split("\n");
+  assert.ok(lines.includes("  stub-credit — point-color · by Stub Author · stub-source-string"),
+    lines.join("|"));
+  assert.ok(lines.includes("  stub-plain — point-color"), "no credit fields → the bare line");
+});
+
+test("mods: stray arguments are a usage error, nothing listed", () => {
+  const { registry } = makeRegistry();
+  const r = registry.runCommand("mods rainbow");
+  assert.equal(r.status, "error");
+  assert.equal(r.message, "mods takes no arguments — it lists the recipe registry");
+  assert.ok(!r.message.includes("built-in:"), "no listing rides the error");
+  assert.ok(registry.verbs().includes("mods"), "registered like every verb");
 });
 
 test("rainbow: nomatch / usage / parse errors write NOTHING", () => {

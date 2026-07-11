@@ -48,6 +48,7 @@ point types `anchor` and `t0`–`t3`).
 | `bondopacityof <expr> <a>` | Alpha for edges **touching** the target (either endpoint — the incident reach) | `bondopacityof #124 0.3` |
 | `traceopacity <expr> <a>` | Alpha for polyline vertices whose **subgroup** contains a resolved point | `traceopacity alpha 0.7` |
 | `rainbow <expr>` | Color those points an even hue ramp in resolution order (the first **recipe**: per-point values, not one constant; one undo stroke) | `rainbow alpha.group-0` |
+| `mods` | List the **recipe registry** (read-only): each recipe's name, axis, origin, and credit — bare, takes no target | `mods` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |
 | `rename @name [new]` | Rename a committed selection | `rename @selection_1 [ring]` |
 | `add @name <tree-target>` | Add tree-addressed entries as **members** at their natural level (no `@` on the right) | `add @ring alpha.group-0` |
@@ -496,7 +497,32 @@ color-mapping step.
   action and count (`colored N points rainbow`), and a nomatch or error
   writes nothing and pushes no stroke.
 - Recipes live in an in-memory registry (name → recipe) the verb resolves
-  through; listing/parameters/other axes are future work.
+  through; parameters and other axes are future work.
+
+### Listing the registry: `mods`
+
+```
+> mods
+built-in:
+  rainbow — point-color · by Dominic Fico · https://github.com/DomFico/molaro
+```
+
+`mods` is the registry's read-face — the vocabulary-side parallel to `ls`
+(`ls` lists committed selections, which are *scene* state; `mods` lists the
+registered recipes, which are *vocabulary* state). One line per recipe,
+grouped by **origin** (`built-in` today; the type admits future origins),
+showing the recipe's name, its axis, and its **credit**. It lists recipes
+only — the built-in command verbs stay with `help`/`?`.
+
+Every recipe carries attribution: a required `origin`, plus optional
+`author` and `source` strings shown for credit. These are **display-only
+opaque strings** — nothing resolves, fetches, validates, or acts on them; a
+`source` that looks like a URL is a citation, not a reference the viewer
+follows. Long listings share `ls`'s display cap.
+
+`mods` is bare — it inspects the vocabulary, not the scene, so it takes no
+target; any trailing argument is a usage error. Read-only: no state, no
+undo impact.
 
 ## Listing: `ls`
 

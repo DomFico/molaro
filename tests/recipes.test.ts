@@ -10,6 +10,7 @@ import {
   RAINBOW_HUE_MAX,
   getRecipe,
   hsvToRgb,
+  listRecipes,
   rainbow,
   registerRecipe,
   type Recipe,
@@ -54,13 +55,22 @@ test("the registry holds rainbow under its name, axis point-color (storage only)
   assert.equal(getRecipe("nothere"), undefined);
 });
 
+test("rainbow carries honest attribution: built-in, project author and repo", () => {
+  assert.equal(rainbow.origin, "built-in");
+  assert.equal(rainbow.author, "Dominic Fico");
+  assert.equal(rainbow.source, "https://github.com/DomFico/molaro");
+});
+
 test("registerRecipe: a name → recipe map future recipes register into", () => {
   const flat: Recipe = {
     name: "flat-test",
     axis: "point-color",
     compute: (points) => points.map(() => 0.5),
     colormap: () => [0, 0, 0],
+    origin: "built-in",
   };
   registerRecipe(flat);
   assert.equal(getRecipe("flat-test"), flat);
+  assert.deepEqual(listRecipes().map((r) => r.name), ["rainbow", "flat-test"],
+    "listRecipes enumerates in registration order");
 });
