@@ -22,7 +22,9 @@ import { randomBytes } from "node:crypto";
 import { ProducerBroker } from "./broker.ts";
 import { parseClaudeCommand } from "../webview/claudemodel.ts";
 import { createClaudeStub, type ClaudeStub } from "../webview/claudestub.ts";
+import { createPlotHost } from "../webview/plothost.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
+import { PLOT_BODY, PLOT_CSS } from "../webview/plothud.ts";
 import { TERMINAL_BODY, TERMINAL_CSS } from "../webview/terminalhud.ts";
 
 const DEFAULT_N_POINTS = 20_000;
@@ -183,6 +185,40 @@ function openPanel(
   // viewer-side (webview/commands.ts).
   let terminal: vscode.WebviewPanel | null = null;
   let claudeStub: ClaudeStub | null = null;
+
+  // The plot panel — a third editor webview, create-on-demand. The HOST
+  // holds the active series (plothost.ts, shared with the harness glue) and
+  // re-pushes it on the page's plot-ready, so close→reopen restores the
+  // plot with no webview retention.
+  let plot: vscode.WebviewPanel | null = null;
+  const openPlot = (): void => {
+    if (plot) {
+      plot.reveal(undefined, true);
+      return;
+    }
+    plot = vscode.window.createWebviewPanel(
+      "viewerPlot",
+      `${opts.title} — Plot`,
+      { viewColumn: vscode.ViewColumn.Beside, preserveFocus: true },
+      {
+        enableScripts: true,
+        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "dist", "webview")],
+      },
+    );
+    plot.webview.html = renderPlotHtml(plot.webview, context.extensionUri);
+    plot.webview.onDidReceiveMessage((msg: unknown) => {
+      plotHost.handlePlotMessage(msg);
+    });
+    plot.onDidDispose(() => {
+      plot = null;
+    });
+  };
+  const plotHost = createPlotHost({
+    openPlot,
+    postToPlot: (msg) => void plot?.webview.postMessage(msg),
+    postToViewer: (msg) => void panel.webview.postMessage(msg),
+    postToTerminal: (msg) => void terminal?.webview.postMessage(msg),
+  });
   const openTerminal = (): void => {
     if (terminal) {
       terminal.reveal(undefined, true);
@@ -206,8 +242,10 @@ function openPanel(
     terminal.webview.html = renderTerminalHtml(terminal.webview, context.extensionUri);
     terminal.webview.onDidReceiveMessage((msg: { type?: string }) => {
       if (msg?.type === "command" || msg?.type === "complete" || msg?.type === "claude-bind") {
-        // claude-bind: a typed tool-result forwarded to the VIEWER, where
-        // the binding rails live (resolver, writers, command execution).
+        // per-frame-series claude-binds belong to the PLOT — the plot host
+        // consumes them (validate, hold, draw, answer the ⤷ outcome);
+        // everything else relays to the VIEWER's binding rails as before.
+        if (plotHost.handleTerminalMessage(msg)) return;
         void panel.webview.postMessage(msg);
         return;
       }
@@ -217,7 +255,9 @@ function openPanel(
         // posted before the page listens would be lost — the stub's opening
         // auth-status must never race the load).
         // STUB — replaced by the real backend behind the identical contract.
-        claudeStub ??= createClaudeStub((ev) => void terminal?.webview.postMessage(ev));
+        claudeStub ??= createClaudeStub((ev) => void terminal?.webview.postMessage(ev), {
+          frameCount: () => plotHost.nFrames(), // so it can emit length-T series
+        });
         return;
       }
       const claudeCmd = parseClaudeCommand(msg);
@@ -237,6 +277,7 @@ function openPanel(
   });
 
   panel.webview.onDidReceiveMessage((msg: { type?: string; request?: unknown }) => {
+    if (plotHost.handleViewerMessage(msg)) return; // viewerInfo / frameChanged
     if (msg?.type === "toProducer" && msg.request) {
       try {
         broker.send(msg.request as { type: "header" | "frames" });
@@ -259,6 +300,7 @@ function openPanel(
   panel.onDidDispose(() => {
     broker.dispose();
     terminal?.dispose();
+    plot?.dispose();
     if (lastViewerSession === session) lastViewerSession = null;
   });
   broker.start();
@@ -303,6 +345,34 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 <body>
   ${HUD_BODY}
   <script nonce="${nonce}">window.__VIEWER__ = { autoplay: false };</script>
+  <script nonce="${nonce}" src="${scriptUri}"></script>
+</body>
+</html>`;
+}
+
+function renderPlotHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+  const nonce = randomBytes(16).toString("base64");
+  const scriptUri = webview.asWebviewUri(
+    vscode.Uri.joinPath(extensionUri, "dist", "webview", "plot.js"),
+  );
+
+  const csp = [
+    "default-src 'none'",
+    `script-src 'nonce-${nonce}' ${webview.cspSource}`,
+    `style-src ${webview.cspSource} 'nonce-${nonce}'`,
+  ].join("; ");
+
+  return /* html */ `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="${csp}">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Point Viewer Plot</title>
+  <style nonce="${nonce}">${PLOT_CSS}</style>
+</head>
+<body>
+  ${PLOT_BODY}
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

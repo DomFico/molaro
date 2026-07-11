@@ -25,6 +25,7 @@ import { parseArgs } from "node:util";
 
 import { ProducerBroker } from "../src/broker.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
+import { PLOT_BODY, PLOT_CSS } from "../webview/plothud.ts";
 import { TERMINAL_BODY, TERMINAL_CSS } from "../webview/terminalhud.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -144,7 +145,11 @@ const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* ht
               // stub module (see __TERMINAL_HARNESS__ below).
               msg.type === "user-message" || msg.type === "approval-decision" ||
               msg.type === "cancel" || msg.type === "claude-ready" ||
-              msg.type === "claude-bind" || msg.type === "claude-bind-result") {
+              msg.type === "claude-bind" || msg.type === "claude-bind-result" ||
+              // plot orchestration: the viewer's frame signals and the plot
+              // page's own posts loop back for the in-page plot-host glue
+              msg.type === "viewerInfo" || msg.type === "frameChanged" ||
+              msg.type === "plotSeek" || msg.type === "plot-ready") {
             setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: msg })), 0);
             return;
           }
@@ -194,12 +199,21 @@ const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* ht
   ${terminal ? `
   <!-- terminal smoke surface: the REAL terminal bundle over the REAL viewer,
        host routing emulated by the shim's loopback above. The flag makes
-       terminal.ts wire the claude stub in-page (the host-side backend,
-       emulated at the same boundary the loopback emulates the relay). -->
+       terminal.ts wire the claude stub AND the plot host in-page (the
+       host-side logic, emulated at the same boundary the loopback emulates
+       the relay). The plot surface sits UNDER the terminal stack (z-50 <
+       z-100): its SVG is asserted by DOM/attribute, and seek clicks are
+       dispatched synthetically, so occlusion is irrelevant. -->
   <style nonce="${NONCE}">${TERMINAL_CSS}</style>
+  <style nonce="${NONCE}">${PLOT_CSS}
+    #plot-harness { position: absolute; inset: 0; z-index: 50; }
+    #plot-harness #plot-root { position: absolute; inset: 0; }
+  </style>
+  <div id="plot-harness">${PLOT_BODY}</div>
   ${TERMINAL_BODY}
   <script nonce="${NONCE}">window.__TERMINAL_HARNESS__ = true;</script>
-  <script nonce="${NONCE}" src="/terminal.js"></script>` : ""}
+  <script nonce="${NONCE}" src="/terminal.js"></script>
+  <script nonce="${NONCE}" src="/plot.js"></script>` : ""}
 </body>
 </html>`;
 
@@ -232,6 +246,9 @@ const server = http.createServer((req, res) => {
   } else if (req.url === "/main.js") {
     res.writeHead(200, { "content-type": "text/javascript" });
     res.end(readFileSync(join(root, "dist", "webview", "main.js")));
+  } else if (req.url === "/plot.js") {
+    res.writeHead(200, { "content-type": "text/javascript" });
+    res.end(readFileSync(join(root, "dist", "webview", "plot.js")));
   } else if (req.url === "/terminal.js") {
     res.writeHead(200, { "content-type": "text/javascript" });
     res.end(readFileSync(join(root, "dist", "webview", "terminal.js")));

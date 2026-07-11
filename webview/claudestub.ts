@@ -16,8 +16,10 @@
  * change; deny carries no result); turn-complete. Sentinel words route
  * alternate single-tool turns: "trigger-error" → the error path,
  * "scalar-size"/"scalar-opacity" → per-point scalars on those axes,
- * "series-demo" → a per-frame-series (the reserved placeholder),
- * "mismatch-demo" → a scalar-count mismatch (the no-write error path).
+ * "series-demo" → a VALID length-T per-frame-series (a raw-valued sine —
+ * the plot draws it), "series-mismatch" → a short series (the plot's
+ * no-draw error path), "mismatch-demo" → a scalar-count mismatch (the
+ * viewer binding's no-write error path).
  * `cancel` stops the script and emits turn-complete. Tool names/args are
  * fully generic and neutral (example_tool_a/example_tool_b, synthetic
  * labels, dataset-independent #index targets).
@@ -34,6 +36,11 @@ export interface ClaudeStubOptions {
   /** Gap between scripted events. Small for tests; keep >0 so streaming is
    * observably incremental. */
   delayMs?: number;
+  /** The trajectory's frame count, supplied by the host (which learns it
+   * from the viewer) — the stub can't know the dataset, but a VALID
+   * per-frame series must be length-T. 0/absent = unknown (the series-demo
+   * then emits a fallback length, which the plot route rejects honestly). */
+  frameCount?: () => number;
 }
 
 export interface ClaudeStub {
@@ -140,10 +147,22 @@ export function createClaudeStub(
           { kind: "per-point-scalar", target: "#150-199", axis: "opacity", scalars: ramp(50) });
         return;
       }
-      if (cmd.text.includes("series-demo")) {
+      if (cmd.text.includes("series-mismatch")) {
+        // 7 values regardless of T — the plot route's no-draw error path
         oneToolTurn('{ label: "example_series" }',
-          "example_tool_a produced a per-frame series",
-          { kind: "per-frame-series", label: "example_series", values: ramp(24) });
+          "example_tool_a produced a short per-frame series",
+          { kind: "per-frame-series", label: "example_series", values: ramp(7) });
+        return;
+      }
+      if (cmd.text.includes("series-demo")) {
+        // a VALID length-T series with an unmistakable shape: a raw-valued
+        // sine (amplitude 3.5 around 10 — REAL numbers, the plot auto-scales)
+        const n = opts.frameCount?.() || 24;
+        const values = Array.from({ length: n }, (_, i) =>
+          10 + 3.5 * Math.sin((i / Math.max(n - 1, 1)) * 2 * Math.PI));
+        oneToolTurn('{ label: "example_series" }',
+          `example_tool_a produced a per-frame series (${n} values)`,
+          { kind: "per-frame-series", label: "example_series", values });
         return;
       }
       if (cmd.text.includes("mismatch-demo")) {

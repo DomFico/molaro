@@ -16,6 +16,7 @@
 import { parseClaudeCommand, parseClaudeEvent } from "./claudemodel.ts";
 import { mountClaudePanel } from "./claudepanel.ts";
 import { createClaudeStub } from "./claudestub.ts";
+import { createPlotHost } from "./plothost.ts";
 
 declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };
 
@@ -53,14 +54,29 @@ function main(): void {
   // terminal's "claude-ready" signal (below), so its first auth-status can
   // never race the listeners. Production never sets the flag.
   if ((window as unknown as { __TERMINAL_HARNESS__?: boolean }).__TERMINAL_HARNESS__) {
+    // the plot HOST logic — the identical module src/extension.ts runs; all
+    // three page surfaces share this window, so its posts are direct
+    // dispatches and its inputs are the looped-back relay messages.
+    const loop = (msg: unknown): void => {
+      window.dispatchEvent(new MessageEvent("message", { data: msg }));
+    };
+    const plotHost = createPlotHost({
+      openPlot: () => {}, // the harness page always carries the plot surface
+      postToPlot: loop,
+      postToViewer: loop,
+      postToTerminal: loop,
+    });
     let stub: ReturnType<typeof createClaudeStub> | null = null;
     window.addEventListener("message", (e: MessageEvent) => {
       if ((e.data as { type?: string } | undefined)?.type === "claude-ready") {
-        stub ??= createClaudeStub((ev) => {
-          window.dispatchEvent(new MessageEvent("message", { data: ev }));
+        stub ??= createClaudeStub((ev) => loop(ev), {
+          frameCount: () => plotHost.nFrames(),
         });
         return;
       }
+      if (plotHost.handleViewerMessage(e.data)) return; // viewerInfo / frameChanged
+      if (plotHost.handlePlotMessage(e.data)) return; // plotSeek / plot-ready
+      if (plotHost.handleTerminalMessage(e.data)) return; // series claude-binds
       const cmd = parseClaudeCommand(e.data);
       if (cmd) stub?.handle(cmd);
     });

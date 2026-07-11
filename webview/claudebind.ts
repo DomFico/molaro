@@ -15,8 +15,10 @@
  *                      per-element closures.
  *   command          → the exact runCommand a typed terminal command hits;
  *                      undo comes from the verb itself.
- *   per-frame-series → RESERVED: acknowledged with a placeholder message,
- *                      nothing written (its renderer is a separate step).
+ *   per-frame-series → NOT HANDLED HERE: the host intercepts it before the
+ *                      viewer relay and routes it to the plot panel
+ *                      (plothost.ts); this dispatch keeps a defensive
+ *                      branch only.
  *
  * Scalars arrive contractually normalized to [0,1]; this layer maps
  * [0,1] → visual and never normalizes, clamps-with-meaning, or interprets
@@ -83,11 +85,12 @@ export function bindTypedResult(
       return { ok: r.status === "ok", message: `${result.command} → ${r.message}` };
     }
     case "per-frame-series":
-      // RESERVED — the synced-plot renderer is a separate step; acknowledge
-      // the payload so the transcript shows it arrived, write nothing.
+      // The plot panel's kind: the HOST intercepts it before the viewer
+      // relay (plothost.ts) and answers the outcome itself — this branch is
+      // defensive only (a series should never reach the viewer's binding).
       return {
-        ok: true,
-        message: `series "${result.label}" received (${result.values.length} values) — plot view not available yet`,
+        ok: false,
+        message: `per-frame-series is routed to the plot panel — not a viewer binding`,
       };
   }
 }

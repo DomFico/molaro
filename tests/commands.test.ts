@@ -1177,11 +1177,14 @@ test("bind command: runs the exact command path and changes scene state", () => 
   assert.match(bad.message, /nothing matches/);
 });
 
-test("bind per-frame-series: the RESERVED placeholder — acknowledged, nothing written", () => {
+test("bind per-frame-series: DEFENSIVE only — the host routes series to the plot panel", () => {
+  // production never sends a series here (the host intercepts it before the
+  // viewer relay; main.ts also guards); the branch stays as a closed-union
+  // safety net that writes nothing
   const { run, colorEachOps, eachOps, commits } = makeBinder();
   const out = run({ kind: "per-frame-series", label: "example_series", values: [0, 0.5, 1] });
-  assert.equal(out.ok, true);
-  assert.match(out.message, /series "example_series" received \(3 values\) — plot view not available yet/);
+  assert.equal(out.ok, false);
+  assert.match(out.message, /per-frame-series is routed to the plot panel/);
   assert.equal(colorEachOps.length + eachOps.length + commits.length, 0, "wrote nothing");
 });
 

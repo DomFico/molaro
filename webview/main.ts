@@ -41,6 +41,7 @@ import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
 import { createCommandRegistry, makeRunComplete, type CommandResult } from "./commands.ts";
 import { bindTypedResult } from "./claudebind.ts";
+import { parseTypedResult } from "./claudemodel.ts";
 import { parseTarget, resolveTarget, type Completion } from "./address.ts";
 import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
 import { pickPoint, selectionBounds } from "./picking.ts";
@@ -504,18 +505,32 @@ async function main(): Promise<void> {
       return;
     }
     if (msg?.type === "claude-bind") {
+      // per-frame-series is the PLOT's kind — the host routes it there and
+      // answers on the outcome channel itself; the viewer stays silent.
+      if (parseTypedResult(msg.result)?.kind === "per-frame-series") return;
       const outcome = bindResult(msg.result);
       host.postMessage({ type: "claude-bind-result", callId: msg.callId, ...outcome });
       return;
     }
+    if (msg?.type === "seekFrame") {
+      // the plot's click-to-seek — the EXACT setter the scrubber drives;
+      // the display loop picks it up and re-syncs the scrubber itself
+      seekFrame(Number((msg as { frame?: number }).frame ?? 0));
+      return;
+    }
     transport.handleMessage(e.data);
   });
+  // late-bound once the player exists (the listener is live before boot ends)
+  let seekFrame: (frame: number) => void = () => {};
 
   setStatus("requesting header…");
   const headerBytes = await transport.request({ type: "header" });
   rejectIfErrorPayload(headerBytes);
   const header = parseHeader(new TextDecoder().decode(headerBytes));
   const nFrames = header.n_frames;
+  // one-shot: the host (plot orchestration, stub) learns the frame count —
+  // T is authoritative here in the header, nowhere host-side
+  host.postMessage({ type: "viewerInfo", nFrames });
 
   const container = document.getElementById("app");
   if (!container) throw new Error("missing #app container");
@@ -1457,8 +1472,12 @@ async function main(): Promise<void> {
     if (displayedFrame === -1) for (const obj of drawables) obj.visible = true;
     displayedFrame = f;
     shownSinceMark++;
+    // the ONE displayed-frame flip point — playback and scrub both land here,
+    // so this single emission drives the plot's playhead (never polling)
+    host.postMessage({ type: "frameChanged", frame: f });
     return true;
   };
+  seekFrame = (frame: number) => player.seek(frame);
 
   renderer.setAnimationLoop(() => {
     const now = performance.now();

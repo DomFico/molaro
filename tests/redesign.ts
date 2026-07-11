@@ -4130,15 +4130,17 @@ async function S24(): Promise<void> {
     check("S24: …and the verb's own undo reverses it",
       (await d.evaluate<number>(`${V}.model.committed().length`)) === committedBefore);
 
-    // -- the reserved series placeholder + the error paths ----------------------
+    // -- series are the PLOT's kind: the viewer stays SILENT + the error paths --
     await snap("__quiet");
     const depthQuiet = await undoDepth();
-    out = await bind(`{ kind: 'per-frame-series', label: 'example_series',
-      values: Array.from({length:24},(_,i)=>i/23) }`);
-    check("S24: per-frame-series reaches the RESERVED placeholder (no view yet)",
-      out.ok === true &&
-        out.message === `series "example_series" received (24 values) — plot view not available yet`,
-      JSON.stringify(out));
+    const bindsBefore = await d.evaluate<number>(`window.__binds.length`);
+    await d.evaluate(`window.dispatchEvent(new MessageEvent('message', { data:
+      { type: 'claude-bind', callId: 'probe', result: { kind: 'per-frame-series',
+        label: 'example_series', values: [1, 2, 3] } } }))`);
+    await sleep(200);
+    check("S24: the viewer IGNORES per-frame-series binds (the plot route owns them)",
+      (await d.evaluate<number>(`window.__binds.length`)) === bindsBefore,
+      "no claude-bind-result from the viewer");
     out = await bind(`{ kind: 'per-point-scalar', target: '#0-9', axis: 'color',
       scalars: [0, 0.25, 0.5, 0.75, 1] }`);
     check("S24: a scalar-count mismatch errors and writes NOTHING",
@@ -4232,8 +4234,8 @@ async function S24(): Promise<void> {
     await typeInto("claude-input", "please series-demo now");
     await sleep(500);
     lines = await bindLines();
-    check("S24: the series result reaches the reserved placeholder line",
-      lines[2]?.text === `⤷ series "example_series" received (24 values) — plot view not available yet` &&
+    check("S24: the series result routes to the PLOT and reports drawn (deep checks in S25)",
+      lines[2]?.text === `⤷ series "example_series" drawn (150 frames) — click the plot to seek` &&
         /\bok\b/.test(lines[2]?.cls ?? ""), JSON.stringify(lines[2]));
 
     const sizeSnap = await d.evaluate<string>(`JSON.stringify([...${V}.rep.state.size.slice(0, 220)])`);
@@ -4263,9 +4265,115 @@ async function S24(): Promise<void> {
   }, 1180, 780, "/terminal");
 }
 
+async function S25(): Promise<void> {
+  console.log("S25 — the plot tab: per-frame series drawn, playhead-synced, click-to-seek");
+  await withDriver(async (d) => {
+    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+    const typeInto = async (id: string, text: string): Promise<void> => {
+      const r = await d.evaluate<{ x: number; y: number }>(`(()=>{
+        const b=${el(id)}.getBoundingClientRect();
+        return {x:b.left+b.width/2, y:b.top+b.height/2};
+      })()`);
+      await d.click(r.x, r.y);
+      await d.insertText(text);
+      await d.key("Enter", "Enter", 13);
+    };
+    const bindLines = () =>
+      d.evaluate<{ cls: string; text: string }[]>(
+        `[...document.querySelectorAll('#claude-transcript .cl-bind')]
+          .map(n=>({cls:n.className, text:n.textContent}))`);
+    const markerX = () => d.evaluate<number>(`Number(${el("plot-marker")}.getAttribute('x1'))`);
+    const linePoints = () =>
+      d.evaluate<string>(`${el("plot-line")}.getAttribute('points') ?? ''`);
+    const viewerFrame = () => d.evaluate<number>(`${V}.player.frame`);
+    // the plot's fixed-viewBox geometry (mirrors plotmodel.ts)
+    const N = 150;
+    const AREA_X = 44, AREA_W = 800 - 44 - 10;
+    const frameToX = (f: number) => AREA_X + (f / (N - 1)) * AREA_W;
+
+    // -- a valid series arrives through the pipe and DRAWS ----------------------
+    await typeInto("term-input", "/claude");
+    await sleep(150);
+    check("S25: the plot starts empty (empty-state note, no line)",
+      await d.evaluate<boolean>(`!${el("plot-empty")}.hidden &&
+        ${el("plot-svg")}.hasAttribute('hidden')`));
+    await typeInto("claude-input", "please series-demo now");
+    await sleep(600);
+    check("S25: the ⤷ line reports the draw",
+      (await bindLines()).some((l) => /series "example_series" drawn \(150 frames\)/.test(l.text)));
+    check("S25: the SVG line has one vertex per frame",
+      (await linePoints()).split(" ").length === N, `${(await linePoints()).split(" ").length}`);
+    check("S25: the label and the raw min/max readout render",
+      await d.evaluate<boolean>(`${el("plot-label")}.textContent === 'example_series' &&
+        /min 6\\.5 · max 13\\.5 · 150 frames/.test(${el("plot-range")}.textContent)`),
+      await d.evaluate<string>(`${el("plot-range")}.textContent`));
+    check("S25: the empty state cleared, the plot shows",
+      await d.evaluate<boolean>(`${el("plot-empty")}.hidden &&
+        getComputedStyle(${el("plot-empty")}).display === 'none' &&
+        !${el("plot-svg")}.hasAttribute('hidden')`),
+      "hidden must actually mean display:none (explicit display beats UA [hidden])");
+
+    // -- the playhead marker tracks the current frame ---------------------------
+    const f0 = await viewerFrame();
+    check("S25: the marker sits at the CURRENT frame",
+      Math.abs((await markerX()) - frameToX(f0)) < 0.01,
+      `marker=${await markerX()} expected=${frameToX(f0)} (frame ${f0})`);
+    await d.evaluate(`${V}.player.seek(120)`); // drive a frame change
+    await sleep(800); // (chunk 15 may need fetching) frame flips → frameChanged → marker
+    check("S25: the marker MOVES when the frame changes",
+      Math.abs((await markerX()) - frameToX(120)) < 0.01,
+      `marker=${await markerX()} expected=${frameToX(120)}`);
+
+    // -- click-to-seek: the plot drives the trajectory ---------------------------
+    // (the plot surface sits under the terminal stack in the harness, so the
+    // click is dispatched synthetically at the exact geometry a real click has)
+    const target = 30;
+    await d.evaluate(`(()=>{
+      const svg=${el("plot-svg")};
+      const r=svg.getBoundingClientRect();
+      const clientX = r.left + (${frameToX(target)} / 800) * r.width;
+      svg.dispatchEvent(new MouseEvent('click', { clientX, clientY: r.top + r.height/2, bubbles: true }));
+    })()`);
+    await sleep(300);
+    check("S25: clicking the plot SEEKS the viewer to that frame",
+      (await viewerFrame()) === target, `frame=${await viewerFrame()}`);
+    check("S25: …and the marker follows the seek",
+      Math.abs((await markerX()) - frameToX(target)) < 0.01);
+
+    // -- the mismatched series: no draw, ⤷ error, previous plot intact ----------
+    const pointsBefore = await linePoints();
+    await typeInto("claude-input", "please series-mismatch now");
+    await sleep(500);
+    check("S25: a length-mismatched series produces the ⤷ error line",
+      (await bindLines()).some((l) =>
+        l.text === "⤷ series length mismatch: 7 values for 150 frames — not drawn" &&
+        /\berr\b/.test(l.cls)));
+    check("S25: …and draws NOTHING — the previous series is untouched",
+      (await linePoints()) === pointsBefore);
+
+    // -- close→reopen: the HOST re-pushes the held series on plot-ready ----------
+    await d.evaluate(`(()=>{
+      ${el("plot-line")}.setAttribute('points', '');
+      ${el("plot-label")}.textContent = 'wiped';
+    })()`); // simulate a fresh, empty plot page…
+    await d.evaluate(`window.dispatchEvent(new MessageEvent('message', { data: { type: 'plot-ready' } }))`);
+    await sleep(200); // …announcing itself, exactly as a reopened tab does
+    check("S25: plot-ready re-pushes the held series (close→reopen restores)",
+      (await linePoints()) === pointsBefore &&
+        (await d.evaluate<string>(`${el("plot-label")}.textContent`)) === "example_series");
+    check("S25: …and the re-pushed playhead is the current frame",
+      Math.abs((await markerX()) - frameToX(target)) < 0.01);
+
+    // evidence only: lift the (harness-occluded) plot surface above the
+    // terminal stack for the screenshot — no assertion depends on this
+    await d.evaluate(`document.getElementById('plot-harness').style.zIndex = '200'`);
+    await d.screenshot(`${REPORT}/S25_plot.png`);
+  }, 1180, 780, "/terminal");
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

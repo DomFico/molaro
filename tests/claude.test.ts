@@ -248,7 +248,9 @@ test("stub: the sentinel turns cover every result kind (size/opacity/series/mism
     ["scalar-opacity", (r) => r?.kind === "per-point-scalar" && r.axis === "opacity" &&
       r.target === "#150-199" && r.scalars.length === 50],
     ["series-demo", (r) => r?.kind === "per-frame-series" &&
-      r.label === "example_series" && r.values.length === 24],
+      r.label === "example_series" && r.values.length === 24], // no frameCount → fallback 24
+    ["series-mismatch", (r) => r?.kind === "per-frame-series" &&
+      r.label === "example_series" && r.values.length === 7], // never length-T — the no-draw path
     ["mismatch-demo", (r) => r?.kind === "per-point-scalar" && r.target === "#0-9" &&
       r.scalars.length === 5], // 5 values for 10 points — the no-write error path
   ];
@@ -262,6 +264,21 @@ test("stub: the sentinel turns cover every result kind (size/opacity/series/mism
     assert.ok(good(result.result), `${sentinel}: ${JSON.stringify(result.result)}`);
     stub.dispose();
   }
+});
+
+test("stub: with the host's frameCount, series-demo emits a LENGTH-T raw-valued series", async () => {
+  const events: ClaudeEvent[] = [];
+  const stub = createClaudeStub((ev) => events.push(ev), { delayMs: 1, frameCount: () => 150 });
+  stub.handle({ type: "user-message", text: "please series-demo now" });
+  await sleep(50);
+  const result = events.find((e) => e.type === "tool-result") as ToolResultEvent;
+  assert.equal(result.result?.kind, "per-frame-series");
+  if (result.result?.kind === "per-frame-series") {
+    assert.equal(result.result.values.length, 150, "length-T, T from the host");
+    const scale = { min: Math.min(...result.result.values), max: Math.max(...result.result.values) };
+    assert.ok(scale.max > 13 && scale.min < 7, `RAW magnitudes, not [0,1]: ${JSON.stringify(scale)}`);
+  }
+  stub.dispose();
 });
 
 test("stub: deny yields ok:false; callIds stay unique across turns", async () => {

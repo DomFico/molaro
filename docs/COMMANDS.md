@@ -665,9 +665,17 @@ rails and the outcome renders as an italic `⤷` line in the tool's block
 - **command** — a command string run through the exact path a typed
   terminal command takes (so an approved tool can, say, `create_sele` a
   selection); undo comes from the verb itself.
-- **per-frame series** — recognized but **reserved**: the transcript
-  acknowledges it (`plot view not available yet`); its synced plot is a
-  future step.
+- **per-frame series** — one **raw** value per frame (whatever its units —
+  the plot auto-scales, it never normalizes), drawn as a line in the
+  **plot tab**: its own editor panel (drag/split/dock like any tab),
+  created or revealed when a series arrives. The plot shows the series
+  label, its raw min/max, a **playhead marker** that tracks the current
+  frame through playback and scrubbing, and **click-to-seek** — clicking
+  the plot seeks the trajectory to that frame, so the plot is a control,
+  not just a readout. One series at a time (a new one replaces it); the
+  host holds the active series and restores it when the tab is reopened.
+  A series whose length ≠ the frame count draws **nothing** and the `⤷`
+  line reports the mismatch.
 
 An unknown kind is an error, never a guess. Nothing beyond these three
 exists.
