@@ -129,7 +129,18 @@ const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* ht
           dispatchSeq++;
         }
       };
+      // webview state shim: sessionStorage-backed so persisted layout
+      // survives a same-tab reload (the E2E restore assertion) but never
+      // leaks across browser launches / reused chrome profiles.
+      let __wvState;
+      try { __wvState = JSON.parse(sessionStorage.getItem("__webview_state__") ?? "null") ?? undefined; }
+      catch { __wvState = undefined; }
       window.acquireVsCodeApi = () => ({
+        getState: () => __wvState,
+        setState(s) {
+          __wvState = s;
+          try { sessionStorage.setItem("__webview_state__", JSON.stringify(s)); } catch {}
+        },
         postMessage(msg) {
           if (!msg) return;
           // HOST LOOPBACK: the real extension host relays these verbatim

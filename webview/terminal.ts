@@ -13,12 +13,17 @@
  * terminalhud.ts.
  */
 
+import { mountClaudeLayout } from "./claudelayout.ts";
 import { parseClaudeCommand, parseClaudeEvent } from "./claudemodel.ts";
 import { mountClaudePanel } from "./claudepanel.ts";
 import { createClaudeStub } from "./claudestub.ts";
 import { createPlotHost } from "./plothost.ts";
 
-declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };
+declare function acquireVsCodeApi(): {
+  postMessage(msg: unknown): void;
+  getState?(): unknown;
+  setState?(s: unknown): void;
+};
 
 interface CommandResultMsg {
   type: "commandResult";
@@ -45,6 +50,9 @@ function main(): void {
   // The conversation panel (/claude): its commands ride the SAME relay as
   // command/complete — the host routes them to the backend (the stub today).
   const claudePanel = mountClaudePanel((cmd) => host.postMessage(cmd));
+  // …and its ARRANGEMENT (open/orientation/order/ratio, divider, flip/swap,
+  // ✕) is the layout controller's — restored from persisted webview state.
+  const claudeLayout = mountClaudeLayout(host);
 
   // HARNESS-ONLY: the smoke/E2E page has no extension host, so the bridge
   // shim loops panel commands back into the page and this glue feeds them to
@@ -193,11 +201,11 @@ function main(): void {
         return;
       }
       if (text === "/claude") {
-        // Terminal-local, like `clear`: toggles the conversation panel above
-        // this terminal (open focuses its input; close restores full height).
+        // Terminal-local, like `clear`: toggles the conversation panel
+        // (open focuses its input; close restores the full terminal).
         // Registered in the command registry only so `help /claude` explains
         // it — viewer state never hears about the toggle.
-        claudePanel.toggle();
+        claudeLayout.toggle();
         input.value = "";
         return;
       }

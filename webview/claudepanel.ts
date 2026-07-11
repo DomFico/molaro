@@ -24,23 +24,21 @@ import {
 } from "./claudemodel.ts";
 
 export interface ClaudePanel {
-  toggle(): void;
-  isOpen(): boolean;
   handleEvent(ev: ClaudeEvent): void;
   /** The viewer's claude-bind-result reply for a call's typed result —
    * renders as the tool block's binding line. */
   setBindOutcome(callId: string, outcome: { ok: boolean; message: string }): void;
 }
 
+/** The transcript renderer only — visibility/arrangement belongs to the
+ * layout controller (claudelayout.ts), which owns the ✕/flip/swap chrome. */
 export function mountClaudePanel(send: (cmd: ClaudeCommand) => void): ClaudePanel {
-  const root = document.getElementById("claude-root");
   const statusDot = document.getElementById("claude-dot");
   const statusText = document.getElementById("claude-status-text");
-  const closeBtn = document.getElementById("claude-close");
   const transcript = document.getElementById("claude-transcript");
   const input = document.getElementById("claude-input") as HTMLInputElement | null;
   const cancelBtn = document.getElementById("claude-cancel") as HTMLButtonElement | null;
-  if (!root || !statusDot || !statusText || !closeBtn || !transcript || !input || !cancelBtn) {
+  if (!statusDot || !statusText || !transcript || !input || !cancelBtn) {
     throw new Error("claude panel: skeleton elements missing");
   }
 
@@ -133,16 +131,6 @@ export function mountClaudePanel(send: (cmd: ClaudeCommand) => void): ClaudePane
     }
   };
 
-  const open = (): void => {
-    root.classList.remove("collapsed");
-    render();
-    input.focus();
-  };
-  const close = (): void => {
-    root.classList.add("collapsed");
-    document.getElementById("term-input")?.focus();
-  };
-
   input.addEventListener("keydown", (e: KeyboardEvent) => {
     if (e.key !== "Enter") return;
     const text = input.value.trim();
@@ -155,16 +143,8 @@ export function mountClaudePanel(send: (cmd: ClaudeCommand) => void): ClaudePane
   cancelBtn.addEventListener("click", () => {
     if (state.busy) send({ type: "cancel" });
   });
-  closeBtn.addEventListener("click", close);
 
   return {
-    toggle(): void {
-      if (root.classList.contains("collapsed")) open();
-      else close();
-    },
-    isOpen(): boolean {
-      return !root.classList.contains("collapsed");
-    },
     handleEvent(ev: ClaudeEvent): void {
       applyEvent(state, ev);
       render();

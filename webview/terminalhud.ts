@@ -17,12 +17,18 @@ export const TERMINAL_CSS = /* css */ `
     background: #1e1e1e; color: #cccccc; font: 12px monospace; }
   * { box-sizing: border-box; }
   /* The stack fills the window (and, in the smoke harness, overlays the
-     viewer exactly as #term-root alone used to): conversation panel above,
-     terminal below, a fixed 60/40 split while the panel is open. */
+     viewer exactly as #term-root alone used to): the panel and terminal
+     split it per the user's layout (claudelayout.ts drives direction,
+     order, and the flex shares inline; the divider drags the ratio). */
   #term-stack { position: absolute; inset: 0; z-index: 100; display: flex;
     flex-direction: column; background: #1e1e1e; }
-  #term-root { flex: 1 1 0; min-height: 0; display: flex;
+  #term-root { flex: 1 1 0; min-height: 0; min-width: 0; display: flex;
     flex-direction: column; background: #1e1e1e; }
+  #claude-divider { flex: none; background: #3a3a3a; height: 6px; cursor: row-resize;
+    touch-action: none; }
+  #claude-divider:hover { background: #505050; }
+  #term-stack.side #claude-divider { height: auto; width: 6px; cursor: col-resize; }
+  #claude-divider[hidden] { display: none; }
   #term-log { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 8px 10px; }
   .term-line { white-space: pre-wrap; word-break: break-word; line-height: 1.5; }
   .term-echo { color: #9a9a9a; }
@@ -37,10 +43,9 @@ export const TERMINAL_CSS = /* css */ `
   #term-input:focus { border-color: #5cb99a; }
 
   /* -- conversation panel (/claude) ------------------------------------- */
-  #claude-root { flex: 3 1 0; min-height: 0; display: flex; flex-direction: column;
-    background: #1b1b1c; border-bottom: 2px solid #3a3a3a; }
+  #claude-root { flex: 3 1 0; min-height: 0; min-width: 0; display: flex;
+    flex-direction: column; background: #1b1b1c; }
   #claude-root.collapsed { display: none; }
-  #claude-root:not(.collapsed) ~ #term-root { flex: 2 1 0; }
   #claude-status { flex: none; display: flex; align-items: center; gap: 6px;
     padding: 4px 10px; background: #252526; border-bottom: 1px solid #3a3a3a;
     color: #9a9a9a; }
@@ -49,9 +54,9 @@ export const TERMINAL_CSS = /* css */ `
   #claude-dot.disconnected { background: #b96a5c; }
   #claude-status-text { flex: 1 1 auto; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; }
-  #claude-close { flex: none; font: inherit; color: #9a9a9a; background: none;
-    border: none; cursor: pointer; padding: 0 2px; }
-  #claude-close:hover { color: #eee; }
+  #claude-close, #claude-flip, #claude-swap { flex: none; font: inherit;
+    color: #9a9a9a; background: none; border: none; cursor: pointer; padding: 0 2px; }
+  #claude-close:hover, #claude-flip:hover, #claude-swap:hover { color: #eee; }
   #claude-transcript { flex: 1 1 auto; min-height: 0; overflow-y: auto;
     padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
   .cl-user { color: #dcdcaa; white-space: pre-wrap; word-break: break-word; }
@@ -94,6 +99,8 @@ export const TERMINAL_BODY = /* html */ `
       <div id="claude-status">
         <span id="claude-dot"></span>
         <span id="claude-status-text">no backend status yet</span>
+        <button id="claude-flip" title="flip orientation (stacked ⁄ side-by-side)">⤢</button>
+        <button id="claude-swap" title="swap pane order">⇄</button>
         <button id="claude-close" title="close (/claude)">✕</button>
       </div>
       <div id="claude-transcript"></div>
@@ -103,6 +110,7 @@ export const TERMINAL_BODY = /* html */ `
         <button id="claude-cancel" hidden>stop</button>
       </div>
     </div>
+    <div id="claude-divider" hidden title="drag to resize the split"></div>
     <div id="term-root">
       <div id="term-log"></div>
       <div id="term-inputrow">

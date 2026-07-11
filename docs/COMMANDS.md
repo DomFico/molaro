@@ -632,11 +632,20 @@ with its own two-step confirm.
 
 ## `/claude` — the conversation panel
 
-`/claude` **toggles** a conversation panel above the terminal: the first
-invocation splits the view (panel above, terminal below) and focuses the
-panel's input; typing it again — or the panel's ✕ — collapses back to the
-full terminal. Like `clear` it is **terminal-local**: the toggle never
-reaches viewer state and creates no undo step.
+`/claude` **toggles** a conversation panel sharing the terminal's view: the
+first invocation splits the view (by default panel above, terminal below)
+and focuses the panel's input; typing it again — or the panel's ✕ —
+collapses back to the full terminal. Like `clear` it is **terminal-local**:
+the toggle never reaches viewer state and creates no undo step.
+
+**The split is yours to arrange — and it's remembered.** Drag the divider
+between the panes to resize (each pane keeps a usable minimum). The two
+small controls next to ✕: **⤢ flips** the orientation (stacked ↔
+side-by-side, keeping the ratio) and **⇄ swaps** the pane order (each pane
+keeps its size; positions exchange). The layout — orientation, order,
+ratio, and whether the panel is open — persists across reloads and
+tab-aways. Only the layout persists: the transcript, series, and scene
+state do not.
 
 The panel is a chat surface with its own input (the terminal keeps its own
 input for the verbs above — two input surfaces, one relay):

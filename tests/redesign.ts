@@ -4371,9 +4371,139 @@ async function S25(): Promise<void> {
   }, 1180, 780, "/terminal");
 }
 
+async function S26(): Promise<void> {
+  console.log("S26 — the Claude/terminal split: resize, flip, swap, persist");
+  await withDriver(async (d) => {
+    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+    const rect = (id: string) =>
+      d.evaluate<{ left: number; top: number; right: number; bottom: number; width: number; height: number }>(
+        `(()=>{ const r=${el(id)}.getBoundingClientRect();
+          return {left:r.left,top:r.top,right:r.right,bottom:r.bottom,width:r.width,height:r.height}; })()`);
+    const stackDir = () =>
+      d.evaluate<string>(`getComputedStyle(${el("term-stack")}).flexDirection`);
+    const claudeDisplay = () =>
+      d.evaluate<string>(`getComputedStyle(${el("claude-root")}).display`);
+    const typeInto = async (id: string, text: string): Promise<void> => {
+      const r = await d.evaluate<{ x: number; y: number }>(`(()=>{
+        const b=${el(id)}.getBoundingClientRect();
+        return {x:b.left+b.width/2, y:b.top+b.height/2};
+      })()`);
+      await d.click(r.x, r.y);
+      await d.insertText(text);
+      await d.key("Enter", "Enter", 13);
+    };
+    /** claude's share of the split axis (excludes the 6px divider). */
+    const claudeShare = async (axis: "height" | "width"): Promise<number> => {
+      const c = await rect("claude-root");
+      const t = await rect("term-root");
+      return c[axis] / (c[axis] + t[axis]);
+    };
+    const near = (a: number, b: number, tol = 0.02): boolean => Math.abs(a - b) < tol;
+
+    // -- default layout ----------------------------------------------------------
+    await typeInto("term-input", "/claude");
+    await sleep(150);
+    const stack = await rect("term-stack");
+    let c = await rect("claude-root");
+    let t = await rect("term-root");
+    check("S26: default layout — stacked (column), claude above the terminal",
+      (await stackDir()) === "column" && c.bottom <= t.top + 1,
+      `dir=${await stackDir()} claude.bottom=${c.bottom} term.top=${t.top}`);
+    check("S26: …at the default 60/40 ratio", near(await claudeShare("height"), 0.6),
+      `share=${await claudeShare("height")}`);
+    await d.screenshot(`${REPORT}/S26_default.png`);
+
+    // -- divider drag: resize + clamping ------------------------------------------
+    let div = await rect("claude-divider");
+    await d.drag(div.left + stack.width / 2, div.top + 3,
+      stack.left + stack.width / 2, stack.top + stack.height * 0.25);
+    await sleep(150);
+    check("S26: dragging the divider resizes the split (≈0.25)",
+      near(await claudeShare("height"), 0.25, 0.03), `share=${await claudeShare("height")}`);
+    div = await rect("claude-divider");
+    await d.drag(div.left + stack.width / 2, div.top + 3,
+      stack.left + stack.width / 2, stack.top + 2); // way past the minimum
+    await sleep(150);
+    check("S26: …and clamps at the minimum — neither pane can vanish",
+      near(await claudeShare("height"), 0.15, 0.03), `share=${await claudeShare("height")}`);
+    check("S26: both panes stay USABLE at the extreme (inputs visible, logs scroll inside)",
+      await d.evaluate<boolean>(`(()=>{
+        const ci=${el("claude-input")}.getBoundingClientRect();
+        const ti=${el("term-input")}.getBoundingClientRect();
+        const log=${el("term-log")};
+        const tr=${el("claude-transcript")};
+        return ci.height > 10 && ti.height > 10 &&
+          getComputedStyle(${el("claude-inputrow")}).display !== 'none' &&
+          log.clientHeight > 0 && tr.clientHeight >= 0 &&
+          log.scrollHeight >= log.clientHeight; // scrolls WITHIN its pane
+      })()`));
+    await d.screenshot(`${REPORT}/S26_extreme.png`);
+    div = await rect("claude-divider");
+    await d.drag(div.left + stack.width / 2, div.top + 3,
+      stack.left + stack.width / 2, stack.top + stack.height * 0.35);
+    await sleep(150);
+
+    // -- flip: stacked ↔ side-by-side, ratio preserved -----------------------------
+    const shareBeforeFlip = await claudeShare("height");
+    await d.evaluate(`${el("claude-flip")}.click()`);
+    await sleep(150);
+    c = await rect("claude-root");
+    t = await rect("term-root");
+    check("S26: flip → side-by-side (row), claude on the left, same top",
+      (await stackDir()) === "row" && c.right <= t.left + 1 && Math.abs(c.top - t.top) < 1,
+      `dir=${await stackDir()}`);
+    check("S26: …the ratio survives the flip",
+      near(await claudeShare("width"), shareBeforeFlip, 0.03),
+      `w-share=${await claudeShare("width")} vs h-share=${shareBeforeFlip}`);
+
+    // -- swap: order exchanges, EACH PANE KEEPS ITS SIZE ----------------------------
+    const widthBeforeSwap = (await rect("claude-root")).width;
+    await d.evaluate(`${el("claude-swap")}.click()`);
+    await sleep(150);
+    c = await rect("claude-root");
+    t = await rect("term-root");
+    check("S26: swap → terminal first, claude on the RIGHT",
+      t.right <= c.left + 1, `term.right=${t.right} claude.left=${c.left}`);
+    check("S26: …and each pane keeps its size (ratio complemented)",
+      Math.abs(c.width - widthBeforeSwap) < 4,
+      `before=${widthBeforeSwap} after=${c.width}`);
+    await d.screenshot(`${REPORT}/S26_side_swapped.png`);
+
+    // -- persistence: the layout survives a reload ---------------------------------
+    const persistedShare = await claudeShare("width");
+    await d.navigate("/terminal");
+    await sleep(3500); // full page boot: producer stream + all three surfaces
+    await pause(d);
+    check("S26: after reload the panel is OPEN with the layout RESTORED",
+      (await claudeDisplay()) !== "none" && (await stackDir()) === "row",
+      `display=${await claudeDisplay()} dir=${await stackDir()}`);
+    c = await rect("claude-root");
+    t = await rect("term-root");
+    check("S26: …same order (terminal first) and same ratio",
+      t.right <= c.left + 1 && near(await claudeShare("width"), persistedShare, 0.03),
+      `share=${await claudeShare("width")} want=${persistedShare}`);
+    check("S26: …and the transcript did NOT persist (layout only)",
+      await d.evaluate<boolean>(`${el("claude-transcript")}.children.length === 0`));
+
+    // -- collapse still restores the full terminal ---------------------------------
+    await d.evaluate(`${el("claude-close")}.click()`);
+    await sleep(150);
+    check("S26: ✕ collapses to the full terminal (computed display none + full area)",
+      (await claudeDisplay()) === "none" &&
+        (await rect("term-root")).width > stack.width * 0.98 &&
+        (await rect("term-root")).height > stack.height * 0.98);
+    await typeInto("term-input", "/claude");
+    await sleep(150);
+    check("S26: reopening keeps the stored layout (side, terminal-first, same ratio)",
+      (await stackDir()) === "row" &&
+        (await rect("term-root")).right <= (await rect("claude-root")).left + 1 &&
+        near(await claudeShare("width"), persistedShare, 0.03));
+  }, 1180, 780, "/terminal");
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];
