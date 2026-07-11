@@ -640,6 +640,37 @@ try {
       lastLine?.text === "mods takes no arguments — it lists the recipe registry",
     JSON.stringify(lastLine));
 
+  // /claude: the conversation panel toggles, and a scripted round-trip
+  // completes through the relay path (deep panel assertions live in S23)
+  const panelOpen = () =>
+    d.evaluate<boolean>(`!document.getElementById('claude-root').classList.contains('collapsed')`);
+  check("the panel starts collapsed", !(await panelOpen()));
+  await submit("/claude");
+  check("/claude opens the conversation panel above the terminal",
+    await panelOpen());
+  check("…without echoing into the terminal log (terminal-local, like clear)",
+    !(await logLines()).some((l) => /\/claude/.test(l.text)));
+  const ci = await d.evaluate<{ x: number; y: number }>(`(()=>{
+    const b=document.getElementById('claude-input').getBoundingClientRect();
+    return {x:b.left+b.width/2, y:b.top+b.height/2};
+  })()`);
+  await d.click(ci.x, ci.y);
+  await d.insertText("look at group-0");
+  await d.key("Enter", "Enter", 13);
+  await sleep(700); // the scripted stream runs to the approval gate
+  check("a scripted round-trip streams through the relay into the transcript",
+    await d.evaluate<boolean>(`[...document.querySelectorAll('.cl-assistant')]
+      .some(n=>n.textContent==='Looking at the target now.')`));
+  check("…and the gated tool is waiting on approve/deny",
+    (await d.evaluate<number>(`[...document.querySelectorAll('.cl-approve,.cl-deny')]
+      .filter(b=>!b.disabled).length`)) === 2);
+  await d.evaluate(`[...document.querySelectorAll('.cl-approve')].at(-1).click()`);
+  await sleep(300);
+  check("approve completes the turn (input re-enabled)",
+    await d.evaluate<boolean>(`!document.getElementById('claude-input').disabled`));
+  await submit("/claude");
+  check("/claude toggles the panel back closed", !(await panelOpen()));
+
   await d.screenshot(`${REPORT}/terminal_smoke.png`);
 } finally {
   await d.dispose();

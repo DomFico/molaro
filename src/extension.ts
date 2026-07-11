@@ -20,6 +20,8 @@ import * as vscode from "vscode";
 import { randomBytes } from "node:crypto";
 
 import { ProducerBroker } from "./broker.ts";
+import { parseClaudeCommand } from "../webview/claudemodel.ts";
+import { createClaudeStub, type ClaudeStub } from "../webview/claudestub.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
 import { TERMINAL_BODY, TERMINAL_CSS } from "../webview/terminalhud.ts";
 
@@ -180,6 +182,7 @@ function openPanel(
   // {type:"commandResult", id, status, message}. All resolution/execution is
   // viewer-side (webview/commands.ts).
   let terminal: vscode.WebviewPanel | null = null;
+  let claudeStub: ClaudeStub | null = null;
   const openTerminal = (): void => {
     if (terminal) {
       terminal.reveal(undefined, true);
@@ -204,9 +207,23 @@ function openPanel(
     terminal.webview.onDidReceiveMessage((msg: { type?: string }) => {
       if (msg?.type === "command" || msg?.type === "complete") {
         void panel.webview.postMessage(msg);
+        return;
       }
+      if (msg?.type === "claude-ready") {
+        // The conversation panel's backend, at ITS boundary: instantiated
+        // host-side per terminal ON the page's ready signal (a message
+        // posted before the page listens would be lost — the stub's opening
+        // auth-status must never race the load).
+        // STUB — replaced by the real backend behind the identical contract.
+        claudeStub ??= createClaudeStub((ev) => void terminal?.webview.postMessage(ev));
+        return;
+      }
+      const claudeCmd = parseClaudeCommand(msg);
+      if (claudeCmd) claudeStub?.handle(claudeCmd);
     });
     terminal.onDidDispose(() => {
+      claudeStub?.dispose();
+      claudeStub = null;
       terminal = null;
     });
   };

@@ -137,7 +137,13 @@ const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* ht
           // message (async, mirroring postMessage delivery).
           if (msg.type === "command" || msg.type === "commandResult" ||
               msg.type === "complete" || msg.type === "completeResult" ||
-              msg.type === "openTerminal") {
+              msg.type === "openTerminal" ||
+              // conversation-panel commands: the real host routes these to
+              // the claude backend (stub); the harness loops them back to
+              // the page, where terminal.ts's harness glue feeds the SAME
+              // stub module (see __TERMINAL_HARNESS__ below).
+              msg.type === "user-message" || msg.type === "approval-decision" ||
+              msg.type === "cancel" || msg.type === "claude-ready") {
             setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: msg })), 0);
             return;
           }
@@ -186,9 +192,12 @@ const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* ht
   </script>` : ""}
   ${terminal ? `
   <!-- terminal smoke surface: the REAL terminal bundle over the REAL viewer,
-       host routing emulated by the shim's loopback above -->
+       host routing emulated by the shim's loopback above. The flag makes
+       terminal.ts wire the claude stub in-page (the host-side backend,
+       emulated at the same boundary the loopback emulates the relay). -->
   <style nonce="${NONCE}">${TERMINAL_CSS}</style>
   ${TERMINAL_BODY}
+  <script nonce="${NONCE}">window.__TERMINAL_HARNESS__ = true;</script>
   <script nonce="${NONCE}" src="/terminal.js"></script>` : ""}
 </body>
 </html>`;

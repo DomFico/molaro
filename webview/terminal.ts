@@ -13,6 +13,10 @@
  * terminalhud.ts.
  */
 
+import { parseClaudeCommand, parseClaudeEvent } from "./claudemodel.ts";
+import { mountClaudePanel } from "./claudepanel.ts";
+import { createClaudeStub } from "./claudestub.ts";
+
 declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };
 
 interface CommandResultMsg {
@@ -36,6 +40,31 @@ function main(): void {
   const log = document.getElementById("term-log");
   const input = document.getElementById("term-input") as HTMLInputElement | null;
   if (!log || !input) throw new Error("terminal: missing #term-log / #term-input");
+
+  // The conversation panel (/claude): its commands ride the SAME relay as
+  // command/complete — the host routes them to the backend (the stub today).
+  const claudePanel = mountClaudePanel((cmd) => host.postMessage(cmd));
+
+  // HARNESS-ONLY: the smoke/E2E page has no extension host, so the bridge
+  // shim loops panel commands back into the page and this glue feeds them to
+  // the SAME stub module the real host instantiates (claudestub.ts) — the
+  // identical code at an emulated boundary, exactly how the shim emulates
+  // the command relay. Like the real host, the stub is created on the
+  // terminal's "claude-ready" signal (below), so its first auth-status can
+  // never race the listeners. Production never sets the flag.
+  if ((window as unknown as { __TERMINAL_HARNESS__?: boolean }).__TERMINAL_HARNESS__) {
+    let stub: ReturnType<typeof createClaudeStub> | null = null;
+    window.addEventListener("message", (e: MessageEvent) => {
+      if ((e.data as { type?: string } | undefined)?.type === "claude-ready") {
+        stub ??= createClaudeStub((ev) => {
+          window.dispatchEvent(new MessageEvent("message", { data: ev }));
+        });
+        return;
+      }
+      const cmd = parseClaudeCommand(e.data);
+      if (cmd) stub?.handle(cmd);
+    });
+  }
 
   const print = (cls: string, text: string): void => {
     const el = document.createElement("div");
@@ -73,6 +102,11 @@ function main(): void {
   let pendingComplete: { id: number; text: string; cursor: number } | null = null;
 
   window.addEventListener("message", (e: MessageEvent) => {
+    const claudeEvent = parseClaudeEvent(e.data);
+    if (claudeEvent) {
+      claudePanel.handleEvent(claudeEvent);
+      return;
+    }
     const m = e.data as CommandResultMsg | CompleteResultMsg | undefined;
     if (m?.type === "commandResult") {
       print(m.status === "error" ? "term-err" : m.status === "nomatch" ? "term-nomatch" : "term-ok", m.message);
@@ -121,6 +155,15 @@ function main(): void {
         input.value = "";
         return;
       }
+      if (text === "/claude") {
+        // Terminal-local, like `clear`: toggles the conversation panel above
+        // this terminal (open focuses its input; close restores full height).
+        // Registered in the command registry only so `help /claude` explains
+        // it — viewer state never hears about the toggle.
+        claudePanel.toggle();
+        input.value = "";
+        return;
+      }
       print("term-echo", `› ${text}`);
       host.postMessage({ type: "command", id: nextId++, text });
       input.value = "";
@@ -157,6 +200,12 @@ function main(): void {
   });
 
   input.focus();
+
+  // Lifecycle glue (transport-level, NOT part of the frozen panel↔backend
+  // contract): tell the host this page's listeners are live. The host
+  // creates the backend (stub) on this signal, so its opening auth-status
+  // can never be posted into a page that isn't listening yet.
+  host.postMessage({ type: "claude-ready" });
 }
 
 main();

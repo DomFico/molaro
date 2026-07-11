@@ -55,6 +55,7 @@ point types `anchor` and `t0`–`t3`).
 | `remove @name <member-pred>` | Drop matched **stored members** (never carves) | `remove @ring subgroup-3` |
 | `remove @name all` / `remove @name` / `remove @all` | Empty its members (it remains) / **delete** it / delete **every** selection | `remove @ring` |
 | `clear` | Wipe the terminal's own log (viewer state untouched) | `clear` |
+| `/claude` | Toggle the conversation panel above the terminal (its own input; tool calls gate on approve/deny) | `/claude` |
 | `help` / `?` | This summary; `help <verb>` describes one verb | `help view` |
 
 ## The mental model: one segment per level
@@ -628,6 +629,31 @@ step is created; the command history (Up/Down) survives. Not to be
 confused with the panel's **Clear button**, which discards the pending
 (uncommitted) target in the sidebar — that one *is* a viewer operation,
 with its own two-step confirm.
+
+## `/claude` — the conversation panel
+
+`/claude` **toggles** a conversation panel above the terminal: the first
+invocation splits the view (panel above, terminal below) and focuses the
+panel's input; typing it again — or the panel's ✕ — collapses back to the
+full terminal. Like `clear` it is **terminal-local**: the toggle never
+reaches viewer state and creates no undo step.
+
+The panel is a chat surface with its own input (the terminal keeps its own
+input for the verbs above — two input surfaces, one relay):
+
+- Assistant replies **stream** into the transcript.
+- Tool calls render as inline blocks (tool name + args preview). Some run
+  directly; a **gated** tool shows **approve / deny** buttons and runs only
+  on approval (deny produces an error-styled result). Result summaries are
+  display-only text — nothing in this panel drives the viewer.
+- A **stop** button interrupts the in-flight turn; the input re-enables
+  when the turn completes.
+- A thin status line shows the backend's connection state and hint —
+  display only, no credential entry.
+
+The panel currently talks to a **scripted stub backend** (no assistant, no
+network); the real backend will replace it behind the identical message
+contract, changing nothing in the panel.
 
 ## Tab completion — stateless and two-stage
 

@@ -116,7 +116,12 @@ const greenCount = (d: E2EDriver, b64: string) =>
   })()`);
 
 let portBase = 9000;
-async function withDriver(fn: (d: E2EDriver) => Promise<void>, w = 1180, h = 780): Promise<void> {
+async function withDriver(
+  fn: (d: E2EDriver) => Promise<void>,
+  w = 1180,
+  h = 780,
+  route = "/", // "/terminal" serves the REAL terminal bundle over the viewer (S23)
+): Promise<void> {
   portBase += 2;
   const d = new E2EDriver({
     bridgePort: portBase, cdpPort: portBase + 300, width: w, height: h,
@@ -124,7 +129,7 @@ async function withDriver(fn: (d: E2EDriver) => Promise<void>, w = 1180, h = 780
   });
   try {
     await d.start();
-    await d.navigate("/");
+    await d.navigate(route);
     await sleep(3200);
     await pause(d);
     await fn(d);
@@ -3873,9 +3878,159 @@ async function S22(): Promise<void> {
   });
 }
 
+async function S23(): Promise<void> {
+  console.log("S23 — /claude: the conversation panel shell (split, stream, approval gate, stub backend)");
+  // the "/terminal" route serves the REAL terminal bundle (panel included)
+  // over the real viewer, with the host relay + stub emulated by the shim
+  await withDriver(async (d) => {
+    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+    const panelOpen = () =>
+      d.evaluate<boolean>(`!${el("claude-root")}.classList.contains('collapsed')`);
+    const inputDisabled = () => d.evaluate<boolean>(`${el("claude-input")}.disabled`);
+    const cancelVisible = () => d.evaluate<boolean>(`!${el("claude-cancel")}.hidden`);
+    const transcript = () =>
+      d.evaluate<{ cls: string; text: string }[]>(`[...${el("claude-transcript")}.children]
+        .map(n=>({cls:n.className, text:n.textContent}))`);
+    const toolBlocks = () =>
+      d.evaluate<{ head: string; approval: boolean; buttons: number; result: string | null; resultCls: string | null }[]>(
+        `[...document.querySelectorAll('#claude-transcript .cl-tool')].map(b=>({
+          head: b.querySelector('.cl-tool-head')?.textContent ?? '',
+          approval: !!b.querySelector('.cl-approval'),
+          buttons: [...b.querySelectorAll('button')].filter(x=>!x.disabled).length,
+          result: b.querySelector('.cl-result')?.textContent ?? null,
+          resultCls: b.querySelector('.cl-result')?.className ?? null,
+        }))`);
+    const clickBtn = (sel: string) =>
+      d.evaluate<boolean>(`(()=>{
+        const b=[...document.querySelectorAll(${JSON.stringify(sel)})].at(-1);
+        if(!b || b.disabled) return false; b.click(); return true;
+      })()`);
+    const typeInto = async (id: string, text: string): Promise<void> => {
+      const r = await d.evaluate<{ x: number; y: number }>(`(()=>{
+        const b=${el(id)}.getBoundingClientRect();
+        return {x:b.left+b.width/2, y:b.top+b.height/2};
+      })()`);
+      await d.click(r.x, r.y);
+      await d.insertText(text);
+      await d.key("Enter", "Enter", 13);
+    };
+
+    // -- open: /claude in the TERMINAL input splits the view -------------------
+    check("S23: the panel starts collapsed (full terminal)", !(await panelOpen()));
+    await typeInto("term-input", "/claude");
+    await sleep(150);
+    check("S23: /claude splits the view — the panel mounts above the terminal",
+      (await panelOpen()) &&
+        (await d.evaluate<boolean>(`${el("term-root")}.getBoundingClientRect().height > 100`)),
+      "panel open + terminal still visible");
+    check("S23: …and focuses the panel's own input",
+      await d.evaluate<boolean>(`document.activeElement === ${el("claude-input")}`));
+    check("S23: the stub's auth-status renders on the status line (connected)",
+      await d.evaluate<boolean>(`${el("claude-dot")}.className === 'connected' &&
+        ${el("claude-status-text")}.textContent === 'connected — stub backend (scripted)'`),
+      await d.evaluate<string>(`${el("claude-status-text")}.textContent`));
+
+    // -- a message: streamed text, the auto-approved tool, the WAITING gate ----
+    await typeInto("claude-input", "look at group-0");
+    await sleep(120); // mid-turn: deltas still streaming
+    check("S23: the input locks for the in-flight turn (cancel affordance live)",
+      (await inputDisabled()) && (await cancelVisible()));
+    await sleep(600); // the script reaches the approval gate and WAITS
+    let items = await transcript();
+    check("S23: the user turn renders", items[0]?.cls === "cl-user" && items[0]?.text === "look at group-0",
+      JSON.stringify(items[0]));
+    check("S23: streamed deltas concatenated into ONE assistant turn",
+      await d.evaluate<boolean>(`[...document.querySelectorAll('.cl-assistant')]
+        .some(n=>n.textContent==='Looking at the target now.')`),
+      JSON.stringify(items));
+    let blocks = await toolBlocks();
+    check("S23: the auto-approved tool: proposed→ok result, NO approval row",
+      blocks[0]?.head === "example_tool_a" && !blocks[0]?.approval &&
+        blocks[0]?.result === "example_tool_a completed on group-0" &&
+        /\bok\b/.test(blocks[0]?.resultCls ?? ""),
+      JSON.stringify(blocks[0]));
+    check("S23: the gated tool renders live approve/deny and NO result yet",
+      blocks[1]?.head === "example_tool_b" && blocks[1]?.approval === true &&
+        blocks[1]?.buttons === 2 && blocks[1]?.result === null,
+      JSON.stringify(blocks[1]));
+    check("S23: …the turn is still in flight while the gate waits", await inputDisabled());
+
+    // -- approve: ok result, turn completes, input re-enables ------------------
+    check("S23: (action) clicking approve", await clickBtn(".cl-approve"));
+    await sleep(250);
+    blocks = await toolBlocks();
+    check("S23: approve → ok-styled result on the gated block",
+      blocks[1]?.result === "example_tool_b completed on subgroup-3" &&
+        /\bok\b/.test(blocks[1]?.resultCls ?? "") && blocks[1]?.buttons === 0,
+      JSON.stringify(blocks[1]));
+    check("S23: turn-complete re-enables the input, hides cancel",
+      !(await inputDisabled()) && !(await cancelVisible()));
+
+    // -- deny path (a fresh turn) ----------------------------------------------
+    await typeInto("claude-input", "again");
+    await sleep(700);
+    check("S23: (action) clicking deny", await clickBtn(".cl-deny"));
+    await sleep(250);
+    blocks = await toolBlocks();
+    check("S23: deny → error-styled result on the new gated block",
+      blocks[3]?.result === "denied — example_tool_b did not run" &&
+        /\berr\b/.test(blocks[3]?.resultCls ?? ""),
+      JSON.stringify(blocks[3]));
+    check("S23: …and the denied turn completes", !(await inputDisabled()));
+    await d.screenshot(`${REPORT}/S23_claude_open.png`); // the split, mid-conversation
+
+    // -- the sentinel error path ------------------------------------------------
+    await typeInto("claude-input", "please trigger-error now");
+    await sleep(250);
+    items = await transcript();
+    check("S23: the sentinel renders an error block and the turn ends",
+      items.some((i) => i.cls === "cl-error" && i.text === "stub error — triggered by sentinel") &&
+        !(await inputDisabled()),
+      JSON.stringify(items.at(-1)));
+
+    // -- cancel interrupts the in-flight turn -----------------------------------
+    await typeInto("claude-input", "one more");
+    await sleep(60); // mid-stream
+    check("S23: (action) clicking stop", await clickBtn("#claude-cancel"));
+    await sleep(250);
+    check("S23: cancel ends the turn — input back, no gate left hanging",
+      !(await inputDisabled()) && !(await cancelVisible()) &&
+        (await d.evaluate<number>(`[...document.querySelectorAll('.cl-approve,.cl-deny')]
+          .filter(b=>!b.disabled).length`)) === 0);
+
+    // -- auth-status: the disconnected state renders too -------------------------
+    // (same message path production events take — the panel renders whatever
+    // auth-status last arrived; the stub's constructor covers the unit side)
+    await d.evaluate(`window.dispatchEvent(new MessageEvent('message', { data:
+      { type: 'auth-status', state: 'disconnected', hint: 'no backend' } }))`);
+    await sleep(80);
+    check("S23: a disconnected auth-status flips the dot and the hint text",
+      await d.evaluate<boolean>(`${el("claude-dot")}.className === 'disconnected' &&
+        ${el("claude-status-text")}.textContent === 'disconnected — no backend'`));
+
+    // -- collapse: both affordances restore the full terminal --------------------
+    check("S23: (action) the panel's ✕ closes it", await clickBtn("#claude-close"));
+    check("S23: ✕ collapses the panel", !(await panelOpen()));
+    check("S23: …and focus returns to the terminal input",
+      await d.evaluate<boolean>(`document.activeElement === ${el("term-input")}`));
+    await typeInto("term-input", "/claude");
+    await sleep(100);
+    check("S23: /claude re-opens with the TRANSCRIPT PRESERVED",
+      (await panelOpen()) && (await transcript()).length > 0);
+    await typeInto("term-input", "/claude");
+    await sleep(100);
+    check("S23: /claude toggles back closed — the terminal has the full height",
+      !(await panelOpen()) &&
+        (await d.evaluate<boolean>(`${el("term-root")}.getBoundingClientRect().height >
+          window.innerHeight * 0.9`)));
+
+    await d.screenshot(`${REPORT}/S23_claude.png`);
+  }, 1180, 780, "/terminal");
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

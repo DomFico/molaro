@@ -1323,6 +1323,8 @@ export const HELP_TEXT = [
   "  mods         list the recipe registry: name, axis, origin, and credit",
   "               (author · source, display-only; recipes, not verbs)",
   "  rename @name [new]  rename a selection · clear  wipe the terminal log",
+  "  /claude      toggle the conversation panel above the terminal (its own",
+  "               input; tool calls gate on approve/deny; stub backend today)",
   "  add @name <tree-target>     add tree entries as members (natural level)",
   "  remove @name <member-pred>  drop matched STORED members (never carves);",
   "               remove @name all = empty it (it remains) · remove @name =",
@@ -1463,6 +1465,14 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "clear",
     () => ({ status: "ok", message: "cleared" }),
     "clear the terminal's output log (handled by the terminal surface itself)",
+  );
+  registry.register(
+    "/claude",
+    () => ({
+      status: "ok",
+      message: "/claude toggles the conversation panel — type it in the terminal",
+    }),
+    "toggle the conversation panel above the terminal (handled by the terminal surface itself; the panel has its own input and talks to the assistant backend)",
   );
   const help = makeHelpHandler(registry);
   registry.register("help", help, "this grammar summary; help <verb> describes one verb");
