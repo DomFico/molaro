@@ -863,9 +863,47 @@ held item is restored when the tab is reopened.
 
 An unknown kind is an error, never a guess. The union closes at four.
 
-The panel currently talks to a **scripted stub backend** (no assistant, no
-network); the real backend will replace it behind the identical message
-contract, changing nothing in the panel.
+### The assistant backend
+
+By default the panel talks to a **real analysis assistant** built on the
+[Claude Agent SDK](https://docs.claude.com/en/api/agent-sdk), running in the
+extension host behind the same frozen message contract. Its job is to **author
+and run analysis mods**: it writes a `.molaro/mods/*.py`, you approve the full
+Python, it runs in the producer against the live trajectory, and its typed
+result binds to the viewer — the curve, the coloring, the scatter — through the
+machinery already described above. A scripted **stub backend** (no assistant, no
+network, no key) remains available behind the `molaro.assistant.useStub` setting
+and drives the test suite.
+
+**Authentication — API key, via VS Code.** Molaro is a distributed extension, so
+it uses Anthropic **API-key** auth (not your claude.ai / Claude Code login). The
+key is read from VS Code **SecretStorage**, falling back to the
+`ANTHROPIC_API_KEY` environment variable. If neither is set, run **“Molaro: Set
+Anthropic API Key”** — a native password box stores it in SecretStorage.
+**“Molaro: Clear Anthropic API Key”** removes it. The key is never shown in the
+webview, never logged, and reaches the model only through the agent subprocess
+environment. The panel's status line shows **connected** / **disconnected** with
+a hint. The model is set by `molaro.assistant.model` (default a current Sonnet).
+
+**The tool surface — exactly four, and nothing else.** The assistant has access
+to four in-process tools and no others — no filesystem, shell, search, or
+network. The SDK's built-in tools are disabled (`allowedTools` is our tools
+only, the built-ins are in `disallowedTools`, and no user/project `.claude`
+settings are loaded):
+
+| tool | approval | what it does |
+|---|---|---|
+| `get_context` | none (read-only) | Reports the loaded system's shape and scene state. |
+| `write_mod` | **required** | Writes a `.molaro/mods/*.py`; **the approval preview is the full Python source**. |
+| `run_mod` | **required** | Runs a mod on a target; the typed result binds to the viewer. |
+| `run_command` | none (undoable) | Runs one grammar command. **Refuses `rm` and analysis-mod runs** at the tool boundary. |
+
+Gated tools surface as an **approve/deny** block in the panel — for `write_mod`,
+the complete Python you're about to save; nothing runs unseen. `run_command` is
+undoable and ungated, but **cannot** delete files (`rm`) or execute Python (an
+analysis mod) — those go only through the gated tools. When a mod fails, the
+producer's **traceback** is returned to the assistant so it can fix the mod and
+try again.
 
 ## Tab completion — stateless and two-stage
 

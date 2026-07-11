@@ -23,8 +23,11 @@ import { join } from "node:path";
 
 import { ProducerBroker } from "./broker.ts";
 import { parseModFile, serializeMod, type AnalysisMod, type Mod } from "../webview/recipes.ts";
-import { parseClaudeCommand } from "../webview/claudemodel.ts";
-import { createClaudeStub, type ClaudeStub } from "../webview/claudestub.ts";
+import { parseClaudeCommand, type ClaudeCommand } from "../webview/claudemodel.ts";
+import { createClaudeStub } from "../webview/claudestub.ts";
+import { createClaudeBackend, type ClaudeBackend } from "./claudebackend.ts";
+import type { SceneContext } from "./claudetools.ts";
+import { clearApiKey, NO_KEY_HINT, promptAndStoreApiKey, resolveApiKey } from "./claudeauth.ts";
 import { createPlotHost } from "../webview/plothost.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
 import { PLOT_BODY, PLOT_CSS } from "../webview/plothud.ts";
@@ -32,6 +35,41 @@ import { TERMINAL_BODY, TERMINAL_CSS } from "../webview/terminalhud.ts";
 
 const DEFAULT_N_POINTS = 20_000;
 const DEFAULT_N_FRAMES = 600;
+
+/** A backend at the conversation panel's boundary — the real SDK backend or the
+ * scripted stub; both speak the frozen contract. */
+type PanelBackend = {
+  handle(cmd: ClaudeCommand): void;
+  dispose(): void;
+  setApiKey?(key: string | null): void;
+};
+
+/** Live assistant backends across all open panels, so the set/clear-key
+ * commands can re-drive their auth-status without reaching into a closure. */
+const liveBackends = new Set<PanelBackend>();
+
+/** A current Sonnet model, overridable via the `molaro.assistant.model` setting. */
+const DEFAULT_MODEL = "claude-sonnet-5";
+
+function assistantConfig(): { useStub: boolean; model: string } {
+  const cfg = vscode.workspace.getConfiguration("molaro");
+  return {
+    useStub: cfg.get<boolean>("assistant.useStub", false),
+    model: cfg.get<string>("assistant.model", DEFAULT_MODEL) || DEFAULT_MODEL,
+  };
+}
+
+/** The minimal shape of the producer header the host peeks off the stream to
+ * answer get_context (system shape) — a read of a message already flowing to
+ * the viewer, never an injected request. */
+interface HeaderPeek {
+  name: string;
+  n_points: number;
+  n_frames: number;
+  categories: string[];
+  groups: Record<string, string>;
+  subgroups: Record<string, string>;
+}
 
 interface OpenArgs {
   // Synthetic (default) source:
@@ -91,6 +129,29 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       lastViewerSession.openTerminal();
+    }),
+  );
+
+  // Assistant API-key management — VS Code native, never the webview. Setting or
+  // clearing the key re-drives auth-status on every live backend immediately.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("viewer.setApiKey", async () => {
+      const key = await promptAndStoreApiKey(context);
+      if (key === null) return; // dismissed
+      for (const b of liveBackends) b.setApiKey?.(key);
+      void vscode.window.showInformationMessage("Molaro: Anthropic API key stored.");
+    }),
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("viewer.clearApiKey", async () => {
+      await clearApiKey(context);
+      const fallback = await resolveApiKey(context); // an env var may still supply one
+      for (const b of liveBackends) b.setApiKey?.(fallback);
+      void vscode.window.showInformationMessage(
+        fallback
+          ? "Molaro: stored key cleared (ANTHROPIC_API_KEY still in effect)."
+          : "Molaro: Anthropic API key cleared.",
+      );
     }),
   );
 
@@ -218,6 +279,21 @@ function openPanel(
     },
   );
 
+  // The loaded system's header, PEEKED off the producer stream (the header is
+  // the first JSON response the viewer requests at boot) — a read of a message
+  // already flowing to the viewer, so get_context needs no injected request and
+  // the producer FIFO is undisturbed. Cached once.
+  let cachedHeader: HeaderPeek | null = null;
+  const peekHeader = (payload: Uint8Array): void => {
+    if (cachedHeader || payload.length === 0 || payload[0] !== 0x7b /* { */) return;
+    try {
+      const obj = JSON.parse(new TextDecoder().decode(payload)) as Record<string, unknown>;
+      if (typeof obj.n_points === "number" && Array.isArray(obj.categories)) {
+        cachedHeader = obj as unknown as HeaderPeek;
+      }
+    } catch { /* not the header (a frame chunk or a non-JSON payload) */ }
+  };
+
   const broker = new ProducerBroker(
     {
       pythonPath: opts.pythonPath,
@@ -226,6 +302,7 @@ function openPanel(
     },
     {
       onMessage: (payload) => {
+        peekHeader(payload);
         void panel.webview.postMessage({ type: "fromProducer", payload });
       },
       onExit: (reason) => {
@@ -241,9 +318,100 @@ function openPanel(
   // {type:"commandResult", id, status, message}. All resolution/execution is
   // viewer-side (webview/commands.ts).
   let terminal: vscode.WebviewPanel | null = null;
-  let claudeStub: ClaudeStub | null = null;
+  let claudeBackend: PanelBackend | null = null;
   /** rm's name → file map, populated ONLY by the mod scan (and save). */
   const modPaths = new Map<string, string>();
+
+  // --- assistant → viewer command injection -------------------------------
+  // The assistant's run_mod/run_command tools drive the EXISTING command relay:
+  // the host posts {type:"command", id, text} to the viewer (the same message
+  // the terminal sends) on a private high id range, captures the id-correlated
+  // ack, and — for a mod invocation, whose real outcome (including a failure
+  // traceback) arrives as an async id:-1 follow-up — the following async line.
+  // No viewer change; the viewer resolves, runs, and binds exactly as it does
+  // for a typed command.
+  let assistantCmdSeq = 1_000_000;
+  const pendingAsstAck = new Map<number, (r: { ok: boolean; message: string }) => void>();
+  let pendingModOutcome: ((r: { ok: boolean; message: string }) => void) | null = null;
+  const MOD_ACK = /^running .+ points/; // "running <mod> on <N> points…"
+
+  const runViewerCommand = (text: string): Promise<{ ok: boolean; message: string }> =>
+    new Promise((resolve) => {
+      const id = assistantCmdSeq++;
+      const timer = setTimeout(() => {
+        pendingAsstAck.delete(id);
+        resolve({ ok: false, message: "viewer command timed out" });
+      }, 60_000);
+      pendingAsstAck.set(id, (r) => { clearTimeout(timer); resolve(r); });
+      void panel.webview.postMessage({ type: "command", id, text });
+    });
+
+  const assembleContext = async (): Promise<SceneContext | null> => {
+    const h = cachedHeader;
+    if (!h) return null;
+    const ls = await runViewerCommand("ls").catch(() => ({ ok: true, message: "(unavailable)" }));
+    const mods = loadWorkspaceMods(producerLog, modPaths).map((m) => ({
+      name: m.name, produces: m.produces, axis: m.axis, description: m.description,
+    }));
+    const categories = Array.isArray(h.categories) ? h.categories : [];
+    return {
+      system: h.name,
+      nAtoms: h.n_points,
+      nFrames: h.n_frames,
+      categories,
+      groups: Object.values(h.groups ?? {}),
+      subgroupCount: Object.keys(h.subgroups ?? {}).length,
+      targetExamples: ["@all", ...categories.slice(0, 3)],
+      committedSelections: ls.message,
+      mods,
+    };
+  };
+
+  const analysisModNames = (): string[] =>
+    loadWorkspaceMods(producerLog, modPaths).map((m) => m.name);
+
+  const saveAssistantMod = (spec: {
+    name: string; produces: AnalysisMod["produces"]; axis?: AnalysisMod["axis"];
+    description: string; code: string;
+  }): { name: string; file: string } => {
+    const mod: AnalysisMod = {
+      kind: "analysis", name: spec.name, origin: "workspace",
+      author: "Molaro assistant", produces: spec.produces,
+      ...(spec.axis ? { axis: spec.axis } : {}),
+      description: spec.description, code: spec.code,
+    };
+    const file = saveWorkspaceMod(mod);
+    // Re-register so the new mod appears in `mods` and its verb resolves — the
+    // viewer re-derives its registry from this push, exactly like at startup.
+    void panel.webview.postMessage({
+      type: "modsLoaded", mods: loadWorkspaceMods(producerLog, modPaths),
+    });
+    return { name: spec.name, file };
+  };
+
+  const createRealBackend = async (): Promise<void> => {
+    if (claudeBackend) return;
+    const { model } = assistantConfig();
+    const apiKey = await resolveApiKey(context);
+    const backend = createClaudeBackend(
+      (ev) => void terminal?.webview.postMessage(ev),
+      {
+        apiKey, model, authHint: NO_KEY_HINT,
+        getSceneContext: assembleContext,
+        getContext: async () => {
+          const c = await assembleContext();
+          if (!c) throw new Error("the system is still loading — try again in a moment");
+          return c;
+        },
+        writeMod: async (spec) => saveAssistantMod(spec),
+        runMod: (name, target) => runViewerCommand(`${name} ${target}`.trim()),
+        runCommand: (text) => runViewerCommand(text),
+        analysisModNames,
+      },
+    );
+    claudeBackend = backend;
+    liveBackends.add(backend);
+  };
 
   // The plot panel — a third editor webview, create-on-demand. The HOST
   // holds the active series (plothost.ts, shared with the harness glue) and
@@ -310,21 +478,31 @@ function openPanel(
       }
       if (msg?.type === "claude-ready") {
         // The conversation panel's backend, at ITS boundary: instantiated
-        // host-side per terminal ON the page's ready signal (a message
-        // posted before the page listens would be lost — the stub's opening
-        // auth-status must never race the load).
-        // STUB — replaced by the real backend behind the identical contract.
-        claudeStub ??= createClaudeStub((ev) => void terminal?.webview.postMessage(ev), {
-          frameCount: () => plotHost.nFrames(), // so it can emit length-T series
-        });
+        // host-side per terminal ON the page's ready signal (a message posted
+        // before the page listens would be lost — the opening auth-status must
+        // never race the load). The REAL SDK backend by default; the scripted
+        // stub behind a setting (and the E2E harness wires the stub in-page).
+        if (claudeBackend) return;
+        const { useStub } = assistantConfig();
+        if (useStub) {
+          claudeBackend = createClaudeStub(
+            (ev) => void terminal?.webview.postMessage(ev),
+            { frameCount: () => plotHost.nFrames() },
+          );
+        } else {
+          void createRealBackend();
+        }
         return;
       }
       const claudeCmd = parseClaudeCommand(msg);
-      if (claudeCmd) claudeStub?.handle(claudeCmd);
+      if (claudeCmd) claudeBackend?.handle(claudeCmd);
     });
     terminal.onDidDispose(() => {
-      claudeStub?.dispose();
-      claudeStub = null;
+      if (claudeBackend) {
+        claudeBackend.dispose();
+        liveBackends.delete(claudeBackend);
+        claudeBackend = null;
+      }
       terminal = null;
     });
   };
@@ -389,10 +567,35 @@ function openPanel(
       }
     } else if (msg?.type === "openTerminal") {
       openTerminal();
-    } else if (
-      msg?.type === "commandResult" || msg?.type === "completeResult" ||
-      msg?.type === "claude-bind-result"
-    ) {
+    } else if (msg?.type === "commandResult") {
+      const cr = msg as unknown as { id: number; status: string; message: string };
+      if (cr.id >= 1_000_000) {
+        // an ASSISTANT command's ack — resolve its tool promise, or (for a mod
+        // invocation) hold for the async id:-1 outcome. Never echoed to the
+        // terminal (the user didn't type it).
+        const ack = pendingAsstAck.get(cr.id);
+        pendingAsstAck.delete(cr.id);
+        if (cr.status === "ok" && MOD_ACK.test(cr.message ?? "")) {
+          pendingModOutcome = ack ?? null;
+          const captured = ack;
+          setTimeout(() => {
+            if (pendingModOutcome === captured) {
+              pendingModOutcome = null;
+              captured?.({ ok: true, message: cr.message });
+            }
+          }, 30_000);
+        } else {
+          ack?.({ ok: cr.status !== "error", message: cr.message });
+        }
+        return;
+      }
+      if (cr.id === -1 && pendingModOutcome) {
+        const settle = pendingModOutcome;
+        pendingModOutcome = null;
+        settle({ ok: cr.status !== "error", message: cr.message });
+      }
+      void terminal?.webview.postMessage(msg);
+    } else if (msg?.type === "completeResult" || msg?.type === "claude-bind-result") {
       void terminal?.webview.postMessage(msg);
     }
   });
