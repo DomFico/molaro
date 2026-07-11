@@ -423,6 +423,22 @@ test("system prompt teaches data.labels, all-vs-@all, and the trajectory-None gu
   assert.match(p, /if data\.trajectory is None:/);
 });
 
+test("system prompt teaches durability: derive vocabulary at run time, respect target_indices (Brief 13)", () => {
+  const p = buildSystemPrompt(sampleContext());
+  // the durability rule — a mod outlives the system; don't freeze get_context's vocabulary
+  assert.match(p, /A mod outlives the system it was written on/);
+  assert.match(p, /never hardcode its vocabulary into a mod/i);
+  assert.match(p, /derive that set at run time/i);
+  // the WRONG/RIGHT worked contrast — derive present elements + handle the unexpected
+  assert.match(p, /WRONG — freezes the elements/);
+  assert.match(p, /a\.element\.symbol for a in data\.trajectory\.topology\.atoms if a\.element/);
+  assert.match(p, /cpk\.get\(sym, 'pink'\)/, "the RIGHT example has a fallback for unanticipated elements");
+  // the specific silent-failure it prevents (phosphorus in a nucleic system)
+  assert.match(p, /phosphorus/i);
+  // respect target_indices guidance
+  assert.match(p, /Respect `target_indices`/);
+});
+
 test("system prompt without context still instructs get_context first", () => {
   assert.match(buildSystemPrompt(null), /Call get_context/);
 });

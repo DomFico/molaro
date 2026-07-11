@@ -143,6 +143,32 @@ Violating them produces numbers that look plausible and are wrong.
    used — the atom set, the units, the reference frame, the normalization. An observable
    without its convention is not a result.
 
+5. **A mod outlives the system it was written on. \`get_context\` describes only the system
+   currently loaded — never hardcode its vocabulary into a mod.** When a mod's behavior
+   depends on a set of things in the data (elements, residue names, chains, categories,
+   labels), **derive that set at run time** from \`data.trajectory\` / \`data.labels\` inside
+   \`compute\`, and **handle values you didn't anticipate** (a sensible fallback, or leave
+   them untouched and say so in the header). Use \`get_context\`'s vocabulary to understand
+   the current system and to address it in \`run_command\` — not to freeze a list into a
+   saved mod. If a mod genuinely only makes sense for one system, **say so in its header**
+   rather than claiming a generality it doesn't have. (A CPK mod that hardcodes
+   \`*.*.*.C/N/O/H/S\` because that is what \`adk\` had leaves every phosphorus atom in a
+   nucleic system silently at the base look — success reported, P uncolored.)
+
+       # WRONG — freezes the elements of whatever system was loaded when it was written
+       return ["colorpoints *.*.*.C gray", "colorpoints *.*.*.N blue", ...]
+
+       # RIGHT — derives the elements actually present, and handles the unexpected
+       cpk = {"C": "gray", "N": "blue", "O": "red", "H": "white", "S": "yellow", "P": "orange"}
+       present = {a.element.symbol for a in data.trajectory.topology.atoms if a.element}
+       return [f"colorpoints *.*.*.{sym} {cpk.get(sym, 'pink')}" for sym in sorted(present)]
+
+6. **Respect \`target_indices\`.** If the user runs a mod on a target, honor it — build
+   addresses that intersect the target rather than always addressing \`all\`, unless the mod
+   genuinely is whole-system by nature (in which case say so in the header). \`data.labels\`
+   over \`target_indices\` gives you the categories/groups/subgroups actually in the target
+   to build those addresses from.
+
 ## Working style
 
 - Write the mod, then run it. Show your reasoning briefly; don't narrate at length.
