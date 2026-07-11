@@ -63,12 +63,14 @@ export interface AnalysisMod extends ModCommon {
   kind: "analysis";
   /** The declared result kind — the routing key into the existing binding
    * layer. (`command` is deliberately NOT a value here.) */
-  produces: "per-point-scalar" | "per-frame-series";
+  produces: "per-point-scalar" | "per-frame-series" | "scatter";
   /** Required iff produces = per-point-scalar: which point axis the scalars
    * bind to. */
   axis?: "color" | "size" | "opacity";
-  /** Python source defining `compute(data, target_indices) -> list[float]`,
-   * executed in the producer against the resident dataset handle. */
+  /** Python source defining `compute(data, target_indices)`, executed in
+   * the producer against the resident dataset handle. Returns a flat
+   * `list[float]` — EXCEPT `produces: scatter`, which returns a dict
+   * `{x, y, frames?, xLabel?, yLabel?}` (the one deliberate widening). */
   code: string;
 }
 
@@ -177,8 +179,8 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
     return { ok: false, error: `kind must be "analysis" for mod files (got "${meta.kind ?? ""}")` };
   }
   const produces = meta.produces;
-  if (produces !== "per-point-scalar" && produces !== "per-frame-series") {
-    return { ok: false, error: `produces must be per-point-scalar | per-frame-series (got "${produces ?? ""}")` };
+  if (produces !== "per-point-scalar" && produces !== "per-frame-series" && produces !== "scatter") {
+    return { ok: false, error: `produces must be per-point-scalar | per-frame-series | scatter (got "${produces ?? ""}")` };
   }
   const axis = meta.axis;
   if (produces === "per-point-scalar") {
@@ -231,19 +233,68 @@ export interface ModRunExpectation {
   produces: AnalysisMod["produces"];
   /** per-point-scalar: the resolved target size. */
   targetCount: number;
-  /** per-frame-series: the dataset's frame count. */
+  /** per-frame-series length / scatter frames range: the dataset's frame count. */
   frameCount: number;
 }
 
+/** A validated scatter return: equal-length finite x/y, optional integer
+ * frame indices (the sync hook), optional axis labels. */
+export interface ScatterValues {
+  x: number[];
+  y: number[];
+  frames?: number[];
+  xLabel?: string;
+  yLabel?: string;
+}
+
+const finiteNumList = (v: unknown): v is number[] =>
+  Array.isArray(v) && v.every((n) => typeof n === "number" && Number.isFinite(n));
+
 /** THE fail-closed gate between the producer's reply and any binding: the
- * return must be a list of finite numbers of the EXACT expected length for
- * the declared kind (and within [0,1] for per-point-scalar — the binding
- * layer's existing contract; the mod owns its own normalization). Any
- * violation → an error and NOTHING is bound. Never partial-write. */
+ * return must match the declared kind EXACTLY — a flat list of finite
+ * numbers of the expected length (within [0,1] for per-point-scalar — the
+ * binding layer's existing contract; the mod owns its own normalization),
+ * or, for scatter only, a dict of equal-length non-empty finite x/y with
+ * optional in-range integer frames. Any violation → an error and NOTHING
+ * is bound or drawn. Never partial-write. */
 export function validateModValues(
   values: unknown,
   expect: ModRunExpectation,
-): { ok: true; values: number[] } | { ok: false; error: string } {
+): { ok: true; values: number[] } | { ok: true; scatter: ScatterValues } | { ok: false; error: string } {
+  if (expect.produces === "scatter") {
+    if (!values || typeof values !== "object" || Array.isArray(values)) {
+      return { ok: false, error: "a scatter mod must return a dict {x, y, frames?, xLabel?, yLabel?}" };
+    }
+    const m = values as Record<string, unknown>;
+    if (!finiteNumList(m.x) || !finiteNumList(m.y)) {
+      return { ok: false, error: "scatter x and y must be lists of finite numbers" };
+    }
+    if (m.x.length === 0) return { ok: false, error: "scatter x/y are empty — nothing to draw" };
+    if (m.x.length !== m.y.length) {
+      return { ok: false, error: `scatter x and y must be equal length (got ${m.x.length} vs ${m.y.length})` };
+    }
+    let frames: number[] | undefined;
+    if (m.frames !== undefined) {
+      if (!finiteNumList(m.frames) || m.frames.length !== m.x.length) {
+        return { ok: false, error: `scatter frames must match x/y length (${m.x.length})` };
+      }
+      for (const f of m.frames) {
+        if (!Number.isInteger(f) || f < 0 || f >= expect.frameCount) {
+          return { ok: false, error: `scatter frames must be integer frame indices in [0, ${expect.frameCount - 1}] — got ${f}` };
+        }
+      }
+      frames = m.frames;
+    }
+    return {
+      ok: true,
+      scatter: {
+        x: m.x, y: m.y,
+        ...(frames ? { frames } : {}),
+        ...(typeof m.xLabel === "string" ? { xLabel: m.xLabel } : {}),
+        ...(typeof m.yLabel === "string" ? { yLabel: m.yLabel } : {}),
+      },
+    };
+  }
   if (!Array.isArray(values)) {
     return { ok: false, error: `compute returned ${typeof values}, not a list of floats` };
   }

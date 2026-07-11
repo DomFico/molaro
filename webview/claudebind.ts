@@ -85,12 +85,13 @@ export function bindTypedResult(
       return { ok: r.status === "ok", message: `${result.command} → ${r.message}` };
     }
     case "per-frame-series":
-      // The plot panel's kind: the HOST intercepts it before the viewer
+    case "scatter":
+      // The plot panel's kinds: the HOST intercepts them before the viewer
       // relay (plothost.ts) and answers the outcome itself — this branch is
-      // defensive only (a series should never reach the viewer's binding).
+      // defensive only (they should never reach the viewer's binding).
       return {
         ok: false,
-        message: `per-frame-series is routed to the plot panel — not a viewer binding`,
+        message: `${result.kind} is routed to the plot panel — not a viewer binding`,
       };
   }
 }

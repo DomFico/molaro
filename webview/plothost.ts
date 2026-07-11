@@ -44,33 +44,74 @@ export interface PlotHost {
 
 export function createPlotHost(io: PlotHostIO): PlotHost {
   let nFrames = 0;
-  let series: { label: string; values: number[] } | null = null;
+  /** THE one active item — a line series or a scatter; a new result of
+   * either kind replaces it in place. */
+  let item:
+    | { type: "series"; label: string; values: number[] }
+    | { type: "scatter"; label: string; x: number[]; y: number[];
+        frames?: number[]; xLabel?: string; yLabel?: string }
+    | null = null;
   let lastFrame = 0;
 
-  const pushSeries = (): void => {
-    if (series) io.postToPlot({ type: "plotSeries", label: series.label, values: series.values, nFrames });
+  const pushItem = (): void => {
+    if (!item) return;
+    if (item.type === "series") {
+      io.postToPlot({ type: "plotSeries", label: item.label, values: item.values, nFrames });
+    } else {
+      io.postToPlot({
+        type: "plotScatter", label: item.label, x: item.x, y: item.y,
+        ...(item.frames ? { frames: item.frames } : {}),
+        ...(item.xLabel ? { xLabel: item.xLabel } : {}),
+        ...(item.yLabel ? { yLabel: item.yLabel } : {}),
+      });
+    }
   };
 
   return {
     handleTerminalMessage(msg: unknown): boolean {
       const m = msg as { type?: string; callId?: string; result?: unknown } | undefined;
       if (m?.type !== "claude-bind") return false;
+      // Consume by RAW kind, so a malformed plot payload fails CLOSED here
+      // with a proper error instead of leaking to the viewer's binding.
+      const rawKind = (m.result as { kind?: unknown } | null | undefined)?.kind;
+      if (rawKind !== "per-frame-series" && rawKind !== "scatter") return false;
+      const fail = (message: string): true => {
+        io.postToTerminal({ type: "claude-bind-result", callId: m.callId, ok: false, message });
+        return true; // consumed: NOTHING drawn, the previous item stands
+      };
       const typed = parseTypedResult(m.result);
-      if (typed?.kind !== "per-frame-series") return false; // the viewer's kinds
-      if (nFrames < 1 || typed.values.length !== nFrames) {
-        io.postToTerminal({
-          type: "claude-bind-result", callId: m.callId, ok: false,
-          message: `series length mismatch: ${typed.values.length} values for ${nFrames} frames — not drawn`,
-        });
-        return true; // consumed: NOTHING drawn, the previous series stands
+      if (!typed || (typed.kind !== "per-frame-series" && typed.kind !== "scatter")) {
+        return fail(`malformed ${rawKind} payload — not drawn`);
       }
-      series = { label: typed.label, values: typed.values };
+      if (typed.kind === "per-frame-series") {
+        if (nFrames < 1 || typed.values.length !== nFrames) {
+          return fail(`series length mismatch: ${typed.values.length} values for ${nFrames} frames — not drawn`);
+        }
+        item = { type: "series", label: typed.label, values: typed.values };
+      } else {
+        // frames (the sync hook) must be valid in-range frame indices
+        if (typed.frames) {
+          for (const f of typed.frames) {
+            if (!Number.isInteger(f) || f < 0 || f >= nFrames) {
+              return fail(`scatter frames must be integer frame indices in [0, ${nFrames - 1}] — got ${f} — not drawn`);
+            }
+          }
+        }
+        item = {
+          type: "scatter", label: typed.label, x: typed.x, y: typed.y,
+          ...(typed.frames ? { frames: typed.frames } : {}),
+          ...(typed.xLabel ? { xLabel: typed.xLabel } : {}),
+          ...(typed.yLabel ? { yLabel: typed.yLabel } : {}),
+        };
+      }
       io.openPlot();
-      pushSeries();
+      pushItem();
       io.postToPlot({ type: "plotFrame", frame: lastFrame });
       io.postToTerminal({
         type: "claude-bind-result", callId: m.callId, ok: true,
-        message: `series "${typed.label}" drawn (${typed.values.length} frames) — click the plot to seek`,
+        message: typed.kind === "per-frame-series"
+          ? `series "${typed.label}" drawn (${typed.values.length} frames) — click the plot to seek`
+          : `scatter "${typed.label}" drawn (${typed.x.length} points${typed.frames ? " — click a point to seek" : ""})`,
       });
       return true;
     },
@@ -94,7 +135,7 @@ export function createPlotHost(io: PlotHostIO): PlotHost {
         return true;
       }
       if (m?.type === "plot-ready") {
-        pushSeries();
+        pushItem();
         io.postToPlot({ type: "plotFrame", frame: lastFrame });
         return true;
       }

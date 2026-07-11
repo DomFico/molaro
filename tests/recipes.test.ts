@@ -179,3 +179,57 @@ test("validateModValues: the FAIL-CLOSED matrix — any violation binds nothing"
     if (!r.ok) assert.match(r.error, want, JSON.stringify(values));
   }
 });
+
+test("validateModValues: the scatter dict return — good paths and the full fail matrix", () => {
+  const expect = { produces: "scatter" as const, targetCount: 3, frameCount: 10 };
+  const good = validateModValues(
+    { x: [1, 2], y: [3, 4], frames: [0, 9], xLabel: "a", yLabel: "b" }, expect);
+  assert.deepEqual(good,
+    { ok: true, scatter: { x: [1, 2], y: [3, 4], frames: [0, 9], xLabel: "a", yLabel: "b" } });
+  assert.deepEqual(validateModValues({ x: [1], y: [2] }, expect),
+    { ok: true, scatter: { x: [1], y: [2] } }, "frames and labels are optional");
+  const bad: [unknown, RegExp][] = [
+    [[1, 2, 3], /must return a dict/],
+    ["nope", /must return a dict/],
+    [{ x: [1, 2] }, /x and y must be lists of finite numbers/],
+    [{ x: [1], y: [Number.NaN] }, /finite/],
+    [{ x: [], y: [] }, /empty — nothing to draw/],
+    [{ x: [1, 2], y: [1] }, /equal length \(got 2 vs 1\)/],
+    [{ x: [1], y: [1], frames: [0, 1] }, /frames must match x\/y length/],
+    [{ x: [1], y: [1], frames: [10] }, /integer frame indices in \[0, 9\] — got 10/],
+    [{ x: [1], y: [1], frames: [0.5] }, /integer frame indices/],
+    [{ x: [1], y: [1], frames: [-1] }, /integer frame indices/],
+  ];
+  for (const [values, want] of bad) {
+    const r = validateModValues(values, expect);
+    assert.ok(!r.ok, JSON.stringify(values));
+    if (!r.ok) assert.match(r.error, want, JSON.stringify(values));
+  }
+  // the flat-list kinds are UNCHANGED by the widening
+  assert.ok(!validateModValues({ x: [1], y: [1] },
+    { produces: "per-frame-series", targetCount: 0, frameCount: 1 }).ok,
+    "a dict is still wrong for a series");
+});
+
+test("parseModFile: produces scatter is accepted; axis on a scatter is rejected", () => {
+  const ok = parseModFile(`${MOD_FILE_MAGIC}
+# name: xy
+# kind: analysis
+# produces: scatter
+
+def compute(data, target_indices):
+    return {"x": [1.0], "y": [1.0]}
+`, "workspace");
+  assert.ok(ok.ok && ok.mod.produces === "scatter", JSON.stringify(ok));
+  const bad = parseModFile(`${MOD_FILE_MAGIC}
+# name: xy
+# kind: analysis
+# produces: scatter
+# axis: color
+
+def compute(data, target_indices):
+    return {}
+`, "workspace");
+  assert.ok(!bad.ok);
+  if (!bad.ok) assert.match(bad.error, /axis is only valid on per-point-scalar/);
+});

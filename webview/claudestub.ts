@@ -147,6 +147,42 @@ export function createClaudeStub(
           { kind: "per-point-scalar", target: "#150-199", axis: "opacity", scalars: ramp(50) });
         return;
       }
+      if (cmd.text.includes("scatter-mismatch")) {
+        // x and y of unequal length — the plot route's fail-closed path
+        oneToolTurn('{ label: "example_scatter" }',
+          "example_tool_a produced a malformed scatter",
+          { kind: "scatter", label: "example_scatter",
+            x: [1, 2, 3, 4, 5], y: [1, 2, 3, 4] } as unknown as TypedResult);
+        return;
+      }
+      if (cmd.text.includes("scatter-static")) {
+        // NO frames: a legitimate static picture (no highlight, no seek)
+        const n = 30;
+        oneToolTurn('{ label: "example_scatter" }',
+          "example_tool_a produced a static scatter",
+          {
+            kind: "scatter", label: "example_scatter",
+            xLabel: "quantity_a", yLabel: "quantity_b",
+            x: Array.from({ length: n }, (_, i) => 2 + (i % 6)),
+            y: Array.from({ length: n }, (_, i) => 10 + ((i * 7) % 11)),
+          });
+        return;
+      }
+      if (cmd.text.includes("scatter-demo")) {
+        // (x, y) per frame index 0..39 — a loop the playhead walks around
+        const n = 40;
+        const frames = Array.from({ length: n }, (_, i) => i);
+        oneToolTurn('{ label: "example_scatter" }',
+          "example_tool_a produced a synced scatter",
+          {
+            kind: "scatter", label: "example_scatter",
+            xLabel: "quantity_a", yLabel: "quantity_b",
+            x: frames.map((i) => 5 + 2 * Math.cos((i / n) * 2 * Math.PI)),
+            y: frames.map((i) => 10 + 3 * Math.sin((i / n) * 2 * Math.PI)),
+            frames,
+          });
+        return;
+      }
       if (cmd.text.includes("series-mismatch")) {
         // 7 values regardless of T — the plot route's no-draw error path
         oneToolTurn('{ label: "example_series" }',

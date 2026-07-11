@@ -25,7 +25,12 @@ export const PLOT_CSS = /* css */ `
   #plot-svg[hidden] { display: none; }
   #plot-line { fill: none; stroke: #9fe8cd; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
   #plot-marker { stroke: #dcb96a; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+  /* SVG elements never get the HTML UA [hidden] rule — restate it (the
+     same display-beats-[hidden] class of bug as #plot-empty, SVG flavor) */
+  #plot-marker[hidden] { display: none; }
   #plot-frame-axis { stroke: #3a3a3a; stroke-width: 1; }
+  .plot-dot { fill: #9fe8cd; opacity: 0.7; }
+  .plot-dot.current { fill: #dcb96a; opacity: 1; }
 `;
 
 export const PLOT_BODY = /* html */ `
@@ -40,6 +45,7 @@ export const PLOT_BODY = /* html */ `
         <line id="plot-frame-axis" x1="${PLOT_M.left}" y1="${PLOT_H - PLOT_M.bottom}"
               x2="${PLOT_W - PLOT_M.right}" y2="${PLOT_H - PLOT_M.bottom}"></line>
         <polyline id="plot-line" points=""></polyline>
+        <g id="plot-dots"></g>
         <line id="plot-marker" x1="0" y1="${PLOT_M.top}" x2="0" y2="${PLOT_H - PLOT_M.bottom}" hidden></line>
       </svg>
     </div>

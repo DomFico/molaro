@@ -95,10 +95,36 @@ def run_mod(source, code: str, target_indices, timeout_s: float) -> bytes:
         if not callable(fn):
             return json.dumps({"error": "the code must define compute(data, target_indices)"}).encode("utf-8")
         values = fn(source, target_indices)
-        if not isinstance(values, list) or not all(
-            isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
-            for v in values
-        ):
+
+        def finite_floats(seq):
+            return isinstance(seq, list) and all(
+                isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v))
+                for v in seq
+            )
+
+        if isinstance(values, dict):
+            # the ONE widened return shape: a scatter's {x, y, frames?,
+            # xLabel?, yLabel?}. The client re-validates against the mod's
+            # declared `produces`; this pass keeps the wire well-formed.
+            if not (finite_floats(values.get("x")) and finite_floats(values.get("y"))):
+                return json.dumps(
+                    {"error": "a dict return must carry x and y as flat lists of finite floats"}
+                ).encode("utf-8")
+            out = {
+                "x": [float(v) for v in values["x"]],
+                "y": [float(v) for v in values["y"]],
+            }
+            if "frames" in values:
+                if not finite_floats(values["frames"]):
+                    return json.dumps(
+                        {"error": "frames must be a flat list of frame indices"}
+                    ).encode("utf-8")
+                out["frames"] = [int(v) for v in values["frames"]]
+            for key in ("xLabel", "yLabel"):
+                if isinstance(values.get(key), str):
+                    out[key] = values[key]
+            return json.dumps({"values": out}).encode("utf-8")
+        if not finite_floats(values):
             return json.dumps(
                 {"error": "compute must return a flat list of finite floats"}
             ).encode("utf-8")

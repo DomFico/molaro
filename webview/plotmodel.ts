@@ -59,6 +59,41 @@ export function valueToY(v: number, scale: PlotScale): number {
   return areaY + (1 - (v - scale.min) / span) * areaH;
 }
 
+/** value → viewBox x under a scale — the scatter's second scaled axis (the
+ * line path keeps its frame-index x via frameToX, untouched). */
+export function valueToX(v: number, scale: PlotScale): number {
+  const span = scale.max - scale.min || 1;
+  return areaX + ((v - scale.min) / span) * areaW;
+}
+
+/** The scatter's click hit test: the nearest point to a viewBox position,
+ * within the tolerance (viewBox units), else -1. Uses THE SAME value→pixel
+ * mapping the render uses, so hit and dot cannot disagree. */
+export const SCATTER_HIT_TOLERANCE = 14;
+
+export function nearestPoint(
+  vx: number,
+  vy: number,
+  xs: readonly number[],
+  ys: readonly number[],
+  xScale: PlotScale,
+  yScale: PlotScale,
+  tolerance = SCATTER_HIT_TOLERANCE,
+): number {
+  let best = -1;
+  let bestD = tolerance * tolerance;
+  for (let i = 0; i < xs.length; i++) {
+    const dx = valueToX(xs[i], xScale) - vx;
+    const dy = valueToY(ys[i], yScale) - vy;
+    const d = dx * dx + dy * dy;
+    if (d <= bestD) {
+      bestD = d;
+      best = i;
+    }
+  }
+  return best;
+}
+
 /** The polyline's `points` attribute: one vertex per frame, x from the
  * SHARED frame mapping, y from the scale. */
 export function pointsFor(values: readonly number[], scale: PlotScale): string {

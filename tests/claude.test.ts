@@ -321,3 +321,54 @@ test("stub: cancel stops the script mid-stream and ends the turn", async () => {
   assert.equal(events.length, n);
   stub.dispose();
 });
+
+// -- the scatter kind: wire round-trips, structural gates, stub sentinels ---------
+
+test("parseTypedResult: scatter round-trips, with and without the frames sync hook", () => {
+  const synced: TypedResult = {
+    kind: "scatter", label: "example_scatter", x: [1, 2], y: [3, 4],
+    xLabel: "quantity_a", yLabel: "quantity_b", frames: [0, 5],
+  };
+  const still: TypedResult = { kind: "scatter", label: "example_scatter", x: [1], y: [2] };
+  for (const r of [synced, still]) {
+    assert.deepEqual(parseTypedResult(JSON.parse(JSON.stringify(r))), r);
+  }
+});
+
+test("parseTypedResult: scatter structural violations are null at the wire gate", () => {
+  for (const junk of [
+    { kind: "scatter", label: "s", x: [1, 2], y: [1] },          // unequal
+    { kind: "scatter", label: "s", x: [], y: [] },               // empty
+    { kind: "scatter", label: "s", x: [1], y: [Infinity] },      // non-finite
+    { kind: "scatter", label: "s", x: [1], y: [1], frames: [0, 1] }, // frames length
+    { kind: "scatter", label: "s", x: [1], y: [1], xLabel: 7 },  // bad label type
+    { kind: "scatter", x: [1], y: [1] },                          // missing label
+    { kind: "heatmap", label: "s", x: [1], y: [1] },              // the union stays CLOSED
+  ]) {
+    assert.equal(parseTypedResult(junk), null, JSON.stringify(junk));
+  }
+});
+
+test("stub: the scatter sentinels — synced, static, and malformed", async () => {
+  const sentinelResult = async (text: string): Promise<unknown> => {
+    const events: ClaudeEvent[] = [];
+    const stub = createClaudeStub((ev) => events.push(ev), { delayMs: 1 });
+    stub.handle({ type: "user-message", text });
+    await sleep(50);
+    stub.dispose();
+    return (events.find((e) => e.type === "tool-result") as { result?: unknown }).result;
+  };
+  const synced = await sentinelResult("please scatter-demo now") as
+    { kind: string; x: number[]; frames?: number[] };
+  assert.equal(synced.kind, "scatter");
+  assert.equal(synced.x.length, 40);
+  assert.deepEqual(synced.frames?.slice(0, 3), [0, 1, 2], "the sync hook rides along");
+  const still = await sentinelResult("please scatter-static now") as
+    { kind: string; x: number[]; frames?: number[] };
+  assert.equal(still.kind, "scatter");
+  assert.equal(still.frames, undefined, "a static scatter carries NO frames");
+  const bad = await sentinelResult("please scatter-mismatch now") as
+    { x: number[]; y: number[] };
+  assert.equal(bad.x.length, 5);
+  assert.equal(bad.y.length, 4, "deliberately unequal — the fail-closed path");
+});

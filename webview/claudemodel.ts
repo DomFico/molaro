@@ -55,13 +55,20 @@ export interface ApprovalRequiredEvent {
  * resolved in HEADER ORDER (rainbow's exact ordering contract); a length
  * mismatch writes nothing.
  *
- * per-frame-series: RESERVED — recognized and acknowledged, its renderer
- * (a synced plot) is a separate step; today it reaches a placeholder.
+ * per-frame-series: one raw value per frame — drawn in the plot tab.
+ *
+ * scatter: raw (x, y) pairs drawn as points in the plot tab (equal-length
+ * non-empty x/y; both axes auto-scale). `frames`, when present, is the
+ * sync hook — the frame index each point came from, same length as x/y —
+ * enabling the current-frame highlight and click-to-seek; absent, the
+ * scatter is a legitimate static picture. THE UNION CLOSES AT FOUR.
  */
 export type TypedResult =
   | { kind: "per-point-scalar"; target: string; axis: "color" | "size" | "opacity"; scalars: number[] }
   | { kind: "command"; command: string }
-  | { kind: "per-frame-series"; label: string; values: number[] };
+  | { kind: "per-frame-series"; label: string; values: number[] }
+  | { kind: "scatter"; label: string; x: number[]; y: number[];
+      xLabel?: string; yLabel?: string; frames?: number[] };
 
 export interface ToolResultEvent {
   type: "tool-result";
@@ -137,6 +144,22 @@ export function parseTypedResult(x: unknown): TypedResult | null {
       return isStr(m.label) && isNumArr(m.values)
         ? { kind: "per-frame-series", label: m.label, values: m.values }
         : null;
+    case "scatter": {
+      // structural validity is part of the wire gate: equal-length,
+      // non-empty x/y; frames (the sync hook) must match that length
+      if (!isStr(m.label) || !isNumArr(m.x) || !isNumArr(m.y)) return null;
+      if (m.x.length === 0 || m.x.length !== m.y.length) return null;
+      if (m.frames !== undefined &&
+          !(isNumArr(m.frames) && m.frames.length === m.x.length)) return null;
+      if (m.xLabel !== undefined && !isStr(m.xLabel)) return null;
+      if (m.yLabel !== undefined && !isStr(m.yLabel)) return null;
+      return {
+        kind: "scatter", label: m.label, x: m.x, y: m.y,
+        ...(m.frames !== undefined ? { frames: m.frames as number[] } : {}),
+        ...(m.xLabel !== undefined ? { xLabel: m.xLabel } : {}),
+        ...(m.yLabel !== undefined ? { yLabel: m.yLabel } : {}),
+      };
+    }
     default:
       return null;
   }

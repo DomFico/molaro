@@ -510,9 +510,12 @@ async function main(): Promise<void> {
       return;
     }
     if (msg?.type === "claude-bind") {
-      // per-frame-series is the PLOT's kind — the host routes it there and
-      // answers on the outcome channel itself; the viewer stays silent.
-      if (parseTypedResult(msg.result)?.kind === "per-frame-series") return;
+      // per-frame-series and scatter are the PLOT's kinds — the host routes
+      // them there and answers on the outcome channel itself; the viewer
+      // stays silent. Checked on the RAW kind, so even a malformed plot
+      // payload never reaches this binding (the plot route errors it).
+      const rawKind = (msg.result as { kind?: unknown } | null | undefined)?.kind;
+      if (rawKind === "per-frame-series" || rawKind === "scatter") return;
       const outcome = bindResult(msg.result);
       host.postMessage({ type: "claude-bind-result", callId: msg.callId, ...outcome });
       return;
@@ -1239,7 +1242,7 @@ async function main(): Promise<void> {
           asyncLine("error", `${mod.name} failed: ${checked.error} — nothing bound`);
           return;
         }
-        if (mod.produces === "per-point-scalar") {
+        if (mod.produces === "per-point-scalar" && "values" in checked) {
           // the EXISTING binding entry, verbatim — resolution, mapping,
           // one-stroke undo, and the double length-guard all come with it
           const outcome = bindResult({
@@ -1249,8 +1252,8 @@ async function main(): Promise<void> {
             scalars: checked.values,
           });
           asyncLine(outcome.ok ? "ok" : "error", `${mod.name} → ${outcome.message}`);
-        } else {
-          // the EXISTING plot route: the host consumes series claude-binds
+        } else if (mod.produces === "per-frame-series" && "values" in checked) {
+          // the EXISTING plot route: the host consumes plot-kind claude-binds
           // (plothost) exactly as it does for tool results
           host.postMessage({
             type: "claude-bind",
@@ -1259,6 +1262,14 @@ async function main(): Promise<void> {
           });
           asyncLine("ok",
             `${mod.name} → series "${mod.name}" (${checked.values.length} frames) → the plot tab`);
+        } else if ("scatter" in checked) {
+          host.postMessage({
+            type: "claude-bind",
+            callId: `mod-${++modRunSeq}`,
+            result: { kind: "scatter", label: mod.name, ...checked.scatter },
+          });
+          asyncLine("ok",
+            `${mod.name} → scatter "${mod.name}" (${checked.scatter.x.length} points) → the plot tab`);
         }
       } catch (err) {
         asyncLine("error",

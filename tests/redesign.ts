@@ -4658,9 +4658,153 @@ async function S27(): Promise<void> {
   }, 1180, 780, "/terminal");
 }
 
+async function S28(): Promise<void> {
+  console.log("S28 — scatter: X-vs-Y as the fourth result kind, playhead-synced, nearest-point seek");
+  await withDriver(async (d) => {
+    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const typeInto = async (id: string, text: string): Promise<void> => {
+      const r = await d.evaluate<{ x: number; y: number }>(`(()=>{
+        const b=${el(id)}.getBoundingClientRect();
+        return {x:b.left+b.width/2, y:b.top+b.height/2};
+      })()`);
+      await d.click(r.x, r.y);
+      await d.insertText(text);
+      await d.key("Enter", "Enter", 13);
+    };
+    const bindLines = () =>
+      d.evaluate<{ cls: string; text: string }[]>(
+        `[...document.querySelectorAll('#claude-transcript .cl-bind')]
+          .map(n=>({cls:n.className, text:n.textContent}))`);
+    const dotCount = () =>
+      d.evaluate<number>(`document.querySelectorAll('#plot-dots .plot-dot').length`);
+    const currentDots = () =>
+      d.evaluate<number[]>(`[...document.querySelectorAll('#plot-dots .plot-dot')]
+        .map((c, i) => c.classList.contains('current') ? i : -1).filter((i) => i >= 0)`);
+    const viewerFrame = () => d.evaluate<number>(`${V}.player.frame`);
+    const clickDot = (i: number) =>
+      d.evaluate(`(()=>{
+        const svg=${el("plot-svg")};
+        const dot=document.querySelectorAll('#plot-dots .plot-dot')[${i}];
+        const r=svg.getBoundingClientRect();
+        const clientX = r.left + (Number(dot.getAttribute('cx')) / 800) * r.width;
+        const clientY = r.top + (Number(dot.getAttribute('cy')) / 300) * r.height;
+        svg.dispatchEvent(new MouseEvent('click', { clientX, clientY, bubbles: true }));
+      })()`);
+
+    // -- the synced scatter: draw, readout, highlight, moving highlight ----------
+    await typeInto("term-input", "/claude");
+    await sleep(150);
+    await typeInto("claude-input", "please scatter-demo now");
+    await sleep(600);
+    check("S28: the ⤷ line reports the scatter draw with the seek hint",
+      (await bindLines()).some((l) =>
+        l.text === `⤷ scatter "example_scatter" drawn (40 points — click a point to seek)` &&
+        /\bok\b/.test(l.cls)), JSON.stringify(await bindLines()));
+    check("S28: 40 dots render; the line and the series marker are cleared",
+      (await dotCount()) === 40 &&
+        (await d.evaluate<string>(`${el("plot-line")}.getAttribute('points')`)) === "" &&
+        (await d.evaluate<boolean>(
+          // computed display, not the attribute — SVG never gets the UA
+          // [hidden] rule (the standing lesson, SVG flavor)
+          `getComputedStyle(${el("plot-marker")}).display === 'none'`)));
+    check("S28: the label and BOTH axis readouts render (raw min/max, axis names)",
+      await d.evaluate<boolean>(`${el("plot-label")}.textContent === 'example_scatter' &&
+        /quantity_a 3…7 · quantity_b 7…13 · 40 pts/.test(${el("plot-range")}.textContent)`),
+      await d.evaluate<string>(`${el("plot-range")}.textContent`));
+    await d.evaluate(`${V}.player.seek(5)`);
+    await sleep(400);
+    check("S28: the current-frame point is highlighted (the scatter's playhead)",
+      JSON.stringify(await currentDots()) === "[5]", JSON.stringify(await currentDots()));
+    await d.evaluate(`${V}.player.seek(20)`);
+    await sleep(400);
+    check("S28: …and the highlight MOVES with the frame",
+      JSON.stringify(await currentDots()) === "[20]", JSON.stringify(await currentDots()));
+
+    // -- nearest-point click-to-seek ----------------------------------------------
+    await clickDot(10);
+    await sleep(300);
+    check("S28: clicking a point seeks the viewer to THAT point's frame",
+      (await viewerFrame()) === 10, `frame=${await viewerFrame()}`);
+    check("S28: …and the highlight follows the seek",
+      JSON.stringify(await currentDots()) === "[10]");
+
+    // -- the static (frames-less) scatter: draws, no highlight, no seek ----------
+    await typeInto("claude-input", "please scatter-static now");
+    await sleep(600);
+    check("S28: a frames-less scatter draws (30 dots), ⤷ WITHOUT a seek hint",
+      (await dotCount()) === 30 &&
+        (await bindLines()).some((l) => l.text === `⤷ scatter "example_scatter" drawn (30 points)`));
+    await d.evaluate(`${V}.player.seek(33)`);
+    await sleep(400);
+    check("S28: …no highlight on a static scatter", (await currentDots()).length === 0);
+    const frameBefore = await viewerFrame();
+    await clickDot(3);
+    await sleep(300);
+    check("S28: …and clicking it does NOT seek", (await viewerFrame()) === frameBefore);
+
+    // -- the malformed scatter: fail-closed on the plot route ---------------------
+    await typeInto("claude-input", "please scatter-mismatch now");
+    await sleep(600);
+    check("S28: unequal x/y → the ⤷ error line, and the previous scatter STANDS",
+      (await bindLines()).some((l) =>
+        l.text === "⤷ malformed scatter payload — not drawn" && /\berr\b/.test(l.cls)) &&
+        (await dotCount()) === 30, `dots=${await dotCount()}`);
+
+    // -- replacement both ways: one active item ------------------------------------
+    await typeInto("claude-input", "please series-demo now");
+    await sleep(600);
+    check("S28: a series result REPLACES the scatter (line back, dots gone)",
+      (await dotCount()) === 0 &&
+        (await d.evaluate<string>(`${el("plot-line")}.getAttribute('points')`)) !== "" &&
+        !(await d.evaluate<boolean>(`${el("plot-marker")}.hasAttribute('hidden')`)));
+    await typeInto("claude-input", "please scatter-demo now");
+    await sleep(600);
+    check("S28: …and a scatter replaces the series right back",
+      (await dotCount()) === 40 &&
+        (await d.evaluate<string>(`${el("plot-line")}.getAttribute('points')`)) === "");
+
+    // -- the Python scatter mod: dict return, frames sync, seek --------------------
+    const listing = await cmd("mods");
+    check("S28: the scatter mod lists with produces: scatter",
+      listing.message.includes("  xy_metric — analysis · scatter · by Example Author"),
+      listing.message);
+    await typeInto("term-input", "xy_metric alpha");
+    await sleep(2500); // producer walks all 150 frames for two quantities
+    check("S28: the Python scatter mod computes and draws (150 dots, its labels)",
+      (await dotCount()) === 150 &&
+        (await d.evaluate<boolean>(`${el("plot-label")}.textContent === 'xy_metric' &&
+          /dist_a .+ · dist_b .+ · 150 pts/.test(${el("plot-range")}.textContent)`)),
+      await d.evaluate<string>(`${el("plot-range")}.textContent`));
+    const preClick = await viewerFrame();
+    await clickDot(120);
+    await sleep(600); // the target chunk may need fetching
+    // real-data scatters self-overlap, so the NEAREST dot to the click may
+    // be a different frame at (nearly) the same (x, y) — the semantic
+    // guarantee is that the seeked frame's point IS at the clicked spot
+    // (xy_metric's frames are the identity, so dot index == frame)
+    const seeked = await viewerFrame();
+    const atClick = await d.evaluate<boolean>(`(()=>{
+      const dots=document.querySelectorAll('#plot-dots .plot-dot');
+      const a=dots[120], s=dots[${seeked}];
+      if (!a || !s) return false;
+      const dx=Number(a.getAttribute('cx'))-Number(s.getAttribute('cx'));
+      const dy=Number(a.getAttribute('cy'))-Number(s.getAttribute('cy'));
+      return Math.hypot(dx,dy) <= 14; // within the hit tolerance (viewBox units)
+    })()`);
+    check("S28: clicking the mod's scatter seeks to a frame whose point is AT the click",
+      seeked !== preClick && atClick, `frame=${seeked} (clicked dot 120)`);
+
+    // evidence: lift the harness-occluded plot for the screenshot
+    await d.evaluate(`document.getElementById('plot-harness').style.zIndex = '200'`);
+    await d.screenshot(`${REPORT}/S28_scatter.png`);
+  }, 1180, 780, "/terminal");
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

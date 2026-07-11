@@ -514,6 +514,12 @@ existing machinery (nothing new renders):
   its own normalization).
 - `produces: per-frame-series` — one **raw** value per frame, drawn in the
   plot tab exactly like a series tool result.
+- `produces: scatter` — the ONE widened return shape: `compute` returns a
+  **dict** `{"x": [...], "y": [...], "frames": [...]?, "xLabel": str?,
+  "yLabel": str?}` (equal-length finite `x`/`y`; `frames`, if present,
+  integer frame indices matching that length — the highlight/seek sync
+  hook). Drawn in the plot tab exactly like a scatter tool result. Every
+  other `produces` keeps the flat `list[float]` return.
 
 **Invocation** is the same own-verb shape: `<modname> <target>`. The verb
 acknowledges immediately (`running <mod> on N points…`) and the outcome
@@ -737,13 +743,24 @@ rails and the outcome renders as an italic `⤷` line in the tool's block
   label, its raw min/max, a **playhead marker** that tracks the current
   frame through playback and scrubbing, and **click-to-seek** — clicking
   the plot seeks the trajectory to that frame, so the plot is a control,
-  not just a readout. One series at a time (a new one replaces it); the
-  host holds the active series and restores it when the tab is reopened.
-  A series whose length ≠ the frame count draws **nothing** and the `⤷`
-  line reports the mismatch.
+  not just a readout. A series whose length ≠ the frame count draws
+  **nothing** and the `⤷` line reports the mismatch.
+- **scatter** — raw (x, y) pairs drawn as points in the **same plot tab**
+  (equal-length, non-empty `x`/`y`; **both** axes auto-scale to their own
+  min/max, with optional `xLabel`/`yLabel` in the readout). An optional
+  `frames` array (one frame index per point, same length) is the **sync
+  hook**: when present, the current frame's point is highlighted as the
+  playhead moves and **clicking a point seeks** the trajectory to that
+  point's frame (nearest point within a small tolerance). Without
+  `frames` the scatter is a legitimate **static picture** — no highlight,
+  no seek. Malformed payloads (unequal lengths, empty, out-of-range
+  frames) draw **nothing** and the `⤷` line reports why.
 
-An unknown kind is an error, never a guess. Nothing beyond these three
-exists.
+The plot tab holds **one active item at a time** — a line series or a
+scatter; a new result of either kind replaces the current one, and the
+held item is restored when the tab is reopened.
+
+An unknown kind is an error, never a guess. The union closes at four.
 
 The panel currently talks to a **scripted stub backend** (no assistant, no
 network); the real backend will replace it behind the identical message

@@ -162,3 +162,98 @@ test("plothost: plotSeek routes to the viewer's seek entry", () => {
   assert.equal(host.handlePlotMessage({ type: "plotFrame", frame: 1 }), false,
     "plotFrame is an OUTBOUND message — never consumed as input");
 });
+
+// -- the scatter's second scaled axis + the nearest-point hit test ----------------
+
+import { SCATTER_HIT_TOLERANCE, nearestPoint, valueToX } from "../webview/plotmodel.ts";
+
+test("valueToX: the second scaled axis — min at the left edge, max at the right", () => {
+  const scale = { min: 5, max: 15 };
+  assert.equal(valueToX(5, scale), PLOT_M.left);
+  assert.equal(valueToX(15, scale), PLOT_W - PLOT_M.right);
+  assert.equal(valueToX(10, scale), (PLOT_M.left + PLOT_W - PLOT_M.right) / 2);
+  assert.ok(Number.isFinite(valueToX(7, { min: 7, max: 7 })), "flat x-axis falls back, no NaN");
+});
+
+test("nearestPoint is consistent with the render mapping; tolerance bounds it", () => {
+  const xs = [1, 2, 3];
+  const ys = [10, 20, 30];
+  const xScale = { min: 1, max: 3 };
+  const yScale = { min: 10, max: 30 };
+  for (let i = 0; i < xs.length; i++) {
+    assert.equal(
+      nearestPoint(valueToX(xs[i], xScale), valueToY(ys[i], yScale), xs, ys, xScale, yScale),
+      i, `clicking exactly on dot ${i} hits dot ${i}`);
+  }
+  const px = valueToX(2, xScale);
+  const py = valueToY(20, yScale);
+  assert.equal(nearestPoint(px + SCATTER_HIT_TOLERANCE - 1, py, xs, ys, xScale, yScale), 1,
+    "within tolerance still hits");
+  assert.equal(nearestPoint(px, py + SCATTER_HIT_TOLERANCE * 3, xs, ys, xScale, yScale), -1,
+    "outside tolerance is a miss (-1), not a nearest-anything");
+  assert.equal(nearestPoint(0, 0, [], [], xScale, yScale), -1, "no points, no hit");
+});
+
+test("plothost: a scatter is held, pushed, and re-pushed exactly like a series", () => {
+  const { host, posts, openedCount } = makeHost();
+  host.handleViewerMessage({ type: "viewerInfo", nFrames: 40 });
+  const frames = [0, 5, 39];
+  assert.ok(host.handleTerminalMessage({
+    type: "claude-bind", callId: "c1",
+    result: { kind: "scatter", label: "example_scatter", x: [1, 2, 3], y: [4, 5, 6], frames },
+  }));
+  assert.equal(openedCount(), 1);
+  assert.deepEqual(posts[0], {
+    to: "plot",
+    msg: { type: "plotScatter", label: "example_scatter", x: [1, 2, 3], y: [4, 5, 6], frames },
+  });
+  assert.match((posts[2].msg as { message: string }).message,
+    /scatter "example_scatter" drawn \(3 points — click a point to seek\)/);
+  posts.length = 0;
+  host.handlePlotMessage({ type: "plot-ready" });
+  assert.equal((posts[0].msg as { type: string }).type, "plotScatter", "re-push restores the scatter");
+  // …and a SERIES replaces it in place (one active item)
+  posts.length = 0;
+  host.handleTerminalMessage(seriesBind(Array.from({ length: 40 }, (_, i) => i)));
+  posts.length = 0;
+  host.handlePlotMessage({ type: "plot-ready" });
+  assert.equal((posts[0].msg as { type: string }).type, "plotSeries", "the series replaced the scatter");
+});
+
+test("plothost: malformed or out-of-range scatter payloads fail CLOSED on the plot route", () => {
+  const { host, posts } = makeHost();
+  host.handleViewerMessage({ type: "viewerInfo", nFrames: 10 });
+  // unequal x/y — structurally malformed: consumed HERE, never the viewer's
+  assert.ok(host.handleTerminalMessage({
+    type: "claude-bind", callId: "c2",
+    result: { kind: "scatter", label: "bad", x: [1, 2], y: [1] },
+  }));
+  assert.deepEqual(posts, [{
+    to: "terminal",
+    msg: { type: "claude-bind-result", callId: "c2", ok: false,
+      message: "malformed scatter payload — not drawn" },
+  }]);
+  posts.length = 0;
+  // frames out of range — well-formed shape, invalid sync hook
+  assert.ok(host.handleTerminalMessage({
+    type: "claude-bind", callId: "c3",
+    result: { kind: "scatter", label: "bad", x: [1], y: [1], frames: [99] },
+  }));
+  assert.match((posts[0].msg as { message: string }).message,
+    /scatter frames must be integer frame indices in \[0, 9\] — got 99 — not drawn/);
+  posts.length = 0;
+  host.handlePlotMessage({ type: "plot-ready" });
+  assert.equal(posts.filter((p) => p.to === "plot" && (p.msg as { type: string }).type !== "plotFrame").length, 0,
+    "nothing was ever held — no item to re-push");
+});
+
+test("plothost: a static (frames-less) scatter is legitimate", () => {
+  const { host, posts } = makeHost();
+  host.handleViewerMessage({ type: "viewerInfo", nFrames: 10 });
+  assert.ok(host.handleTerminalMessage({
+    type: "claude-bind", callId: "c4",
+    result: { kind: "scatter", label: "static", x: [1, 2], y: [3, 4] },
+  }));
+  assert.match((posts[2].msg as { message: string }).message,
+    /scatter "static" drawn \(2 points\)$/, "no seek hint without frames");
+});
