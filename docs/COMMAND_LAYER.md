@@ -693,9 +693,18 @@ higher cost.
   pixels; **S33** boots the bridge with `--strip-bbox` (a test-infra
   header rewrite; `bbox: null` is contract-legal) and pins the LOUD
   null-bbox fallback — the status-line warning, the seam's fallback flag,
-  and the self-correcting parity band on the fallback box. The harness
-  runs the synthetic producer at **N=6000** (the extension default is
-  20000 — counts differ).
+  and the self-correcting parity band on the fallback box. **A caution
+  about the pre-S32 pixel checks:** when the impostor pass replaced EVERY
+  point in the scene — 3×3 squares became shaded discs (9 px² → ~7 px²),
+  the overlays went from a fixed 6 px to silhouette-matched, and a
+  ~4,500-pixel size-0 residue vanished outright — the whole pre-existing
+  suite passed **unchanged**. That is not evidence the change was inert; it
+  is evidence those checks (thresholded classifier counts) are **too
+  coarse to detect a total change of point geometry**. Treat green runs of
+  the older pixel checks as weak evidence for anything geometry-shaped;
+  S32/S33 are the sensitive checks and exist precisely because of that
+  insensitivity. The harness runs the synthetic producer at **N=6000**
+  (the extension default is 20000 — counts differ).
 - **Terminal smoke** (`node tests/terminal_smoke.ts`): the real terminal
   bundle + real viewer in one page, host relay emulated by the bridge shim's
   loopback; commands (every verb incl. the representation family's buffer
