@@ -714,9 +714,10 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   // Development/measurement switch for the impostor depth variant (1 = flat
   // sprite depth, 2 = analytic gl_FragDepth). NOT a user surface — it exists
   // so the real-hardware measurement script can drive both variants against
-  // the packaged extension. Anything but 1 means the provisional default (2).
+  // the packaged extension. Anything but 2 means the provisional default (1:
+  // early-Z kept, cannot regress frame rate on unmeasured hardware).
   const depthVariant =
-    vscode.workspace.getConfiguration("molaro").get<number>("viewer.depthVariant", 2) === 1 ? 1 : 2;
+    vscode.workspace.getConfiguration("molaro").get<number>("viewer.depthVariant", 1) === 2 ? 2 : 1;
 
   const csp = [
     "default-src 'none'",

@@ -30,8 +30,8 @@
         "molaro.viewer.depthVariant": {
           "type": "number",
           "enum": [1, 2],
-          "default": 2,
-          "description": "Development/measurement switch for the impostor depth path: 1 = flat sprite depth (early-Z preserved), 2 = analytic per-fragment depth (correct interpenetration). Used by the renderer measurement script; the default is provisional. Takes effect when a viewer panel is (re)opened."
+          "default": 1,
+          "description": "Development/measurement switch for the impostor depth path: 1 = flat sprite depth (early-Z preserved), 2 = analytic per-fragment depth (correct interpenetration). Used by the renderer measurement script; the default is provisional (1 — the variant that cannot regress frame rate on unmeasured hardware). Takes effect when a viewer panel is (re)opened."
         }
       }
     },

@@ -107,8 +107,10 @@ interface ViewerConfig {
   test?: boolean;
   /** Development/measurement switch (NOT a user surface): 1 = flat sprite
    * depth (early-Z kept), 2 = analytic gl_FragDepth (correct
-   * interpenetration). Global across all geometry passes; the default is
-   * PROVISIONAL pending real-hardware measurement made outside this lane. */
+   * interpenetration). Global across all geometry passes. The PROVISIONAL
+   * default is 1 — the variant that cannot regress frame rate on unmeasured
+   * hardware; the real decision ("upgrade to 2?") is made outside this lane
+   * on tests/impostor_bench.ts numbers. */
   depthVariant?: number;
 }
 
@@ -614,7 +616,7 @@ async function main(): Promise<void> {
   // status line carries the warning for the whole session.
   const scale = sceneExtent(header.bbox);
   if (scale.fallback) console.warn(`[viewer] ${NO_BBOX_WARNING}`);
-  const depthVariant: 1 | 2 = cfg.depthVariant === 1 ? 1 : 2;
+  const depthVariant: 1 | 2 = cfg.depthVariant === 2 ? 2 : 1;
   const TAN_HALF_FOV = Math.tan(((CAMERA_FOV_DEG / 2) * Math.PI) / 180);
   const sizing: SizingUniforms = {
     uWorldPerSize: { value: worldPerSizeUnit(scale.S) },
