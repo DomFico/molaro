@@ -47,6 +47,20 @@ import { makeAnalysisModHandler, isFileAlreadyGone } from "./commands.ts";
 import { parseTarget, resolveTarget, type Completion } from "./address.ts";
 import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
 import { pickPoint, selectionBounds } from "./picking.ts";
+import {
+  CAMERA_FOV_DEG,
+  FRAME_DISTANCE_FACTOR,
+  NO_BBOX_WARNING,
+  sceneExtent,
+  worldPerSizeUnit,
+  type Box3Like,
+} from "./geometry.ts";
+import {
+  IMPOSTOR_DEPTH_DEFINE,
+  focusFlashShaders,
+  highlightShaders,
+  pointShaders,
+} from "./shaders.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
 const PLAYBACK_FPS = 30;
@@ -91,6 +105,11 @@ interface ViewerConfig {
   screenshotMode?: boolean;
   /** Test harness only: expose camera/controls/player/selection on window.__viewer. */
   test?: boolean;
+  /** Development/measurement switch (NOT a user surface): 1 = flat sprite
+   * depth (early-Z kept), 2 = analytic gl_FragDepth (correct
+   * interpenetration). Global across all geometry passes; the default is
+   * PROVISIONAL pending real-hardware measurement made outside this lane. */
+  depthVariant?: number;
 }
 
 function setStatus(text: string): void {
@@ -121,35 +140,69 @@ interface SceneParts {
   /** the polyline pass's per-POINT color attribute (null without polylines);
    * colorTrace writes rep.state.traceColor through to the vertex slots. */
   traceColAttr: THREE.BufferAttribute | null;
+  /** the three GEOMETRY materials (C2: depthWrite pinned explicitly on every
+   * one; the E2E suite asserts it via the seam so the override can't lapse). */
+  geometryMaterials: {
+    points: THREE.ShaderMaterial;
+    edges: THREE.LineBasicMaterial;
+    traces: THREE.LineBasicMaterial;
+  };
 }
 
-function basePointsMaterial(pixelRatio: number): THREE.ShaderMaterial {
-  // Reads the representation layer's per-point color/size/visible/opacity
-  // buffers. Hidden points collapse (size 0) and discard. Opacity blends
-  // NAIVELY (transparent: true, no depth sorting — overlap compositing is
-  // order-dependent; a recorded follow-up). Exactly-zero alpha discards so
-  // an invisible-but-present point never punches a depth hole in the scene
-  // (it stays pickable — picking is CPU-side and never reads alpha).
-  return new THREE.ShaderMaterial({
+/** The two sizing uniforms every sprite pass shares (ONE object each — the
+ * base pass and both overlays reference the same instances, so the values
+ * cannot fork) plus the projection z-row the depth-variant-2 fragment needs. */
+interface SizingUniforms {
+  /** `k` — world units per size-buffer unit (from the single-source S). */
+  uWorldPerSize: { value: number };
+  /** drawingBufferHeight / (2·tan(fov/2)) — updated on resize. */
+  uPxPerWorld: { value: number };
+  /** (P[2][2], P[3][2]) of the projection matrix (aspect-independent). */
+  uProjZ: { value: THREE.Vector2 };
+}
+
+/**
+ * THE geometry-material factory — the one place the depth-variant switch is
+ * consumed and the one place depthWrite is set on the geometry passes.
+ *
+ * Base points render as ray-traced sphere impostors reading the
+ * representation buffers (color/size/visible/opacity). Sizes are WORLD
+ * radii now (k × stored value): they scale with zoom instead of pinning to
+ * screen pixels. Hidden points collapse and discard; exactly-zero alpha AND
+ * exactly-zero radius discard, so invisible-but-present elements never
+ * punch depth holes (both stay pickable — picking is CPU-side). Opacity
+ * still blends NAIVELY (no depth sorting — the recorded follow-up).
+ *
+ * depthWrite is EXPLICIT on all three geometry materials (C2): if the
+ * override ever lapsed, occlusion would silently revert to per-object
+ * draw-order — under variant 2 the shader would compute gl_FragDepth per
+ * fragment and throw it away. An E2E assertion pins all three.
+ *
+ * The edge/trace materials still rasterize as 1px GL lines in this
+ * increment; increments B/C replace them HERE, consuming the same
+ * depthVariant (a mixed scene clips wrongly exactly at the junctions).
+ */
+function makeGeometryMaterials(
+  sizing: SizingUniforms,
+  depthVariant: 1 | 2,
+): { points: THREE.ShaderMaterial; edges: THREE.LineBasicMaterial; traces: THREE.LineBasicMaterial } {
+  const s = pointShaders();
+  const points = new THREE.ShaderMaterial({
     transparent: true,
-    uniforms: { uPixelRatio: { value: pixelRatio } },
-    vertexShader: `
-      attribute vec3 aColor; attribute float aSize; attribute float aVisible;
-      attribute float aOpacity;
-      uniform float uPixelRatio; varying vec3 vColor; varying float vVisible;
-      varying float vOpacity;
-      void main() {
-        vColor = aColor; vVisible = aVisible; vOpacity = aOpacity;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = aVisible > 0.5 ? aSize * uPixelRatio : 0.0;
-      }`,
-    fragmentShader: `
-      varying vec3 vColor; varying float vVisible; varying float vOpacity;
-      void main() {
-        if (vVisible < 0.5 || vOpacity <= 0.0) discard;
-        gl_FragColor = vec4(vColor, vOpacity);
-      }`,
+    depthWrite: true, // C2: explicit, never inherited
+    depthTest: true,
+    defines: depthVariant === 2 ? { [IMPOSTOR_DEPTH_DEFINE]: "" } : {},
+    uniforms: {
+      uWorldPerSize: sizing.uWorldPerSize,
+      uPxPerWorld: sizing.uPxPerWorld,
+      uProjZ: sizing.uProjZ,
+    },
+    vertexShader: s.vertex,
+    fragmentShader: s.fragment,
   });
+  const line = (): THREE.LineBasicMaterial =>
+    new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: true });
+  return { points, edges: line(), traces: line() };
 }
 
 /**
@@ -157,97 +210,62 @@ function basePointsMaterial(pixelRatio: number): THREE.ShaderMaterial {
  * in the pending selection render the flash BLENDED toward the selection
  * tint — a focus pulse passing over green points shifts smoothly within the
  * same color family instead of hard-swapping to yellow (no splotches).
+ * Silhouette-matched to the base sphere (same aSize, same sizing chunk, same
+ * radius) so highlighting never detaches from the thing it highlights.
+ * depthTest stays OFF deliberately: a tint, not geometry — silhouette-
+ * coplanar depth testing would z-fight (recorded trade-off: an overlaid
+ * element behind opaque geometry shows its tint through).
  */
 function focusFlashMaterial(
-  pixelRatio: number,
-  size: number,
+  sizing: SizingUniforms,
   color: number,
   selColor: number,
 ): THREE.ShaderMaterial {
+  const s = focusFlashShaders();
   return new THREE.ShaderMaterial({
     transparent: true,
     depthTest: false,
     depthWrite: false,
     uniforms: {
-      uPixelRatio: { value: pixelRatio },
-      uSize: { value: size },
+      uWorldPerSize: sizing.uWorldPerSize,
+      uPxPerWorld: sizing.uPxPerWorld,
       uColor: { value: new THREE.Color(color) },
       uSelColor: { value: new THREE.Color(selColor) },
       uStrength: { value: 0 },
     },
-    vertexShader: `
-      attribute float aVisible; attribute float aFlag; attribute float aSel;
-      uniform float uPixelRatio; uniform float uSize; uniform float uStrength;
-      varying float vShow; varying float vK; varying float vSel;
-      void main() {
-        vK = uStrength;
-        vSel = aSel;
-        vShow = (aFlag > 0.5 && aVisible > 0.5 && vK > 0.01) ? 1.0 : 0.0;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = vShow > 0.5 ? uSize * uPixelRatio : 0.0;
-      }`,
-    fragmentShader: `
-      uniform vec3 uColor; uniform vec3 uSelColor;
-      varying float vShow; varying float vK; varying float vSel;
-      void main() {
-        if (vShow < 0.5) discard;
-        vec2 pc = gl_PointCoord * 2.0 - 1.0;
-        float d = length(pc);
-        if (d > 1.0) discard;
-        float a = 0.88 * vK * smoothstep(1.0, 0.82, d);
-        if (a < 0.02) discard;
-        vec3 c = vSel > 0.5 ? mix(uColor, uSelColor, 0.5) : uColor;
-        gl_FragColor = vec4(c, a);
-      }`,
+    vertexShader: s.vertex,
+    fragmentShader: s.fragment,
   });
 }
 
 /**
  * Highlight overlay: a Points pass tinting points whose `aFlag` is set AND
  * that are visible (hidden wins) toward a light highlight color. No glow, no
- * halo, no size change — the point simply pulses to the new color and back.
+ * halo — the tint covers exactly the base sphere's silhouette (same aSize,
+ * same chunk, same radius; a size-0 point shows no overlay, ever).
  * `uStrength` (0..1) animates the tint per frame on the CPU; `uFloor` is the
  * tint floor — the pending overlay breathes but never disappears
  * (floor ≈ 0.45), the focus flash fades fully out (floor 0).
  */
 function highlightMaterial(
-  pixelRatio: number,
-  size: number,
+  sizing: SizingUniforms,
   color: number,
   floor: number,
 ): THREE.ShaderMaterial {
+  const s = highlightShaders();
   return new THREE.ShaderMaterial({
     transparent: true,
     depthTest: false,
     depthWrite: false,
     uniforms: {
-      uPixelRatio: { value: pixelRatio },
-      uSize: { value: size },
+      uWorldPerSize: sizing.uWorldPerSize,
+      uPxPerWorld: sizing.uPxPerWorld,
       uColor: { value: new THREE.Color(color) },
       uStrength: { value: 0 },
       uFloor: { value: floor },
     },
-    vertexShader: `
-      attribute float aVisible; attribute float aFlag;
-      uniform float uPixelRatio; uniform float uSize; uniform float uStrength; uniform float uFloor;
-      varying float vShow; varying float vK;
-      void main() {
-        vK = uFloor + (1.0 - uFloor) * uStrength;
-        vShow = (aFlag > 0.5 && aVisible > 0.5 && vK > 0.01) ? 1.0 : 0.0;
-        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        gl_PointSize = vShow > 0.5 ? uSize * uPixelRatio : 0.0;
-      }`,
-    fragmentShader: `
-      uniform vec3 uColor; varying float vShow; varying float vK;
-      void main() {
-        if (vShow < 0.5) discard;
-        vec2 pc = gl_PointCoord * 2.0 - 1.0;
-        float d = length(pc);
-        if (d > 1.0) discard;
-        float a = 0.88 * vK * smoothstep(1.0, 0.82, d);
-        if (a < 0.02) discard;
-        gl_FragColor = vec4(uColor, a);
-      }`,
+    vertexShader: s.vertex,
+    fragmentShader: s.fragment,
   });
 }
 
@@ -263,11 +281,13 @@ function buildScene(
   rep: RepresentationLayer,
   selArray: Float32Array,
   flashArray: Float32Array,
-  pixelRatio: number,
+  sizing: SizingUniforms,
+  depthVariant: 1 | 2,
 ): SceneParts {
   const scene = new THREE.Scene();
   scene.background = new THREE.Color(BACKGROUND);
   const n = header.n_points;
+  const mats = makeGeometryMaterials(sizing, depthVariant);
 
   const positionAttr = new THREE.BufferAttribute(new Float32Array(n * 3), 3);
   positionAttr.setUsage(THREE.DynamicDrawUsage);
@@ -289,7 +309,7 @@ function buildScene(
   pointsGeo.setAttribute("aSize", sizeAttr);
   pointsGeo.setAttribute("aVisible", visibleAttr);
   pointsGeo.setAttribute("aOpacity", opacityAttr);
-  drawables.push(new THREE.Points(pointsGeo, basePointsMaterial(pixelRatio)));
+  drawables.push(new THREE.Points(pointsGeo, mats.points));
 
   // Edges + polylines, trimmed to segments whose BOTH endpoints are visible
   // (so a hidden category also hides its edge hairball).
@@ -320,10 +340,7 @@ function buildScene(
     edgeGeo.setAttribute("position", edgePosAttr);
     edgeGeo.setAttribute("color", edgeColAttr);
     edgeGeo.setDrawRange(0, 0);
-    drawables.push(new THREE.LineSegments(
-      edgeGeo,
-      new THREE.LineBasicMaterial({ vertexColors: true, transparent: true }),
-    ));
+    drawables.push(new THREE.LineSegments(edgeGeo, mats.edges));
     fillEdges = (): void => {
       const pos = positionAttr.array as Float32Array;
       const ec = rep.state.edgeColor;
@@ -383,10 +400,7 @@ function buildScene(
     index.setUsage(THREE.DynamicDrawUsage);
     geo.setIndex(index);
     geo.setDrawRange(0, 0);
-    drawables.push(new THREE.LineSegments(
-      geo,
-      new THREE.LineBasicMaterial({ vertexColors: true, transparent: true }),
-    ));
+    drawables.push(new THREE.LineSegments(geo, mats.traces));
     rebuildPoly = () => {
       const arr = index.array as Uint32Array;
       let k = 0;
@@ -406,21 +420,26 @@ function buildScene(
   };
 
   // Pending-target overlay: a second Points pass over all N, gently pulsing
-  // targeted & visible points to a light green.
-  const selMat = highlightMaterial(pixelRatio, 6, SELECTION_COLOR, 0.45);
+  // targeted & visible points to a light green. Both overlays bind aSize as
+  // the SAME BufferAttribute object the base pass uses (already in repAttrs
+  // — one upload path, no second list to keep in sync), so the tint always
+  // covers exactly the base sphere's silhouette at any stored size.
+  const selMat = highlightMaterial(sizing, SELECTION_COLOR, 0.45);
   const overlayGeo = new THREE.BufferGeometry();
   overlayGeo.setAttribute("position", positionAttr);
   overlayGeo.setAttribute("aVisible", visibleAttr);
+  overlayGeo.setAttribute("aSize", sizeAttr);
   overlayGeo.setAttribute("aFlag", selAttr);
   const overlay = new THREE.Points(overlayGeo, selMat);
   overlay.renderOrder = 11;
   drawables.push(overlay);
 
   // Focus flash: a brief light-yellow tint over the last-focused region.
-  const flashMat = focusFlashMaterial(pixelRatio, 7, FOCUS_COLOR, SELECTION_COLOR);
+  const flashMat = focusFlashMaterial(sizing, FOCUS_COLOR, SELECTION_COLOR);
   const flashGeo = new THREE.BufferGeometry();
   flashGeo.setAttribute("position", positionAttr);
   flashGeo.setAttribute("aVisible", visibleAttr);
+  flashGeo.setAttribute("aSize", sizeAttr);
   flashGeo.setAttribute("aFlag", flashAttr);
   flashGeo.setAttribute("aSel", selAttr); // blend the flash on selected points
   const flash = new THREE.Points(flashGeo, flashMat);
@@ -445,26 +464,25 @@ function buildScene(
     rebuildLines,
     fillEdges,
     traceColAttr,
+    geometryMaterials: mats,
   };
 }
 
-function frameCamera(header: Header, aspect: number) {
-  const box = header.bbox ?? { min: [-10, -10, -10], max: [10, 10, 10] };
+/** Initial framing. `box`/`size` come from the ONE sceneExtent call in
+ * main() — the same S the impostor scale `k` derives from. Pixel parity is a
+ * relationship between `k` and the CAMERA, so the two must never compute S
+ * independently (even on the fallback box, both misframe together and a
+ * default element still lands at its target pixel extent). */
+function frameCamera(box: Box3Like, size: number, aspect: number) {
   const center = new THREE.Vector3(
     (box.min[0] + box.max[0]) / 2,
     (box.min[1] + box.max[1]) / 2,
     (box.min[2] + box.max[2]) / 2,
   );
-  const size = Math.max(
-    box.max[0] - box.min[0],
-    box.max[1] - box.min[1],
-    box.max[2] - box.min[2],
-    1e-3,
-  );
-  const camera = new THREE.PerspectiveCamera(50, aspect, size / 1000, size * 100);
+  const camera = new THREE.PerspectiveCamera(CAMERA_FOV_DEG, aspect, size / 1000, size * 100);
   camera.position
     .copy(center)
-    .add(new THREE.Vector3(0.9, 0.7, 1.1).normalize().multiplyScalar(size * 1.6));
+    .add(new THREE.Vector3(0.9, 0.7, 1.1).normalize().multiplyScalar(size * FRAME_DISTANCE_FACTOR));
   camera.lookAt(center);
   return { camera, target: center, size };
 }
@@ -590,12 +608,40 @@ async function main(): Promise<void> {
   const selArray = new Float32Array(header.n_points); // per-point target flag (green)
   const flashArray = new Float32Array(header.n_points); // per-point focus-flash flag
 
-  const parts = buildScene(header, rep, selArray, flashArray, renderer.getPixelRatio());
+  // -- scene scale: ONE sceneExtent call feeds BOTH the camera framing and
+  // the impostor world-radius constant `k` (A4 — never fork S; parity is
+  // between `k` and the camera). The null-bbox fallback is LOUD (C1): the
+  // status line carries the warning for the whole session.
+  const scale = sceneExtent(header.bbox);
+  if (scale.fallback) console.warn(`[viewer] ${NO_BBOX_WARNING}`);
+  const depthVariant: 1 | 2 = cfg.depthVariant === 1 ? 1 : 2;
+  const TAN_HALF_FOV = Math.tan(((CAMERA_FOV_DEG / 2) * Math.PI) / 180);
+  const sizing: SizingUniforms = {
+    uWorldPerSize: { value: worldPerSizeUnit(scale.S) },
+    uPxPerWorld: { value: 1 }, // set for real by updateSizingUniforms below
+    uProjZ: { value: new THREE.Vector2() },
+  };
+
+  const parts = buildScene(header, rep, selArray, flashArray, sizing, depthVariant);
   const { scene, positionAttr, drawables, repAttrs } = parts;
   const { camera, target, size: sceneSize } = frameCamera(
-    header,
+    scale.box,
+    scale.S,
     container.clientWidth / container.clientHeight,
   );
+  /** Re-derive the resize-dependent sizing uniforms: uPxPerWorld tracks the
+   * drawing-buffer height (device px, so devicePixelRatio is implicit);
+   * uProjZ re-reads the projection z-row (near/far-only, so effectively
+   * constant — re-read is free hygiene). `k` itself never changes. */
+  const updateSizingUniforms = (): void => {
+    const buf = renderer.getDrawingBufferSize(new THREE.Vector2());
+    sizing.uPxPerWorld.value = buf.y / (2 * TAN_HALF_FOV);
+    sizing.uProjZ.value.set(
+      camera.projectionMatrix.elements[10],
+      camera.projectionMatrix.elements[14],
+    );
+  };
+  updateSizingUniforms();
   const controls = new TrackballControls(camera, renderer.domElement);
   controls.target.copy(target);
   // Gentle inertia (4.7 A5): a flick gives a short nudge that decays quickly, not
@@ -654,7 +700,10 @@ async function main(): Promise<void> {
     const dir = new THREE.Vector3().subVectors(camera.position, controls.target);
     if (dir.lengthSq() < 1e-9) dir.set(0.9, 0.7, 1.1);
     dir.normalize();
-    animateCameraTo(homeTarget.clone().addScaledVector(dir, sceneSize * 1.6), homeTarget.clone());
+    animateCameraTo(
+      homeTarget.clone().addScaledVector(dir, sceneSize * FRAME_DISTANCE_FACTOR),
+      homeTarget.clone(),
+    );
   };
 
   // Resize atomically: size + camera aspect + trackball screen + an immediate
@@ -668,6 +717,7 @@ async function main(): Promise<void> {
     renderer.setSize(w, h);
     camera.aspect = w / h;
     camera.updateProjectionMatrix();
+    updateSizingUniforms(); // impostor sizing tracks the drawing buffer
     controls.handleResize();
     renderer.render(scene, camera);
     window.dispatchEvent(new Event("panelrelayout")); // virtual lists re-window
@@ -1776,7 +1826,8 @@ async function main(): Promise<void> {
   setStatus(
     `${header.name} — N=${header.n_points}, T=${nFrames} · ` +
       `${header.edges.length} edges, ${header.polylines.length} polylines · ` +
-      `${header.categories.length} categories · live producer stream`,
+      `${header.categories.length} categories · live producer stream` +
+      (scale.fallback ? ` · ${NO_BBOX_WARNING}` : ""),
   );
 
   if (cfg.test) {
@@ -1791,6 +1842,16 @@ async function main(): Promise<void> {
       model,
       edges: header.edges, // parity audits test edge endpoints vs resolvePoints
       traceVertices, // parity audits map vertices to subgroups vs resolvePoints
+      // impostor seam: the C2 depthWrite assertion reads the geometry
+      // materials; sizing lets pixel tests predict projected extents.
+      geometryMaterials: parts.geometryMaterials,
+      depthVariant,
+      sizing: {
+        worldPerSize: sizing.uWorldPerSize.value,
+        pxPerWorld: () => sizing.uPxPerWorld.value,
+        sceneS: scale.S,
+        bboxFallback: scale.fallback,
+      },
       actions: committedActions,
       command: runCommand,
       complete: runComplete,
@@ -1856,17 +1917,21 @@ async function main(): Promise<void> {
           sel: parts.selMat.uniforms.uStrength.value as number,
           flash: parts.flashMat.uniforms.uStrength.value as number,
         }),
-        /** project point `idx` (current frame) to client px — for E2E clicks. */
-        projectPoint: (idx: number): { x: number; y: number; front: boolean } => {
+        /** project point `idx` (current frame) to client px — for E2E clicks.
+         * `depth` = camera-space view depth (positive in front), so pixel
+         * tests can reason about impostor sizes and occlusion order. */
+        projectPoint: (idx: number): { x: number; y: number; front: boolean; depth: number } => {
           const arr = positionAttr.array as Float32Array;
-          const v = new THREE.Vector3(arr[idx * 3], arr[idx * 3 + 1], arr[idx * 3 + 2]).project(
-            camera,
-          );
+          const p = new THREE.Vector3(arr[idx * 3], arr[idx * 3 + 1], arr[idx * 3 + 2]);
+          camera.updateMatrixWorld();
+          const depth = -p.clone().applyMatrix4(camera.matrixWorldInverse).z;
+          const v = p.project(camera);
           const rect = renderer.domElement.getBoundingClientRect();
           return {
             x: rect.left + ((v.x + 1) / 2) * rect.width,
             y: rect.top + ((1 - v.y) / 2) * rect.height,
             front: v.z < 1 && v.z > -1,
+            depth,
           };
         },
       },

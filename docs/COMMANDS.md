@@ -39,7 +39,7 @@ point types `anchor` and `t0`–`t3`).
 | `colorbonds <expr> <color>` | Color every edge with **both** endpoints in the target (contained) | `colorbonds beta.group-0.subgroup-0 #ff8800` |
 | `colorbondsof <expr> <color>` | Color every edge **touching** the target (either endpoint — deliberately reaches one hop outside) | `colorbondsof #124 red` |
 | `colortrace <expr> <color>` | Color polyline vertices whose **subgroup** contains a resolved point (maps up; boundary segments blend) | `colortrace alpha steelblue` |
-| `pointsize <expr> <size>` | Size those points (0 is legal and **never hides**; negatives clamp to 0) | `pointsize alpha 2` |
+| `pointsize <expr> <size>` | Size those points — a **world-anchored** sphere radius that scales with zoom (0 is legal and **never hides**; negatives clamp to 0) | `pointsize alpha 2` |
 | `bondsize <expr> <size>` | Width for edges with **both** endpoints in the target (stored; not yet drawn) | `bondsize beta.group-0.subgroup-0 0` |
 | `bondsizeof <expr> <size>` | Width for edges **touching** the target (either endpoint — the incident reach) | `bondsizeof #124 1.5` |
 | `tracesize <expr> <size>` | Thickness for polyline vertices whose **subgroup** contains a resolved point | `tracesize alpha 1.5` |
@@ -418,14 +418,18 @@ The axis values:
   hex (`#ff8800`, or the short form `#f80`). The color token is
   **case-insensitive** (CSS semantics — it is a color, not a tree label);
   an unknown or malformed color is an **error** and nothing is written.
-- **`<size>`** is a plain non-negative number (`2`, `1.5`, `0`). **Zero is a
+- **`<size>`** is a plain non-negative number (`2`, `1.5`, `0`). Size numbers
+  keep their historical meaning — a size-v element spans about v pixels at
+  the initial camera framing — but the value is now anchored in **world
+  units** (one scene-scale constant converts it), so elements **grow and
+  shrink with zoom** instead of staying pinned to screen pixels. **Zero is a
   legal, literal value — it does NOT hide**: a size-0 element stays in the
   scene, stays in its buffer slot, and its hide-state is untouched (size
-  and hide are orthogonal channels; a zero-extent element may draw no
-  pixels, which is not the same thing as hidden — the message says
-  `set N points to size 0`, never "hidden"). **Negative values clamp to 0**
-  and the message notes it (`(clamped to 0)`). A non-numeric size token is
-  an **error** and nothing is written.
+  and hide are orthogonal channels; a zero-extent element draws **zero
+  pixels**, which is not the same thing as hidden — it stays pickable, and
+  the message says `set N points to size 0`, never "hidden"). **Negative
+  values clamp to 0** and the message notes it (`(clamped to 0)`). A
+  non-numeric size token is an **error** and nothing is written.
 - **`<opacity>`** is a number in **[0, 1]** (`0.5`, `0`, `1`). **Zero is a
   legal, literal alpha — it does NOT hide**: a zero-opacity element is
   *invisible-but-present* — still in the scene, still in its buffer slot,
@@ -436,11 +440,11 @@ The axis values:
   **Out-of-range clamps two-sidedly** — below 0 → 0, above 1 → 1 — and the
   message names the bound (`(clamped to 0)` / `(clamped to 1)`). A
   non-numeric token is an **error** and nothing is written.
-- **Visible thickness caveat**: point sizes render immediately (the point
-  pass honors per-point size). Edge and trace **widths are stored but not
-  yet drawn** — WebGL rasterizes lines at 1 px regardless, so honored
-  thickness awaits an impostor/mesh-line render pass. The buffers, undo,
-  and messages are fully live; only the pixels lag.
+- **Visible thickness caveat**: point sizes render as shaded, depth-correct
+  **spheres** (ray-traced impostors). Edge and trace **widths are stored but
+  not yet drawn** — WebGL rasterizes lines at 1 px regardless, so honored
+  thickness awaits the tube passes (increments B/C of the impostor brief).
+  The buffers, undo, and messages are fully live; only the pixels lag.
 - **Transparency-ordering caveat**: per-element opacity renders **today**
   on all three primitives via alpha blending, but blending is draw-order
   **naive** — overlapping *semi*-transparent elements may composite in the

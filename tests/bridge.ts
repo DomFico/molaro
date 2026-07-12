@@ -68,10 +68,17 @@ const { values: args } = parseArgs({
     // Open a file directly (Increment 4.6): --open <path> under --python.
     open: { type: "string" },
     python: { type: "string", default: "python3" },
+    // Null the header's bbox before relaying it (bbox: null is legal per the
+    // contract) — drives the viewer's loud scene-scale fallback (C1) without
+    // touching the producer or the wire format. Test-infra only.
+    "strip-bbox": { type: "boolean", default: false },
   },
 });
 
 const pendingResponses: http.ServerResponse[] = [];
+// request kind per pending response, FIFO with it — lets the relay know
+// which reply is the header when --strip-bbox rewrites it.
+const pendingKinds: string[] = [];
 
 const producerArgs = args.open
   ? ["--open", args.open]
@@ -88,12 +95,20 @@ const broker = new ProducerBroker(
   {
     onMessage: (payload) => {
       const res = pendingResponses.shift();
+      const kind = pendingKinds.shift();
       if (!res) {
         console.error("[bridge] response with no waiting rpc — aborting");
         process.exit(1);
       }
+      let body = Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength);
+      if (args["strip-bbox"] && kind === "header") {
+        const header = JSON.parse(body.toString("utf-8")) as { bbox?: unknown };
+        header.bbox = null;
+        body = Buffer.from(JSON.stringify(header), "utf-8");
+        console.error("[bridge] --strip-bbox: relayed header with bbox: null");
+      }
       res.writeHead(200, { "content-type": "application/octet-stream" });
-      res.end(Buffer.from(payload.buffer, payload.byteOffset, payload.byteLength));
+      res.end(body);
     },
     onExit: (reason) => {
       console.error(`[bridge] producer exit: ${reason}`);
@@ -125,7 +140,12 @@ const TINY_PNG = Buffer.from(
   "base64",
 );
 
-const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* html */ `<!DOCTYPE html>
+const harnessHtml = (
+  hold: boolean,
+  selftest = false,
+  terminal = false,
+  depthVariant?: number,
+) => /* html */ `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -137,7 +157,9 @@ const harnessHtml = (hold: boolean, selftest = false, terminal = false) => /* ht
   ${HUD_BODY}
   ${hold ? '<img id="holdopen" src="/slow.png" width="1" height="1" alt="">' : ""}
   <script nonce="${NONCE}">
-    window.__VIEWER__ = { autoplay: true, statsLog: true, screenshotMode: true, test: true };
+    window.__VIEWER__ = { autoplay: true, statsLog: true, screenshotMode: true, test: true${
+      depthVariant !== undefined ? `, depthVariant: ${depthVariant}` : ""
+    } };
     // Headless Chrome under --virtual-time-budget never fires rAF (timers only),
     // so back the render loop with setTimeout. Harness-only; the real webview
     // uses native rAF.
@@ -314,19 +336,32 @@ const server = http.createServer((req, res) => {
       // Queue the response BEFORE sending — producer replies are FIFO with sends.
       pendingResponses.push(res);
       try {
-        broker.send(JSON.parse(Buffer.concat(body).toString("utf-8")));
+        const request = JSON.parse(Buffer.concat(body).toString("utf-8"));
+        pendingKinds.push(String((request as { type?: string }).type ?? ""));
+        broker.send(request);
       } catch (err) {
         pendingResponses.pop();
+        if (pendingKinds.length === pendingResponses.length + 1) pendingKinds.pop();
         res.writeHead(500);
         res.end(String(err));
       }
     });
   } else if (
-    req.url === "/" || req.url === "/harness.html" || req.url === "/hold" ||
-    req.url === "/selftest" || req.url === "/terminal"
+    (() => {
+      const path = new URL(req.url ?? "/", "http://harness").pathname;
+      return path === "/" || path === "/harness.html" || path === "/hold" ||
+        path === "/selftest" || path === "/terminal";
+    })()
   ) {
+    const u = new URL(req.url ?? "/", "http://harness");
+    const dv = u.searchParams.get("depthVariant");
     res.writeHead(200, { "content-type": "text/html" });
-    res.end(harnessHtml(req.url === "/hold", req.url === "/selftest", req.url === "/terminal"));
+    res.end(harnessHtml(
+      u.pathname === "/hold",
+      u.pathname === "/selftest",
+      u.pathname === "/terminal",
+      dv === null ? undefined : Number(dv),
+    ));
   } else if (req.url === "/slow.png") {
     setTimeout(() => {
       res.writeHead(200, { "content-type": "image/png" });

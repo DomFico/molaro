@@ -711,6 +711,12 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   const scriptUri = webview.asWebviewUri(
     vscode.Uri.joinPath(extensionUri, "dist", "webview", "main.js"),
   );
+  // Development/measurement switch for the impostor depth variant (1 = flat
+  // sprite depth, 2 = analytic gl_FragDepth). NOT a user surface — it exists
+  // so the real-hardware measurement script can drive both variants against
+  // the packaged extension. Anything but 1 means the provisional default (2).
+  const depthVariant =
+    vscode.workspace.getConfiguration("molaro").get<number>("viewer.depthVariant", 2) === 1 ? 1 : 2;
 
   const csp = [
     "default-src 'none'",
@@ -731,7 +737,7 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 </head>
 <body>
   ${HUD_BODY}
-  <script nonce="${nonce}">window.__VIEWER__ = { autoplay: false };</script>
+  <script nonce="${nonce}">window.__VIEWER__ = { autoplay: false, depthVariant: ${depthVariant} };</script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

@@ -318,15 +318,52 @@ assert about:
   follow-up (see open threads). Note the difference from the width
   follow-up: opacity is visible-but-may-mis-composite-on-overlap; width
   was not-visible-at-all.
-- **Point size renders today; edge/trace width is STATE ONLY (Phase-0
-  finding, on record).** The point pass already honored per-point size
-  (`rep.state.size` → the `aSize` attribute → `gl_PointSize`), so
-  `pointsize` needed no render change — the brief's `pointSize` buffer
-  already existed under the name `size` and is reused, not duplicated. GL
-  lines, by contrast, rasterize at 1 px on essentially every platform and
-  have no per-vertex width concept at all, so `edgeSize`/`traceSize` are
-  complete as command + buffer + undo but produce no visible thickness
-  until an impostor/mesh-line render pass exists (see open threads).
+- **Point size renders as SPHERE IMPOSTORS (world-anchored); edge/trace
+  width is still STATE ONLY.** The base point pass ray-traces a shaded
+  sphere per point (`webview/shaders.ts` — a fixed headlight Lambert, no
+  scene lights): `rep.state.size` now means a **world radius** = `k` × the
+  stored value, where `k` (`worldPerSizeUnit` in `webview/geometry.ts`) is
+  the ONE scene-scale constant, derived from the same `sceneExtent(header)`
+  call the camera framing consumes — **never fork S**: pixel parity is a
+  relationship between `k` and the camera, so both must read one value
+  (even on the null-bbox fallback box both misframe together and a
+  default-size element still lands at ~its historical pixel extent at the
+  initial framing; sizes now scale with zoom instead of pinning to screen
+  pixels). The size-value MEANING is unchanged and the `DEFAULT_*`
+  base-look constants are untouched. Both overlays (pending green, focus
+  flash) bind the same `aSize` attribute and the same sizing GLSL chunk at
+  the same radius, so highlighting covers exactly the base silhouette — and
+  a size-0 point shows no overlay, ever. `size 0` now draws **zero pixels**
+  (the pre-impostor pass left a ~1px min-point-size residue — a "state
+  without pixels" defect found by measurement; the radial discard fixes
+  it), while the point still resolves and picks. Two depth behaviors ship
+  in ONE shader behind the `molaro.viewer.depthVariant` dev switch
+  (variant 1 = flat sprite depth, early-Z kept; variant 2 = analytic
+  `gl_FragDepth`, correct interpenetration; the default is PROVISIONAL —
+  the choice is made outside this lane on `tests/impostor_bench.ts`
+  real-hardware numbers, and the switch is global across all geometry
+  passes because a mixed scene clips wrongly at primitive junctions).
+  `depthWrite` is pinned EXPLICITLY on all three geometry materials in the
+  one factory that consumes the switch, and S32 asserts it — if the
+  override lapsed, occlusion would silently revert to draw-order. GL lines
+  still rasterize at 1 px, so `edgeSize`/`traceSize` remain complete as
+  command + buffer + undo but produce no visible thickness until the tube
+  passes land (increments B/C — see open threads).
+- **Impostor rendering: recorded trade-offs (accepted, do not "fix"
+  piecemeal).** (1) `gl_PointSize` clamps at the driver cap (measured
+  1023 px on the harness): a sphere stops growing once the camera is
+  extremely close. (2) GL clips points by CENTER: a large near sphere pops
+  out entirely when its center leaves the view. (3) The overlays keep
+  `depthTest: false` — silhouette-coplanar depth testing would z-fight —
+  so a highlighted element BEHIND opaque geometry shows its tint through;
+  true today as before, merely more visible on solid spheres. (4) A header
+  with **no bbox** anchors `k` to the default box permanently while later
+  camera moves find the real data — element sizes may be misscaled for
+  such a dataset; the viewer says so LOUDLY (status-line warning, pinned by
+  S33 and a unit test) rather than silently. (5) Picking stays CPU-side and
+  center-based: a large sphere is picked by proximity to its center, not
+  across its drawn face (invariant — radius-aware picking would couple
+  picking to representation state).
 - **The de-indexed edge pass** (the one render change per-edge color forced):
   flat per-edge color cannot ride an indexed LineSegments sharing the points'
   position attribute — shared vertices would bleed one edge's color onto
@@ -520,14 +557,16 @@ deliberate decisions:
 decision landed on per-vertex color with an explicit gradient-boundary
 rendering — see the representation-family section above and S17.)
 
-- **Honored edge/trace thickness — the flagged renderer follow-up.**
-  `rep.state.edgeSize` / `.traceSize` are live (commands, undo, LWW, tests
-  through S18) but GL lines rasterize at 1 px, so the stored widths draw no
-  pixels yet. Making them visible means replacing the two line passes with
-  impostor/cylinder or mesh-line (triangle-strip) geometry — a renderer
-  brief of its own, deliberately NOT bundled into the size-verb brief. When
-  it lands, it reads the existing buffers; no command-layer change should
-  be needed.
+- **Honored edge/trace thickness — the flagged renderer follow-up (points
+  half now CLOSED).** The point half landed as sphere impostors (increment
+  A of the impostor-geometry brief — see the representation-family section
+  above). `rep.state.edgeSize` / `.traceSize` are live (commands, undo,
+  LWW, tests through S18) but GL lines rasterize at 1 px, so the stored
+  widths draw no pixels yet. The cleared construction (instanced quads:
+  per-instance start/end per frame flip, radius/RGBA on rep-write only,
+  instance slot ≡ header edge order — no compaction, ever) lands as
+  increments B (edges) and C (traces); it reads the existing buffers and
+  needs no command-layer change.
 - **Correct transparency ordering (depth sort / OIT) — the second flagged
   renderer follow-up.** Per-element opacity renders NOW with naive
   blending: all three passes are `transparent: true`, drawn in scene order
@@ -639,8 +678,24 @@ higher cost.
   afterward pops exactly the user's strokes in order. (The retention itself
   — the webview surviving a real tab hide — is validated against the
   packaged VSIX by the real-VS-Code CDP probe, since the harness has no
-  panel lifecycle.) The harness runs the synthetic producer at **N=6000**
-  (the extension default is 20000 — counts differ).
+  panel lifecycle.) **S32** is the impostor-geometry pixel suite, run TWICE
+  — once per depth variant (`/?depthVariant=N` boots the harness on either
+  path): the C2 depthWrite pin on all three geometry materials, the
+  initial-framing parity band for a default-size sphere, extent scaling
+  with the stored size, SIZE-0 = ZERO PIXELS while the point still
+  resolves and picks, nearer-occludes-farther at equal sizes (the
+  depth-state tripwire — must hold on BOTH variants), the interpenetration
+  check with OPPOSITE expectations per variant (v2: a big sphere's front
+  bulge eliminates a nearer small point; v1: the small point punches
+  through — the only allowed divergence), overlay registration on the
+  sphere's own pixels + scaling with size + none at size 0, focus-flash
+  registration, and a full unwind restoring pristine buffers AND pristine
+  pixels; **S33** boots the bridge with `--strip-bbox` (a test-infra
+  header rewrite; `bbox: null` is contract-legal) and pins the LOUD
+  null-bbox fallback — the status-line warning, the seam's fallback flag,
+  and the self-correcting parity band on the fallback box. The harness
+  runs the synthetic producer at **N=6000** (the extension default is
+  20000 — counts differ).
 - **Terminal smoke** (`node tests/terminal_smoke.ts`): the real terminal
   bundle + real viewer in one page, host relay emulated by the bridge shim's
   loopback; commands (every verb incl. the representation family's buffer

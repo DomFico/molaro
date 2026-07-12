@@ -13,9 +13,13 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  DEFAULT_SCENE_BOX,
+  NO_BBOX_WARNING,
   computeBounds,
   edgeSegmentIndices,
   polylineSegmentIndices,
+  sceneExtent,
+  worldPerSizeUnit,
 } from "../webview/geometry.ts";
 import { decodeFrameChunk, parseHeader, validateFrameChunk } from "../contract/contract.ts";
 
@@ -73,4 +77,41 @@ test("webview fixture parses, validates, and is a zero-copy frame-0 view", () =>
     assert.ok(box.min[c] >= header.bbox.min[c] - 1e-4);
     assert.ok(box.max[c] <= header.bbox.max[c] + 1e-4);
   }
+});
+
+// -- scene scale: the single source both the camera and `k` consume ---------
+
+test("sceneExtent: bbox present — max extent, no fallback", () => {
+  const r = sceneExtent({ min: [-1, -2, 0], max: [3, 5, 1] });
+  assert.equal(r.S, 7); // the y extent dominates
+  assert.equal(r.fallback, false);
+  assert.deepEqual(r.box, { min: [-1, -2, 0], max: [3, 5, 1] });
+});
+
+test("sceneExtent: null bbox — the camera's historical default box, flagged loudly", () => {
+  const r = sceneExtent(null);
+  assert.equal(r.fallback, true, "the null-bbox branch must be flagged (C1)");
+  assert.equal(r.S, 20);
+  assert.deepEqual(r.box, DEFAULT_SCENE_BOX);
+  assert.ok(NO_BBOX_WARNING.includes("bbox"), "warning names the missing bbox");
+  assert.ok(/misscal/i.test(NO_BBOX_WARNING), "warning states the consequence");
+});
+
+test("sceneExtent: degenerate box clamps to a positive extent", () => {
+  const r = sceneExtent({ min: [1, 1, 1], max: [1, 1, 1] });
+  assert.ok(r.S > 0);
+});
+
+test("worldPerSizeUnit: the pixel-parity formula, pinned", () => {
+  // k = FRAME_DISTANCE_FACTOR · S · tan(fov/2) / NOMINAL_VIEWPORT_PX — so at
+  // the initial framing distance (FRAME_DISTANCE_FACTOR·S) a size-v element
+  // projects to v·(viewportHeight/NOMINAL_VIEWPORT_PX) px. One constant, all
+  // three primitives; the 3:1:1 default ratio is geometric.
+  const S = 32.687; // the synthetic reference extent measured in Phase 0
+  const k = worldPerSizeUnit(S);
+  const expected = (1.6 * S * Math.tan((25 * Math.PI) / 180)) / 720;
+  assert.ok(Math.abs(k - expected) < 1e-12);
+  assert.ok(Math.abs(k - 0.03387) < 1e-4, `k on the reference data (${k})`);
+  // linear in S: doubling the scene doubles world radii, pixels stay put
+  assert.ok(Math.abs(worldPerSizeUnit(2 * S) - 2 * k) < 1e-12);
 });

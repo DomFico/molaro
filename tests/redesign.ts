@@ -5104,9 +5104,313 @@ async function S31(): Promise<void> {
   }, 1180, 780, "/terminal");
 }
 
+// ==================== S32: impostor geometry (increment A) ===================
+// Spheres draw the stored size buffer — pixel assertions, run under BOTH depth
+// variants (2 = analytic gl_FragDepth, 1 = flat sprite depth; one global dev
+// switch). Only the interpenetration check separates them, with opposite
+// expected colors; everything else must hold identically on both.
+async function S32(): Promise<void> {
+  for (const variant of [2, 1] as const) {
+    console.log(`S32 — impostor geometry, depth variant ${variant}`);
+    await withDriver(async (d) => {
+      const cmd = (text: string) =>
+        d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+      const redCount = (b64: string) =>
+        d.evaluate<number>(`(async () => {
+          const app = document.getElementById('app').getBoundingClientRect();
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+          const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+            Math.round(app.width), Math.round(app.height) - 60).data;
+          let n = 0;
+          for (let i = 0; i < px.length; i += 4) {
+            if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) n++;
+          }
+          return n;
+        })()`);
+      /** strict red/blue pixel counts in a 5×5 patch at client (x,y) — the
+       * occlusion checks assert PRESENCE/ABSENCE, never majority (a small
+       * sphere in front of a big one is a few pixels inside many). */
+      const patchCounts = (b64: string, x: number, y: number) =>
+        d.evaluate<{ red: number; blue: number }>(`(async () => {
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+          const px = g.getImageData(${Math.round(x) - 2}, ${Math.round(y) - 2}, 5, 5).data;
+          let red = 0, blue = 0;
+          for (let i = 0; i < px.length; i += 4) {
+            if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) red++;
+            if (px[i+2] > px[i] + 60 && px[i+2] > px[i+1] + 60) blue++;
+          }
+          return { red, blue };
+        })()`);
+      const snap = (tag: string) => d.captureB64(`${REPORT}/S32_v${variant}_${tag}.png`);
+
+      // C2: depthWrite pinned EXPLICITLY on all three geometry materials, and
+      // the boot config actually selected this variant.
+      const mats = await d.evaluate<{ p: boolean; e: boolean; t: boolean; dv: number }>(
+        `(()=>{const m=${V}.geometryMaterials; return {p:m.points.depthWrite, e:m.edges.depthWrite, t:m.traces.depthWrite, dv:${V}.depthVariant};})()`);
+      check("S32: depthWrite === true on ALL THREE geometry materials (C2)",
+        mats.p && mats.e && mats.t, JSON.stringify(mats));
+      check("S32: the boot config selected this depth variant", mats.dv === variant,
+        `dv=${mats.dv}`);
+      check("S32: no bbox warning on a bbox-carrying header",
+        !(await d.evaluate<string>(`document.getElementById('status').textContent`)).includes("no bbox"));
+
+      // isolate one on-screen point: everything size 0, the probe red at default
+      const probe = await d.evaluate<number>(`(()=>{
+        const n = ${V}.rep.state.size.length;
+        for (let p = 100; p < n; p += 137) {
+          const pr = ${V}.debug.projectPoint(p);
+          const app = document.getElementById('app').getBoundingClientRect();
+          if (pr.front && pr.x > app.left + 40 && pr.x < app.right - 40 &&
+              pr.y > app.top + 90 && pr.y < app.bottom - 40) return p;
+        }
+        return 100;
+      })()`);
+      await cmd(`colorpoints #${probe} red`);
+      await cmd("pointsize all 0");
+      await cmd(`pointsize #${probe} 3`);
+      await sleep(250);
+      const n3 = await redCount(await snap("probe_size3"));
+      check("S32: default-size sphere lands near its pre-impostor pixel extent (parity pin)",
+        n3 >= 3 && n3 <= 30, `default-size red pixels=${n3}`);
+
+      await cmd(`pointsize #${probe} 9`);
+      await sleep(250);
+      const n9 = await redCount(await snap("probe_size9"));
+      check("S32: a larger stored size covers materially more pixels",
+        n9 >= 3 * n3, `size3=${n3} size9=${n9}`);
+
+      // ZERO ⊥ HIDE, now at the pixel level: size 0 draws NOTHING (the old
+      // pass left a ~1px min-point-size residue), the point still resolves,
+      // and it is still pickable through the real picking path.
+      await cmd(`pointsize #${probe} 0`);
+      await sleep(250);
+      const n0 = await redCount(await snap("probe_size0"));
+      check("S32: size 0 covers ZERO pixels", n0 === 0, `red pixels=${n0}`);
+      check("S32: the size-0 point still resolves",
+        await d.evaluate<number>(`${V}.debug.resolvePoints('#${probe}').length`) === 1);
+      const picked = await d.evaluate<{ hit: number; front: boolean }>(`(()=>{
+        const pr = ${V}.debug.projectPoint(${probe});
+        return { hit: ${V}.debug.pick(pr.x, pr.y), front: pr.front };
+      })()`);
+      check("S32: the size-0 point is still pickable at its projection",
+        picked.front && picked.hit === probe, JSON.stringify(picked));
+      const vis = await visibleCount(d);
+      check("S32: zero writes never touched visibility", vis === 6000, `visible=${vis}`);
+
+      // occlusion pair: two points projecting within ~3px at different view
+      // depths (bucketed search over the current frame).
+      const pair = await d.evaluate<{ front: number; back: number; x: number; y: number; dz: number } | null>(`(()=>{
+        const n = ${V}.rep.state.size.length;
+        const app = document.getElementById('app').getBoundingClientRect();
+        const cells = new Map();
+        for (let p = 0; p < n; p++) {
+          const pr = ${V}.debug.projectPoint(p);
+          if (!pr.front) continue;
+          if (pr.x < app.left + 60 || pr.x > app.right - 60 ||
+              pr.y < app.top + 100 || pr.y > app.bottom - 60) continue;
+          const key = Math.round(pr.x / 3) + ':' + Math.round(pr.y / 3);
+          const list = cells.get(key) ?? [];
+          list.push({ p, ...pr });
+          cells.set(key, list);
+        }
+        for (const list of cells.values()) {
+          for (let i = 0; i < list.length; i++) for (let j = 0; j < list.length; j++) {
+            const dz = list[j].depth - list[i].depth;
+            if (dz > 0.2 && dz < 0.9 && Math.hypot(list[i].x - list[j].x, list[i].y - list[j].y) < 3) {
+              return { front: list[i].p, back: list[j].p, x: list[i].x, y: list[i].y, dz };
+            }
+          }
+        }
+        return null;
+      })()`);
+      check("S32: found an overlapping pair for the occlusion checks", pair !== null,
+        JSON.stringify(pair));
+      if (pair) {
+        // (a) BOTH variants: at equal size, the nearer sphere occludes the
+        // farther one where they overlap (C2's behavioral tripwire — if this
+        // fails on either variant, depth state broke, not the variant).
+        await cmd(`colorpoints #${pair.front} red`);
+        await cmd(`colorpoints #${pair.back} blue`);
+        await cmd(`pointsize #${pair.front} 15`);
+        await cmd(`pointsize #${pair.back} 15`);
+        await sleep(250);
+        const eq = await patchCounts(await snap("occlusion_equal"), pair.x, pair.y);
+        check("S32: nearer sphere occludes the farther at their overlap",
+          eq.red > 0 && eq.blue === 0, `${JSON.stringify(eq)} dz=${pair.dz.toFixed(3)}`);
+
+        // (b) the variant-SEPARATING check — interpenetration: a big sphere
+        // behind, a small nearer point inside its front bulge. Variant 2
+        // (analytic surface depth): the bulge is nearer — the small point is
+        // eliminated (red absent). Variant 1 (flat centre depth): the nearer
+        // centre wins — the small point punches through (red present).
+        // Opposite expectations, same setup — the ONLY assertion the two
+        // variants are allowed to differ on.
+        await cmd(`pointsize #${pair.back} 40`);
+        await cmd(`pointsize #${pair.front} 4`);
+        await sleep(250);
+        const fp = await d.evaluate<{ x: number; y: number }>(`${V}.debug.projectPoint(${pair.front})`);
+        const bulge = await patchCounts(await snap("occlusion_bulge"), fp.x, fp.y);
+        if (variant === 2) {
+          check("S32(v2): the big sphere's front bulge ELIMINATES the nearer small point",
+            bulge.red === 0 && bulge.blue > 0, `${JSON.stringify(bulge)} dz=${pair.dz.toFixed(3)}`);
+        } else {
+          check("S32(v1): flat centre depth — the nearer small point punches through the bulge",
+            bulge.red > 0 && bulge.blue > 0, `${JSON.stringify(bulge)} dz=${pair.dz.toFixed(3)}`);
+        }
+      }
+
+      // overlays register on the sphere's own pixels and scale with it.
+      // Capture at a pulse peak so the breathing tint is at full strength.
+      await cmd("pointsize all 0");
+      await cmd(`pointsize #${probe} 12`);
+      await d.evaluate(`${V}.refreshPoints(${V}.model.toggleInTarget({level:'point', id:${probe}}))`);
+      const atPeak = async (): Promise<string> => {
+        await d.evaluate<number>(`(async () => {
+          for (let i = 0; i < 60; i++) {
+            if (${V}.debug.pulse().sel > 0.9) return i;
+            await new Promise(r => setTimeout(r, 40));
+          }
+          return -1;
+        })()`);
+        return snap("overlay");
+      };
+      const pr = await d.evaluate<{ x: number; y: number }>(`${V}.debug.projectPoint(${probe})`);
+      const greenAt = async (b64: string) =>
+        d.evaluate<number>(`(async () => {
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+          const px = g.getImageData(${Math.round(pr.x) - 15}, ${Math.round(pr.y) - 15}, 30, 30).data;
+          let n = 0;
+          for (let i = 0; i < px.length; i += 4) {
+            if (px[i+1] > px[i] + 25 && px[i+1] >= px[i+2]) n++;
+          }
+          return n;
+        })()`);
+      const big = await greenAt(await atPeak());
+      check("S32: pending overlay registers on the sphere's own pixels", big > 20,
+        `green@sphere=${big}`);
+      await cmd(`pointsize #${probe} 4`);
+      const small = await greenAt(await atPeak());
+      check("S32: the overlay SCALES with the stored size (silhouette-matched)",
+        small > 0 && big > 2 * small, `size12=${big} size4=${small}`);
+      await cmd(`pointsize #${probe} 0`);
+      await sleep(150);
+      const gone = await greenAt(await atPeak());
+      check("S32: a size-0 point shows NO overlay, ever", gone === 0, `green=${gone}`);
+
+      // focus flash rides the same silhouette
+      await cmd(`pointsize #${probe} 12`);
+      await d.evaluate(`${V}.focusPoints([${probe}])`);
+      await sleep(450); // camera tween done (360ms), flash near peak strength
+      const fb64 = await snap("flash");
+      const yellowAt = await d.evaluate<number>(`(async () => {
+        const img = new Image();
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${fb64}"; });
+        const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+        const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+        const pr2 = ${V}.debug.projectPoint(${probe});
+        const px = g.getImageData(Math.round(pr2.x) - 15, Math.round(pr2.y) - 15, 30, 30).data;
+        let n = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          if (px[i] > 150 && px[i+1] > 130 && px[i] > px[i+2] + 30 && px[i+1] > px[i+2] + 20) n++;
+        }
+        return n;
+      })()`);
+      check("S32: focus flash registers on the sphere's pixels", yellowAt > 10,
+        `yellow@sphere=${yellowAt}`);
+
+      // undo: byte-exact buffers AND pixel-exact scene (red pixels return to 0)
+      const depth = await d.evaluate<number>(`${V}.model.undoDepth`);
+      for (let i = 0; i < depth; i++) await d.ctrlZ(); // the real undo path
+      await sleep(300);
+      const pristineSize = await d.evaluate<boolean>(
+        `${V}.rep.state.size.every(v => v === 3)`);
+      const pristineColor = await d.evaluate<boolean>(
+        `(()=>{const c=${V}.rep.state.color; const f=Math.fround(0.9); return c.every(v => v === f);})()`);
+      const redFinal = await redCount(await snap("unwound"));
+      check("S32: full unwind restores pristine buffers AND pristine pixels",
+        pristineSize && pristineColor && redFinal === 0,
+        `size=${pristineSize} color=${pristineColor} red=${redFinal}`);
+    }, 1180, 780, `/?depthVariant=${variant}`);
+  }
+}
+
+// ==================== S33: null-bbox fallback is LOUD (C1) ====================
+async function S33(): Promise<void> {
+  console.log("S33 — null-bbox scene scale: loud warning, parity still self-corrects");
+  portBase += 2;
+  const d = new E2EDriver({
+    bridgePort: portBase, cdpPort: portBase + 300, width: 1180, height: 780,
+    producerArgs: ["--n-points", "6000", "--n-frames", "150", "--strip-bbox"],
+  });
+  try {
+    await d.start();
+    await d.navigate("/");
+    await sleep(3200);
+    await pause(d);
+    const status = await d.evaluate<string>(`document.getElementById('status').textContent`);
+    check("S33: the status line carries the no-bbox warning for the whole session",
+      status.includes("no bbox") && /misscal/i.test(status), status);
+    check("S33: the seam confirms the fallback branch",
+      await d.evaluate<boolean>(`${V}.sizing.bboxFallback === true`));
+
+    // parity self-corrects on the fallback: k and the camera share the
+    // default box, so a default-size point still lands in the same pixel
+    // band even though S (20) is wrong for this data (~32.7).
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const probe = await d.evaluate<number>(`(()=>{
+      const d0 = ${V}.sizing.sceneS * 1.6;
+      const n = ${V}.rep.state.size.length;
+      const app = document.getElementById('app').getBoundingClientRect();
+      let best = 100, err = Infinity;
+      for (let p = 0; p < n; p += 7) {
+        const pr = ${V}.debug.projectPoint(p);
+        if (!pr.front) continue;
+        if (pr.x < app.left + 40 || pr.x > app.right - 40 ||
+            pr.y < app.top + 90 || pr.y > app.bottom - 40) continue;
+        const e = Math.abs(pr.depth - d0);
+        if (e < err) { err = e; best = p; }
+      }
+      return best;
+    })()`);
+    await cmd(`colorpoints #${probe} red`);
+    await cmd("pointsize all 0");
+    await cmd(`pointsize #${probe} 3`);
+    await sleep(250);
+    const b64 = await d.captureB64(`${REPORT}/S33_fallback_parity.png`);
+    const red = await d.evaluate<number>(`(async () => {
+      const app = document.getElementById('app').getBoundingClientRect();
+      const img = new Image();
+      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+      const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+      const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+      const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+        Math.round(app.width), Math.round(app.height) - 60).data;
+      let n = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) n++;
+      }
+      return n;
+    })()`);
+    check("S33: a default-size point at the framed distance still lands in the parity band",
+      red >= 3 && red <= 30, `red pixels=${red}`);
+  } finally {
+    await d.dispose();
+  }
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

@@ -37,6 +37,61 @@ export interface Box3Like {
   max: [number, number, number];
 }
 
+// -- scene scale: the ONE source both the camera framing and the impostor
+// -- world-radius constant derive from ------------------------------------
+//
+// Pixel parity is a relationship between the world-radius constant `k` and
+// the CAMERA, not between `k` and the data: the initial framing distance is
+// FRAME_DISTANCE_FACTOR * S, so as long as both consumers read the same S,
+// a default-size element subtends its target pixel extent at that framing —
+// even on the fallback box (a misframed camera and a misscaled `k` cancel).
+// That is why S is computed here, once, and passed to both — never derived
+// a second time, and never from frame data (the camera frames before any
+// positions exist, and re-aiming it is frozen behavior).
+
+/** The camera's historical fallback framing box for headers without a bbox. */
+export const DEFAULT_SCENE_BOX: Box3Like = { min: [-10, -10, -10], max: [10, 10, 10] };
+/** Camera field of view (degrees) — shared by the projection and `k`. */
+export const CAMERA_FOV_DEG = 50;
+/** Initial camera distance = this factor × the scene extent. */
+export const FRAME_DISTANCE_FACTOR = 1.6;
+/** Nominal viewport height (device px) pinning size-value → pixel parity:
+ * at the initial framing a size-v element spans v·(H/H_NOM) px, matching the
+ * pre-impostor screen-space pixel sizes at a typical viewport. */
+export const NOMINAL_VIEWPORT_PX = 720;
+
+/** The loud null-bbox warning (C1): shown whenever `sceneExtent` falls back.
+ * `k` stays anchored to the default box permanently while later camera moves
+ * find the real data — sizes may be misscaled for such a dataset, and that
+ * must never happen quietly. */
+export const NO_BBOX_WARNING =
+  "⚠ header has no bbox — scene scale fell back to the default box; element sizes may be misscaled";
+
+/** Max bbox extent + whether the fallback box was used (no bbox in the
+ * header). `fallback: true` must be surfaced loudly — element sizes are
+ * anchored to the default box, not the data (see the known-trade-offs doc). */
+export function sceneExtent(
+  bbox: Box3Like | null,
+): { S: number; box: Box3Like; fallback: boolean } {
+  const box = bbox ?? DEFAULT_SCENE_BOX;
+  const S = Math.max(
+    box.max[0] - box.min[0],
+    box.max[1] - box.min[1],
+    box.max[2] - box.min[2],
+    1e-3,
+  );
+  return { S, box, fallback: bbox === null };
+}
+
+/** World units per size-buffer unit (`k`): world radius = k × stored value,
+ * for ALL THREE primitives (points/edges/traces — the 3:1:1 default ratio is
+ * geometric). Derived so that at the initial camera framing a size-v element
+ * projects to ≈v CSS px — the meaning size numbers always had. */
+export function worldPerSizeUnit(S: number): number {
+  const tanHalf = Math.tan(((CAMERA_FOV_DEG / 2) * Math.PI) / 180);
+  return (FRAME_DISTANCE_FACTOR * S * tanHalf) / NOMINAL_VIEWPORT_PX;
+}
+
 /** Axis-aligned bounds of an interleaved xyz float32 block (length 3*N). */
 export function computeBounds(positions: Float32Array): Box3Like {
   if (positions.length < 3) {
