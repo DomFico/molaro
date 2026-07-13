@@ -5336,6 +5336,11 @@ async function S32(): Promise<void> {
       // also asserts the pulse actually reaches strength at some phase).
       await cmd("pointsize all 0");
       await cmd(`pointsize #${probe} 12`);
+      // the probe is RED from the sizing section — green-tint-over-red only
+      // clears the greenish classifier within a sliver of the pulse peak
+      // (g−r = a·64 − (1−a)·255·shade). Measure the tint over the base gray,
+      // where the margin is a·64 at every shade.
+      await cmd(`colorpoints #${probe} #e6e6e6`);
       await d.evaluate(`${V}.refreshPoints(${V}.model.toggleInTarget({level:'point', id:${probe}}))`);
       /** Wait until the page's render loop has DRAWN n more frames — under
        * desktop load the compositor can present frames that are minutes old,
@@ -5397,6 +5402,11 @@ async function S32(): Promise<void> {
       // one did) and captures immediately. The camera is at the target after
       // the first tween, so re-focusing only restarts the pulse.
       await cmd(`pointsize #${probe} 12`);
+      // deselect the probe first: the flash BLENDS 50% toward the selection
+      // mint on selected points, and mint-blend over the gray base fails the
+      // yellow classifier by construction — this check asserts silhouette
+      // registration, not the blend.
+      await d.evaluate(`${V}.refreshPoints(${V}.model.toggleInTarget({level:'point', id:${probe}}))`);
       let yellowBest = 0;
       for (let attempt = 0; attempt < 6 && yellowBest <= 10; attempt++) {
         await d.evaluate(`${V}.focusPoints([${probe}])`);
@@ -5695,13 +5705,98 @@ async function S34(): Promise<void> {
         check("S34: the junction has sphere then tube with NO background gap (both variants)",
           seq[0] === "red" && firstGreen > 0 && gapBg === 0,
           `seq=${seq.join(",")} sphereR=${walk.sphereR.toFixed(1)}`);
-        if (variant === 2) {
-          check("S34(v2): on the sphere face the analytic bulge occludes the nearer tube",
-            walk.probe === "red", `probe=${walk.probe} dz=${jct.dz.toFixed(3)}`);
-        } else {
-          check("S34(v1): flat axis depth — the nearer tube draws across the sphere face",
-            walk.probe === "green", `probe=${walk.probe} dz=${jct.dz.toFixed(3)}`);
-        }
+        // B′: the analytic trim ends the tube ON the sphere's surface BY
+        // GEOMETRY, so no tube pixel reaches the sphere's near face under
+        // EITHER variant (the pre-trim v1 "punches through" expectation is
+        // retired — that behaviour no longer exists to assert).
+        check("S34(B′): no tube pixel on the sphere's near face — geometry, both variants",
+          walk.probe === "red", `probe=${walk.probe} dz=${jct.dz.toFixed(3)}`);
+
+        // B′: EQUAL radii — d = 0, tube runs centre-to-centre, the sphere
+        // caps it exactly: no background pixel anywhere along the seam.
+        await cmd(`bondsizeof #${jct.p} 6`);
+        await sleep(250);
+        const eqb64 = await snap("junction_equal");
+        const eqSeq = await d.evaluate<string[]>(`(async () => {
+          const pr = ${V}.debug.projectPoint(${jct.p});
+          const nr = ${V}.debug.projectPoint(${jct.n});
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${eqb64}"; });
+          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+          const dir = { x: nr.x - pr.x, y: nr.y - pr.y };
+          const len = Math.hypot(dir.x, dir.y);
+          dir.x /= len; dir.y /= len;
+          const k = ${V}.sizing.worldPerSize;
+          const rPx = (6 * k) * ${V}.sizing.pxPerWorld() / pr.depth;
+          const seq = [];
+          for (let t = 0; t <= rPx * 2.2; t += 3) {
+            const px = g.getImageData(Math.round(pr.x + dir.x * t) - 1, Math.round(pr.y + dir.y * t) - 1, 3, 3).data;
+            let lit = 0;
+            for (let i = 0; i < px.length; i += 4) {
+              if (px[i] > 55 || px[i+1] > 55 || px[i+2] > 55) lit++;
+            }
+            seq.push(lit > 6 ? "lit" : "bg");
+          }
+          return seq;
+        })()`);
+        check("S34(B′): equal radii — the seam is sealed (no background along the axis)",
+          eqSeq.every((s) => s === "lit"), `seq=${eqSeq.join(",")}`);
+
+        // B′: an EXPOSED end (size-0 endpoint) is capped — the tube end
+        // reads as solid right through and past the endpoint's centre.
+        await cmd(`bondsizeof #${jct.p} 2`);
+        await cmd(`pointsize #${jct.p} 0`);
+        await sleep(250);
+        const capB64 = await snap("junction_cap");
+        const cap = await d.evaluate<{ atCenter: string; pastCenter: string }>(`(async () => {
+          const pr = ${V}.debug.projectPoint(${jct.p});
+          const nr = ${V}.debug.projectPoint(${jct.n});
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${capB64}"; });
+          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+          const classify = (x, y) => {
+            const px = g.getImageData(Math.round(x) - 1, Math.round(y) - 1, 3, 3).data;
+            let gr = 0;
+            for (let i = 0; i < px.length; i += 4) {
+              if (px[i+1] > px[i] + 50 && px[i+1] > px[i+2] + 50) gr++;
+            }
+            return gr > 4 ? "green" : "not-green";
+          };
+          // walk AWAY from the neighbour: past the naked endpoint's centre
+          const dir = { x: pr.x - nr.x, y: pr.y - nr.y };
+          const len = Math.hypot(dir.x, dir.y);
+          dir.x /= len; dir.y /= len;
+          const k = ${V}.sizing.worldPerSize;
+          const rPx = (2 * k) * ${V}.sizing.pxPerWorld() / pr.depth;
+          return {
+            atCenter: classify(pr.x, pr.y),
+            pastCenter: classify(pr.x + dir.x * rPx * 0.5, pr.y + dir.y * rPx * 0.5),
+          };
+        })()`);
+        check("S34(B′): a size-0 endpoint leaves no hollow end — the cap reads solid",
+          cap.atCenter === "green" && cap.pastCenter === "green", JSON.stringify(cap));
+
+        // B′ cadence (invariant 2): a frame flip re-uploads endpoints but
+        // NEVER the junction end-sizes; a pointsize write bumps them.
+        const v0 = await d.evaluate<{ start: number; sizeA: number; sizeB: number }>(
+          `${V}.edgeAttrVersions()`);
+        await d.evaluate(`${V}.player.seek(40)`);
+        await sleep(400);
+        await d.evaluate(`${V}.player.seek(0)`);
+        await sleep(400);
+        const v1c = await d.evaluate<{ start: number; sizeA: number; sizeB: number }>(
+          `${V}.edgeAttrVersions()`);
+        await cmd(`pointsize #${jct.p} 3`);
+        await sleep(100);
+        const v2c = await d.evaluate<{ start: number; sizeA: number; sizeB: number }>(
+          `${V}.edgeAttrVersions()`);
+        check("S34(B′): frame flips re-upload endpoints, NEVER the end-sizes (cadence)",
+          v1c.start > v0.start && v1c.sizeA === v0.sizeA && v1c.sizeB === v0.sizeB,
+          JSON.stringify({ v0, v1c }));
+        check("S34(B′): a pointsize write DOES bump the end-sizes",
+          v2c.sizeA > v1c.sizeA && v2c.sizeB > v1c.sizeB, JSON.stringify({ v1c, v2c }));
       }
 
       // full unwind: pristine buffers AND pristine pixels

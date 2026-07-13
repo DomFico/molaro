@@ -387,7 +387,21 @@ assert about:
   the billboard plane contains the axis, so tube and sphere agree exactly
   at a shared endpoint, no junction hole; v2: analytic cylinder-surface
   depth through the same projection row). Zero alpha discards; zero radius
-  collapses — both literal zeros, S34-pinned.
+  collapses — both literal zeros, S34-pinned. **The junction is correct BY
+  GEOMETRY** (brief B′): each tube end is trimmed to d = √(max(0, r_s² −
+  r_t²)) from its endpoint's centre, putting the end ring exactly on that
+  point's sphere surface from every angle (equal radii → d = 0, perfect
+  capsule; a sphere ≥ the tube caps the end, so the shader discards past
+  the ring; a tube swallowed whole collapses). The quad EXTENDS one radius
+  past each trimmed end so the fragment shader — not the quad boundary —
+  decides the silhouette; an EXPOSED end (sphere strictly smaller, incl.
+  size 0) grows a hemispherical cap, so a bare tube end reads solid, never
+  as a cut pipe. The endpoint sizes ride two per-instance attributes
+  (iSizeA/iSizeB) at REP-WRITE cadence — pointsize writes update exactly
+  the incident edges' slots via a point→edges map; frame flips never touch
+  them (S34 asserts the upload versions). Because the trim is geometric,
+  the junction assertions are variant-UNIFORM: no tube pixel on a larger
+  sphere's near face under either variant.
 - **The polyline pass stays zero-copy** — per-VERTEX color is exactly what
   indexed geometry renders natively. The pass keeps sharing the points'
   position attribute (nothing re-copies on frame flip) and gains a per-POINT

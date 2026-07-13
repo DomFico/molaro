@@ -146,6 +146,13 @@ interface SceneParts {
   /** write iRadius for these edge ids from rep.state.edgeSize — the hook
    * that makes stored widths DRAW (undefined = all). */
   fillEdgeSizes: (ids?: readonly number[]) => void;
+  /** write the endpoint-sphere sizes (iSizeA/iSizeB) for every edge incident
+   * to these POINTS from rep.state.size — the junction-trim inputs, at
+   * rep-write cadence like iRadius (undefined = all points). */
+  fillEdgeEndSizes: (pointIds?: readonly number[]) => void;
+  /** attribute upload versions (test seam): proves the cadence split — a
+   * frame flip bumps `start` and must never bump `sizeA`/`sizeB`. */
+  edgeAttrVersions: () => { start: number; sizeA: number; sizeB: number };
   /** the polyline pass's per-POINT color attribute (null without polylines);
    * colorTrace writes rep.state.traceColor through to the vertex slots. */
   traceColAttr: THREE.BufferAttribute | null;
@@ -363,6 +370,10 @@ function buildScene(
   let fillEdgeColors: (ids?: readonly number[]) => void = () => {};
   let fillEdgeSizes: (ids?: readonly number[]) => void = () => {};
   let fillEdgeVisibility: () => void = () => {};
+  let fillEdgeEndSizes: (pointIds?: readonly number[]) => void = () => {};
+  let edgeAttrVersions: () => { start: number; sizeA: number; sizeB: number } = () => ({
+    start: 0, sizeA: 0, sizeB: 0,
+  });
   if (nEdges > 0) {
     const edgeGeo = new THREE.InstancedBufferGeometry();
     edgeGeo.instanceCount = nEdges;
@@ -376,13 +387,28 @@ function buildScene(
     const iVisible = new THREE.InstancedBufferAttribute(new Float32Array(nEdges).fill(1), 1);
     const iRadius = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
     const iColor = new THREE.InstancedBufferAttribute(new Float32Array(nEdges * 4), 4);
-    for (const a of [iStart, iEnd, iVisible, iRadius, iColor]) a.setUsage(THREE.DynamicDrawUsage);
+    // endpoint sphere sizes for the analytic junction trim — REP-WRITE
+    // cadence (pointsize writes only), exactly like iRadius; never per flip
+    const iSizeA = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
+    const iSizeB = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
+    for (const a of [iStart, iEnd, iVisible, iRadius, iColor, iSizeA, iSizeB]) {
+      a.setUsage(THREE.DynamicDrawUsage);
+    }
     edgeGeo.setAttribute("iStart", iStart);
     edgeGeo.setAttribute("iEnd", iEnd);
     edgeGeo.setAttribute("iVisible", iVisible);
     edgeGeo.setAttribute("iRadius", iRadius);
     edgeGeo.setAttribute("iColor", iColor);
+    edgeGeo.setAttribute("iSizeA", iSizeA);
+    edgeGeo.setAttribute("iSizeB", iSizeB);
     drawables.push(new THREE.Mesh(edgeGeo, mats.edges));
+    // point → incident edge ids, built once (header order both sides), so a
+    // pointsize write touches exactly its edges' end-size slots
+    const edgesOfPoint: number[][] = Array.from({ length: header.n_points }, () => []);
+    for (let e = 0; e < nEdges; e++) {
+      edgesOfPoint[header.edges[e][0]].push(e);
+      edgesOfPoint[header.edges[e][1]].push(e);
+    }
     fillEdges = (): void => {
       const pos = positionAttr.array as Float32Array;
       const s = iStart.array as Float32Array;
@@ -425,8 +451,27 @@ function buildScene(
       }
       iVisible.needsUpdate = true;
     };
+    fillEdgeEndSizes = (pointIds?: readonly number[]): void => {
+      const size = rep.state.size;
+      const a = iSizeA.array as Float32Array;
+      const b = iSizeB.array as Float32Array;
+      const write = (e: number): void => {
+        a[e] = size[header.edges[e][0]];
+        b[e] = size[header.edges[e][1]];
+      };
+      if (pointIds) for (const p of pointIds) for (const e of edgesOfPoint[p]) write(e);
+      else for (let e = 0; e < nEdges; e++) write(e);
+      iSizeA.needsUpdate = true;
+      iSizeB.needsUpdate = true;
+    };
+    edgeAttrVersions = () => ({
+      start: iStart.version,
+      sizeA: iSizeA.version,
+      sizeB: iSizeB.version,
+    });
     fillEdgeColors(); // seed the GPU arrays with the base look
     fillEdgeSizes();
+    fillEdgeEndSizes();
   }
   // The polyline pass keeps the ZERO-COPY indexed form (positions ride the
   // shared attribute; nothing re-copies on frame flip). Per-VERTEX color
@@ -525,6 +570,8 @@ function buildScene(
     fillEdges,
     fillEdgeColors,
     fillEdgeSizes,
+    fillEdgeEndSizes,
+    edgeAttrVersions,
     traceColAttr,
     geometryMaterials: mats,
   };
@@ -1329,11 +1376,17 @@ async function main(): Promise<void> {
   };
   const edgeColorHook = (ids: readonly number[]): void => parts.fillEdgeColors(ids);
   const edgeSizeHook = (ids: readonly number[]): void => parts.fillEdgeSizes(ids);
+  /** point-size writes also feed the junction trim: the tube shader needs
+   * each endpoint's sphere size (rep-write cadence — never the flip loop). */
+  const pointSizeHook = (ids: readonly number[]): void => {
+    repDirty();
+    parts.fillEdgeEndSizes(ids);
+  };
   const colorPoints = makeRepWriter(rep.state.color, 3, repDirty);
   const colorPointsEach = makeRepEachWriter(rep.state.color, 3, repDirty);
-  const sizePointsEach = makeRepEachWriter(rep.state.size, 1, repDirty);
+  const sizePointsEach = makeRepEachWriter(rep.state.size, 1, pointSizeHook);
   const opacityPointsEach = makeRepEachWriter(rep.state.opacity, 1, repDirty);
-  const sizePoints = makeRepWriter(rep.state.size, 1, repDirty);
+  const sizePoints = makeRepWriter(rep.state.size, 1, pointSizeHook);
   const opacityPoints = makeRepWriter(rep.state.opacity, 1, repDirty);
   const colorEdges = makeRepWriter(rep.state.edgeColor, 3, edgeColorHook);
   const sizeEdges = makeRepWriter(rep.state.edgeSize, 1, edgeSizeHook);
@@ -1907,7 +1960,10 @@ async function main(): Promise<void> {
       edges: header.edges, // parity audits test edge endpoints vs resolvePoints
       traceVertices, // parity audits map vertices to subgroups vs resolvePoints
       // impostor seam: the C2 depthWrite assertion reads the geometry
-      // materials; sizing lets pixel tests predict projected extents.
+      // materials; sizing lets pixel tests predict projected extents;
+      // edgeAttrVersions proves the cadence split (flips never re-upload
+      // the junction end-sizes).
+      edgeAttrVersions: parts.edgeAttrVersions,
       geometryMaterials: parts.geometryMaterials,
       depthVariant,
       sizing: {

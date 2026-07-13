@@ -86,3 +86,25 @@ test("edge tube: collapsed instances leave the clip volume; zero alpha discards"
   assert.match(vertex, /iVisible < 0\.5 \|\| radius <= 0\.0/);
   assert.match(fragment, /vColor\.a <= 0\.0/);
 });
+
+// -- the junction trim (B′ §2) ------------------------------------------------
+
+test("junction: the analytic trim formula and endpoint sizes are in the vertex stage", () => {
+  const v = edgeTubeShaders().vertex;
+  assert.match(v, /attribute float iSizeA; attribute float iSizeB;/);
+  assert.match(v, /sqrt\(max\(0\.0, rsA \* rsA - radius \* radius\)\)/);
+  assert.match(v, /dA \+ dB >= len/, "a swallowed tube collapses");
+  // the quad extends ONE RADIUS past each trimmed end — the fragment shader,
+  // not the quad boundary, decides where the tube ends
+  assert.match(v, /dA - radius/);
+  assert.match(v, /len - dB \+ radius/);
+});
+
+test("junction: covered ends discard, exposed ends grow a hemispherical cap", () => {
+  const f = edgeTubeShaders().fragment;
+  assert.match(f, />= vRadius\) discard/, "sphere >= tube: the sphere owns the end zone");
+  assert.match(f, /q2 > 1\.0\) discard/, "outside the cap silhouette");
+  assert.match(f, /sqrt\(1\.0 - q2\)/, "cap shades as a sphere");
+  // still exactly ONE depth write, shared by wall and cap, behind the define
+  assert.equal(f.split("gl_FragDepth").length - 1, 1);
+});

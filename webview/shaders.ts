@@ -106,47 +106,95 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
       attribute vec2 aCorner;
       attribute vec3 iStart; attribute vec3 iEnd;
       attribute float iVisible; attribute float iRadius; attribute vec4 iColor;
+      // endpoint SPHERE sizes (rep-write cadence, like iRadius): the tube is
+      // trimmed analytically to the sphere it meets — see the fragment shader
+      attribute float iSizeA; attribute float iSizeB;
       uniform float uWorldPerSize;
       varying vec4 vColor; varying float vU;
-      varying float vRadius; varying float vViewDepth;
+      varying float vRadius;
+      varying float vT; varying float vLen;
+      varying float vDA; varying float vDB;
+      varying float vDepthA; varying float vDepthB;
+      varying float vRsA; varying float vRsB;
       void main() {
         float radius = uWorldPerSize * iRadius;
         vec3 mvA = (modelViewMatrix * vec4(iStart, 1.0)).xyz;
         vec3 mvB = (modelViewMatrix * vec4(iEnd, 1.0)).xyz;
         vec3 seg = mvB - mvA;
-        // collapsed instances (hidden edge, zero radius, degenerate segment)
-        // leave the clip volume entirely — no fragments, no depth writes
-        if (iVisible < 0.5 || radius <= 0.0 || dot(seg, seg) < 1e-16) {
+        float len = length(seg);
+        float rsA = uWorldPerSize * iSizeA;
+        float rsB = uWorldPerSize * iSizeB;
+        // trim distance: stopping the tube at d = sqrt(rs² − rt²) puts its
+        // end ring EXACTLY on the endpoint's sphere surface, from every
+        // viewing angle. rs ≤ rt clamps to 0 (exposed end → capped).
+        float dA = sqrt(max(0.0, rsA * rsA - radius * radius));
+        float dB = sqrt(max(0.0, rsB * rsB - radius * radius));
+        // collapsed instances (hidden edge, zero radius, degenerate segment,
+        // or a tube swallowed whole by its endpoint spheres) leave the clip
+        // volume entirely — no fragments, no depth writes
+        if (iVisible < 0.5 || radius <= 0.0 || len * len < 1e-16 || dA + dB >= len) {
           gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-          vColor = vec4(0.0); vU = 0.0; vRadius = 0.0; vViewDepth = 1.0;
+          vColor = vec4(0.0); vU = 0.0; vRadius = 0.0;
+          vT = 0.0; vLen = 1.0; vDA = 0.0; vDB = 0.0;
+          vDepthA = 1.0; vDepthB = 1.0; vRsA = 0.0; vRsB = 0.0;
           return;
         }
-        vec3 axis = normalize(seg);
+        vec3 axis = seg / len;
         vec3 toCam = -normalize(mvA + mvB); // midpoint view direction
         vec3 s = cross(axis, toCam);
         if (dot(s, s) < 1e-12) s = cross(axis, vec3(0.0, 1.0, 0.0));
         if (dot(s, s) < 1e-12) s = cross(axis, vec3(1.0, 0.0, 0.0));
         vec3 side = normalize(s);
-        vec3 self = aCorner.y < 0.5 ? mvA : mvB;
-        vec3 pos = self + side * (aCorner.x * radius);
+        // the quad EXTENDS one radius past each trimmed end so the fragment
+        // shader — not the quad boundary — decides where the tube ends (the
+        // cylinder's end seen at an angle reaches beyond the axis endpoint;
+        // covered ends discard there, exposed ends grow a cap there)
+        float t = aCorner.y < 0.5 ? (dA - radius) : (len - dB + radius);
+        vec3 pos = mvA + axis * t + side * (aCorner.x * radius);
         vColor = iColor;
         vU = aCorner.x;
         vRadius = radius;
-        vViewDepth = -self.z;
+        vT = t; vLen = len; vDA = dA; vDB = dB;
+        vDepthA = -mvA.z; vDepthB = -mvB.z;
+        vRsA = rsA; vRsB = rsB;
         gl_Position = projectionMatrix * vec4(pos, 1.0);
       }`,
     fragment: `
       uniform vec2 uProjZ;
       varying vec4 vColor; varying float vU;
-      varying float vRadius; varying float vViewDepth;
+      varying float vRadius;
+      varying float vT; varying float vLen;
+      varying float vDA; varying float vDB;
+      varying float vDepthA; varying float vDepthB;
+      varying float vRsA; varying float vRsB;
       void main() {
         // zero alpha is a literal zero: no fragment, no depth hole
         if (vColor.a <= 0.0) discard;
-        float nz = sqrt(max(1.0 - vU * vU, 0.0));
+        float u2 = vU * vU;
+        float nz; float depthBase;
+        if (vT < vDA || vT > vLen - vDB) {
+          // END ZONE. Covered (sphere > tube): the ring lies on the sphere
+          // and the sphere owns everything past it — no fragment. Exposed
+          // (sphere ≤ tube, incl. size 0): a hemispherical cap, so a bare
+          // tube end reads as SOLID, never as a cut pipe.
+          bool startEnd = vT < vDA;
+          // >=: a sphere of EQUAL radius already caps the end exactly — a
+          // cap there would be coincident geometry and z-fight it
+          if ((startEnd ? vRsA : vRsB) >= vRadius) discard;
+          float tc = startEnd ? vT : vT - vLen; // axial offset from the point centre (d = 0 here)
+          float q2 = (tc * tc) / (vRadius * vRadius) + u2;
+          if (q2 > 1.0) discard;
+          nz = sqrt(1.0 - q2);
+          depthBase = startEnd ? vDepthA : vDepthB;
+        } else {
+          // cylinder wall
+          nz = sqrt(max(1.0 - u2, 0.0));
+          depthBase = mix(vDepthA, vDepthB, clamp(vT / vLen, 0.0, 1.0));
+        }
         float shade = 0.55 + 0.45 * nz;
       #ifdef ${IMPOSTOR_DEPTH_DEFINE}
-        // analytic cylinder-surface depth: nearer than the axis by nz*radius
-        float zView = -(vViewDepth - vRadius * nz);
+        // analytic surface depth: nearer than the axis/centre by nz*radius
+        float zView = -(depthBase - vRadius * nz);
         gl_FragDepth = 0.5 * ((uProjZ.x * zView + uProjZ.y) / -zView) + 0.5;
       #endif
         gl_FragColor = vec4(vColor.rgb * shade, vColor.a);
