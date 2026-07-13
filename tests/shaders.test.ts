@@ -10,6 +10,7 @@ import assert from "node:assert/strict";
 
 import {
   IMPOSTOR_DEPTH_DEFINE,
+  IMPOSTOR_SHADE_CHUNK,
   IMPOSTOR_SIZING_CHUNK,
   edgeTubeShaders,
   focusFlashShaders,
@@ -107,4 +108,25 @@ test("junction: covered ends discard, exposed ends grow a hemispherical cap", ()
   assert.match(f, /sqrt\(1\.0 - q2\)/, "cap shades as a sphere");
   // still exactly ONE depth write, shared by wall and cap, behind the define
   assert.equal(f.split("gl_FragDepth").length - 1, 1);
+});
+
+// -- the shared shading chunk (B′ §3) -----------------------------------------
+
+test("shading is single-sourced: both fragments embed THE shade chunk, no local formula", () => {
+  const pf = pointShaders().fragment;
+  const ef = edgeTubeShaders().fragment;
+  assert.equal(pf.split(IMPOSTOR_SHADE_CHUNK).length - 1, 1, "point fragment embeds the chunk once");
+  assert.equal(ef.split(IMPOSTOR_SHADE_CHUNK).length - 1, 1, "tube fragment embeds the chunk once");
+  assert.match(pf, /impostorShade\(vColor, nz\)/);
+  assert.match(ef, /impostorShade\(vColor\.rgb, nz\)/);
+  for (const [name, src] of [["point", pf], ["tube", ef]] as const) {
+    assert.equal(src.split("0.55 + 0.45").length - 1, 1,
+      `${name}: the lambert term exists ONLY inside the chunk`);
+  }
+});
+
+test("the highlight is restrained: one specular term, no second light, overlays untouched", () => {
+  assert.match(IMPOSTOR_SHADE_CHUNK, /0\.35 \* pow\(max\(nz, 0\.0\), 48\.0\)/);
+  assert.doesNotMatch(highlightShaders().fragment, /impostorShade|pow\(/);
+  assert.doesNotMatch(focusFlashShaders().fragment, /impostorShade|pow\(/);
 });

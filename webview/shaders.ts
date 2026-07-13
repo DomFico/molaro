@@ -37,9 +37,26 @@ float impostorDiameterPx(float worldRadius, float viewDepth) {
 }
 `;
 
+/**
+ * Shared fragment shading: headlight Lambert + ONE restrained specular
+ * highlight. The light is the headlight (along the view axis), so the
+ * Blinn half-vector is ~the view axis and the term reduces to a power of
+ * the surface normal's view-space z — the same `nz` every impostor already
+ * computes. One highlight, no second light, no environment: just enough
+ * for a sphere to read as ROUND instead of clay. Consumed by the sphere
+ * and tube fragments (traces inherit it with increment C's tube pass).
+ */
+export const IMPOSTOR_SHADE_CHUNK = `
+vec3 impostorShade(vec3 color, float nz) {
+  float lambert = 0.55 + 0.45 * nz;
+  float spec = 0.35 * pow(max(nz, 0.0), 48.0);
+  return color * lambert + vec3(spec);
+}
+`;
+
 /** Base points pass: ray-traced sphere impostors reading aColor/aSize/
- * aVisible/aOpacity. Shading is a fixed headlight Lambert (0.55 + 0.45·n·v) —
- * depth and volume, no new art direction, hue-preserving. */
+ * aVisible/aOpacity. Shading is the shared impostorShade chunk (headlight
+ * Lambert + one restrained specular highlight). */
 export function pointShaders(): { vertex: string; fragment: string } {
   return {
     vertex: `
@@ -58,6 +75,7 @@ export function pointShaders(): { vertex: string; fragment: string } {
       }`,
     fragment: `
       uniform vec2 uProjZ;
+      ${IMPOSTOR_SHADE_CHUNK}
       varying vec3 vColor; varying float vVisible; varying float vOpacity;
       varying float vRadius; varying float vViewDepth;
       void main() {
@@ -68,7 +86,6 @@ export function pointShaders(): { vertex: string; fragment: string } {
         float r2 = dot(pc, pc);
         if (r2 > 1.0) discard;
         float nz = sqrt(1.0 - r2);
-        float shade = 0.55 + 0.45 * nz;
       #ifdef ${IMPOSTOR_DEPTH_DEFINE}
         // analytic sphere-surface depth: this fragment is nearer than the
         // sprite's centre by nz*radius; re-project view z through the
@@ -76,7 +93,7 @@ export function pointShaders(): { vertex: string; fragment: string } {
         float zView = -(vViewDepth - vRadius * nz);
         gl_FragDepth = 0.5 * ((uProjZ.x * zView + uProjZ.y) / -zView) + 0.5;
       #endif
-        gl_FragColor = vec4(vColor * shade, vOpacity);
+        gl_FragColor = vec4(impostorShade(vColor, nz), vOpacity);
       }`,
   };
 }
@@ -161,6 +178,7 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
       }`,
     fragment: `
       uniform vec2 uProjZ;
+      ${IMPOSTOR_SHADE_CHUNK}
       varying vec4 vColor; varying float vU;
       varying float vRadius;
       varying float vT; varying float vLen;
@@ -191,13 +209,12 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
           nz = sqrt(max(1.0 - u2, 0.0));
           depthBase = mix(vDepthA, vDepthB, clamp(vT / vLen, 0.0, 1.0));
         }
-        float shade = 0.55 + 0.45 * nz;
       #ifdef ${IMPOSTOR_DEPTH_DEFINE}
         // analytic surface depth: nearer than the axis/centre by nz*radius
         float zView = -(depthBase - vRadius * nz);
         gl_FragDepth = 0.5 * ((uProjZ.x * zView + uProjZ.y) / -zView) + 0.5;
       #endif
-        gl_FragColor = vec4(vColor.rgb * shade, vColor.a);
+        gl_FragColor = vec4(impostorShade(vColor.rgb, nz), vColor.a);
       }`,
   };
 }
