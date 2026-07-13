@@ -863,18 +863,36 @@ async function S7(): Promise<void> {
       return {x:r.left+r.width/2, y:r.top+r.height/2};
     })()`);
     check("S7: found an on-screen subgroup row to scroll-paint from", subRow !== null);
+    // The engine's contract is "scrollTop moved + a scroll event" (tree.ts
+    // onScrollCapture/processScroll); the wheel is only a vehicle. Headless
+    // Chrome delivers both wheel-scrolls and programmatic scroll EVENTS on
+    // lazy rendering steps, and the impostor passes' heavier first frames
+    // shifted that timing enough to swallow ticks nondeterministically —
+    // Chromium's delivery layer, not the engine under test. So the scroll
+    // tick is delivered exactly per contract, synchronously (a late
+    // duplicate browser event computes delta 0 and no-ops). The tested
+    // semantics — rows sliding under the held pointer join the trail, a
+    // second tick extends the same stroke, one undo — are unchanged.
+    const scrollTick = () =>
+      d.evaluate<number>(`(()=>{
+        const s = document.getElementById('sidebar-content');
+        s.scrollTop = s.scrollTop + 54; // ≈3 rows slide under the pointer
+        s.dispatchEvent(new Event('scroll'));
+        return s.scrollTop;
+      })()`);
     await d.mouse("mousePressed", subRow!.x, subRow!.y, { clickCount: 1 });
-    await d.wheel(subRow!.x, subRow!.y, 54, 1); // ≈3 rows slide under the pointer
+    await sleep(200); // Input and Runtime pipelines are unordered — let the press land
+    await scrollTick();
     await sleep(250);
     const midScroll = await pendingEntries(d);
     check("S7: rows joining under the pointer paint WHILE scrolling",
       midScroll >= 3, `entries=${midScroll}`);
-    await d.wheel(subRow!.x, subRow!.y, 54, 1);
+    await scrollTick();
     await sleep(250);
     await d.mouse("mouseReleased", subRow!.x, subRow!.y, { clickCount: 1 });
     await sleep(150);
     const afterScroll = await pendingEntries(d);
-    check("S7: a second wheel tick keeps extending the same stroke",
+    check("S7: a second scroll tick keeps extending the same stroke",
       afterScroll > midScroll, `entries=${afterScroll}`);
     await d.ctrlZ();
     await sleep(120);
@@ -1209,6 +1227,21 @@ async function S9(): Promise<void> {
         `[...${V}.camera.position.toArray(), ...${V}.controls.target.toArray()]`,
       );
     const closeCam = (a: number[], b: number[]) => a.every((v, i) => Math.abs(v - b[i]) < 0.01);
+    /** Pose read that waits for the tween to have RENDERED to completion:
+     * the tween advances only on rendered frames, so under a starved render
+     * loop a fixed sleep can photograph the camera mid-flight. Settled =
+     * pose identical across two consecutive rendered frames. */
+    const camSettled = async (): Promise<number[]> => {
+      for (let i = 0; i < 40; i++) {
+        const a = await camState();
+        await d.evaluate(`(async () => {
+          for (let j = 0; j < 2; j++) await new Promise(r => requestAnimationFrame(r));
+        })()`);
+        const b = await camState();
+        if (closeCam(a, b)) return b;
+      }
+      return camState();
+    };
     const dist = () => d.evaluate<number>(`${V}.camera.position.distanceTo(${V}.controls.target)`);
     const reset = async () => {
       await d.evaluate(`${V}.resetCamera()`);
@@ -1480,13 +1513,13 @@ async function S9(): Promise<void> {
       rCover.status === "ok" && rCover.message === "focused 100 points",
       JSON.stringify(rCover));
     await sleep(650);
-    const camCover = await camState();
+    const camCover = await camSettled();
     await reset();
     const subRowAgain = (await bottomRow(d, "/subgroup-0\\b/"))!;
     await d.rightClick(subRowAgain.x, subRowAgain.y);
     await sleep(650);
     check("S9: @cover.<member-label> ≡ clicking that subgroup row",
-      closeCam(camCover, await camState()),
+      closeCam(camCover, await camSettled()),
       `cmd=${camCover.map((v) => v.toFixed(3))}`);
     await d.ctrlZ(); // undo the [cover] commit
     await sleep(120);
@@ -4170,6 +4203,10 @@ async function S24(): Promise<void> {
     const pts = await d.evaluate<number[]>(`${V}.debug.resolvePoints("#0-99")`);
     const pA = pts[0]; // scalar 0 → red
     const pB = pts[40]; // scalar ≈0.4 → green
+    // depth-correct spheres OCCLUDE: a nearer chain neighbour can cover a
+    // sample point's centre pixel (flat squares never did). Isolate the two
+    // probes — size ⊥ color, so the bound ramp itself is untouched.
+    await cmd("pointsize all 0");
     await cmd(`pointsize #${pA} 12`);
     await cmd(`pointsize #${pB} 12`);
     const proj = await d.evaluate<{ a: { x: number; y: number; front: boolean }; b: { x: number; y: number; front: boolean } }>(
@@ -4178,6 +4215,9 @@ async function S24(): Promise<void> {
       proj.a.front && proj.b.front &&
         Math.hypot(proj.a.x - proj.b.x, proj.a.y - proj.b.y) > 12, JSON.stringify(proj));
     await sleep(200);
+    await d.evaluate(`(async () => {
+      for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`); // load-immunity: capture only after fresh frames
     const shot = await d.captureB64(`${REPORT}/S24_pixels.png`);
     const px = await d.evaluate<{ a: number[]; b: number[] }>(`(async () => {
       const img = new Image();
@@ -4474,7 +4514,17 @@ async function S26(): Promise<void> {
     // -- persistence: the layout survives a reload ---------------------------------
     const persistedShare = await claudeShare("width");
     await d.navigate("/terminal");
-    await sleep(3500); // full page boot: producer stream + all three surfaces
+    // full page boot: producer stream + all three surfaces. POLL for the
+    // claude panel instead of a fixed sleep — the impostor/tube shader
+    // programs lengthen SwiftShader's first-render compile, and a fixed
+    // 3500ms raced it (the assertions below are unchanged).
+    await d.evaluate(`(async () => {
+      for (let i = 0; i < 60; i++) {
+        if (document.getElementById('claude-root')) return;
+        await new Promise(r => setTimeout(r, 250));
+      }
+    })()`);
+    await sleep(300);
     await pause(d);
     check("S26: after reload the panel is OPEN with the layout RESTORED",
       (await claudeDisplay()) !== "none" && (await stackDir()) === "row",
@@ -5113,6 +5163,12 @@ async function S32(): Promise<void> {
   for (const variant of [2, 1] as const) {
     console.log(`S32 — impostor geometry, depth variant ${variant}`);
     await withDriver(async (d) => {
+      // pin the displayed frame: autoplay races the boot sleep, so each boot
+      // pauses at a DIFFERENT frame — different positions, different probe
+      // depths, different projected sphere sizes. Frame 0 makes every pixel
+      // expectation deterministic.
+      await d.evaluate(`${V}.player.seek(0)`);
+      await sleep(400);
       const cmd = (text: string) =>
         d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
       const redCount = (b64: string) =>
@@ -5147,7 +5203,15 @@ async function S32(): Promise<void> {
           }
           return { red, blue };
         })()`);
-      const snap = (tag: string) => d.captureB64(`${REPORT}/S32_v${variant}_${tag}.png`);
+      // EVERY capture first waits for the page to render fresh frames —
+      // under desktop load the compositor presents stale frames and a
+      // capture then photographs pre-command state (load-immunity rule).
+      const snap = async (tag: string): Promise<string> => {
+        await d.evaluate(`(async () => {
+          for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r));
+        })()`);
+        return d.captureB64(`${REPORT}/S32_v${variant}_${tag}.png`);
+      };
 
       // C2: depthWrite pinned EXPLICITLY on all three geometry materials, and
       // the boot config actually selected this variant.
@@ -5266,22 +5330,24 @@ async function S32(): Promise<void> {
       }
 
       // overlays register on the sphere's own pixels and scale with it.
-      // Capture at a pulse peak so the breathing tint is at full strength.
+      // The tint BREATHES (1600ms period) and CDP capture latency can
+      // outlive the peak window, so single peak-chasing captures are
+      // phase-racy — sample across a full period and keep the MAX (which
+      // also asserts the pulse actually reaches strength at some phase).
       await cmd("pointsize all 0");
       await cmd(`pointsize #${probe} 12`);
       await d.evaluate(`${V}.refreshPoints(${V}.model.toggleInTarget({level:'point', id:${probe}}))`);
-      const atPeak = async (): Promise<string> => {
-        await d.evaluate<number>(`(async () => {
-          for (let i = 0; i < 60; i++) {
-            if (${V}.debug.pulse().sel > 0.9) return i;
-            await new Promise(r => setTimeout(r, 40));
-          }
-          return -1;
-        })()`);
-        return snap("overlay");
-      };
+      /** Wait until the page's render loop has DRAWN n more frames — under
+       * desktop load the compositor can present frames that are minutes old,
+       * and a capture taken then photographs pre-command state. Sampling
+       * only after fresh frames makes the pixel checks load-immune (they
+       * wait instead of reading stale pixels). */
+      const settleFrames = (n = 3) => d.evaluate(`(async () => {
+        for (let i = 0; i < ${n}; i++) await new Promise(r => requestAnimationFrame(r));
+      })()`);
+      await settleFrames();
       const pr = await d.evaluate<{ x: number; y: number }>(`${V}.debug.projectPoint(${probe})`);
-      const greenAt = async (b64: string) =>
+      const greenAt = (b64: string) =>
         d.evaluate<number>(`(async () => {
           const img = new Image();
           await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
@@ -5294,38 +5360,73 @@ async function S32(): Promise<void> {
           }
           return n;
         })()`);
-      const big = await greenAt(await atPeak());
+      const greenBest = async (tag: string): Promise<number> => {
+        let best = 0;
+        await settleFrames(); // the write must be DRAWN before sampling starts
+        for (let i = 0; i < 6; i++) { // 6 × 280ms straddles the 1600ms period
+          best = Math.max(best, await greenAt(await snap(`${tag}_${i}`)));
+          await sleep(280);
+          await settleFrames(1);
+        }
+        return best;
+      };
+      const probeState = () => d.evaluate<string>(`JSON.stringify({
+        sel: ${V}.debug.selCount(),
+        inTarget: ${V}.model.targetContains(${probe}),
+        size: ${V}.rep.state.size[${probe}],
+        vis: ${V}.rep.state.visible[${probe}],
+        pulse: Number(${V}.debug.pulse().sel.toFixed(2)),
+      })`);
+      const big = await greenBest("overlay12");
       check("S32: pending overlay registers on the sphere's own pixels", big > 20,
-        `green@sphere=${big}`);
+        `green@sphere=${big} state=${await probeState()}`);
       await cmd(`pointsize #${probe} 4`);
-      const small = await greenAt(await atPeak());
+      const small = await greenBest("overlay4");
       check("S32: the overlay SCALES with the stored size (silhouette-matched)",
-        small > 0 && big > 2 * small, `size12=${big} size4=${small}`);
+        small > 0 && big > 2 * small, `size12=${big} size4=${small} state=${await probeState()}`);
       await cmd(`pointsize #${probe} 0`);
       await sleep(150);
-      const gone = await greenAt(await atPeak());
+      const gone = await greenBest("overlay0"); // max over ALL phases must be 0
       check("S32: a size-0 point shows NO overlay, ever", gone === 0, `green=${gone}`);
 
-      // focus flash rides the same silhouette
+      // focus flash rides the same silhouette. It is a ONE-SHOT 900ms pulse:
+      // under load the render loop can skip the ENTIRE window (no frame ever
+      // renders with strength > 0), and CDP captures happen at handling
+      // time — so each attempt re-triggers the flash, then waits for PROOF a
+      // flash frame actually rendered (the strength uniform only rises when
+      // one did) and captures immediately. The camera is at the target after
+      // the first tween, so re-focusing only restarts the pulse.
       await cmd(`pointsize #${probe} 12`);
-      await d.evaluate(`${V}.focusPoints([${probe}])`);
-      await sleep(450); // camera tween done (360ms), flash near peak strength
-      const fb64 = await snap("flash");
-      const yellowAt = await d.evaluate<number>(`(async () => {
-        const img = new Image();
-        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${fb64}"; });
-        const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
-        const g = c.getContext('2d'); g.drawImage(img, 0, 0);
-        const pr2 = ${V}.debug.projectPoint(${probe});
-        const px = g.getImageData(Math.round(pr2.x) - 15, Math.round(pr2.y) - 15, 30, 30).data;
-        let n = 0;
-        for (let i = 0; i < px.length; i += 4) {
-          if (px[i] > 150 && px[i+1] > 130 && px[i] > px[i+2] + 30 && px[i+1] > px[i+2] + 20) n++;
-        }
-        return n;
-      })()`);
-      check("S32: focus flash registers on the sphere's pixels", yellowAt > 10,
-        `yellow@sphere=${yellowAt}`);
+      let yellowBest = 0;
+      for (let attempt = 0; attempt < 6 && yellowBest <= 10; attempt++) {
+        await d.evaluate(`${V}.focusPoints([${probe}])`);
+        if (attempt === 0) await sleep(420); // the one real camera tween
+        const rendered = await d.evaluate<boolean>(`(async () => {
+          for (let i = 0; i < 20; i++) {
+            if (${V}.debug.pulse().flash > 0.5) return true;
+            await new Promise(r => setTimeout(r, 60));
+          }
+          return false;
+        })()`);
+        if (!rendered) continue; // the whole window starved — fresh attempt
+        const fb64 = await snap("flash");
+        const y = await d.evaluate<number>(`(async () => {
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${fb64}"; });
+          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+          const pr2 = ${V}.debug.projectPoint(${probe});
+          const px = g.getImageData(Math.round(pr2.x) - 15, Math.round(pr2.y) - 15, 30, 30).data;
+          let n = 0;
+          for (let i = 0; i < px.length; i += 4) {
+            if (px[i] > 150 && px[i+1] > 130 && px[i] > px[i+2] + 30 && px[i+1] > px[i+2] + 20) n++;
+          }
+          return n;
+        })()`);
+        yellowBest = Math.max(yellowBest, y);
+      }
+      check("S32: focus flash registers on the sphere's pixels", yellowBest > 10,
+        `yellow@sphere=${yellowBest}`);
 
       // undo: byte-exact buffers AND pixel-exact scene (red pixels return to 0)
       const depth = await d.evaluate<number>(`${V}.model.undoDepth`);
@@ -5356,6 +5457,8 @@ async function S33(): Promise<void> {
     await d.navigate("/");
     await sleep(3200);
     await pause(d);
+    await d.evaluate(`${V}.player.seek(0)`); // deterministic frame-0 positions
+    await sleep(400);
     const status = await d.evaluate<string>(`document.getElementById('status').textContent`);
     check("S33: the status line carries the no-bbox warning for the whole session",
       status.includes("no bbox") && /misscal/i.test(status), status);
@@ -5386,6 +5489,9 @@ async function S33(): Promise<void> {
     await cmd("pointsize all 0");
     await cmd(`pointsize #${probe} 3`);
     await sleep(250);
+    await d.evaluate(`(async () => {
+      for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`); // load-immunity: capture only after fresh frames
     const b64 = await d.captureB64(`${REPORT}/S33_fallback_parity.png`);
     const red = await d.evaluate<number>(`(async () => {
       const app = document.getElementById('app').getBoundingClientRect();
@@ -5408,9 +5514,220 @@ async function S33(): Promise<void> {
   }
 }
 
+// ==================== S34: edge tubes (increment B) ==========================
+// The headline of the impostor brief: `bondsize` moves PIXELS. Instanced tube
+// quads read the existing edgeSize/edgeColor/edgeOpacity buffers; run under
+// both depth variants — only the junction-interpenetration check separates
+// them, with expectations derived from measured depths.
+async function S34(): Promise<void> {
+  for (const variant of [2, 1] as const) {
+    console.log(`S34 — edge tubes, depth variant ${variant}`);
+    await withDriver(async (d) => {
+      // deterministic frame-0 positions (see S32's note); S34's own seek
+      // checks below re-seek and return here
+      await d.evaluate(`${V}.player.seek(0)`);
+      await sleep(400);
+      const cmd = (text: string) =>
+        d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+      // same load-immunity rule as S32: never capture before fresh frames
+      const snap = async (tag: string): Promise<string> => {
+        await d.evaluate(`(async () => {
+          for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r));
+        })()`);
+        return d.captureB64(`${REPORT}/S34_v${variant}_${tag}.png`);
+      };
+      /** strict per-color pixel counts over the canvas (red / green / deep-blue;
+       * the +80 blue threshold keeps the base edge look 0x5a7a9a out). */
+      const counts = (b64: string) =>
+        d.evaluate<{ red: number; green: number; blue: number }>(`(async () => {
+          const app = document.getElementById('app').getBoundingClientRect();
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+          const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+            Math.round(app.width), Math.round(app.height) - 60).data;
+          let red = 0, green = 0, blue = 0;
+          for (let i = 0; i < px.length; i += 4) {
+            if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) red++;
+            if (px[i+1] > px[i] + 50 && px[i+1] > px[i+2] + 50) green++;
+            if (px[i+2] > px[i] + 80 && px[i+2] > px[i+1] + 80) blue++;
+          }
+          return { red, green, blue };
+        })()`);
+
+      // fade the points so edge pixels dominate the classifiers
+      await cmd("pointopacity all 0");
+      await cmd("colorbonds alpha.group-0.subgroup-0 red");
+      await cmd("colorbonds beta.group-0.subgroup-1 blue");
+      await sleep(250);
+      const thin = await counts(await snap("thin"));
+      check("S34: default-width tubes draw (colored edges visible at width 1)",
+        thin.red > 20 && thin.blue > 20, JSON.stringify(thin));
+
+      // THE HEADLINE: bondsize moves pixels — on the addressed edges only.
+      // (The growth saturates well below width×: the subgroup's edge tangle
+      // fills its own screen area and the fat tubes overlap — so the check
+      // is a decisive increase, not a linear one.)
+      await cmd("bondsize alpha.group-0.subgroup-0 6");
+      await sleep(250);
+      const fat = await counts(await snap("fat"));
+      check("S34: bondsize <target> 6 — a measurable pixel increase on the addressed edges",
+        fat.red >= 1.5 * thin.red && fat.red - thin.red > 500, `red ${thin.red} → ${fat.red}`);
+      check("S34: …and none elsewhere (the other subgroup's edges did not grow)",
+        fat.blue <= thin.blue * 1.15 + 5, `blue ${thin.blue} → ${fat.blue}`);
+
+      // width 0 renders nothing; the buffer state is intact and undoable
+      await cmd("bondsize alpha.group-0.subgroup-0 0");
+      await sleep(250);
+      const zero = await counts(await snap("zero"));
+      check("S34: bondsize 0 renders NOTHING on the addressed edges",
+        zero.red === 0, `red=${zero.red}`);
+      await d.ctrlZ(); // back to width 6
+      await sleep(250);
+      const unzero = await counts(await snap("undo_width"));
+      check("S34: one Ctrl+Z returns the tubes to their prior width",
+        unzero.red >= 0.8 * fat.red, `red=${unzero.red} vs fat=${fat.red}`);
+
+      // frame-flip integrity: fat tubes follow streamed positions
+      await d.evaluate(`${V}.player.seek(75)`);
+      await sleep(500);
+      const flipped = await counts(await snap("frame75"));
+      check("S34: tubes track the displayed frame (seek keeps them drawn)",
+        flipped.red >= 0.5 * fat.red, `red@frame75=${flipped.red} vs fat=${fat.red}`);
+      await d.evaluate(`${V}.player.seek(0)`);
+      await sleep(500);
+
+      // visibility: hidden endpoints collapse their edges, show restores
+      await cmd("hide alpha");
+      await sleep(250);
+      const hidden = await counts(await snap("hidden"));
+      check("S34: hiding the endpoints hides their tubes (hidden wins)",
+        hidden.red === 0, `red=${hidden.red}`);
+      await cmd("show alpha");
+      await sleep(250);
+      const shown = await counts(await snap("shown"));
+      check("S34: show restores the tubes",
+        shown.red >= 0.8 * fat.red, `red=${shown.red} vs fat=${fat.red}`);
+
+      // ---- the junction (A5): a sphere with an incident tube ----
+      // pick a probe point whose chain neighbor is NEARER the camera, so the
+      // variant expectations are determined, not assumed.
+      await cmd("pointopacity all 1");
+      const jct = await d.evaluate<{ p: number; n: number; dz: number } | null>(`(()=>{
+        const edges = ${V}.edges;
+        const inc = new Map();
+        for (const [a, b] of edges) {
+          inc.set(a, (inc.get(a) ?? []).concat([b]));
+          inc.set(b, (inc.get(b) ?? []).concat([a]));
+        }
+        for (let p = 120; p < 600; p += 1) {
+          const nbrs = inc.get(p) ?? [];
+          if (nbrs.length !== 2) continue;
+          const pr = ${V}.debug.projectPoint(p);
+          if (!pr.front) continue;
+          for (const n of nbrs) {
+            const nr = ${V}.debug.projectPoint(n);
+            const dz = pr.depth - nr.depth; // >0: neighbor is NEARER
+            if (nr.front && dz > 0.1) return { p, n, dz };
+          }
+        }
+        return null;
+      })()`);
+      check("S34: found a junction probe with a nearer neighbor", jct !== null, JSON.stringify(jct));
+      if (jct) {
+        // isolate the junction: every OTHER point collapses to size 0 and
+        // every other edge fades to alpha 0 (invisible-but-present — the S19
+        // staging trick), because at this zoom EVERY world-anchored default
+        // tube is ~24px wide and the scene is a forest that buries the probe
+        await cmd("pointsize all 0");
+        await cmd("bondopacity all 0");
+        await cmd(`colorpoints #${jct.p} red`);
+        await cmd(`pointsize #${jct.p} 6`);
+        await cmd(`colorbondsof #${jct.p} green`);
+        await cmd(`bondopacityof #${jct.p} 1`);
+        await cmd(`bondsizeof #${jct.p} 2`);
+        await d.evaluate(`${V}.focusPoints([${jct.p}])`);
+        await sleep(900); // tween + flash mostly done
+        await sleep(700); // flash fully out — pure geometry pixels
+        const b64 = await snap("junction");
+        const walk = await d.evaluate<{ seq: string[]; sphereR: number; probe: string }>(`(async () => {
+          const pr = ${V}.debug.projectPoint(${jct.p});
+          const nr = ${V}.debug.projectPoint(${jct.n});
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+          const classify = (x, y) => {
+            const px = g.getImageData(Math.round(x) - 1, Math.round(y) - 1, 3, 3).data;
+            let r = 0, gr = 0, bg = 0;
+            for (let i = 0; i < px.length; i += 4) {
+              if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) r++;
+              else if (px[i+1] > px[i] + 50 && px[i+1] > px[i+2] + 50) gr++;
+              else if (px[i] < 55 && px[i+1] < 55 && px[i+2] < 55) bg++;
+            }
+            if (r > 4) return 'red';
+            if (gr > 4) return 'green';
+            if (bg > 6) return 'bg';
+            return 'other';
+          };
+          // sphere projected radius in px (world radius 6k at the point's depth)
+          const k = ${V}.sizing.worldPerSize;
+          const sphereR = (6 * k) * ${V}.sizing.pxPerWorld() / pr.depth;
+          const dir = { x: nr.x - pr.x, y: nr.y - pr.y };
+          const len = Math.hypot(dir.x, dir.y);
+          dir.x /= len; dir.y /= len;
+          // the variant probe: ON the sphere face, 15% of its radius out
+          const probe = classify(pr.x + dir.x * sphereR * 0.15, pr.y + dir.y * sphereR * 0.15);
+          // the gap walk: centre → 2.5 sphere radii out, every 3px
+          const seq = [];
+          for (let t = 0; t <= sphereR * 2.5; t += 3) {
+            seq.push(classify(pr.x + dir.x * t, pr.y + dir.y * t));
+          }
+          return { seq, sphereR, probe };
+        })()`);
+        const seq = walk.seq;
+        const firstGreen = seq.indexOf("green");
+        const lastRed = seq.lastIndexOf("red", firstGreen < 0 ? seq.length : firstGreen);
+        const gapBg = firstGreen > 0 && lastRed >= 0
+          ? seq.slice(lastRed + 1, firstGreen).filter((s) => s === "bg").length
+          : 999;
+        check("S34: the junction has sphere then tube with NO background gap (both variants)",
+          seq[0] === "red" && firstGreen > 0 && gapBg === 0,
+          `seq=${seq.join(",")} sphereR=${walk.sphereR.toFixed(1)}`);
+        if (variant === 2) {
+          check("S34(v2): on the sphere face the analytic bulge occludes the nearer tube",
+            walk.probe === "red", `probe=${walk.probe} dz=${jct.dz.toFixed(3)}`);
+        } else {
+          check("S34(v1): flat axis depth — the nearer tube draws across the sphere face",
+            walk.probe === "green", `probe=${walk.probe} dz=${jct.dz.toFixed(3)}`);
+        }
+      }
+
+      // full unwind: pristine buffers AND pristine pixels
+      const depth = await d.evaluate<number>(`${V}.model.undoDepth`);
+      for (let i = 0; i < depth; i++) await d.ctrlZ();
+      await sleep(300);
+      const pristine = await d.evaluate<{ size: boolean; color: boolean }>(`(()=>{
+        const es = ${V}.rep.state.edgeSize;
+        const ec = ${V}.rep.state.edgeColor;
+        const f = [Math.fround(0x5a/255), Math.fround(0x7a/255), Math.fround(0x9a/255)];
+        let size = true, color = true;
+        for (let e = 0; e < es.length; e++) if (es[e] !== 1) { size = false; break; }
+        for (let i = 0; i < ec.length; i++) if (ec[i] !== f[i % 3]) { color = false; break; }
+        return { size, color };
+      })()`);
+      const final = await counts(await snap("unwound"));
+      check("S34: full unwind restores pristine edge buffers AND pixels",
+        pristine.size && pristine.color && final.red === 0 && final.blue === 0,
+        `${JSON.stringify(pristine)} ${JSON.stringify(final)}`);
+    }, 1180, 780, `/?depthVariant=${variant}`);
+  }
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

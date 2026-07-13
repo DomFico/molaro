@@ -57,6 +57,7 @@ import {
 } from "./geometry.ts";
 import {
   IMPOSTOR_DEPTH_DEFINE,
+  edgeTubeShaders,
   focusFlashShaders,
   highlightShaders,
   pointShaders,
@@ -134,11 +135,17 @@ interface SceneParts {
   /** the overlays' materials (uStrength driven per-frame by the render loop). */
   selMat: THREE.ShaderMaterial;
   flashMat: THREE.ShaderMaterial;
-  /** rebuild edge + polyline draw ranges from current visibility. */
+  /** rebuild edge visibility + polyline draw ranges from current visibility. */
   rebuildLines: () => void;
-  /** re-copy the de-indexed edge pass (positions from the current frame,
-   * colors from rep.state.edgeColor) — every displayed-frame flip needs it. */
+  /** re-copy the edge pass's per-instance endpoints from the current frame —
+   * every displayed-frame flip needs it (6 floats per edge, unconditional). */
   fillEdges: () => void;
+  /** write iColor (RGBA) for these edge ids from rep.state.edgeColor +
+   * edgeOpacity — representation-write cadence only (undefined = all). */
+  fillEdgeColors: (ids?: readonly number[]) => void;
+  /** write iRadius for these edge ids from rep.state.edgeSize — the hook
+   * that makes stored widths DRAW (undefined = all). */
+  fillEdgeSizes: (ids?: readonly number[]) => void;
   /** the polyline pass's per-POINT color attribute (null without polylines);
    * colorTrace writes rep.state.traceColor through to the vertex slots. */
   traceColAttr: THREE.BufferAttribute | null;
@@ -146,7 +153,7 @@ interface SceneParts {
    * one; the E2E suite asserts it via the seam so the override can't lapse). */
   geometryMaterials: {
     points: THREE.ShaderMaterial;
-    edges: THREE.LineBasicMaterial;
+    edges: THREE.ShaderMaterial;
     traces: THREE.LineBasicMaterial;
   };
 }
@@ -187,13 +194,14 @@ interface SizingUniforms {
 function makeGeometryMaterials(
   sizing: SizingUniforms,
   depthVariant: 1 | 2,
-): { points: THREE.ShaderMaterial; edges: THREE.LineBasicMaterial; traces: THREE.LineBasicMaterial } {
+): { points: THREE.ShaderMaterial; edges: THREE.ShaderMaterial; traces: THREE.LineBasicMaterial } {
+  const defines = depthVariant === 2 ? { [IMPOSTOR_DEPTH_DEFINE]: "" } : {};
   const s = pointShaders();
   const points = new THREE.ShaderMaterial({
     transparent: true,
     depthWrite: true, // C2: explicit, never inherited
     depthTest: true,
-    defines: depthVariant === 2 ? { [IMPOSTOR_DEPTH_DEFINE]: "" } : {},
+    defines,
     uniforms: {
       uWorldPerSize: sizing.uWorldPerSize,
       uPxPerWorld: sizing.uPxPerWorld,
@@ -202,9 +210,30 @@ function makeGeometryMaterials(
     vertexShader: s.vertex,
     fragmentShader: s.fragment,
   });
-  const line = (): THREE.LineBasicMaterial =>
-    new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, depthWrite: true });
-  return { points, edges: line(), traces: line() };
+  // Edge tubes: instanced quads, radius = the SAME k uniform object × the
+  // stored edgeSize — one scene-scale constant across all primitives. The
+  // same depthVariant define as the point pass (A5: a mixed scene clips
+  // wrongly exactly at the junctions). DoubleSide: the billboard's winding
+  // depends on the side vector's orientation.
+  const et = edgeTubeShaders();
+  const edges = new THREE.ShaderMaterial({
+    transparent: true,
+    depthWrite: true, // C2: explicit, never inherited
+    depthTest: true,
+    side: THREE.DoubleSide,
+    defines,
+    uniforms: { uWorldPerSize: sizing.uWorldPerSize, uProjZ: sizing.uProjZ },
+    vertexShader: et.vertex,
+    fragmentShader: et.fragment,
+  });
+  // The trace pass still rasterizes as 1px GL lines; increment C replaces it
+  // here, consuming the same defines. depthWrite pinned now regardless (C2).
+  const traces = new THREE.LineBasicMaterial({
+    vertexColors: true,
+    transparent: true,
+    depthWrite: true,
+  });
+  return { points, edges, traces };
 }
 
 /**
@@ -316,59 +345,88 @@ function buildScene(
   // Edges + polylines, trimmed to segments whose BOTH endpoints are visible
   // (so a hidden category also hides its edge hairball).
   //
-  // The EDGE pass is DE-INDEXED: per-EDGE flat color (rep.state.edgeColor)
-  // cannot ride an indexed geometry sharing the points' position attribute —
-  // shared vertices would bleed one edge's color onto every adjacent edge as
-  // a gradient. So each visible edge gets two OWNED vertices: positions are
-  // copied from the current frame (fillEdges runs on every displayed-frame
-  // flip, visibility change, and edge-color write — a linear copy, cheap at
-  // these scales), and both vertices carry the edge's color. The polyline
-  // pass keeps the zero-copy indexed form: it has no per-segment color yet
-  // (colortrace is deferred — see docs/COMMAND_LAYER.md open threads).
+  // The EDGE pass is INSTANCED tube geometry: one static camera-facing quad
+  // (4 corner vertices, 6 indices) instanced per edge, expanded in the
+  // vertex shader to a world-radius billboard. Per-instance attributes are
+  // split by UPDATE CADENCE — endpoints (iStart/iEnd) re-copy on every
+  // displayed-frame flip (6 floats/edge, unconditional, branch-free);
+  // visibility (iVisible) only on hide/show; radius (iRadius) only on
+  // bondsize writes; RGBA (iColor) only on colorbonds/bondopacity writes.
+  // Instance slot ≡ HEADER EDGE INDEX, never compacted: the GPU arrays
+  // share the rep buffers' element order with no remap anywhere (hidden or
+  // zero-radius edges collapse in the vertex shader instead). Blending
+  // stays NAIVE (transparent: true, no depth sorting) — the recorded
+  // follow-up covers overlap compositing.
   const visible = rep.state.visible;
   const nEdges = header.edges.length;
-  const edgePosAttr = new THREE.BufferAttribute(new Float32Array(nEdges * 2 * 3), 3);
-  // RGBA per vertex: an itemSize-4 color attribute makes three.js read the
-  // 4th component as per-vertex ALPHA (USE_COLOR_ALPHA) — the rep-state
-  // buffers stay separate (edgeColor 3E + edgeOpacity E); this GPU array is
-  // derived from both by fillEdges. Blending is NAIVE (transparent: true,
-  // no depth sorting) — the recorded follow-up covers overlap compositing.
-  const edgeColAttr = new THREE.BufferAttribute(new Float32Array(nEdges * 2 * 4), 4);
-  edgePosAttr.setUsage(THREE.DynamicDrawUsage);
-  edgeColAttr.setUsage(THREE.DynamicDrawUsage);
   let fillEdges: () => void = () => {};
+  let fillEdgeColors: (ids?: readonly number[]) => void = () => {};
+  let fillEdgeSizes: (ids?: readonly number[]) => void = () => {};
+  let fillEdgeVisibility: () => void = () => {};
   if (nEdges > 0) {
-    const edgeGeo = new THREE.BufferGeometry();
-    edgeGeo.setAttribute("position", edgePosAttr);
-    edgeGeo.setAttribute("color", edgeColAttr);
-    edgeGeo.setDrawRange(0, 0);
-    drawables.push(new THREE.LineSegments(edgeGeo, mats.edges));
+    const edgeGeo = new THREE.InstancedBufferGeometry();
+    edgeGeo.instanceCount = nEdges;
+    // static base quad: aCorner = (side ∈ {-1,+1}, end ∈ {0,1}); position is
+    // unused by the shader but present so three's internals never look for it
+    edgeGeo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(4 * 3), 3));
+    edgeGeo.setAttribute("aCorner", new THREE.Float32BufferAttribute([-1, 0, 1, 0, -1, 1, 1, 1], 2));
+    edgeGeo.setIndex([0, 2, 1, 1, 2, 3]);
+    const iStart = new THREE.InstancedBufferAttribute(new Float32Array(nEdges * 3), 3);
+    const iEnd = new THREE.InstancedBufferAttribute(new Float32Array(nEdges * 3), 3);
+    const iVisible = new THREE.InstancedBufferAttribute(new Float32Array(nEdges).fill(1), 1);
+    const iRadius = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
+    const iColor = new THREE.InstancedBufferAttribute(new Float32Array(nEdges * 4), 4);
+    for (const a of [iStart, iEnd, iVisible, iRadius, iColor]) a.setUsage(THREE.DynamicDrawUsage);
+    edgeGeo.setAttribute("iStart", iStart);
+    edgeGeo.setAttribute("iEnd", iEnd);
+    edgeGeo.setAttribute("iVisible", iVisible);
+    edgeGeo.setAttribute("iRadius", iRadius);
+    edgeGeo.setAttribute("iColor", iColor);
+    drawables.push(new THREE.Mesh(edgeGeo, mats.edges));
     fillEdges = (): void => {
       const pos = positionAttr.array as Float32Array;
+      const s = iStart.array as Float32Array;
+      const t = iEnd.array as Float32Array;
+      for (let e = 0; e < nEdges; e++) {
+        const a3 = header.edges[e][0] * 3;
+        const b3 = header.edges[e][1] * 3;
+        const e3 = e * 3;
+        s[e3] = pos[a3]; s[e3 + 1] = pos[a3 + 1]; s[e3 + 2] = pos[a3 + 2];
+        t[e3] = pos[b3]; t[e3 + 1] = pos[b3 + 1]; t[e3 + 2] = pos[b3 + 2];
+      }
+      iStart.needsUpdate = true;
+      iEnd.needsUpdate = true;
+    };
+    fillEdgeColors = (ids?: readonly number[]): void => {
       const ec = rep.state.edgeColor;
       const eo = rep.state.edgeOpacity;
-      const pArr = edgePosAttr.array as Float32Array;
-      const cArr = edgeColAttr.array as Float32Array;
-      let k = 0; // vertex write cursor (2 per visible edge)
-      for (let e = 0; e < nEdges; e++) {
-        const a = header.edges[e][0];
-        const b = header.edges[e][1];
-        if (visible[a] > 0.5 && visible[b] > 0.5) {
-          for (let c = 0; c < 3; c++) {
-            pArr[k * 3 + c] = pos[a * 3 + c];
-            pArr[k * 3 + 3 + c] = pos[b * 3 + c];
-            cArr[k * 4 + c] = ec[e * 3 + c];
-            cArr[(k + 1) * 4 + c] = ec[e * 3 + c];
-          }
-          cArr[k * 4 + 3] = eo[e];
-          cArr[(k + 1) * 4 + 3] = eo[e];
-          k += 2;
-        }
-      }
-      edgePosAttr.needsUpdate = true;
-      edgeColAttr.needsUpdate = true;
-      edgeGeo.setDrawRange(0, k);
+      const c = iColor.array as Float32Array;
+      const write = (e: number): void => {
+        c[e * 4] = ec[e * 3];
+        c[e * 4 + 1] = ec[e * 3 + 1];
+        c[e * 4 + 2] = ec[e * 3 + 2];
+        c[e * 4 + 3] = eo[e];
+      };
+      if (ids) for (const e of ids) write(e);
+      else for (let e = 0; e < nEdges; e++) write(e);
+      iColor.needsUpdate = true;
     };
+    fillEdgeSizes = (ids?: readonly number[]): void => {
+      const es = rep.state.edgeSize;
+      const r = iRadius.array as Float32Array;
+      if (ids) for (const e of ids) r[e] = es[e];
+      else for (let e = 0; e < nEdges; e++) r[e] = es[e];
+      iRadius.needsUpdate = true;
+    };
+    fillEdgeVisibility = (): void => {
+      const v = iVisible.array as Float32Array;
+      for (let e = 0; e < nEdges; e++) {
+        v[e] = visible[header.edges[e][0]] > 0.5 && visible[header.edges[e][1]] > 0.5 ? 1 : 0;
+      }
+      iVisible.needsUpdate = true;
+    };
+    fillEdgeColors(); // seed the GPU arrays with the base look
+    fillEdgeSizes();
   }
   // The polyline pass keeps the ZERO-COPY indexed form (positions ride the
   // shared attribute; nothing re-copies on frame flip). Per-VERTEX color
@@ -417,7 +475,7 @@ function buildScene(
     };
   }
   const rebuildLines = (): void => {
-    fillEdges();
+    fillEdgeVisibility();
     rebuildPoly();
   };
 
@@ -465,6 +523,8 @@ function buildScene(
     flashMat,
     rebuildLines,
     fillEdges,
+    fillEdgeColors,
+    fillEdgeSizes,
     traceColAttr,
     geometryMaterials: mats,
   };
@@ -1211,9 +1271,10 @@ async function main(): Promise<void> {
    * state, so nothing model-derived needs recomputing). Axis ⊥ hide and
    * axis ⊥ axis: a writer touches ONLY its own buffer. Render hooks:
    * per-point buffers re-upload through rep.dirty; edge color/opacity
-   * re-copy through fillEdges; trace color/opacity write through
-   * syncTraceSlots; edge/trace SIZE is state-only pending impostor
-   * geometry (GL lines rasterize at 1px), so its onWrite is a no-op. */
+   * write through fillEdgeColors and edge SIZE through fillEdgeSizes (the
+   * instanced tube pass — write-cadence only, ids-scoped); trace
+   * color/opacity write through syncTraceSlots; trace SIZE is state-only
+   * pending increment C's tube pass, so its onWrite is a no-op. */
   const writeRepValues = (
     buf: Float32Array,
     stride: number,
@@ -1266,16 +1327,17 @@ async function main(): Promise<void> {
   const repDirty = (): void => {
     rep.dirty = true; // the render loop re-uploads every per-point attribute
   };
-  const fillEdgesHook = (): void => parts.fillEdges();
+  const edgeColorHook = (ids: readonly number[]): void => parts.fillEdgeColors(ids);
+  const edgeSizeHook = (ids: readonly number[]): void => parts.fillEdgeSizes(ids);
   const colorPoints = makeRepWriter(rep.state.color, 3, repDirty);
   const colorPointsEach = makeRepEachWriter(rep.state.color, 3, repDirty);
   const sizePointsEach = makeRepEachWriter(rep.state.size, 1, repDirty);
   const opacityPointsEach = makeRepEachWriter(rep.state.opacity, 1, repDirty);
   const sizePoints = makeRepWriter(rep.state.size, 1, repDirty);
   const opacityPoints = makeRepWriter(rep.state.opacity, 1, repDirty);
-  const colorEdges = makeRepWriter(rep.state.edgeColor, 3, fillEdgesHook);
-  const sizeEdges = makeRepWriter(rep.state.edgeSize, 1, () => {});
-  const opacityEdges = makeRepWriter(rep.state.edgeOpacity, 1, fillEdgesHook);
+  const colorEdges = makeRepWriter(rep.state.edgeColor, 3, edgeColorHook);
+  const sizeEdges = makeRepWriter(rep.state.edgeSize, 1, edgeSizeHook);
+  const opacityEdges = makeRepWriter(rep.state.edgeOpacity, 1, edgeColorHook);
   const colorTrace = makeRepWriter(rep.state.traceColor, 3, syncTraceSlots);
   const sizeTrace = makeRepWriter(rep.state.traceSize, 1, () => {});
   const opacityTrace = makeRepWriter(rep.state.traceOpacity, 1, syncTraceSlots);
@@ -1754,7 +1816,7 @@ async function main(): Promise<void> {
     const offset = (f - chunk.start) * header.n_points * 3;
     positionAttr.array = chunk.positions.subarray(offset, offset + header.n_points * 3);
     positionAttr.needsUpdate = true;
-    parts.fillEdges(); // the de-indexed edge pass owns copies of these positions
+    parts.fillEdges(); // the instanced edge pass owns copies of these endpoints
     if (displayedFrame === -1) for (const obj of drawables) obj.visible = true;
     displayedFrame = f;
     shownSinceMark++;

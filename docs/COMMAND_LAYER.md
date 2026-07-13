@@ -318,8 +318,9 @@ assert about:
   follow-up (see open threads). Note the difference from the width
   follow-up: opacity is visible-but-may-mis-composite-on-overlap; width
   was not-visible-at-all.
-- **Point size renders as SPHERE IMPOSTORS (world-anchored); edge/trace
-  width is still STATE ONLY.** The base point pass ray-traces a shaded
+- **Point size renders as SPHERE IMPOSTORS and edge width as INSTANCED
+  TUBES (both world-anchored); trace width is still STATE ONLY.** The base
+  point pass ray-traces a shaded
   sphere per point (`webview/shaders.ts` — a fixed headlight Lambert, no
   scene lights): `rep.state.size` now means a **world radius** = `k` × the
   stored value, where `k` (`worldPerSizeUnit` in `webview/geometry.ts`) is
@@ -345,10 +346,11 @@ assert about:
   passes because a mixed scene clips wrongly at primitive junctions).
   `depthWrite` is pinned EXPLICITLY on all three geometry materials in the
   one factory that consumes the switch, and S32 asserts it — if the
-  override lapsed, occlusion would silently revert to draw-order. GL lines
-  still rasterize at 1 px, so `edgeSize`/`traceSize` remain complete as
-  command + buffer + undo but produce no visible thickness until the tube
-  passes land (increments B/C — see open threads).
+  override lapsed, occlusion would silently revert to draw-order. Edge
+  widths draw as instanced tubes (increment B — see the instanced-edge-pass
+  entry below); the POLYLINE pass still rasterizes 1 px GL lines, so
+  `traceSize` remains complete as command + buffer + undo but produces no
+  visible thickness until increment C's tube pass (see open threads).
 - **Impostor rendering: recorded trade-offs (accepted, do not "fix"
   piecemeal).** (1) `gl_PointSize` clamps at the driver cap (measured
   1023 px on the harness): a sphere stops growing once the camera is
@@ -364,14 +366,28 @@ assert about:
   center-based: a large sphere is picked by proximity to its center, not
   across its drawn face (invariant — radius-aware picking would couple
   picking to representation state).
-- **The de-indexed edge pass** (the one render change per-edge color forced):
-  flat per-edge color cannot ride an indexed LineSegments sharing the points'
-  position attribute — shared vertices would bleed one edge's color onto
-  every adjacent edge as a gradient. So the edge pass owns two vertices per
-  edge (`fillEdges` in buildScene): positions re-copied from the current
-  frame on every displayed-frame flip / visibility change / edge-color
-  write, both vertices carrying the edge's color
-  (`LineBasicMaterial({vertexColors: true})`).
+- **The INSTANCED edge tube pass** (increment B — supersedes the de-indexed
+  LineSegments pass per-edge color originally forced). Edges draw as
+  camera-facing quads with real world thickness: one static base quad
+  instanced per edge, expanded in the vertex shader to radius
+  `k × rep.state.edgeSize[e]` — the SAME scene-scale constant (one uniform
+  object) the sphere pass uses, so the default point : edge ratio is
+  geometric and `bondsize`/`bondsizeof` finally MOVE PIXELS. Per-instance
+  attributes split by update cadence: endpoints re-copy on every
+  displayed-frame flip (6 floats/edge, branch-free — measured cheaper than
+  the old de-indexed fill at every scale); visibility only on hide/show;
+  radius only on size writes; RGBA only on color/opacity writes.
+  **Instance slot ≡ header edge index, never compacted** — the GPU arrays
+  share the rep buffers' element order with no remap anywhere (hidden and
+  zero-radius edges collapse in the vertex shader instead; do NOT introduce
+  compaction as an "optimisation": it drags radius/RGBA into the per-flip
+  loop and reintroduces a two-lists remap). Tube shading is the cylinder
+  profile of the sphere pass's headlight Lambert; depth follows the ONE
+  global variant (v1: fragments keep the quad's interpolated AXIS depth —
+  the billboard plane contains the axis, so tube and sphere agree exactly
+  at a shared endpoint, no junction hole; v2: analytic cylinder-surface
+  depth through the same projection row). Zero alpha discards; zero radius
+  collapses — both literal zeros, S34-pinned.
 - **The polyline pass stays zero-copy** — per-VERTEX color is exactly what
   indexed geometry renders natively. The pass keeps sharing the points'
   position attribute (nothing re-copies on frame flip) and gains a per-POINT
@@ -558,15 +574,14 @@ decision landed on per-vertex color with an explicit gradient-boundary
 rendering — see the representation-family section above and S17.)
 
 - **Honored edge/trace thickness — the flagged renderer follow-up (points
-  half now CLOSED).** The point half landed as sphere impostors (increment
-  A of the impostor-geometry brief — see the representation-family section
-  above). `rep.state.edgeSize` / `.traceSize` are live (commands, undo,
-  LWW, tests through S18) but GL lines rasterize at 1 px, so the stored
-  widths draw no pixels yet. The cleared construction (instanced quads:
-  per-instance start/end per frame flip, radius/RGBA on rep-write only,
-  instance slot ≡ header edge order — no compaction, ever) lands as
-  increments B (edges) and C (traces); it reads the existing buffers and
-  needs no command-layer change.
+  AND edges now CLOSED; traces remain).** The point half landed as sphere
+  impostors (increment A) and the edge half as instanced tube quads
+  (increment B) — see the representation-family section above; both read
+  the existing buffers with zero command-layer change, as predicted.
+  `rep.state.traceSize` is still live-but-undrawn (the polyline pass
+  rasterizes 1 px GL lines); increment C applies the same instanced
+  construction with PER-END radius/color so the pinned per-vertex gradient
+  semantics fall out of varying interpolation.
 - **Correct transparency ordering (depth sort / OIT) — the second flagged
   renderer follow-up.** Per-element opacity renders NOW with naive
   blending: all three passes are `transparent: true`, drawn in scene order
@@ -693,7 +708,16 @@ higher cost.
   pixels; **S33** boots the bridge with `--strip-bbox` (a test-infra
   header rewrite; `bbox: null` is contract-legal) and pins the LOUD
   null-bbox fallback — the status-line warning, the seam's fallback flag,
-  and the self-correcting parity band on the fallback box. **A caution
+  and the self-correcting parity band on the fallback box; **S34** is the
+  edge-tube suite, run twice (once per depth variant): default-width tubes
+  draw, the HEADLINE `bondsize <t> 6` pixel increase on exactly the
+  addressed edges (the other subgroup's count byte-flat), width 0 = zero
+  pixels, one-Ctrl+Z width restore, tubes tracking a frame seek,
+  hidden-wins collapse + show restore, the junction walk (sphere→tube with
+  no background gap on BOTH variants), the variant-separating junction
+  probe with expectations derived from measured depths (v2: the sphere's
+  bulge holds the nearer tube off its face; v1: the tube's flat axis depth
+  crosses it), and a full unwind to pristine buffers AND pixels. **A caution
   about the pre-S32 pixel checks:** when the impostor pass replaced EVERY
   point in the scene — 3×3 squares became shaded discs (9 px² → ~7 px²),
   the overlays went from a fixed 6 px to silhouette-matched, and a

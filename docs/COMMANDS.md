@@ -40,7 +40,7 @@ point types `anchor` and `t0`–`t3`).
 | `colorbondsof <expr> <color>` | Color every edge **touching** the target (either endpoint — deliberately reaches one hop outside) | `colorbondsof #124 red` |
 | `colortrace <expr> <color>` | Color polyline vertices whose **subgroup** contains a resolved point (maps up; boundary segments blend) | `colortrace alpha steelblue` |
 | `pointsize <expr> <size>` | Size those points — a **world-anchored** sphere radius that scales with zoom (0 is legal and **never hides**; negatives clamp to 0) | `pointsize alpha 2` |
-| `bondsize <expr> <size>` | Width for edges with **both** endpoints in the target (stored; not yet drawn) | `bondsize beta.group-0.subgroup-0 0` |
+| `bondsize <expr> <size>` | Width for edges with **both** endpoints in the target — a world-anchored tube radius that scales with zoom | `bondsize beta.group-0.subgroup-0 0` |
 | `bondsizeof <expr> <size>` | Width for edges **touching** the target (either endpoint — the incident reach) | `bondsizeof #124 1.5` |
 | `tracesize <expr> <size>` | Thickness for polyline vertices whose **subgroup** contains a resolved point | `tracesize alpha 1.5` |
 | `pointopacity <expr> <a>` | Fade those points (0–1; 0 is invisible-but-**present**, never a hide; clamps) | `pointopacity alpha 0.5` |
@@ -441,10 +441,13 @@ The axis values:
   message names the bound (`(clamped to 0)` / `(clamped to 1)`). A
   non-numeric token is an **error** and nothing is written.
 - **Visible thickness caveat**: point sizes render as shaded, depth-correct
-  **spheres** (ray-traced impostors). Edge and trace **widths are stored but
-  not yet drawn** — WebGL rasterizes lines at 1 px regardless, so honored
-  thickness awaits the tube passes (increments B/C of the impostor brief).
-  The buffers, undo, and messages are fully live; only the pixels lag.
+  **spheres** (ray-traced impostors) and edge widths render as shaded
+  **tubes** with real world thickness — `bondsize`/`bondsizeof` move pixels,
+  scale with zoom, and share the points' scene-scale constant (the default
+  3 : 1 point : edge ratio is geometric). Trace **widths are stored but not
+  yet drawn** — the polyline pass still rasterizes 1 px GL lines until
+  increment C's tube pass. Its buffers, undo, and messages are fully live;
+  only those pixels lag.
 - **Transparency-ordering caveat**: per-element opacity renders **today**
   on all three primitives via alpha blending, but blending is draw-order
   **naive** — overlapping *semi*-transparent elements may composite in the

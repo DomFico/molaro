@@ -81,6 +81,79 @@ export function pointShaders(): { vertex: string; fragment: string } {
   };
 }
 
+/**
+ * Edge tube pass: instanced camera-facing quads with real world thickness.
+ * One quad (4 static corner vertices, 6 indices) instanced per edge; the
+ * per-instance attributes split by update cadence (iStart/iEnd every
+ * displayed-frame flip; iVisible on visibility change; iRadius/iColor on
+ * representation writes only). Instance slot ≡ header edge index — never
+ * compacted, so the GPU arrays share the rep buffers' element order with no
+ * remap anywhere.
+ *
+ * World radius = uWorldPerSize × iRadius — the SAME `k` uniform object the
+ * point pass reads, so the default point:edge ratio (3:1) is geometric.
+ * Shading is the cylinder profile of the sphere pass's headlight Lambert.
+ * Depth follows the ONE global variant: undefined, fragments keep the
+ * quad's interpolated AXIS depth (the billboard plane contains the axis,
+ * so at a shared endpoint tube and sphere agree exactly — no junction
+ * hole); defined, fragments write analytic cylinder-surface depth through
+ * the same uProjZ row the sphere pass uses.
+ */
+export function edgeTubeShaders(): { vertex: string; fragment: string } {
+  return {
+    vertex: `
+      // static per-corner: x = side (-1 | +1 across width), y = end (0 | 1)
+      attribute vec2 aCorner;
+      attribute vec3 iStart; attribute vec3 iEnd;
+      attribute float iVisible; attribute float iRadius; attribute vec4 iColor;
+      uniform float uWorldPerSize;
+      varying vec4 vColor; varying float vU;
+      varying float vRadius; varying float vViewDepth;
+      void main() {
+        float radius = uWorldPerSize * iRadius;
+        vec3 mvA = (modelViewMatrix * vec4(iStart, 1.0)).xyz;
+        vec3 mvB = (modelViewMatrix * vec4(iEnd, 1.0)).xyz;
+        vec3 seg = mvB - mvA;
+        // collapsed instances (hidden edge, zero radius, degenerate segment)
+        // leave the clip volume entirely — no fragments, no depth writes
+        if (iVisible < 0.5 || radius <= 0.0 || dot(seg, seg) < 1e-16) {
+          gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+          vColor = vec4(0.0); vU = 0.0; vRadius = 0.0; vViewDepth = 1.0;
+          return;
+        }
+        vec3 axis = normalize(seg);
+        vec3 toCam = -normalize(mvA + mvB); // midpoint view direction
+        vec3 s = cross(axis, toCam);
+        if (dot(s, s) < 1e-12) s = cross(axis, vec3(0.0, 1.0, 0.0));
+        if (dot(s, s) < 1e-12) s = cross(axis, vec3(1.0, 0.0, 0.0));
+        vec3 side = normalize(s);
+        vec3 self = aCorner.y < 0.5 ? mvA : mvB;
+        vec3 pos = self + side * (aCorner.x * radius);
+        vColor = iColor;
+        vU = aCorner.x;
+        vRadius = radius;
+        vViewDepth = -self.z;
+        gl_Position = projectionMatrix * vec4(pos, 1.0);
+      }`,
+    fragment: `
+      uniform vec2 uProjZ;
+      varying vec4 vColor; varying float vU;
+      varying float vRadius; varying float vViewDepth;
+      void main() {
+        // zero alpha is a literal zero: no fragment, no depth hole
+        if (vColor.a <= 0.0) discard;
+        float nz = sqrt(max(1.0 - vU * vU, 0.0));
+        float shade = 0.55 + 0.45 * nz;
+      #ifdef ${IMPOSTOR_DEPTH_DEFINE}
+        // analytic cylinder-surface depth: nearer than the axis by nz*radius
+        float zView = -(vViewDepth - vRadius * nz);
+        gl_FragDepth = 0.5 * ((uProjZ.x * zView + uProjZ.y) / -zView) + 0.5;
+      #endif
+        gl_FragColor = vec4(vColor.rgb * shade, vColor.a);
+      }`,
+  };
+}
+
 /** Pending-target overlay: flat tint (depthTest off — a highlight, not
  * geometry) silhouette-matched to the base sphere: same aSize, same chunk,
  * same radius. uFloor keeps the breathing pulse from fading out fully. */

@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   IMPOSTOR_DEPTH_DEFINE,
   IMPOSTOR_SIZING_CHUNK,
+  edgeTubeShaders,
   focusFlashShaders,
   highlightShaders,
   pointShaders,
@@ -62,4 +63,26 @@ test("zero radius and zero alpha discard: literal zeros draw nothing", () => {
   // overlays gate on radius in the vertex stage
   assert.match(highlightShaders().vertex, /radius > 0\.0/);
   assert.match(focusFlashShaders().vertex, /radius > 0\.0/);
+});
+
+// -- edge tube pass (increment B) --------------------------------------------
+
+test("edge tube: radius derives from THE shared k uniform, no local scale", () => {
+  const v = edgeTubeShaders().vertex;
+  assert.match(v, /uniform float uWorldPerSize;/);
+  assert.match(v, /uWorldPerSize \* iRadius/);
+  assert.doesNotMatch(v, /uPixelRatio|uSize\b/);
+});
+
+test("edge tube: ONE depth write behind the same define; same uProjZ row", () => {
+  const f = edgeTubeShaders().fragment;
+  assert.match(f, new RegExp(`#ifdef ${IMPOSTOR_DEPTH_DEFINE}`));
+  assert.equal(f.split("gl_FragDepth").length - 1, 1);
+  assert.match(f, /uProjZ/);
+});
+
+test("edge tube: collapsed instances leave the clip volume; zero alpha discards", () => {
+  const { vertex, fragment } = edgeTubeShaders();
+  assert.match(vertex, /iVisible < 0\.5 \|\| radius <= 0\.0/);
+  assert.match(fragment, /vColor\.a <= 0\.0/);
 });
