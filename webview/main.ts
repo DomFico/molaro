@@ -43,7 +43,13 @@ import { createCommandRegistry, makeRunComplete, runCommandMacro, type CommandRe
 import { bindTypedResult } from "./claudebind.ts";
 import { parseTypedResult } from "./claudemodel.ts";
 import { listRecipes, registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
-import { makeAnalysisModHandler, isFileAlreadyGone } from "./commands.ts";
+import {
+  installModList,
+  isFileAlreadyGone,
+  makeAnalysisModHandler,
+  modInstallReport,
+  type ModInstallOutcome,
+} from "./commands.ts";
 import { parseTarget, resolveTarget, type Completion } from "./address.ts";
 import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
 import { pickPoint, selectionBounds } from "./picking.ts";
@@ -618,9 +624,12 @@ async function main(): Promise<void> {
     ok: false,
     message: "viewer is still loading",
   });
-  // Workspace analysis mods arrive from the host once it sees viewerInfo;
-  // rebound onto the real installer once the command registry exists below.
-  let installMods: (raw: unknown) => void = () => {};
+  // Workspace analysis mods arrive from the host once it sees viewerInfo, and
+  // again after every write_mod save; rebound onto the real installer once the
+  // command registry exists below. Returns WHAT IT DID — the host awaits this
+  // outcome before letting write_mod claim a registration.
+  let installMods: (raw: unknown) => ModInstallOutcome =
+    () => ({ installed: [], skipped: [] });
   // `produces: commands` mods run their emitted strings through the command
   // path; late-bound once the command registry + validation registry exist.
   let runCommandMod: (mod: AnalysisMod, cmds: string[]) => void = () => {};
@@ -657,7 +666,17 @@ async function main(): Promise<void> {
       return;
     }
     if (msg?.type === "modsLoaded") {
-      installMods((msg as { mods?: unknown }).mods);
+      const push = msg as unknown as { mods?: unknown; id?: number; confirm?: string };
+      const outcome = installMods(push.mods);
+      // A push that carries an id is a write_mod save AWAITING confirmation: the
+      // host holds the tool's promise open until the viewer — the layer that
+      // actually registers — says what happened. Answered on the SAME
+      // id-correlated commandResult channel every assistant command already uses;
+      // the boot push carries no id and is not answered.
+      if (typeof push.id === "number" && typeof push.confirm === "string") {
+        const report = modInstallReport(outcome, push.confirm);
+        host.postMessage({ type: "commandResult", id: push.id, ...report });
+      }
       return;
     }
     if (msg?.type === "confirm-answer") {
@@ -1615,27 +1634,28 @@ async function main(): Promise<void> {
     });
     asyncLine(outcome.status, outcome.message);
   };
-  // Workspace mod files (parsed host-side, one message at boot): register
-  // each in the mod registry AND as its own verb. A name colliding with an
-  // existing verb is skipped — a mod file can never shadow a built-in.
-  installMods = (raw: unknown): void => {
-    if (!Array.isArray(raw)) return;
-    for (const entry of raw) {
-      const mod = entry as AnalysisMod;
-      if (!mod || mod.kind !== "analysis" || typeof mod.name !== "string" ||
-          typeof mod.code !== "string") continue;
-      if (commands.verbs().includes(mod.name)) {
-        asyncLine("error", `mod "${mod.name}" skipped — the name is already a command`);
-        continue;
-      }
-      registerRecipe(mod);
-      commands.register(
-        mod.name,
-        makeAnalysisModHandler(commandContext, mod),
-        `analysis mod (${mod.produces}${mod.axis ? ` → ${mod.axis}` : ""})` +
-          `${mod.description ? `: ${mod.description}` : ""} — ${mod.name} <target>`,
-      );
+  // Workspace mod files (parsed host-side): register each in the mod registry
+  // AND as its own verb — at boot, and again after every write_mod save. A
+  // re-push REPLACES both, so a rewritten mod runs its new code; only a BUILT-IN
+  // name is refused, so a mod file can still never shadow one. The decision and
+  // the outcome are pure (installModList); this wires it to the two registries.
+  installMods = (raw: unknown): ModInstallOutcome => {
+    const outcome = installModList(raw, {
+      isBuiltin: (name) => commands.isBuiltin(name),
+      install: (mod) => {
+        registerRecipe(mod); // replaces the entry holding mod.code
+        commands.register(   // replaces the handler CLOSING OVER the mod object
+          mod.name,
+          makeAnalysisModHandler(commandContext, mod),
+          `analysis mod (${mod.produces}${mod.axis ? ` → ${mod.axis}` : ""})` +
+            `${mod.description ? `: ${mod.description}` : ""} — ${mod.name} <target>`,
+        );
+      },
+    });
+    for (const s of outcome.skipped) {
+      asyncLine("error", `mod "${s.name}" skipped — ${s.reason}`);
     }
+    return outcome;
   };
   document.getElementById("terminal-btn")?.addEventListener("click", () => {
     host.postMessage({ type: "openTerminal" });

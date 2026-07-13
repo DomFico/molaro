@@ -112,6 +112,37 @@ the mouse gestures call; commands get no rendering or camera code of their own.
 The S9 suite asserts camera-pose equality (to 0.01) between commands and real
 clicks/drags.
 
+### Built-in vs. mod verbs — and why a push REPLACES
+
+A mod's code lives in **two** name-keyed caches in the webview: its entry in the
+recipe registry (which holds `mod.code`, the string shipped to the producer) and
+its command handler, **which closes over the mod object**. `installModList` is
+the one door both are written through — at boot, and again after every
+`write_mod` save — and **a re-push replaces both together**. Replace one without
+the other and the viewer runs a mod that no longer exists.
+
+The guard in front of them refuses exactly one thing: a name that is a **built-in
+verb**, so a mod file can never shadow one. It must *not* ask "is this name
+already a verb" — that is true of every already-installed mod, **including the
+one being replaced**. `CommandRegistry.sealBuiltins()` (called once by
+`createCommandRegistry`, after the built-ins are in and before any mod can be
+installed) draws that line; `isBuiltin()` is the question the guard asks.
+
+This is not a style point. `write_mod` is a **gated** tool: the human is shown a
+mod's full source and approves it. Conflating the two questions meant a rewritten
+mod collided with *itself*, was skipped, and kept running its first version — the
+human approved version B and version A executed. `delete_mod` + rewrite appeared
+to "fix" it only because it is the one path that evicts those caches (a
+content-keyed "cache-bust" comment does nothing; nothing here keys on content).
+**S35 pins the invariant: the code that RUNS is the code that was APPROVED.**
+
+And because registration happens in the *webview* while the file is written by
+the *host*, `write_mod` must not report a registration it never heard confirmed:
+the push carries an `id`, the viewer answers `modInstallReport` on the existing
+id-correlated `commandResult` channel, and the tool reports **that** — never its
+own disk write. A skipped registration is an error in the assistant's transcript,
+naming the reason, not a line on a surface it cannot read.
+
 ## Resolution mirrors the VISIBLE tree
 
 `resolveTarget` descends `classification.ts buildTree`'s `TreeModel` — the
@@ -570,6 +601,19 @@ deliberate decisions:
 
 ### Open threads (deliberate deferrals)
 
+- **The mod registry has no invalidation story — only a re-push.** KNOWN GAP.
+  The webview's two mod caches are written by `installModList` and evicted by
+  `rm`/`delete_mod`. There is **no file watcher and no `reload` verb**, and
+  `modsLoaded` is pushed from exactly two places: viewer boot, and a `write_mod`
+  save. So a user who **hand-edits** `.molaro/mods/<name>.py` on disk and re-runs
+  it **from the terminal** still gets the mod as it was at boot, until the panel
+  is reopened. This is the same *class* as the approval-gate bug S35 pins (a
+  name-keyed cache with no invalidation) reached by a different trigger — the
+  difference being that the terminal user edited the file themselves and no gate
+  claims otherwise, whereas `write_mod` previously *reported success*.
+  The guard fix closes the **assistant** path completely and honestly; it does
+  **not** give the system an invalidation story, and this doc will not pretend it
+  does. A watcher or a `reload` verb is a separate piece of work.
 - **`:` level qualifier** — reserved in the filter span for a future
   explicit field pin (`@sel.<level>:<pred>`). Under membership-only filtering
   the collision it would resolve (a point member's type equal to a label

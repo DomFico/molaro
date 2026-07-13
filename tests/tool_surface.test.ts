@@ -25,7 +25,7 @@ const stubDeps: ToolDeps = {
     targetExamples: [], committedSelections: "", mods: [],
     baseLook: { pointSize: 3, opacity: 1, color: "#e6e6e6" },
   }),
-  writeMod: async (s) => ({ name: s.name, file: "x" }),
+  writeMod: async (s) => ({ ok: true, name: s.name, file: "x", message: `registered mod "${s.name}"` }),
   deleteMod: async () => ({ ok: true, message: "" }),
   runMod: async () => ({ ok: true, message: "" }),
   runCommand: async () => ({ ok: true, message: "" }),

@@ -424,10 +424,28 @@ function openPanel(
   const analysisModNames = (): string[] =>
     loadWorkspaceMods(producerLog, modPaths).map((m) => m.name);
 
-  const saveAssistantMod = (spec: {
+  /** Push the workspace mods to the viewer and AWAIT its registration outcome
+   * for `confirm` — the SAME id-correlated round-trip runViewerCommand uses (the
+   * viewer answers on the commandResult channel; ids ≥ 1e6 never reach the
+   * terminal). The viewer is the layer that actually registers a mod, so it is
+   * the only layer entitled to say a mod was registered. */
+  const pushWorkspaceMods = (confirm: string): Promise<{ ok: boolean; message: string }> =>
+    new Promise((resolve) => {
+      const id = assistantCmdSeq++;
+      const timer = setTimeout(() => {
+        pendingAsstAck.delete(id);
+        resolve({ ok: false, message: "the viewer never confirmed the registration (timed out)" });
+      }, 60_000);
+      pendingAsstAck.set(id, (r) => { clearTimeout(timer); resolve(r); });
+      void panel.webview.postMessage({
+        type: "modsLoaded", mods: loadWorkspaceMods(producerLog, modPaths), id, confirm,
+      });
+    });
+
+  const saveAssistantMod = async (spec: {
     name: string; produces: AnalysisMod["produces"]; axis?: AnalysisMod["axis"];
     description: string; code: string;
-  }): { name: string; file: string } => {
+  }): Promise<{ ok: boolean; name: string; file: string; message: string }> => {
     const mod: AnalysisMod = {
       kind: "analysis", name: spec.name, origin: "workspace",
       author: "Molaro assistant", produces: spec.produces,
@@ -435,12 +453,10 @@ function openPanel(
       description: spec.description, code: spec.code,
     };
     const file = saveWorkspaceMod(mod);
-    // Re-register so the new mod appears in `mods` and its verb resolves — the
-    // viewer re-derives its registry from this push, exactly like at startup.
-    void panel.webview.postMessage({
-      type: "modsLoaded", mods: loadWorkspaceMods(producerLog, modPaths),
-    });
-    return { name: spec.name, file };
+    // The disk write is NOT the registration. Re-push and wait for the viewer to
+    // say whether it took — write_mod reports what THIS answers, never the write.
+    const r = await pushWorkspaceMods(spec.name);
+    return { ok: r.ok, name: spec.name, file, message: r.message };
   };
 
   // The GATED delete_mod tool's host action. Refuses everything that is not a

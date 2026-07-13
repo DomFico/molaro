@@ -43,7 +43,12 @@ function mockDeps(
   const calls: Calls = { runCommand: [], runMod: [], writeMod: [], unlinked: [] };
   return {
     getContext: async () => sampleContext(),
-    writeMod: async (s) => { calls.writeMod.push(s); return { name: s.name, file: `/ws/.molaro/mods/${s.name}.py` }; },
+    // faithful to the host saveAssistantMod: the disk write is not the answer —
+    // `ok` is the VIEWER's registration confirmation, round-tripped back.
+    writeMod: async (s) => {
+      calls.writeMod.push(s);
+      return { ok: true, name: s.name, file: `/ws/.molaro/mods/${s.name}.py`, message: `registered mod "${s.name}"` };
+    },
     // faithful to the host deleteAssistantMod: resolve via the SAME path-map
     // discipline (resolveModDeletion), "unlink" only mapped paths, then report.
     deleteMod: async (name) => {
@@ -202,6 +207,30 @@ test("write_mod saves through the host path and reports registration", async () 
   assert.equal(res.isError, false);
   assert.equal(deps.calls.writeMod.length, 1);
   assert.match(text(res), /wrote mod "rg"/);
+});
+
+// ---- §3.2: the ack must not claim what the tool did not verify --------------
+// write_mod used to report "it is now registered" UNCONDITIONALLY, describing the
+// host's disk write, while the viewer silently declined to register the mod — so
+// the human approved version B and run_mod kept executing version A. The tool now
+// reports the VIEWER's answer. An assistant told the write failed can recover; an
+// assistant told it succeeded cannot.
+test("write_mod does NOT report success when the viewer declined to register it", async () => {
+  const deps = mockDeps({
+    writeMod: async (s) => ({
+      ok: false,
+      name: s.name,
+      file: `/ws/.molaro/mods/${s.name}.py`,
+      message: `the viewer did NOT register "${s.name}" — "${s.name}" is a built-in command`,
+    }),
+  });
+  const res = await buildToolDefs(deps).write_mod.handler(
+    { name: "rainbow", produces: "commands", axis: undefined, description: "x", code: "def compute(d,t): return []" }, {},
+  );
+  assert.equal(res.isError, true, "a declined registration is an ERROR the model can see, not a success");
+  assert.doesNotMatch(text(res), /it is now registered/, "it must never claim the registration it was denied");
+  assert.match(text(res), /built-in command/, "the REASON reaches the assistant's transcript, not just the terminal");
+  assert.match(text(res), /will NOT run/, "and the consequence is stated plainly");
 });
 
 // ---- Brief #10a: write_mod's schema MUST equal the mod system's produces ----

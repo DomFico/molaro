@@ -5820,9 +5820,106 @@ async function S34(): Promise<void> {
   }
 }
 
+// ====== S35: the code that RUNS is the code that was APPROVED ================
+// The gated write_mod tool previews a mod's FULL source to the human, who
+// approves it. A re-push under an existing name must therefore REPLACE the code
+// the viewer runs — otherwise the human approves version B and version A
+// executes, which is a lie told by the approval gate, not a caching annoyance.
+//
+// `modsLoaded` is dispatched here exactly as the host dispatches it after a
+// write_mod save (bridge.ts mirrors the same push on viewerInfo), so this drives
+// the real installation path — no test-only seam.
+async function S35(): Promise<void> {
+  console.log("S35 — a re-pushed mod runs its NEW code (the approval gate's one sentence)");
+  const modFile = (code: string) => ({
+    kind: "analysis", name: "zz_over", produces: "commands",
+    origin: "workspace", description: "harness-only: the overwrite fixture", code,
+  });
+  // Two versions of ONE mod, distinguishable by what they paint. Neither needs a
+  // trajectory (a commands mod may ignore target_indices), so both run on the
+  // synthetic source.
+  const versionA = modFile('def compute(data, target_indices):\n    return ["colorpoints all red"]\n');
+  const versionB = modFile('def compute(data, target_indices):\n    return ["colorpoints all blue"]\n');
+
+  await withDriver(async (d) => {
+    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const logLines = () =>
+      d.evaluate<{ cls: string; text: string }[]>(
+        `[...document.querySelectorAll('#term-log .term-line')].map(l=>({cls:l.className,text:l.textContent}))`);
+    const typeInto = async (text: string): Promise<void> => {
+      const r = await d.evaluate<{ x: number; y: number }>(`(()=>{
+        const b=${el("term-input")}.getBoundingClientRect(); return {x:b.left+b.width/2, y:b.top+b.height/2};
+      })()`);
+      await d.click(r.x, r.y); await d.insertText(text); await d.key("Enter", "Enter", 13);
+    };
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    // What the points are actually painted — the only evidence that separates
+    // version A from version B. Base look is #e6e6e6, neither red nor blue.
+    const painted = () => d.evaluate<{ red: number; blue: number }>(`(()=>{
+      const c=${V}.rep.state.color; let red=0, blue=0;
+      for (let i=0;i<c.length;i+=3) {
+        if (c[i]>0.9 && c[i+1]<0.1 && c[i+2]<0.1) red++;
+        else if (c[i]<0.1 && c[i+1]<0.1 && c[i+2]>0.9) blue++;
+      }
+      return {red, blue};
+    })()`);
+    // The host's push, verbatim: {type:"modsLoaded", mods:[…]} into the page.
+    const push = async (mods: unknown[]): Promise<void> => {
+      await d.evaluate(`window.dispatchEvent(new MessageEvent("message", { data: ${
+        JSON.stringify({ type: "modsLoaded", mods })} }))`);
+      await sleep(150);
+    };
+
+    // -- version A: written, registered, and it paints RED ---------------------
+    await push([versionA]);
+    check("S35: the freshly pushed mod registers and lists",
+      (await cmd("mods")).message.includes(" zz_over — analysis · commands"));
+    const depth0 = await undoDepth();
+    await typeInto("zz_over");
+    await sleep(2000);
+    let px = await painted();
+    check("S35: version A runs — every point RED", px.red === 6000 && px.blue === 0, JSON.stringify(px));
+
+    // -- version B: re-pushed under the SAME name, WITHOUT deleting it ---------
+    // This is the exact sequence the assistant performs on an overwrite:
+    // write_mod(name, newCode) → the host saves + re-pushes. No delete_mod.
+    await push([versionB]);
+    await typeInto("zz_over");
+    await sleep(2000);
+    px = await painted();
+    check("S35: THE HEADLINE — the re-pushed mod runs version B (BLUE), not the stale version A",
+      px.blue === 6000 && px.red === 0, JSON.stringify(px));
+
+    // §3.4 — the re-registered handler is still exactly one undo stroke.
+    const depth1 = await undoDepth();
+    check("S35: each macro run is still ONE undo stroke after re-registration",
+      depth1 === depth0 + 2, `undo depth ${depth0} → ${depth1} over two runs`);
+    await d.evaluate(`${el("term-input")}.blur()`);
+    await d.ctrlZ();
+    await sleep(400);
+    px = await painted();
+    check("S35: one Ctrl+Z reverses the whole version-B macro — back to version A's red",
+      px.red === 6000 && px.blue === 0 && (await undoDepth()) === depth0 + 1, JSON.stringify(px));
+
+    // -- §3.3 — the built-in protection the guard exists for SURVIVES ----------
+    // A mod file named after a built-in must still be refused, loudly, and the
+    // built-in must still work. This is what §2.1 is most likely to break.
+    await push([{ ...modFile('def compute(data, target_indices):\n    return ["colorpoints all red"]\n'), name: "rainbow" }]);
+    const lines = await logLines();
+    check("S35: a mod named after a BUILT-IN is still refused, naming the reason",
+      lines.some((l) => /^mod "rainbow" skipped — .*built-in/.test(l.text)),
+      JSON.stringify(lines.slice(-2)));
+    const rb = await cmd("rainbow all");
+    check("S35: …and the built-in still works — it was never overwritten",
+      rb.status === "ok" && rb.message === "colored 6000 points rainbow", JSON.stringify(rb));
+  }, 1180, 780, "/terminal");
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

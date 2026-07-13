@@ -210,9 +210,29 @@ export interface CommandContext {
 
 export class CommandRegistry {
   private readonly entries = new Map<string, { handler: CommandHandler; description: string }>();
+  private readonly builtins = new Set<string>();
 
   register(verb: string, handler: CommandHandler, description = ""): void {
     this.entries.set(verb, { handler, description });
+  }
+
+  /** Freeze the verbs registered SO FAR as the built-ins — called once by
+   * createCommandRegistry, after the built-in verbs are in and before any mod
+   * can be installed. Everything registered afterwards is a mod's own verb.
+   *
+   * This distinction is the whole point: "is this name a built-in" is NOT the
+   * same question as "is this name currently a verb", because a mod's verb is
+   * registered by the installer itself. Conflating the two made every re-push of
+   * an existing mod look like a built-in collision, so it was skipped — and the
+   * viewer kept running the mod's PREVIOUS code. */
+  sealBuiltins(): void {
+    for (const verb of this.entries.keys()) this.builtins.add(verb);
+  }
+
+  /** True only for a verb that was present at seal time. An unsealed registry
+   * has no built-ins — a mod verb never becomes one by being registered. */
+  isBuiltin(verb: string): boolean {
+    return this.builtins.has(verb);
   }
 
   /** Remove a verb (rm's deregistration of a deleted mod's own-verb — the
@@ -1701,7 +1721,89 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   const help = makeHelpHandler(registry);
   registry.register("help", help, "this grammar summary; help <verb> describes one verb");
   registry.register("?", help, "alias of help");
+  // Everything registered above is a BUILT-IN. Anything registered after this
+  // line is a mod's own verb, and a mod may replace its own verb freely.
+  registry.sealBuiltins();
   return registry;
+}
+
+// -- installing workspace mods ---------------------------------------------------
+
+/** The two registries a mod's code lives in, behind one call. Both are keyed by
+ * mod name and both must be REPLACED together on a re-push: the recipe entry
+ * holds `mod.code`, and the command handler CLOSES OVER the mod object. Replace
+ * one without the other and the viewer runs a mod that no longer exists. */
+export interface ModInstallDeps {
+  isBuiltin(name: string): boolean;
+  /** Register or REPLACE the mod: its recipe entry AND its command handler. */
+  install(mod: AnalysisMod): void;
+}
+
+export interface ModInstallOutcome {
+  installed: string[];
+  skipped: { name: string; reason: string }[];
+}
+
+/**
+ * Install a pushed set of workspace mods — the ONE door a mod's code enters the
+ * viewer through, at boot and after every `write_mod` save.
+ *
+ * **A push REPLACES.** A mod re-pushed under an existing name overwrites both its
+ * recipe entry and its command handler, so the code that RUNS is always the code
+ * that was last pushed — and therefore the code the human approved at the gate.
+ *
+ * The guard refuses exactly one thing: a name that is a BUILT-IN verb, so a mod
+ * file can never shadow one. It deliberately does NOT ask "is this name already a
+ * verb" — that is true of every already-installed mod, including the one being
+ * replaced, which is what silently pinned the viewer to a mod's first version.
+ *
+ * Pure: the caller supplies the registries and reports the outcome.
+ */
+export function installModList(raw: unknown, deps: ModInstallDeps): ModInstallOutcome {
+  const installed: string[] = [];
+  const skipped: { name: string; reason: string }[] = [];
+  if (!Array.isArray(raw)) return { installed, skipped };
+  for (const entry of raw) {
+    const mod = entry as AnalysisMod;
+    if (!mod || mod.kind !== "analysis" || typeof mod.name !== "string" ||
+        typeof mod.code !== "string") {
+      const name = typeof (entry as { name?: unknown })?.name === "string"
+        ? (entry as { name: string }).name : "(unnamed)";
+      skipped.push({ name, reason: "it is not a well-formed analysis mod" });
+      continue;
+    }
+    if (deps.isBuiltin(mod.name)) {
+      skipped.push({ name: mod.name, reason: `"${mod.name}" is a built-in command` });
+      continue;
+    }
+    deps.install(mod);
+    installed.push(mod.name);
+  }
+  return { installed, skipped };
+}
+
+/**
+ * What the viewer reports back about ONE mod in a push — the truthful ack.
+ *
+ * `write_mod` used to report success from the HOST, describing its own disk
+ * write, while the viewer silently declined to register the mod. The tool must
+ * only claim a registration the layer that performs it actually confirmed, so
+ * this is the answer that rides the outcome round-trip back to the tool.
+ */
+export function modInstallReport(outcome: ModInstallOutcome, name: string): CommandResult {
+  if (outcome.installed.includes(name)) {
+    return { status: "ok", message: `registered mod "${name}"` };
+  }
+  const skip = outcome.skipped.find((s) => s.name === name);
+  if (skip) {
+    return { status: "error", message: `the viewer did NOT register "${name}" — ${skip.reason}` };
+  }
+  // No trailing period on any of these: the caller composes them into a sentence.
+  return {
+    status: "error",
+    message: `the viewer did NOT register "${name}" — it was not among the mods loaded from disk ` +
+      `(the file may be malformed, or the viewer was not ready)`,
+  };
 }
 
 /** Tab completion for the terminal — `runCommand`'s sibling. Gathers the

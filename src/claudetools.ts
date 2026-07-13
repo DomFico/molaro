@@ -141,7 +141,13 @@ export interface WriteModSpec {
  * state and touch no neutral-tier file directly. */
 export interface ToolDeps {
   getContext(): Promise<SceneContext>;
-  writeMod(spec: WriteModSpec): Promise<{ name: string; file: string }>;
+  /** Save the mod AND confirm with the viewer that it actually registered.
+   * `ok` is the VIEWER's answer, not the host's disk write — the two are
+   * different layers, and only the one that registers a mod may claim it did.
+   * A save that lands on disk but is refused by the registry answers ok:false
+   * with the reason, so write_mod can report a failure instead of inventing a
+   * success (the bug: the human approved version B, version A kept running). */
+  writeMod(spec: WriteModSpec): Promise<{ ok: boolean; name: string; file: string; message: string }>;
   /** Delete a WORKSPACE mod file and reconcile the registry. Refuses (ok:false)
    * anything not a scanned `.molaro/mods/*.py` mod — built-ins, unknown names,
    * traversal — by construction (it deletes only paths the mod scan recorded,
@@ -233,6 +239,15 @@ export function buildToolDefs(deps: ToolDeps) {
     async (args) => {
       try {
         const saved = await deps.writeMod(args as WriteModSpec);
+        // Registration is the viewer's to confirm. If it declined, say so HERE —
+        // in the transcript, naming the reason — instead of reporting a success
+        // and leaving run_mod to execute something the human never approved.
+        if (!saved.ok) {
+          return err(
+            `write_mod: the file was saved to ${saved.file}, but ${saved.message}. ` +
+            `This code will NOT run — run_mod would not execute it. Fix the cause and write it again.`,
+          );
+        }
         return ok(`wrote mod "${saved.name}" to ${saved.file} — it is now registered; run it with run_mod.`);
       } catch (e) {
         return err(`write_mod failed: ${e instanceof Error ? e.message : String(e)}`);

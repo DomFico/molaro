@@ -13,8 +13,10 @@ import {
   commandMacroRefusal,
   createCommandRegistry,
   HELP_TEXT,
+  installModList,
   isFileAlreadyGone,
   makeAnalysisModHandler,
+  modInstallReport,
   parseColor,
   parseOpacity,
   parseSize,
@@ -22,7 +24,13 @@ import {
   type CommandContext,
   type CommandResult,
 } from "../webview/commands.ts";
-import { listRecipes, registerRecipe, unregisterRecipe } from "../webview/recipes.ts";
+import {
+  getRecipe,
+  listRecipes,
+  registerRecipe,
+  unregisterRecipe,
+  type AnalysisMod,
+} from "../webview/recipes.ts";
 import { BIND_SIZE_MAX, bindTypedResult } from "../webview/claudebind.ts";
 
 function makeHeader(): Header {
@@ -56,6 +64,7 @@ function makeRegistry() {
   const colorEachOps: { points: number[]; rgb: number[] }[] = [];
   const eachOps: { kind: "size" | "opacity"; points: number[]; values: number[] }[] = [];
   const modRuns: { name: string; points: number[]; expr: string }[] = [];
+  const modRunCode: string[] = [];
   const rmArms: string[][] = [];
   const edgeOps: { edgeIds: number[]; rgb: [number, number, number] }[] = [];
   // a chain over the 3 points: edge 0 sits inside c0 ({0,1}); edge 1 crosses
@@ -256,6 +265,10 @@ function makeRegistry() {
     },
     runAnalysisMod: (mod, points, expr) => {
       modRuns.push({ name: mod.name, points: [...points], expr });
+      // The CODE the handler would ship to the producer — the only thing that
+      // separates one version of a mod from another (kept out of modRuns, which
+      // is deepEqual-asserted elsewhere).
+      modRunCode.push(mod.code);
     },
     armRmDeletion: (names) => {
       rmArms.push([...names]);
@@ -265,7 +278,7 @@ function makeRegistry() {
     registry: createCommandRegistry(ctx),
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
-    colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, rmArms, sels,
+    colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, modRunCode, rmArms, sels,
   };
 }
 
@@ -1449,4 +1462,115 @@ test("runCommandMacro: all valid → runs all in ONE stroke, reports per-command
   assert.equal(calls.endStroke, 1, "and closed once → one undo stroke");
   assert.match(r.message, /ran 2 commands \(one undo stroke\)/);
   assert.match(r.message, /colorbonds alpha red → ran colorbonds alpha red/);
+});
+
+// ================== the code that RUNS is the code that was APPROVED ==========
+// write_mod is a GATED tool: the human is shown a mod's FULL source and approves
+// it. So the viewer must run the code it was last handed. It did not: installMods
+// guarded with "is this name already a verb", which is true of every already-
+// installed mod — so a mod re-pushed under its own name collided with ITSELF, was
+// skipped, and both caches (the recipe entry holding mod.code, and the command
+// handler CLOSING OVER the mod object) kept version 1. The human approved version
+// B; version A ran. delete_mod + rewrite worked only because it is the one path
+// that evicts those caches.
+
+/** Install into a real registry + the real recipe registry, exactly as main.ts
+ * wires it — the deps are the only thing main.ts adds. */
+function makeInstaller() {
+  const made = makeRegistry();
+  const install = (mods: unknown) =>
+    installModList(mods, {
+      isBuiltin: (name) => made.registry.isBuiltin(name),
+      install: (mod) => {
+        registerRecipe(mod);
+        made.registry.register(mod.name, makeAnalysisModHandler(made.ctx, mod), "analysis mod");
+      },
+    });
+  return { ...made, install };
+}
+
+const modV = (name: string, code: string): AnalysisMod => ({
+  kind: "analysis", name, produces: "commands", origin: "workspace",
+  description: "overwrite fixture", code,
+});
+
+test("§3.1 a re-pushed mod RUNS ITS NEW CODE — not the version it was first registered with", () => {
+  const { registry, install, modRunCode } = makeInstaller();
+  const A = modV("zz_over", "def compute(d,t): return ['A']");
+  const B = modV("zz_over", "def compute(d,t): return ['B']");
+  try {
+    assert.deepEqual(install([A]), { installed: ["zz_over"], skipped: [] });
+    registry.runCommand("zz_over c0");
+    assert.deepEqual(modRunCode, [A.code], "version A runs first — the baseline");
+
+    // The overwrite: same name, new code, NO delete in between. This is exactly
+    // what write_mod does, and it is where the gate used to break.
+    assert.deepEqual(install([B]), { installed: ["zz_over"], skipped: [] },
+      "a re-push is an INSTALL, not a self-collision to skip");
+    registry.runCommand("zz_over c0");
+    assert.deepEqual(modRunCode, [A.code, B.code],
+      "THE INVARIANT: the handler now ships version B — the code the human approved");
+
+    // Both caches, not just one: a stale recipe entry is the same bug wearing a
+    // different hat (run_mod reads mod.code straight off the registry).
+    const entry = getRecipe("zz_over");
+    assert.equal(entry?.kind === "analysis" ? entry.code : null, B.code,
+      "the recipe registry holds version B too");
+  } finally {
+    unregisterRecipe("zz_over");
+  }
+});
+
+test("§3.3 a mod named after a BUILT-IN is still refused — and the built-in still works", () => {
+  const { registry, install, colorEachOps } = makeInstaller();
+  const hostile = modV("rainbow", "def compute(d,t): return ['pwned']");
+  const outcome = install([hostile]);
+  assert.deepEqual(outcome.installed, [], "nothing installed");
+  assert.equal(outcome.skipped.length, 1);
+  assert.equal(outcome.skipped[0].name, "rainbow");
+  assert.match(outcome.skipped[0].reason, /built-in/, "and it says WHY");
+
+  // the reason the guard exists: the built-in must be untouched
+  const r = registry.runCommand("rainbow c0");
+  assert.equal(r.status, "ok", r.message);
+  assert.equal(colorEachOps.length, 1, "the real rainbow ran — its handler was never replaced");
+  assert.equal(getRecipe("rainbow")?.origin, "built-in", "and its recipe entry is still the built-in");
+});
+
+test("a mod's own verb is NOT a built-in — sealing draws the line where the factory ends", () => {
+  const { registry, install } = makeInstaller();
+  try {
+    assert.ok(registry.isBuiltin("colorpoints") && registry.isBuiltin("rainbow") && registry.isBuiltin("help"));
+    install([modV("zz_over", "def compute(d,t): return []")]);
+    assert.ok(registry.verbs().includes("zz_over"), "it IS a verb");
+    assert.ok(!registry.isBuiltin("zz_over"), "…but never a built-in — which is what makes the re-push legal");
+  } finally {
+    unregisterRecipe("zz_over");
+  }
+});
+
+test("§3.2 modInstallReport is TRUTHFUL — it never reports a registration that did not happen", () => {
+  const skipped = { installed: [], skipped: [{ name: "rainbow", reason: '"rainbow" is a built-in command' }] };
+  const refused = modInstallReport(skipped, "rainbow");
+  assert.equal(refused.status, "error", "a skip is an ERROR the tool can surface, not a silent line");
+  assert.match(refused.message, /did NOT register/);
+  assert.match(refused.message, /built-in command/, "the reason travels with it");
+
+  const good = modInstallReport({ installed: ["rg"], skipped: [] }, "rg");
+  assert.equal(good.status, "ok");
+  assert.match(good.message, /registered mod "rg"/);
+
+  // the file was written but never reached the registry at all (malformed on
+  // re-parse, or the viewer was not ready): still not a success.
+  const absent = modInstallReport({ installed: ["other"], skipped: [] }, "rg");
+  assert.equal(absent.status, "error");
+  assert.match(absent.message, /not among the mods loaded from disk/);
+});
+
+test("a malformed entry in a push is skipped WITH a reason, never silently dropped", () => {
+  const { install } = makeInstaller();
+  const outcome = install([{ name: "half", kind: "analysis" }, { kind: "analysis", code: "x" }]);
+  assert.deepEqual(outcome.installed, []);
+  assert.deepEqual(outcome.skipped.map((s) => s.name), ["half", "(unnamed)"]);
+  assert.ok(outcome.skipped.every((s) => /well-formed/.test(s.reason)));
 });
