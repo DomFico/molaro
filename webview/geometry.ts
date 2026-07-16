@@ -32,6 +32,49 @@ export function polylineSegmentIndices(polylines: number[][]): Uint32Array {
   return out;
 }
 
+/**
+ * One path segment per consecutive vertex pair, in the SAME traversal order
+ * the flattened polyline-vertex axis uses (`header.polylines.flat()` — the
+ * axis every trace buffer is indexed by). Segment k carries BOTH addressings
+ * of its two ends: the VERTEX ids (indices into that flat axis → the trace
+ * buffers) and the POINT ids (→ positions/visibility). Single-sourced on
+ * purpose: instance slots, vertex ids, and point ids all come from this ONE
+ * walk, so the segment list and the per-vertex buffers cannot disagree about
+ * order (the "two lists that must agree" defect class). A path with fewer
+ * than two vertices contributes no segments.
+ */
+export interface TraceSegments {
+  count: number;
+  /** per segment: the flat-axis VERTEX id of each end. */
+  vertexA: Uint32Array;
+  vertexB: Uint32Array;
+  /** per segment: the POINT index of each end. */
+  pointA: Uint32Array;
+  pointB: Uint32Array;
+}
+
+export function traceSegments(polylines: number[][]): TraceSegments {
+  let count = 0;
+  for (const poly of polylines) count += Math.max(0, poly.length - 1);
+  const vertexA = new Uint32Array(count);
+  const vertexB = new Uint32Array(count);
+  const pointA = new Uint32Array(count);
+  const pointB = new Uint32Array(count);
+  let k = 0;
+  let base = 0; // the current path's first vertex id on the flat axis
+  for (const poly of polylines) {
+    for (let i = 0; i + 1 < poly.length; i++) {
+      vertexA[k] = base + i;
+      vertexB[k] = base + i + 1;
+      pointA[k] = poly[i];
+      pointB[k] = poly[i + 1];
+      k++;
+    }
+    base += poly.length;
+  }
+  return { count, vertexA, vertexB, pointA, pointB };
+}
+
 export interface Box3Like {
   min: [number, number, number];
   max: [number, number, number];

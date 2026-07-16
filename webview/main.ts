@@ -35,7 +35,6 @@ import {
 import { StreamingPlayer } from "./playback.ts";
 import { Transport, rejectIfErrorPayload } from "./transport.ts";
 import {
-  DEFAULT_TRACE_COLOR,
   RepresentationLayer,
   type RepresentationState,
 } from "./representation.ts";
@@ -62,6 +61,7 @@ import {
   FRAME_DISTANCE_FACTOR,
   NO_BBOX_WARNING,
   sceneExtent,
+  traceSegments,
   worldPerSizeUnit,
   type Box3Like,
 } from "./geometry.ts";
@@ -71,6 +71,7 @@ import {
   focusFlashShaders,
   highlightShaders,
   pointShaders,
+  traceTubeShaders,
 } from "./shaders.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
@@ -190,7 +191,7 @@ interface PassEnv {
   materials: {
     points: THREE.ShaderMaterial;
     edges: THREE.ShaderMaterial;
-    traces: THREE.LineBasicMaterial;
+    traces: THREE.ShaderMaterial;
   };
 }
 
@@ -281,14 +282,15 @@ interface SizingUniforms {
  * draw-order — under variant 2 the shader would compute gl_FragDepth per
  * fragment and throw it away. An E2E assertion pins all three.
  *
- * The edge/trace materials still rasterize as 1px GL lines in this
- * increment; increments B/C replace them HERE, consuming the same
- * depthVariant (a mixed scene clips wrongly exactly at the junctions).
+ * All three geometry passes are impostor/instanced ShaderMaterials now
+ * (spheres, edge tubes, trace tubes), consuming the same depthVariant — a
+ * mixed scene clips wrongly exactly at the junctions, so the switch is
+ * global and consumed only here.
  */
 function makeGeometryMaterials(
   sizing: SizingUniforms,
   depthVariant: 1 | 2,
-): { points: THREE.ShaderMaterial; edges: THREE.ShaderMaterial; traces: THREE.LineBasicMaterial } {
+): { points: THREE.ShaderMaterial; edges: THREE.ShaderMaterial; traces: THREE.ShaderMaterial } {
   const defines = depthVariant === 2 ? { [IMPOSTOR_DEPTH_DEFINE]: "" } : {};
   const s = pointShaders();
   const points = new THREE.ShaderMaterial({
@@ -320,12 +322,20 @@ function makeGeometryMaterials(
     vertexShader: et.vertex,
     fragmentShader: et.fragment,
   });
-  // The trace pass still rasterizes as 1px GL lines; increment C replaces it
-  // here, consuming the same defines. depthWrite pinned now regardless (C2).
-  const traces = new THREE.LineBasicMaterial({
-    vertexColors: true,
+  // Trace tubes: instanced trapezoids with PER-END radius/RGBA — radius =
+  // the SAME k uniform object × the stored traceSize (one scene-scale
+  // constant across all primitives), the same depthVariant define as every
+  // pass. DoubleSide for the same billboard-winding reason as edges.
+  const tt = traceTubeShaders();
+  const traces = new THREE.ShaderMaterial({
     transparent: true,
-    depthWrite: true,
+    depthWrite: true, // C2: explicit, never inherited
+    depthTest: true,
+    side: THREE.DoubleSide,
+    defines,
+    uniforms: { uWorldPerSize: sizing.uWorldPerSize, uProjZ: sizing.uProjZ },
+    vertexShader: tt.vertex,
+    fragmentShader: tt.fragment,
   });
   return { points, edges, traces };
 }
@@ -394,16 +404,8 @@ function highlightMaterial(
   });
 }
 
-/** Flatten polylines into segment endpoint pairs once (for the rebuild filter). */
-function polylineSegmentPairs(polylines: number[][]): [number, number][] {
-  const out: [number, number][] = [];
-  for (const poly of polylines) for (let i = 0; i + 1 < poly.length; i++) out.push([poly[i], poly[i + 1]]);
-  return out;
-}
-
 // ---------------------------------------------------------------------------
-// The five built-in generators — the former inline passes, verbatim behind
-// the ShapeGenerator interface.
+// The five built-in generators behind the ShapeGenerator interface.
 // ---------------------------------------------------------------------------
 
 /** Base points: ray-traced sphere impostors reading the per-point buffers.
@@ -578,78 +580,200 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
   },
 };
 
-/** The polyline pass keeps the ZERO-COPY indexed form (positions ride the
- * shared attribute; nothing re-copies on frame flip — no onFrameFlip hook).
- * Per-VERTEX color arrives as a per-POINT attribute — indexed draws fetch
- * attributes by point index — sized 4N with only the polyline-vertex slots
- * ever drawn; the trace write hook writes it through from
- * rep.state.traceColor/traceOpacity on write only. The GPU interpolates
- * between vertex colors along a segment, so a colored↔uncolored boundary
- * renders as a gradient — intended, inherent to per-vertex color. (If two
- * polyline vertices ever shared one point index, the drawn color of that
- * point would be the later write; state stays per-vertex regardless. The
- * producer's vertices are distinct.) Segments drop when EITHER endpoint
- * hides. traceSize has NO subscriber anywhere — state-only pending the
- * vertex tube pass (the recorded follow-up). */
-const polylineLinesGenerator: ShapeGenerator = {
-  name: "polyline-lines",
+/** Trace tubes + joint spheres — the path-tube generator (replaces the 1-px
+ * line pass). Each path SEGMENT draws as a tapered camera-facing tube wall —
+ * radius and RGBA at each END vertex, varying interpolation giving the
+ * along-segment gradient (the trace buffers' pinned per-vertex semantics) —
+ * and each path VERTEX draws as a joint sphere of exactly the tube's end
+ * radius (both are traceSize at that vertex), so every bend, cap, and end is
+ * covered by construction: no trim machinery, the sphere owns the end zone.
+ * Joints are an INDEXED Points pass over the shared position attribute
+ * reusing the base pass's impostor MATERIAL — both depth variants,
+ * zero-radius/zero-alpha discards, and the sizing chunk for free, and ZERO
+ * per-flip work (positions are zero-copy). Tube endpoints re-copy per flip
+ * exactly like the edge pass (6 floats/segment, linear, branch-free).
+ * Instance slot ≡ segment order from the ONE traceSegments traversal —
+ * never compacted. (If two polyline vertices ever shared one point index,
+ * the drawn JOINT would be the later write-through, exactly the old
+ * per-point-slot caveat; segment state stays per-vertex regardless. The
+ * producer's vertices are distinct.) This generator's traceSize
+ * subscription replaces the channel's former no-subscriber silence:
+ * writing traceSize finally draws. */
+interface TraceTubePass extends BuiltPass {
+  /** upload versions (test seam): a flip bumps `start` and must never bump
+   * `radius`/`color` — the cadence-split proof, as the edge pass has. */
+  attrVersions(): { start: number; radius: number; color: number };
+}
+const traceTubesGenerator: ShapeGenerator<TraceTubePass> = {
+  name: "trace-tubes",
   elementKind: "vertex",
-  build(env): BuiltPass | null {
+  build(env): TraceTubePass | null {
     const header = env.header;
-    const visible = env.rep.state.visible;
-    const polySegs = polylineSegmentPairs(header.polylines);
-    if (polySegs.length === 0) return null;
-    // itemSize 4: RGBA per point slot (alpha = the 4th component, like the
-    // edge pass); rep.state.traceColor/traceOpacity write through per vertex.
-    const traceArr = new Float32Array(header.n_points * 4);
-    for (let p = 0; p < header.n_points; p++) {
-      traceArr[p * 4] = DEFAULT_TRACE_COLOR[0];
-      traceArr[p * 4 + 1] = DEFAULT_TRACE_COLOR[1];
-      traceArr[p * 4 + 2] = DEFAULT_TRACE_COLOR[2];
-      traceArr[p * 4 + 3] = 1;
+    const rep = env.rep;
+    const positionAttr = env.positionAttr;
+    const visible = rep.state.visible;
+    const seg = traceSegments(header.polylines);
+    if (seg.count === 0) return null;
+
+    // -- the tube pass: one instanced trapezoid per segment ------------------
+    const tubeGeo = new THREE.InstancedBufferGeometry();
+    tubeGeo.instanceCount = seg.count;
+    tubeGeo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(4 * 3), 3));
+    tubeGeo.setAttribute("aCorner", new THREE.Float32BufferAttribute([-1, 0, 1, 0, -1, 1, 1, 1], 2));
+    tubeGeo.setIndex([0, 2, 1, 1, 2, 3]);
+    const iStart = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
+    const iEnd = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
+    const iVisible = new THREE.InstancedBufferAttribute(new Float32Array(seg.count).fill(1), 1);
+    const iRadiusA = new THREE.InstancedBufferAttribute(new Float32Array(seg.count), 1);
+    const iRadiusB = new THREE.InstancedBufferAttribute(new Float32Array(seg.count), 1);
+    const iColorA = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 4), 4);
+    const iColorB = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 4), 4);
+    for (const a of [iStart, iEnd, iVisible, iRadiusA, iRadiusB, iColorA, iColorB]) {
+      a.setUsage(THREE.DynamicDrawUsage);
     }
-    const traceColAttr = new THREE.BufferAttribute(traceArr, 4);
-    traceColAttr.setUsage(THREE.DynamicDrawUsage);
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", env.positionAttr);
-    geo.setAttribute("color", traceColAttr);
-    const index = new THREE.BufferAttribute(new Uint32Array(polySegs.length * 2), 1);
-    index.setUsage(THREE.DynamicDrawUsage);
-    geo.setIndex(index);
-    geo.setDrawRange(0, 0);
-    const rebuildPoly = (): void => {
-      const arr = index.array as Uint32Array;
-      let k = 0;
-      for (const [a, b] of polySegs) {
-        if (visible[a] > 0.5 && visible[b] > 0.5) {
-          arr[k++] = a;
-          arr[k++] = b;
+    tubeGeo.setAttribute("iStart", iStart);
+    tubeGeo.setAttribute("iEnd", iEnd);
+    tubeGeo.setAttribute("iVisible", iVisible);
+    tubeGeo.setAttribute("iRadiusA", iRadiusA);
+    tubeGeo.setAttribute("iRadiusB", iRadiusB);
+    tubeGeo.setAttribute("iColorA", iColorA);
+    tubeGeo.setAttribute("iColorB", iColorB);
+
+    // vertex → incident (segment, end) slots, built once from the SAME
+    // traversal's arrays, so a trace write touches exactly its segments' end
+    // slots (the edge pass's edgesOfPoint discipline).
+    const endsOfVertex: { k: number; b: boolean }[][] =
+      Array.from({ length: env.traceVertices.length }, () => []);
+    for (let k = 0; k < seg.count; k++) {
+      endsOfVertex[seg.vertexA[k]].push({ k, b: false });
+      endsOfVertex[seg.vertexB[k]].push({ k, b: true });
+    }
+
+    // -- the joint pass: indexed impostor points over the shared positions ---
+    // Per-point write-through attributes (the old per-point-slot pattern):
+    // only path-vertex slots are ever indexed/drawn. aSize here is the
+    // VERTEX's traceSize, not the point-pass size — a joint is trace
+    // geometry, silhouette-matched to the tube it caps.
+    const n = header.n_points;
+    const jColor = new Float32Array(n * 3);
+    const jSize = new Float32Array(n);
+    const jOpacity = new Float32Array(n);
+    const jVisible = new Float32Array(n);
+    const jColorAttr = new THREE.BufferAttribute(jColor, 3);
+    const jSizeAttr = new THREE.BufferAttribute(jSize, 1);
+    const jOpacityAttr = new THREE.BufferAttribute(jOpacity, 1);
+    const jVisibleAttr = new THREE.BufferAttribute(jVisible, 1);
+    for (const a of [jColorAttr, jSizeAttr, jOpacityAttr, jVisibleAttr]) {
+      a.setUsage(THREE.DynamicDrawUsage);
+    }
+    // joints exist only where segments do (a single-vertex path draws
+    // nothing, exactly like the line pass it replaces); deduped point ids
+    const jointPoints = [...new Set<number>([...seg.pointA, ...seg.pointB])];
+    const jointGeo = new THREE.BufferGeometry();
+    jointGeo.setAttribute("position", positionAttr);
+    jointGeo.setAttribute("aColor", jColorAttr);
+    jointGeo.setAttribute("aSize", jSizeAttr);
+    jointGeo.setAttribute("aVisible", jVisibleAttr);
+    jointGeo.setAttribute("aOpacity", jOpacityAttr);
+    jointGeo.setIndex(jointPoints);
+
+    /** re-copy the per-instance segment endpoints from the current frame —
+     * frame-flip cadence, a linear copy and nothing else. */
+    const fillTubeEnds = (): void => {
+      const pos = positionAttr.array as Float32Array;
+      const s = iStart.array as Float32Array;
+      const t = iEnd.array as Float32Array;
+      for (let k = 0; k < seg.count; k++) {
+        const a3 = seg.pointA[k] * 3;
+        const b3 = seg.pointB[k] * 3;
+        const k3 = k * 3;
+        s[k3] = pos[a3]; s[k3 + 1] = pos[a3 + 1]; s[k3 + 2] = pos[a3 + 2];
+        t[k3] = pos[b3]; t[k3 + 1] = pos[b3 + 1]; t[k3 + 2] = pos[b3 + 2];
+      }
+      iStart.needsUpdate = true;
+      iEnd.needsUpdate = true;
+    };
+    /** write tube end RGBA + joint RGBA for these VERTEX ids from
+     * rep.state.traceColor/traceOpacity — write cadence only, called after
+     * every write AND every undo restore (the state is already correct;
+     * this just syncs the GPU). */
+    const fillTraceColors = (ids?: readonly number[]): void => {
+      const tc = rep.state.traceColor;
+      const to = rep.state.traceOpacity;
+      const cA = iColorA.array as Float32Array;
+      const cB = iColorB.array as Float32Array;
+      const write = (v: number): void => {
+        const r = tc[v * 3], g = tc[v * 3 + 1], b = tc[v * 3 + 2], a = to[v];
+        for (const e of endsOfVertex[v]) {
+          const at = e.k * 4;
+          const arr = e.b ? cB : cA;
+          arr[at] = r; arr[at + 1] = g; arr[at + 2] = b; arr[at + 3] = a;
         }
-      }
-      index.needsUpdate = true;
-      geo.setDrawRange(0, k);
+        const p = env.traceVertices[v];
+        jColor[p * 3] = r; jColor[p * 3 + 1] = g; jColor[p * 3 + 2] = b;
+        jOpacity[p] = a;
+      };
+      if (ids) for (const v of ids) write(v);
+      else for (let v = 0; v < env.traceVertices.length; v++) write(v);
+      iColorA.needsUpdate = true;
+      iColorB.needsUpdate = true;
+      jColorAttr.needsUpdate = true;
+      jOpacityAttr.needsUpdate = true;
     };
-    /** Write the pass's RGBA slots for these vertex ids from the CURRENT rep
-     * state (traceColor + traceOpacity) — the one write-through both trace
-     * axes share, called after every write AND after every undo restore (the
-     * state is already correct; this just syncs the GPU). */
-    const syncTraceSlots = (ids: readonly number[]): void => {
-      const gpu = traceColAttr.array as Float32Array;
-      const tc = env.rep.state.traceColor;
-      const to = env.rep.state.traceOpacity;
-      for (const v of ids) {
-        const p = env.traceVertices[v] * 4;
-        gpu[p] = tc[v * 3];
-        gpu[p + 1] = tc[v * 3 + 1];
-        gpu[p + 2] = tc[v * 3 + 2];
-        gpu[p + 3] = to[v];
-      }
-      traceColAttr.needsUpdate = true;
+    /** write tube end radii + joint radii for these VERTEX ids from
+     * rep.state.traceSize — THE hook that makes the stored widths draw. */
+    const fillTraceSizes = (ids?: readonly number[]): void => {
+      const tsz = rep.state.traceSize;
+      const rA = iRadiusA.array as Float32Array;
+      const rB = iRadiusB.array as Float32Array;
+      const write = (v: number): void => {
+        for (const e of endsOfVertex[v]) (e.b ? rB : rA)[e.k] = tsz[v];
+        jSize[env.traceVertices[v]] = tsz[v];
+      };
+      if (ids) for (const v of ids) write(v);
+      else for (let v = 0; v < env.traceVertices.length; v++) write(v);
+      iRadiusA.needsUpdate = true;
+      iRadiusB.needsUpdate = true;
+      jSizeAttr.needsUpdate = true;
     };
+    /** segment: both endpoint POINTS visible (parity with the line pass's
+     * index rebuild). Joint: its point visible AND ≥1 incident segment
+     * visible — a fully-hidden path leaves no floating joint balls. */
+    const fillTraceVisibility = (): void => {
+      const vis = iVisible.array as Float32Array;
+      for (let k = 0; k < seg.count; k++) {
+        vis[k] = visible[seg.pointA[k]] > 0.5 && visible[seg.pointB[k]] > 0.5 ? 1 : 0;
+      }
+      for (let v = 0; v < env.traceVertices.length; v++) {
+        let any = 0;
+        for (const e of endsOfVertex[v]) if (vis[e.k] > 0.5) { any = 1; break; }
+        jVisible[env.traceVertices[v]] =
+          visible[env.traceVertices[v]] > 0.5 && any ? 1 : 0;
+      }
+      iVisible.needsUpdate = true;
+      jVisibleAttr.needsUpdate = true;
+    };
+    fillTraceColors(); // seed the GPU arrays with the base look
+    fillTraceSizes();
+    fillTraceVisibility();
+
+    const tubes = new THREE.Mesh(tubeGeo, env.materials.traces);
+    // joints REUSE the base impostor material — same variant, same shading
+    const joints = new THREE.Points(jointGeo, env.materials.points);
     return {
-      objects: [new THREE.LineSegments(geo, env.materials.traces)],
-      onRepWrite: { traceColor: syncTraceSlots, traceOpacity: syncTraceSlots },
-      onVisibilityChange: rebuildPoly,
+      objects: [tubes, joints],
+      onFrameFlip: fillTubeEnds,
+      onRepWrite: {
+        traceColor: fillTraceColors,
+        traceOpacity: fillTraceColors, // one RGBA interleave serves both axes
+        traceSize: fillTraceSizes,     // the formerly-silent channel DRAWS
+      },
+      onVisibilityChange: fillTraceVisibility,
+      attrVersions: () => ({
+        start: iStart.version,
+        radius: iRadiusA.version,
+        color: iColorA.version,
+      }),
     };
   },
 };
@@ -910,7 +1034,7 @@ async function main(): Promise<void> {
   // compositing depends on it): points, edges, polylines, then the overlays.
   registry.add(spherePointsGenerator, passEnv);
   const edgePass = registry.add(edgeTubesGenerator, passEnv);
-  registry.add(polylineLinesGenerator, passEnv);
+  const tracePass = registry.add(traceTubesGenerator, passEnv);
   const pendingPass = registry.add(pendingOverlayGenerator, passEnv)!;
   const flashPass = registry.add(focusFlashGenerator, passEnv)!;
   const scene = new THREE.Scene();
@@ -2130,6 +2254,11 @@ async function main(): Promise<void> {
         ? edgePass.attrVersions
         : (): { start: number; sizeA: number; sizeB: number } =>
             ({ start: 0, sizeA: 0, sizeB: 0 }),
+      // trace-tube cadence seam: a flip bumps start, never radius/color
+      traceAttrVersions: tracePass
+        ? tracePass.attrVersions
+        : (): { start: number; radius: number; color: number } =>
+            ({ start: 0, radius: 0, color: 0 }),
       geometryMaterials: materials,
       depthVariant,
       sizing: {

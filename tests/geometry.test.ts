@@ -19,6 +19,7 @@ import {
   edgeSegmentIndices,
   polylineSegmentIndices,
   sceneExtent,
+  traceSegments,
   worldPerSizeUnit,
 } from "../webview/geometry.ts";
 import { decodeFrameChunk, parseHeader, validateFrameChunk } from "../contract/contract.ts";
@@ -36,6 +37,40 @@ test("polylineSegmentIndices expands paths into segment pairs", () => {
   const out = polylineSegmentIndices([[3, 5, 9], [7, 2]]);
   assert.deepEqual([...out], [3, 5, 5, 9, 7, 2]);
   assert.deepEqual([...polylineSegmentIndices([])], []);
+});
+
+test("traceSegments: segments and the flat vertex axis come from ONE walk and agree", () => {
+  const polylines = [[3, 5, 9], [7, 2]];
+  const seg = traceSegments(polylines);
+  const flat = polylines.flat(); // the trace buffers' vertex axis
+  assert.equal(seg.count, 3);
+  assert.deepEqual([...seg.vertexA], [0, 1, 3]);
+  assert.deepEqual([...seg.vertexB], [1, 2, 4]);
+  assert.deepEqual([...seg.pointA], [3, 5, 7]);
+  assert.deepEqual([...seg.pointB], [5, 9, 2]);
+  // the load-bearing identity: a segment's vertex id resolves to exactly the
+  // point id it carries — buffer order and instance order cannot disagree
+  for (let k = 0; k < seg.count; k++) {
+    assert.equal(flat[seg.vertexA[k]], seg.pointA[k]);
+    assert.equal(flat[seg.vertexB[k]], seg.pointB[k]);
+  }
+  // segment ENDPOINT pairs match the index-pair expansion the line pass used
+  assert.deepEqual(
+    [...polylineSegmentIndices(polylines)],
+    [...seg.count ? Array.from({ length: seg.count }, (_, k) => [seg.pointA[k], seg.pointB[k]]).flat() : []],
+  );
+});
+
+test("traceSegments: empty and single-vertex paths contribute nothing", () => {
+  assert.equal(traceSegments([]).count, 0);
+  assert.equal(traceSegments([[4]]).count, 0);
+  const seg = traceSegments([[4], [1, 8], []]);
+  assert.equal(seg.count, 1);
+  // the singleton path still occupies vertex id 0 on the flat axis
+  assert.deepEqual([...seg.vertexA], [1]);
+  assert.deepEqual([...seg.vertexB], [2]);
+  assert.deepEqual([...seg.pointA], [1]);
+  assert.deepEqual([...seg.pointB], [8]);
 });
 
 test("computeBounds finds per-axis min/max", () => {

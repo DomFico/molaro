@@ -219,6 +219,85 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
   };
 }
 
+/**
+ * Trace (path) tube pass: instanced camera-facing quads, ONE PER PATH
+ * SEGMENT, with PER-END radius and RGBA — varying interpolation gives the
+ * along-segment gradient, the trace buffers' pinned per-vertex semantics
+ * (a tapered wall when the two end radii differ). Unlike the edge tube
+ * there is NO trim/extension/cap machinery: the joint SPHERE drawn at each
+ * path vertex has exactly the tube's end radius (both are traceSize at
+ * that vertex, world-scaled by the same k), so the sphere caps every end
+ * and owns every bend — the wall spans exactly [0, len], and the
+ * equal-radius coincident-cap z-fight the edge shader documents cannot
+ * arise (the sphere renders the end zone; the wall simply stops).
+ * Instance slot ≡ segment order from the ONE traceSegments traversal
+ * (geometry.ts) — never compacted; hidden/degenerate/zero instances
+ * collapse out of the clip volume here. Depth follows the ONE global
+ * variant through the same define as every geometry pass.
+ */
+export function traceTubeShaders(): { vertex: string; fragment: string } {
+  return {
+    vertex: `
+      // static per-corner: x = side (-1 | +1 across width), y = end (0 | 1)
+      attribute vec2 aCorner;
+      attribute vec3 iStart; attribute vec3 iEnd;
+      attribute float iVisible;
+      attribute float iRadiusA; attribute float iRadiusB;
+      attribute vec4 iColorA; attribute vec4 iColorB;
+      uniform float uWorldPerSize;
+      varying vec4 vColor; varying float vU;
+      varying float vRadius; varying float vDepth;
+      void main() {
+        float rA = uWorldPerSize * iRadiusA;
+        float rB = uWorldPerSize * iRadiusB;
+        vec3 mvA = (modelViewMatrix * vec4(iStart, 1.0)).xyz;
+        vec3 mvB = (modelViewMatrix * vec4(iEnd, 1.0)).xyz;
+        vec3 seg = mvB - mvA;
+        float len = length(seg);
+        // collapsed instances (hidden segment, degenerate length, both end
+        // radii zero) leave the clip volume — no fragments, no depth writes
+        if (iVisible < 0.5 || len * len < 1e-16 || max(rA, rB) <= 0.0) {
+          gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+          vColor = vec4(0.0); vU = 0.0; vRadius = 0.0; vDepth = 1.0;
+          return;
+        }
+        vec3 axis = seg / len;
+        vec3 toCam = -normalize(mvA + mvB); // midpoint view direction
+        vec3 s = cross(axis, toCam);
+        if (dot(s, s) < 1e-12) s = cross(axis, vec3(0.0, 1.0, 0.0));
+        if (dot(s, s) < 1e-12) s = cross(axis, vec3(1.0, 0.0, 0.0));
+        vec3 side = normalize(s);
+        // a trapezoid: each end's corners sit at that end's own radius, so
+        // the wall tapers linearly between the two vertex sizes
+        bool atB = aCorner.y > 0.5;
+        float r = atB ? rB : rA;
+        vec3 pos = (atB ? mvB : mvA) + side * (aCorner.x * r);
+        vColor = atB ? iColorB : iColorA;
+        vU = aCorner.x;
+        vRadius = r;
+        vDepth = -(atB ? mvB.z : mvA.z);
+        gl_Position = projectionMatrix * vec4(pos, 1.0);
+      }`,
+    fragment: `
+      uniform vec2 uProjZ;
+      ${IMPOSTOR_SHADE_CHUNK}
+      varying vec4 vColor; varying float vU;
+      varying float vRadius; varying float vDepth;
+      void main() {
+        // zero alpha and a zero LOCAL radius (a tapered cone's tip) are
+        // literal zeros: no fragment survives, no depth is written
+        if (vColor.a <= 0.0 || vRadius <= 0.0) discard;
+        float nz = sqrt(max(1.0 - vU * vU, 0.0));
+      #ifdef ${IMPOSTOR_DEPTH_DEFINE}
+        // analytic surface depth: nearer than the axis by nz*radius
+        float zView = -(vDepth - vRadius * nz);
+        gl_FragDepth = 0.5 * ((uProjZ.x * zView + uProjZ.y) / -zView) + 0.5;
+      #endif
+        gl_FragColor = vec4(impostorShade(vColor.rgb, nz), vColor.a);
+      }`,
+  };
+}
+
 /** Pending-target overlay: flat tint (depthTest off — a highlight, not
  * geometry) silhouette-matched to the base sphere: same aSize, same chunk,
  * same radius. uFloor keeps the breathing pulse from fading out fully. */

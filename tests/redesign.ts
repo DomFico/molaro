@@ -5820,6 +5820,173 @@ async function S34(): Promise<void> {
   }
 }
 
+// ============ S36: trace tubes — traceSize finally draws ======================
+// The path-tube generator: each path segment a tapered tube (per-end radius/
+// RGBA from the trace buffers), each path vertex a joint sphere of the tube's
+// end radius. The HEADLINE is the assertion traceSize could never pass before:
+// writing it moves pixels, scoped to the addressed vertices. Run once per
+// depth variant (the switch is global). Cadence is asserted via the
+// traceAttrVersions seam: a flip bumps endpoints only; a width write bumps
+// radii only — the silent failure class this scenario exists to guard.
+async function S36(): Promise<void> {
+  for (const variant of [2, 1] as const) {
+    console.log(`S36 — trace tubes, depth variant ${variant}`);
+    await withDriver(async (d) => {
+      // deterministic frame-0 positions (see S32's note)
+      await d.evaluate(`${V}.player.seek(0)`);
+      await sleep(400);
+      const cmd = (text: string) =>
+        d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+      // same load-immunity rule as S32/S34: never capture before fresh frames
+      const snap = async (tag: string): Promise<string> => {
+        await d.evaluate(`(async () => {
+          for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r));
+        })()`);
+        return d.captureB64(`${REPORT}/S36_v${variant}_${tag}.png`);
+      };
+      // strict per-color pixel counts over the canvas (S34's classifiers —
+      // gradient midzones between red and blue vertices count as neither)
+      const counts = (b64: string) =>
+        d.evaluate<{ red: number; blue: number }>(`(async () => {
+          const app = document.getElementById('app').getBoundingClientRect();
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+          const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+            Math.round(app.width), Math.round(app.height) - 60).data;
+          let red = 0, blue = 0;
+          for (let i = 0; i < px.length; i += 4) {
+            if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) red++;
+            if (px[i+2] > px[i] + 80 && px[i+2] > px[i+1] + 80) blue++;
+          }
+          return { red, blue };
+        })()`);
+
+      // occlusion isolation: fade points and edges to LITERAL zero (opacity ⊥
+      // hide — everything still resolves), so trace pixels own the canvas
+      await cmd("pointopacity all 0");
+      await cmd("bondopacity all 0");
+      // two DISJOINT vertex sets: the categories' subgroups interleave along
+      // the path, so red and blue vertices alternate with gradient segments
+      // between them — the classifiers count only the pure ends
+      await cmd("colortrace alpha red");
+      await cmd("colortrace beta blue");
+      await sleep(250);
+      const thin = await counts(await snap("thin"));
+      check("S36: default-width tubes draw (colored trace visible at width 1)",
+        thin.red > 20 && thin.blue > 20, JSON.stringify(thin));
+
+      // THE HEADLINE — the assertion traceSize has never been able to pass:
+      // writing it grows the addressed vertices' pixels...
+      await d.evaluate(`void (window.__tsz = Float32Array.from(${V}.rep.state.traceSize))`);
+      await cmd("tracesize alpha 5");
+      await sleep(250);
+      const fat = await counts(await snap("fat"));
+      check("S36: tracesize <target> 5 — the stored width finally MOVES PIXELS",
+        fat.red >= 1.5 * thin.red && fat.red - thin.red > 300, `red ${thin.red} → ${fat.red}`);
+      // The write is SCOPED at the state level: exactly the target's active
+      // vertices changed, every other slot byte-flat (the honest scoping
+      // claim). Pixels near the OTHER category's vertices legitimately grow a
+      // little: a segment shared between a widened and a thin vertex TAPERS
+      // (per-end radius interpolation — the width twin of the pinned color
+      // gradient), so the thin end widens partway along. Bound it, and demand
+      // it stays far below the addressed growth.
+      const scope = await d.evaluate<{ match: boolean; changed: number }>(`(()=>{
+        const v = ${V}; const ts = v.rep.state.traceSize; const s = window.__tsz;
+        const active = new Set(v.debug.resolvePoints("alpha").map((p) => v.hierarchy.subgroupOfPoint(p)));
+        let changed = 0; let match = true;
+        for (let i = 0; i < ts.length; i++) {
+          const wrote = ts[i] !== s[i];
+          if (wrote) changed++;
+          if (wrote !== active.has(v.hierarchy.subgroupOfPoint(v.traceVertices[i]))) match = false;
+        }
+        return { match, changed };
+      })()`);
+      check("S36: …the write is SCOPED — exactly the target's vertex slots changed, others byte-flat",
+        scope.match && scope.changed === 4, JSON.stringify(scope));
+      check("S36: …the neighbor category's pixels grow only by the shared segments' taper (bounded, ≪ the addressed growth)",
+        fat.blue <= thin.blue * 1.6 + 5 && (fat.blue - thin.blue) * 4 < (fat.red - thin.red),
+        `blue ${thin.blue} → ${fat.blue}; red ${thin.red} → ${fat.red}`);
+
+      // width 0 renders NOTHING — tubes and joints both — while the points
+      // still resolve (size ⊥ hide, exactly the buffer's existing semantics)
+      await cmd("tracesize all 0");
+      await sleep(250);
+      const zero = await counts(await snap("zero"));
+      const resolved = await d.evaluate<number>(`${V}.debug.resolvePoints("alpha").length`);
+      check("S36: tracesize 0 renders NOTHING (tubes and joint spheres alike)",
+        zero.red === 0 && zero.blue === 0, JSON.stringify(zero));
+      check("S36: …while the vertices' points still resolve (size ⊥ hide)",
+        resolved === 400, `resolved=${resolved}`);
+      await d.ctrlZ(); // back to alpha 5 / beta 1
+      await sleep(250);
+      const undone = await counts(await snap("undo_width"));
+      check("S36: one Ctrl+Z restores the prior widths (fat red AND thin blue)",
+        undone.red >= 0.8 * fat.red && undone.blue >= 0.5 * thin.blue,
+        `red=${undone.red} vs ${fat.red}; blue=${undone.blue} vs ${thin.blue}`);
+
+      // frame-flip integrity: tubes follow streamed positions
+      await d.evaluate(`${V}.player.seek(75)`);
+      await sleep(500);
+      const flipped = await counts(await snap("frame75"));
+      check("S36: tubes track the displayed frame (seek keeps them drawn)",
+        flipped.red >= 0.5 * fat.red, `red@frame75=${flipped.red} vs fat=${fat.red}`);
+      await d.evaluate(`${V}.player.seek(0)`);
+      await sleep(500);
+
+      // visibility: hiding the vertices' points collapses their segments AND
+      // their joints (no floating joint balls); show restores
+      await cmd("hide alpha");
+      await sleep(250);
+      const hidden = await counts(await snap("hidden"));
+      check("S36: hiding the vertices hides their tubes and joints (hidden wins)",
+        hidden.red === 0, `red=${hidden.red}`);
+      await cmd("show alpha");
+      await sleep(250);
+      const shown = await counts(await snap("shown"));
+      check("S36: show restores the tubes",
+        shown.red >= 0.8 * fat.red, `red=${shown.red} vs fat=${fat.red}`);
+
+      // ---- THE CADENCE ASSERTION (the silent class this brief guards) ----
+      // playback is paused; a seek causes exactly frame flips, a width write
+      // causes exactly a radius upload — the two must never cross.
+      const v0 = await d.evaluate<{ start: number; radius: number; color: number }>(
+        `${V}.traceAttrVersions()`);
+      await d.evaluate(`${V}.player.seek(30)`);
+      await sleep(400);
+      const v1 = await d.evaluate<{ start: number; radius: number; color: number }>(
+        `${V}.traceAttrVersions()`);
+      check("S36: a frame flip re-uploads ONLY the segment endpoints",
+        v1.start > v0.start && v1.radius === v0.radius && v1.color === v0.color,
+        JSON.stringify({ v0, v1 }));
+      await cmd("tracesize gamma 2");
+      await sleep(150);
+      const v2 = await d.evaluate<{ start: number; radius: number; color: number }>(
+        `${V}.traceAttrVersions()`);
+      check("S36: a width write re-uploads ONLY the radii (never rides the flip loop)",
+        v2.radius > v1.radius && v2.start === v1.start && v2.color === v1.color,
+        JSON.stringify({ v1, v2 }));
+
+      // full unwind: pristine buffers AND pristine pixels
+      const depth = await d.evaluate<number>(`${V}.model.undoDepth`);
+      for (let i = 0; i < depth; i++) await d.ctrlZ();
+      await sleep(400);
+      const pristine = await counts(await snap("pristine"));
+      const buffersPristine = await d.evaluate<boolean>(`(()=>{
+        const s = ${V}.rep.state;
+        for (let v = 0; v < s.traceSize.length; v++) {
+          if (s.traceSize[v] !== 1 || s.traceOpacity[v] !== 1) return false;
+        }
+        return true;
+      })()`);
+      check("S36: full unwind restores pristine trace buffers AND pixels",
+        buffersPristine && pristine.red === 0 && pristine.blue === 0,
+        `buffers=${buffersPristine} ${JSON.stringify(pristine)}`);
+    }, 1180, 780, `/?depthVariant=${variant}`);
+  }
+}
+
 // ====== S35: the code that RUNS is the code that was APPROVED ================
 // The gated write_mod tool previews a mod's FULL source to the human, who
 // approves it. A re-push under an existing name must therefore REPLACE the code
@@ -5919,7 +6086,7 @@ async function S35(): Promise<void> {
 
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36 };
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];

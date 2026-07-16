@@ -16,6 +16,7 @@ import {
   focusFlashShaders,
   highlightShaders,
   pointShaders,
+  traceTubeShaders,
 } from "../webview/shaders.ts";
 
 const ALL_VERTEX = {
@@ -110,16 +111,55 @@ test("junction: covered ends discard, exposed ends grow a hemispherical cap", ()
   assert.equal(f.split("gl_FragDepth").length - 1, 1);
 });
 
+// -- trace tube pass (the path-tube generator) ---------------------------------
+
+test("trace tube: PER-END radii derive from THE shared k uniform, no local scale", () => {
+  const v = traceTubeShaders().vertex;
+  assert.match(v, /uniform float uWorldPerSize;/);
+  assert.match(v, /uWorldPerSize \* iRadiusA/);
+  assert.match(v, /uWorldPerSize \* iRadiusB/);
+  assert.doesNotMatch(v, /uPixelRatio|uSize\b/);
+});
+
+test("trace tube: ONE depth write behind the same define; same uProjZ row", () => {
+  const f = traceTubeShaders().fragment;
+  assert.match(f, new RegExp(`#ifdef ${IMPOSTOR_DEPTH_DEFINE}`));
+  assert.equal(f.split("gl_FragDepth").length - 1, 1);
+  assert.match(f, /uProjZ/);
+});
+
+test("trace tube: collapsed instances leave the clip volume; literal zeros discard", () => {
+  const { vertex, fragment } = traceTubeShaders();
+  assert.match(vertex, /iVisible < 0\.5 \|\| len \* len < 1e-16 \|\| max\(rA, rB\) <= 0\.0/);
+  assert.match(fragment, /vColor\.a <= 0\.0 \|\| vRadius <= 0\.0/);
+});
+
+test("trace tube: NO trim/extension/cap machinery — the joint sphere owns the ends", () => {
+  const { vertex, fragment } = traceTubeShaders();
+  // no endpoint-size attributes, no trim distance, no quad extension, no cap zone
+  assert.doesNotMatch(vertex, /iSizeA|iSizeB|dA|dB/);
+  assert.doesNotMatch(fragment, /vDA|vDB|q2|startEnd/);
+});
+
+test("trace tube: per-end RGBA varies — the along-segment gradient is interpolation", () => {
+  const v = traceTubeShaders().vertex;
+  assert.match(v, /attribute vec4 iColorA; attribute vec4 iColorB;/);
+  assert.match(v, /vColor = atB \? iColorB : iColorA;/);
+});
+
 // -- the shared shading chunk (B′ §3) -----------------------------------------
 
-test("shading is single-sourced: both fragments embed THE shade chunk, no local formula", () => {
+test("shading is single-sourced: every geometry fragment embeds THE shade chunk, no local formula", () => {
   const pf = pointShaders().fragment;
   const ef = edgeTubeShaders().fragment;
+  const tf = traceTubeShaders().fragment;
   assert.equal(pf.split(IMPOSTOR_SHADE_CHUNK).length - 1, 1, "point fragment embeds the chunk once");
-  assert.equal(ef.split(IMPOSTOR_SHADE_CHUNK).length - 1, 1, "tube fragment embeds the chunk once");
+  assert.equal(ef.split(IMPOSTOR_SHADE_CHUNK).length - 1, 1, "edge fragment embeds the chunk once");
+  assert.equal(tf.split(IMPOSTOR_SHADE_CHUNK).length - 1, 1, "trace fragment embeds the chunk once");
   assert.match(pf, /impostorShade\(vColor, nz\)/);
   assert.match(ef, /impostorShade\(vColor\.rgb, nz\)/);
-  for (const [name, src] of [["point", pf], ["tube", ef]] as const) {
+  assert.match(tf, /impostorShade\(vColor\.rgb, nz\)/);
+  for (const [name, src] of [["point", pf], ["edge", ef], ["trace", tf]] as const) {
     assert.equal(src.split("0.55 + 0.45").length - 1, 1,
       `${name}: the lambert term exists ONLY inside the chunk`);
   }
