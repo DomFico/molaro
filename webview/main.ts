@@ -34,7 +34,11 @@ import {
 } from "../contract/contract.ts";
 import { StreamingPlayer } from "./playback.ts";
 import { Transport, rejectIfErrorPayload } from "./transport.ts";
-import { DEFAULT_TRACE_COLOR, RepresentationLayer } from "./representation.ts";
+import {
+  DEFAULT_TRACE_COLOR,
+  RepresentationLayer,
+  type RepresentationState,
+} from "./representation.ts";
 import { bulkCategories, buildTree } from "./classification.ts";
 import { flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
@@ -126,49 +130,126 @@ function setStatus(text: string): void {
   if (el) el.textContent = text;
 }
 
-interface SceneParts {
-  scene: THREE.Scene;
+// ---------------------------------------------------------------------------
+// The shape-generator registry: the pattern the scene build always followed,
+// made explicit — each draw pass is a geometry, a material off the shared
+// machinery, and a set of fill hooks keyed by update cadence. A ShapeGenerator
+// BUILDS one pass; the registry owns cadence dispatch. This is a
+// formalization only: the five built-in generators below draw exactly what
+// the former inline passes drew, and nothing outside this module registers
+// one (a shape is data plus declared channel reads, never code shipped in).
+//
+// The cadence contract, structural rather than conventional:
+//   onFrameFlip        every displayed-frame flip. LINEAR COPY ONLY — the
+//                      hook receives no ids and no channel, so representation-
+//                      derived work physically cannot ride the flip loop.
+//   onRepWrite         representation writes, keyed by CHANNEL, scoped to the
+//                      written ids. Dispatch is by channel — never by owning
+//                      pass — which makes cross-pass subscriptions
+//                      first-class: the edge pass subscribes to the POINT
+//                      `size` channel for the junction trim.
+//   onVisibilityChange hide/show recomputation (index trims, instance masks).
+//   onRenderTick       per rendered frame — overlay pulse envelopes only.
+//
+// The host keeps owning: the per-point attribute OBJECTS and the ONE repAttrs
+// re-upload list, refreshPoints, selection/flash bookkeeping, and the flash
+// envelope (host state) — those reach a pass only through the typed fields a
+// concrete builder returns beyond BuiltPass (materials, version counters).
+// ---------------------------------------------------------------------------
+
+/** A representation buffer name — the key space onRepWrite dispatches on. */
+type RepChannel = keyof RepresentationState;
+
+/** Everything a generator may draw on — handed in, never reached for. */
+interface PassEnv {
+  header: Header;
+  rep: RepresentationLayer;
+  /** THE shared position attribute (repointed at a chunk subarray per flip). */
   positionAttr: THREE.BufferAttribute;
-  drawables: THREE.Object3D[];
-  /** color/size/visible attributes to re-upload when the representation changes. */
-  repAttrs: THREE.BufferAttribute[];
-  /** per-point pending-target flag (0/1) drawn by the green overlay. */
-  selAttr: THREE.BufferAttribute;
-  /** per-point focus-flash flag (0/1) drawn by the yellow pulse pass. */
-  flashAttr: THREE.BufferAttribute;
-  /** shared visibility attribute (also the overlays'), re-uploaded on hide/show. */
-  visibleAttr: THREE.BufferAttribute;
-  /** the overlays' materials (uStrength driven per-frame by the render loop). */
-  selMat: THREE.ShaderMaterial;
-  flashMat: THREE.ShaderMaterial;
-  /** rebuild edge visibility + polyline draw ranges from current visibility. */
-  rebuildLines: () => void;
-  /** re-copy the edge pass's per-instance endpoints from the current frame —
-   * every displayed-frame flip needs it (6 floats per edge, unconditional). */
-  fillEdges: () => void;
-  /** write iColor (RGBA) for these edge ids from rep.state.edgeColor +
-   * edgeOpacity — representation-write cadence only (undefined = all). */
-  fillEdgeColors: (ids?: readonly number[]) => void;
-  /** write iRadius for these edge ids from rep.state.edgeSize — the hook
-   * that makes stored widths DRAW (undefined = all). */
-  fillEdgeSizes: (ids?: readonly number[]) => void;
-  /** write the endpoint-sphere sizes (iSizeA/iSizeB) for every edge incident
-   * to these POINTS from rep.state.size — the junction-trim inputs, at
-   * rep-write cadence like iRadius (undefined = all points). */
-  fillEdgeEndSizes: (pointIds?: readonly number[]) => void;
-  /** attribute upload versions (test seam): proves the cadence split — a
-   * frame flip bumps `start` and must never bump `sizeA`/`sizeB`. */
-  edgeAttrVersions: () => { start: number; sizeA: number; sizeB: number };
-  /** the polyline pass's per-POINT color attribute (null without polylines);
-   * colorTrace writes rep.state.traceColor through to the vertex slots. */
-  traceColAttr: THREE.BufferAttribute | null;
-  /** the three GEOMETRY materials (C2: depthWrite pinned explicitly on every
-   * one; the E2E suite asserts it via the seam so the override can't lapse). */
-  geometryMaterials: {
+  /** Host-owned per-point attribute OBJECTS wrapping the rep buffers and the
+   * overlay flag arrays. Shared as OBJECTS across passes on purpose: the
+   * overlays bind the same aSize/aVisible the base pass uploads, so
+   * silhouette-matching and hidden-wins are identities, not conventions. */
+  pointAttrs: {
+    color: THREE.BufferAttribute;
+    size: THREE.BufferAttribute;
+    visible: THREE.BufferAttribute;
+    opacity: THREE.BufferAttribute;
+    /** pending-target flag (0/1) drawn by the green overlay. */
+    sel: THREE.BufferAttribute;
+    /** focus-flash flag (0/1) drawn by the yellow pulse pass. */
+    flash: THREE.BufferAttribute;
+  };
+  /** Polyline vertex → point index, header order (computed once in main). */
+  traceVertices: readonly number[];
+  /** The shared sizing uniform OBJECTS (one instance each — values can't fork). */
+  sizing: SizingUniforms;
+  depthVariant: 1 | 2;
+  /** The three GEOMETRY materials from the ONE factory — the only consumer of
+   * the depth-variant switch; depthWrite pinned explicitly there (C2). */
+  materials: {
     points: THREE.ShaderMaterial;
     edges: THREE.ShaderMaterial;
     traces: THREE.LineBasicMaterial;
   };
+}
+
+/** One built draw pass: its scene objects plus its cadence hooks. */
+interface BuiltPass {
+  /** Added to the scene in registration order (draw order IS scene order —
+   * the naive-transparency compositing depends on it). */
+  objects: THREE.Object3D[];
+  onFrameFlip?: () => void;
+  onRepWrite?: Partial<Record<RepChannel, (ids: readonly number[]) => void>>;
+  onVisibilityChange?: () => void;
+  onRenderTick?: (nowMs: number) => void;
+}
+
+interface ShapeGenerator<B extends BuiltPass = BuiltPass> {
+  name: string;
+  /** The element kind the pass draws over; "overlay" marks the two built-in
+   * decorations (never pluggable — they exist to shadow the point pass). */
+  elementKind: "point" | "edge" | "vertex" | "overlay";
+  /** Build the pass, or null when the dataset has no such elements. */
+  build(env: PassEnv): B | null;
+}
+
+/** Construction + cadence dispatch. Nothing else — state stays with the host
+ * or inside the built passes' closures. */
+class ShapeRegistry {
+  private readonly built: BuiltPass[] = [];
+  private readonly sceneObjects: THREE.Object3D[] = [];
+
+  /** Build and adopt a generator's pass. Returns the CONCRETE pass (typed
+   * wider than BuiltPass) so the host keeps handles a builder exports. */
+  add<B extends BuiltPass>(gen: ShapeGenerator<B>, env: PassEnv): B | null {
+    const pass = gen.build(env);
+    if (!pass) return null;
+    this.built.push(pass);
+    this.sceneObjects.push(...pass.objects);
+    return pass;
+  }
+
+  /** Every pass's scene objects, in registration order. */
+  objects(): readonly THREE.Object3D[] {
+    return this.sceneObjects;
+  }
+
+  frameFlip(): void {
+    for (const p of this.built) p.onFrameFlip?.();
+  }
+
+  repWrite(channel: RepChannel, ids: readonly number[]): void {
+    for (const p of this.built) p.onRepWrite?.[channel]?.(ids);
+  }
+
+  visibilityChange(): void {
+    for (const p of this.built) p.onVisibilityChange?.();
+  }
+
+  renderTick(nowMs: number): void {
+    for (const p of this.built) p.onRenderTick?.(nowMs);
+  }
 }
 
 /** The two sizing uniforms every sprite pass shares (ONE object each — the
@@ -320,67 +401,62 @@ function polylineSegmentPairs(polylines: number[][]): [number, number][] {
   return out;
 }
 
-function buildScene(
-  header: Header,
-  rep: RepresentationLayer,
-  selArray: Float32Array,
-  flashArray: Float32Array,
-  sizing: SizingUniforms,
-  depthVariant: 1 | 2,
-): SceneParts {
-  const scene = new THREE.Scene();
-  scene.background = new THREE.Color(BACKGROUND);
-  const n = header.n_points;
-  const mats = makeGeometryMaterials(sizing, depthVariant);
+// ---------------------------------------------------------------------------
+// The five built-in generators — the former inline passes, verbatim behind
+// the ShapeGenerator interface.
+// ---------------------------------------------------------------------------
 
-  const positionAttr = new THREE.BufferAttribute(new Float32Array(n * 3), 3);
-  positionAttr.setUsage(THREE.DynamicDrawUsage);
-  const colorAttr = new THREE.BufferAttribute(rep.state.color, 3);
-  const sizeAttr = new THREE.BufferAttribute(rep.state.size, 1);
-  const visibleAttr = new THREE.BufferAttribute(rep.state.visible, 1);
-  const opacityAttr = new THREE.BufferAttribute(rep.state.opacity, 1);
-  const selAttr = new THREE.BufferAttribute(selArray, 1);
-  const flashAttr = new THREE.BufferAttribute(flashArray, 1);
-  for (const a of [colorAttr, sizeAttr, visibleAttr, opacityAttr, selAttr, flashAttr]) {
-    a.setUsage(THREE.DynamicDrawUsage);
-  }
+/** Base points: ray-traced sphere impostors reading the per-point buffers.
+ * The per-point attributes ride the host's ONE repAttrs re-upload list, so
+ * the write hooks only flag rep.dirty — the render loop uploads. */
+const spherePointsGenerator: ShapeGenerator = {
+  name: "sphere-points",
+  elementKind: "point",
+  build(env): BuiltPass {
+    const pointsGeo = new THREE.BufferGeometry();
+    pointsGeo.setAttribute("position", env.positionAttr);
+    pointsGeo.setAttribute("aColor", env.pointAttrs.color);
+    pointsGeo.setAttribute("aSize", env.pointAttrs.size);
+    pointsGeo.setAttribute("aVisible", env.pointAttrs.visible);
+    pointsGeo.setAttribute("aOpacity", env.pointAttrs.opacity);
+    const repDirty = (): void => {
+      env.rep.dirty = true; // the render loop re-uploads every per-point attribute
+    };
+    return {
+      objects: [new THREE.Points(pointsGeo, env.materials.points)],
+      onRepWrite: { color: repDirty, size: repDirty, opacity: repDirty },
+    };
+  },
+};
 
-  const drawables: THREE.Object3D[] = [];
-
-  const pointsGeo = new THREE.BufferGeometry();
-  pointsGeo.setAttribute("position", positionAttr);
-  pointsGeo.setAttribute("aColor", colorAttr);
-  pointsGeo.setAttribute("aSize", sizeAttr);
-  pointsGeo.setAttribute("aVisible", visibleAttr);
-  pointsGeo.setAttribute("aOpacity", opacityAttr);
-  drawables.push(new THREE.Points(pointsGeo, mats.points));
-
-  // Edges + polylines, trimmed to segments whose BOTH endpoints are visible
-  // (so a hidden category also hides its edge hairball).
-  //
-  // The EDGE pass is INSTANCED tube geometry: one static camera-facing quad
-  // (4 corner vertices, 6 indices) instanced per edge, expanded in the
-  // vertex shader to a world-radius billboard. Per-instance attributes are
-  // split by UPDATE CADENCE — endpoints (iStart/iEnd) re-copy on every
-  // displayed-frame flip (6 floats/edge, unconditional, branch-free);
-  // visibility (iVisible) only on hide/show; radius (iRadius) only on
-  // bondsize writes; RGBA (iColor) only on colorbonds/bondopacity writes.
-  // Instance slot ≡ HEADER EDGE INDEX, never compacted: the GPU arrays
-  // share the rep buffers' element order with no remap anywhere (hidden or
-  // zero-radius edges collapse in the vertex shader instead). Blending
-  // stays NAIVE (transparent: true, no depth sorting) — the recorded
-  // follow-up covers overlap compositing.
-  const visible = rep.state.visible;
-  const nEdges = header.edges.length;
-  let fillEdges: () => void = () => {};
-  let fillEdgeColors: (ids?: readonly number[]) => void = () => {};
-  let fillEdgeSizes: (ids?: readonly number[]) => void = () => {};
-  let fillEdgeVisibility: () => void = () => {};
-  let fillEdgeEndSizes: (pointIds?: readonly number[]) => void = () => {};
-  let edgeAttrVersions: () => { start: number; sizeA: number; sizeB: number } = () => ({
-    start: 0, sizeA: 0, sizeB: 0,
-  });
-  if (nEdges > 0) {
+/** The EDGE pass is INSTANCED tube geometry: one static camera-facing quad
+ * (4 corner vertices, 6 indices) instanced per edge, expanded in the
+ * vertex shader to a world-radius billboard. Per-instance attributes are
+ * split by UPDATE CADENCE — endpoints (iStart/iEnd) re-copy on every
+ * displayed-frame flip (6 floats/edge, unconditional, branch-free);
+ * visibility (iVisible) only on hide/show; radius (iRadius) only on
+ * bondsize writes; RGBA (iColor) only on colorbonds/bondopacity writes.
+ * Instance slot ≡ HEADER EDGE INDEX, never compacted: the GPU arrays
+ * share the rep buffers' element order with no remap anywhere (hidden or
+ * zero-radius edges collapse in the vertex shader instead). Blending
+ * stays NAIVE (transparent: true, no depth sorting) — the recorded
+ * follow-up covers overlap compositing. Edges drop when EITHER endpoint
+ * hides (so a hidden category also hides its edge hairball). */
+interface EdgeTubePass extends BuiltPass {
+  /** attribute upload versions (test seam): proves the cadence split — a
+   * frame flip bumps `start` and must never bump `sizeA`/`sizeB`. */
+  attrVersions(): { start: number; sizeA: number; sizeB: number };
+}
+const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
+  name: "edge-tubes",
+  elementKind: "edge",
+  build(env): EdgeTubePass | null {
+    const header = env.header;
+    const rep = env.rep;
+    const positionAttr = env.positionAttr;
+    const visible = rep.state.visible;
+    const nEdges = header.edges.length;
+    if (nEdges === 0) return null;
     const edgeGeo = new THREE.InstancedBufferGeometry();
     edgeGeo.instanceCount = nEdges;
     // static base quad: aCorner = (side ∈ {-1,+1}, end ∈ {0,1}); position is
@@ -407,7 +483,6 @@ function buildScene(
     edgeGeo.setAttribute("iColor", iColor);
     edgeGeo.setAttribute("iSizeA", iSizeA);
     edgeGeo.setAttribute("iSizeB", iSizeB);
-    drawables.push(new THREE.Mesh(edgeGeo, mats.edges));
     // point → incident edge ids, built once (header order both sides), so a
     // pointsize write touches exactly its edges' end-size slots
     const edgesOfPoint: number[][] = Array.from({ length: header.n_points }, () => []);
@@ -415,7 +490,9 @@ function buildScene(
       edgesOfPoint[header.edges[e][0]].push(e);
       edgesOfPoint[header.edges[e][1]].push(e);
     }
-    fillEdges = (): void => {
+    /** re-copy the per-instance endpoints from the current frame — every
+     * displayed-frame flip needs it (6 floats per edge, unconditional). */
+    const fillEdges = (): void => {
       const pos = positionAttr.array as Float32Array;
       const s = iStart.array as Float32Array;
       const t = iEnd.array as Float32Array;
@@ -429,7 +506,9 @@ function buildScene(
       iStart.needsUpdate = true;
       iEnd.needsUpdate = true;
     };
-    fillEdgeColors = (ids?: readonly number[]): void => {
+    /** write iColor (RGBA) for these edge ids from rep.state.edgeColor +
+     * edgeOpacity — representation-write cadence only (undefined = all). */
+    const fillEdgeColors = (ids?: readonly number[]): void => {
       const ec = rep.state.edgeColor;
       const eo = rep.state.edgeOpacity;
       const c = iColor.array as Float32Array;
@@ -443,21 +522,26 @@ function buildScene(
       else for (let e = 0; e < nEdges; e++) write(e);
       iColor.needsUpdate = true;
     };
-    fillEdgeSizes = (ids?: readonly number[]): void => {
+    /** write iRadius for these edge ids from rep.state.edgeSize — the hook
+     * that makes stored widths DRAW (undefined = all). */
+    const fillEdgeSizes = (ids?: readonly number[]): void => {
       const es = rep.state.edgeSize;
       const r = iRadius.array as Float32Array;
       if (ids) for (const e of ids) r[e] = es[e];
       else for (let e = 0; e < nEdges; e++) r[e] = es[e];
       iRadius.needsUpdate = true;
     };
-    fillEdgeVisibility = (): void => {
+    const fillEdgeVisibility = (): void => {
       const v = iVisible.array as Float32Array;
       for (let e = 0; e < nEdges; e++) {
         v[e] = visible[header.edges[e][0]] > 0.5 && visible[header.edges[e][1]] > 0.5 ? 1 : 0;
       }
       iVisible.needsUpdate = true;
     };
-    fillEdgeEndSizes = (pointIds?: readonly number[]): void => {
+    /** write the endpoint-sphere sizes (iSizeA/iSizeB) for every edge incident
+     * to these POINTS from rep.state.size — the junction-trim inputs, at
+     * rep-write cadence like iRadius (undefined = all points). */
+    const fillEdgeEndSizes = (pointIds?: readonly number[]): void => {
       const size = rep.state.size;
       const a = iSizeA.array as Float32Array;
       const b = iSizeB.array as Float32Array;
@@ -470,29 +554,51 @@ function buildScene(
       iSizeA.needsUpdate = true;
       iSizeB.needsUpdate = true;
     };
-    edgeAttrVersions = () => ({
-      start: iStart.version,
-      sizeA: iSizeA.version,
-      sizeB: iSizeB.version,
-    });
     fillEdgeColors(); // seed the GPU arrays with the base look
     fillEdgeSizes();
     fillEdgeEndSizes();
-  }
-  // The polyline pass keeps the ZERO-COPY indexed form (positions ride the
-  // shared attribute; nothing re-copies on frame flip). Per-VERTEX color
-  // arrives as a per-POINT attribute — indexed draws fetch attributes by
-  // point index — sized 3N with only the polyline-vertex slots ever drawn;
-  // colorTrace writes it through from rep.state.traceColor on color-write
-  // only. The GPU interpolates between vertex colors along a segment, so a
-  // colored↔uncolored boundary renders as a gradient — intended, inherent
-  // to per-vertex color. (If two polyline vertices ever shared one point
-  // index, the drawn color of that point would be the later write; state
-  // stays per-vertex regardless. The producer's vertices are distinct.)
-  const polySegs = polylineSegmentPairs(header.polylines);
-  let traceColAttr: THREE.BufferAttribute | null = null;
-  let rebuildPoly: () => void = () => {};
-  if (polySegs.length > 0) {
+    return {
+      objects: [new THREE.Mesh(edgeGeo, env.materials.edges)],
+      onFrameFlip: fillEdges,
+      onRepWrite: {
+        edgeColor: fillEdgeColors,
+        edgeOpacity: fillEdgeColors, // one RGBA interleave serves both axes
+        edgeSize: fillEdgeSizes,
+        // the junction trim reads POINT sizes — a cross-pass subscription,
+        // at rep-write cadence (never the flip loop)
+        size: fillEdgeEndSizes,
+      },
+      onVisibilityChange: fillEdgeVisibility,
+      attrVersions: () => ({
+        start: iStart.version,
+        sizeA: iSizeA.version,
+        sizeB: iSizeB.version,
+      }),
+    };
+  },
+};
+
+/** The polyline pass keeps the ZERO-COPY indexed form (positions ride the
+ * shared attribute; nothing re-copies on frame flip — no onFrameFlip hook).
+ * Per-VERTEX color arrives as a per-POINT attribute — indexed draws fetch
+ * attributes by point index — sized 4N with only the polyline-vertex slots
+ * ever drawn; the trace write hook writes it through from
+ * rep.state.traceColor/traceOpacity on write only. The GPU interpolates
+ * between vertex colors along a segment, so a colored↔uncolored boundary
+ * renders as a gradient — intended, inherent to per-vertex color. (If two
+ * polyline vertices ever shared one point index, the drawn color of that
+ * point would be the later write; state stays per-vertex regardless. The
+ * producer's vertices are distinct.) Segments drop when EITHER endpoint
+ * hides. traceSize has NO subscriber anywhere — state-only pending the
+ * vertex tube pass (the recorded follow-up). */
+const polylineLinesGenerator: ShapeGenerator = {
+  name: "polyline-lines",
+  elementKind: "vertex",
+  build(env): BuiltPass | null {
+    const header = env.header;
+    const visible = env.rep.state.visible;
+    const polySegs = polylineSegmentPairs(header.polylines);
+    if (polySegs.length === 0) return null;
     // itemSize 4: RGBA per point slot (alpha = the 4th component, like the
     // edge pass); rep.state.traceColor/traceOpacity write through per vertex.
     const traceArr = new Float32Array(header.n_points * 4);
@@ -502,17 +608,16 @@ function buildScene(
       traceArr[p * 4 + 2] = DEFAULT_TRACE_COLOR[2];
       traceArr[p * 4 + 3] = 1;
     }
-    traceColAttr = new THREE.BufferAttribute(traceArr, 4);
+    const traceColAttr = new THREE.BufferAttribute(traceArr, 4);
     traceColAttr.setUsage(THREE.DynamicDrawUsage);
     const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", positionAttr);
+    geo.setAttribute("position", env.positionAttr);
     geo.setAttribute("color", traceColAttr);
     const index = new THREE.BufferAttribute(new Uint32Array(polySegs.length * 2), 1);
     index.setUsage(THREE.DynamicDrawUsage);
     geo.setIndex(index);
     geo.setDrawRange(0, 0);
-    drawables.push(new THREE.LineSegments(geo, mats.traces));
-    rebuildPoly = () => {
+    const rebuildPoly = (): void => {
       const arr = index.array as Uint32Array;
       let k = 0;
       for (const [a, b] of polySegs) {
@@ -524,64 +629,86 @@ function buildScene(
       index.needsUpdate = true;
       geo.setDrawRange(0, k);
     };
-  }
-  const rebuildLines = (): void => {
-    fillEdgeVisibility();
-    rebuildPoly();
-  };
+    /** Write the pass's RGBA slots for these vertex ids from the CURRENT rep
+     * state (traceColor + traceOpacity) — the one write-through both trace
+     * axes share, called after every write AND after every undo restore (the
+     * state is already correct; this just syncs the GPU). */
+    const syncTraceSlots = (ids: readonly number[]): void => {
+      const gpu = traceColAttr.array as Float32Array;
+      const tc = env.rep.state.traceColor;
+      const to = env.rep.state.traceOpacity;
+      for (const v of ids) {
+        const p = env.traceVertices[v] * 4;
+        gpu[p] = tc[v * 3];
+        gpu[p + 1] = tc[v * 3 + 1];
+        gpu[p + 2] = tc[v * 3 + 2];
+        gpu[p + 3] = to[v];
+      }
+      traceColAttr.needsUpdate = true;
+    };
+    return {
+      objects: [new THREE.LineSegments(geo, env.materials.traces)],
+      onRepWrite: { traceColor: syncTraceSlots, traceOpacity: syncTraceSlots },
+      onVisibilityChange: rebuildPoly,
+    };
+  },
+};
 
-  // Pending-target overlay: a second Points pass over all N, gently pulsing
-  // targeted & visible points to a light green. Both overlays bind aSize as
-  // the SAME BufferAttribute object the base pass uses (already in repAttrs
-  // — one upload path, no second list to keep in sync), so the tint always
-  // covers exactly the base sphere's silhouette at any stored size.
-  const selMat = highlightMaterial(sizing, SELECTION_COLOR, 0.45);
-  const overlayGeo = new THREE.BufferGeometry();
-  overlayGeo.setAttribute("position", positionAttr);
-  overlayGeo.setAttribute("aVisible", visibleAttr);
-  overlayGeo.setAttribute("aSize", sizeAttr);
-  overlayGeo.setAttribute("aFlag", selAttr);
-  const overlay = new THREE.Points(overlayGeo, selMat);
-  overlay.renderOrder = 11;
-  drawables.push(overlay);
-
-  // Focus flash: a brief light-yellow tint over the last-focused region.
-  const flashMat = focusFlashMaterial(sizing, FOCUS_COLOR, SELECTION_COLOR);
-  const flashGeo = new THREE.BufferGeometry();
-  flashGeo.setAttribute("position", positionAttr);
-  flashGeo.setAttribute("aVisible", visibleAttr);
-  flashGeo.setAttribute("aSize", sizeAttr);
-  flashGeo.setAttribute("aFlag", flashAttr);
-  flashGeo.setAttribute("aSel", selAttr); // blend the flash on selected points
-  const flash = new THREE.Points(flashGeo, flashMat);
-  flash.renderOrder = 12;
-  drawables.push(flash);
-
-  for (const obj of drawables) {
-    obj.frustumCulled = false;
-    obj.visible = false; // until the first frame is displayed
-    scene.add(obj);
-  }
-  return {
-    scene,
-    positionAttr,
-    drawables,
-    repAttrs: [colorAttr, sizeAttr, visibleAttr, opacityAttr],
-    selAttr,
-    flashAttr,
-    visibleAttr,
-    selMat,
-    flashMat,
-    rebuildLines,
-    fillEdges,
-    fillEdgeColors,
-    fillEdgeSizes,
-    fillEdgeEndSizes,
-    edgeAttrVersions,
-    traceColAttr,
-    geometryMaterials: mats,
-  };
+/** The two overlays export their material so host features (the flash
+ * envelope, the debug seam) can drive/read uStrength. */
+interface OverlayPass extends BuiltPass {
+  material: THREE.ShaderMaterial;
 }
+
+/** Pending-target overlay: a second Points pass over all N, gently pulsing
+ * targeted & visible points to a light green. Both overlays bind aSize/
+ * aVisible as the SAME BufferAttribute objects the base pass uses (already
+ * in the host's repAttrs — one upload path, no second list to keep in
+ * sync), so the tint always covers exactly the base sphere's silhouette at
+ * any stored size. The breathing pulse is stateless uniform math, so it
+ * rides the pass's own render tick. */
+const pendingOverlayGenerator: ShapeGenerator<OverlayPass> = {
+  name: "pending-overlay",
+  elementKind: "overlay",
+  build(env): OverlayPass {
+    const selMat = highlightMaterial(env.sizing, SELECTION_COLOR, 0.45);
+    const overlayGeo = new THREE.BufferGeometry();
+    overlayGeo.setAttribute("position", env.positionAttr);
+    overlayGeo.setAttribute("aVisible", env.pointAttrs.visible);
+    overlayGeo.setAttribute("aSize", env.pointAttrs.size);
+    overlayGeo.setAttribute("aFlag", env.pointAttrs.sel);
+    const overlay = new THREE.Points(overlayGeo, selMat);
+    overlay.renderOrder = 11;
+    return {
+      objects: [overlay],
+      onRenderTick: (now) => {
+        selMat.uniforms.uStrength.value =
+          0.5 + 0.5 * Math.sin((now / GREEN_PULSE_PERIOD_MS) * Math.PI * 2);
+      },
+      material: selMat,
+    };
+  },
+};
+
+/** Focus flash: a brief light-yellow tint over the last-focused region. The
+ * swell-and-fade envelope stays HOST-side (it owns the flashStart/flashPts/
+ * flashArray bookkeeping) and drives this pass through the material handle. */
+const focusFlashGenerator: ShapeGenerator<OverlayPass> = {
+  name: "focus-flash",
+  elementKind: "overlay",
+  build(env): OverlayPass {
+    const flashMat = focusFlashMaterial(env.sizing, FOCUS_COLOR, SELECTION_COLOR);
+    const flashGeo = new THREE.BufferGeometry();
+    flashGeo.setAttribute("position", env.positionAttr);
+    flashGeo.setAttribute("aVisible", env.pointAttrs.visible);
+    flashGeo.setAttribute("aSize", env.pointAttrs.size);
+    flashGeo.setAttribute("aFlag", env.pointAttrs.flash);
+    flashGeo.setAttribute("aSel", env.pointAttrs.sel); // blend the flash on selected points
+    const flash = new THREE.Points(flashGeo, flashMat);
+    flash.renderOrder = 12;
+    return { objects: [flash], material: flashMat };
+  },
+};
 
 /** Initial framing. `box`/`size` come from the ONE sceneExtent call in
  * main() — the same S the impostor scale `k` derives from. Pixel parity is a
@@ -750,8 +877,49 @@ async function main(): Promise<void> {
     uProjZ: { value: new THREE.Vector2() },
   };
 
-  const parts = buildScene(header, rep, selArray, flashArray, sizing, depthVariant);
-  const { scene, positionAttr, drawables, repAttrs } = parts;
+  // -- scene assembly through the shape-generator registry ----------------------
+  // Host-owned attribute OBJECTS: the shared position attribute plus the
+  // per-point attributes wrapping the rep buffers and the overlay flags.
+  // Shared as objects so the overlays silhouette-match the base pass by
+  // identity, and so the ONE repAttrs list below covers every consumer.
+  const positionAttr = new THREE.BufferAttribute(new Float32Array(header.n_points * 3), 3);
+  const pointAttrs: PassEnv["pointAttrs"] = {
+    color: new THREE.BufferAttribute(rep.state.color, 3),
+    size: new THREE.BufferAttribute(rep.state.size, 1),
+    visible: new THREE.BufferAttribute(rep.state.visible, 1),
+    opacity: new THREE.BufferAttribute(rep.state.opacity, 1),
+    sel: new THREE.BufferAttribute(selArray, 1),
+    flash: new THREE.BufferAttribute(flashArray, 1),
+  };
+  for (const a of [
+    positionAttr, pointAttrs.color, pointAttrs.size, pointAttrs.visible,
+    pointAttrs.opacity, pointAttrs.sel, pointAttrs.flash,
+  ]) {
+    a.setUsage(THREE.DynamicDrawUsage);
+  }
+  /** THE re-upload list: color/size/visible/opacity re-upload when the render
+   * loop sees rep.dirty. Any new per-point attribute joins it in the same
+   * edit that binds it, or it silently stops reaching the GPU. */
+  const repAttrs = [pointAttrs.color, pointAttrs.size, pointAttrs.visible, pointAttrs.opacity];
+  const materials = makeGeometryMaterials(sizing, depthVariant);
+  const passEnv: PassEnv = {
+    header, rep, positionAttr, pointAttrs, traceVertices, sizing, depthVariant, materials,
+  };
+  const registry = new ShapeRegistry();
+  // Registration order IS draw order (scene order — the naive-transparency
+  // compositing depends on it): points, edges, polylines, then the overlays.
+  registry.add(spherePointsGenerator, passEnv);
+  const edgePass = registry.add(edgeTubesGenerator, passEnv);
+  registry.add(polylineLinesGenerator, passEnv);
+  const pendingPass = registry.add(pendingOverlayGenerator, passEnv)!;
+  const flashPass = registry.add(focusFlashGenerator, passEnv)!;
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(BACKGROUND);
+  for (const obj of registry.objects()) {
+    obj.frustumCulled = false;
+    obj.visible = false; // until the first frame is displayed
+    scene.add(obj);
+  }
   const { camera, target, size: sceneSize } = frameCamera(
     scale.box,
     scale.S,
@@ -896,7 +1064,7 @@ async function main(): Promise<void> {
     }
     if (visChanged) {
       rep.dirty = true; // re-upload visible; the overlays share it
-      parts.rebuildLines();
+      registry.visibilityChange();
     }
   };
 
@@ -929,7 +1097,7 @@ async function main(): Promise<void> {
     for (const p of indices) flashArray[p] = 1;
     flashPts = indices;
     flashStart = performance.now();
-    parts.flashAttr.needsUpdate = true;
+    pointAttrs.flash.needsUpdate = true;
   };
   const focusEntry = (e: Entry): void => focusPoints(hierarchy.pointsOf(e));
 
@@ -1308,26 +1476,6 @@ async function main(): Promise<void> {
     refreshPoints(arr);
     return arr.length;
   };
-  /** Write the polyline pass's RGBA slots for these vertex ids from the
-   * CURRENT rep state (traceColor + traceOpacity) — the one write-through
-   * both trace axes share, called after every write AND after every undo
-   * restore (the state is already correct; this just syncs the GPU). */
-  const syncTraceSlots = (ids: readonly number[]): void => {
-    const attr = parts.traceColAttr;
-    if (!attr) return;
-    const gpu = attr.array as Float32Array;
-    const tc = rep.state.traceColor;
-    const to = rep.state.traceOpacity;
-    for (const v of ids) {
-      const p = traceVertices[v] * 4;
-      gpu[p] = tc[v * 3];
-      gpu[p + 1] = tc[v * 3 + 1];
-      gpu[p + 2] = tc[v * 3 + 2];
-      gpu[p + 3] = to[v];
-    }
-    attr.needsUpdate = true;
-  };
-
   /** THE ONE WRITER FACTORY for the whole representation grid — all nine
    * primitive×axis closures (color stride 3; size/opacity stride 1) flow
    * through it: capture the prior values of exactly the written elements,
@@ -1335,12 +1483,13 @@ async function main(): Promise<void> {
    * the restoration through recordOp — one stroke per invocation, undo
    * returning no point indices (representation state is not selection
    * state, so nothing model-derived needs recomputing). Axis ⊥ hide and
-   * axis ⊥ axis: a writer touches ONLY its own buffer. Render hooks:
-   * per-point buffers re-upload through rep.dirty; edge color/opacity
-   * write through fillEdgeColors and edge SIZE through fillEdgeSizes (the
-   * instanced tube pass — write-cadence only, ids-scoped); trace
-   * color/opacity write through syncTraceSlots; trace SIZE is state-only
-   * pending increment C's tube pass, so its onWrite is a no-op. */
+   * axis ⊥ axis: a writer touches ONLY its own buffer. The render hook is
+   * the registry's write cadence: registry.repWrite(channel, ids) reaches
+   * every pass subscribed to that channel — the point pass flags rep.dirty,
+   * the edge pass fills its ids-scoped instance slots (including the
+   * junction end-sizes on the POINT size channel), the polyline pass writes
+   * its RGBA slots through; trace SIZE has no subscriber anywhere —
+   * state-only pending the vertex tube pass. */
   const writeRepValues = (
     buf: Float32Array,
     stride: number,
@@ -1390,29 +1539,23 @@ async function main(): Promise<void> {
   ) =>
     (ids: readonly number[], values: readonly number[]): number =>
       writeRepValues(buf, stride, onWrite, ids, (i, c) => values[i * stride + c]);
-  const repDirty = (): void => {
-    rep.dirty = true; // the render loop re-uploads every per-point attribute
-  };
-  const edgeColorHook = (ids: readonly number[]): void => parts.fillEdgeColors(ids);
-  const edgeSizeHook = (ids: readonly number[]): void => parts.fillEdgeSizes(ids);
-  /** point-size writes also feed the junction trim: the tube shader needs
-   * each endpoint's sphere size (rep-write cadence — never the flip loop). */
-  const pointSizeHook = (ids: readonly number[]): void => {
-    repDirty();
-    parts.fillEdgeEndSizes(ids);
-  };
-  const colorPoints = makeRepWriter(rep.state.color, 3, repDirty);
-  const colorPointsEach = makeRepEachWriter(rep.state.color, 3, repDirty);
-  const sizePointsEach = makeRepEachWriter(rep.state.size, 1, pointSizeHook);
-  const opacityPointsEach = makeRepEachWriter(rep.state.opacity, 1, repDirty);
-  const sizePoints = makeRepWriter(rep.state.size, 1, pointSizeHook);
-  const opacityPoints = makeRepWriter(rep.state.opacity, 1, repDirty);
-  const colorEdges = makeRepWriter(rep.state.edgeColor, 3, edgeColorHook);
-  const sizeEdges = makeRepWriter(rep.state.edgeSize, 1, edgeSizeHook);
-  const opacityEdges = makeRepWriter(rep.state.edgeOpacity, 1, edgeColorHook);
-  const colorTrace = makeRepWriter(rep.state.traceColor, 3, syncTraceSlots);
-  const sizeTrace = makeRepWriter(rep.state.traceSize, 1, () => {});
-  const opacityTrace = makeRepWriter(rep.state.traceOpacity, 1, syncTraceSlots);
+  /** onWrite for the writer factory: dispatch to every pass subscribed to
+   * this channel (the registry's write cadence). The undo closure calls the
+   * same hook, so GPU sync on undo is automatic. */
+  const repWrite = (channel: RepChannel) =>
+    (ids: readonly number[]): void => registry.repWrite(channel, ids);
+  const colorPoints = makeRepWriter(rep.state.color, 3, repWrite("color"));
+  const colorPointsEach = makeRepEachWriter(rep.state.color, 3, repWrite("color"));
+  const sizePointsEach = makeRepEachWriter(rep.state.size, 1, repWrite("size"));
+  const opacityPointsEach = makeRepEachWriter(rep.state.opacity, 1, repWrite("opacity"));
+  const sizePoints = makeRepWriter(rep.state.size, 1, repWrite("size"));
+  const opacityPoints = makeRepWriter(rep.state.opacity, 1, repWrite("opacity"));
+  const colorEdges = makeRepWriter(rep.state.edgeColor, 3, repWrite("edgeColor"));
+  const sizeEdges = makeRepWriter(rep.state.edgeSize, 1, repWrite("edgeSize"));
+  const opacityEdges = makeRepWriter(rep.state.edgeOpacity, 1, repWrite("edgeOpacity"));
+  const colorTrace = makeRepWriter(rep.state.traceColor, 3, repWrite("traceColor"));
+  const sizeTrace = makeRepWriter(rep.state.traceSize, 1, repWrite("traceSize"));
+  const opacityTrace = makeRepWriter(rep.state.traceOpacity, 1, repWrite("traceOpacity"));
 
   // -- Type A (analysis) mods: the async producer round-trip ---------------------
   // Follow-up terminal lines ride the commandResult channel — the terminal
@@ -1675,7 +1818,7 @@ async function main(): Promise<void> {
   for (const c of bulkCategories(header)) {
     model.seed(header.categories[c] ?? `category ${c}`, [{ level: "category", id: c }]);
   }
-  parts.rebuildLines();
+  registry.visibilityChange();
 
   // -- picking + 3D gestures + keys --------------------------------------------
   const vp = new THREE.Matrix4();
@@ -1889,8 +2032,8 @@ async function main(): Promise<void> {
     const offset = (f - chunk.start) * header.n_points * 3;
     positionAttr.array = chunk.positions.subarray(offset, offset + header.n_points * 3);
     positionAttr.needsUpdate = true;
-    parts.fillEdges(); // the instanced edge pass owns copies of these endpoints
-    if (displayedFrame === -1) for (const obj of drawables) obj.visible = true;
+    registry.frameFlip(); // the instanced edge pass owns copies of these endpoints
+    if (displayedFrame === -1) for (const obj of registry.objects()) obj.visible = true;
     displayedFrame = f;
     shownSinceMark++;
     // the ONE displayed-frame flip point — playback and scrub both land here,
@@ -1913,23 +2056,23 @@ async function main(): Promise<void> {
       rep.dirty = false;
     }
     if (selDirty) {
-      parts.selAttr.needsUpdate = true;
+      pointAttrs.sel.needsUpdate = true;
       selDirty = false;
     }
     // Pulse strengths are CPU-computed each frame (shaders stay time-free):
-    // the pending green breathes; the yellow focus flash swells and fades once.
-    parts.selMat.uniforms.uStrength.value =
-      0.5 + 0.5 * Math.sin((now / GREEN_PULSE_PERIOD_MS) * Math.PI * 2);
+    // the pending green breathes via its pass's render tick; the yellow focus
+    // flash swells and fades once, driven here (host state) via the handle.
+    registry.renderTick(now);
     if (flashStart >= 0) {
       const k = (now - flashStart) / FOCUS_FLASH_MS;
       if (k >= 1) {
         flashStart = -1;
-        parts.flashMat.uniforms.uStrength.value = 0;
+        flashPass.material.uniforms.uStrength.value = 0;
         for (const p of flashPts) flashArray[p] = 0;
         flashPts = [];
-        parts.flashAttr.needsUpdate = true;
+        pointAttrs.flash.needsUpdate = true;
       } else {
-        parts.flashMat.uniforms.uStrength.value = Math.pow(Math.sin(Math.PI * k), 1.35);
+        flashPass.material.uniforms.uStrength.value = Math.pow(Math.sin(Math.PI * k), 1.35);
       }
     }
     if (!isStatic && now - fpsMarkMs >= 1000) {
@@ -1983,8 +2126,11 @@ async function main(): Promise<void> {
       // materials; sizing lets pixel tests predict projected extents;
       // edgeAttrVersions proves the cadence split (flips never re-upload
       // the junction end-sizes).
-      edgeAttrVersions: parts.edgeAttrVersions,
-      geometryMaterials: parts.geometryMaterials,
+      edgeAttrVersions: edgePass
+        ? edgePass.attrVersions
+        : (): { start: number; sizeA: number; sizeB: number } =>
+            ({ start: 0, sizeA: 0, sizeB: 0 }),
+      geometryMaterials: materials,
       depthVariant,
       sizing: {
         worldPerSize: sizing.uWorldPerSize.value,
@@ -2054,8 +2200,8 @@ async function main(): Promise<void> {
         },
         /** current overlay pulse strengths (green target, yellow flash). */
         pulse: (): { sel: number; flash: number } => ({
-          sel: parts.selMat.uniforms.uStrength.value as number,
-          flash: parts.flashMat.uniforms.uStrength.value as number,
+          sel: pendingPass.material.uniforms.uStrength.value as number,
+          flash: flashPass.material.uniforms.uStrength.value as number,
         }),
         /** project point `idx` (current frame) to client px — for E2E clicks.
          * `depth` = camera-space view depth (positive in front), so pixel
