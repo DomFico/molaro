@@ -30,7 +30,39 @@ async function poll(fn: () => Promise<boolean>, tries = 100, gapMs = 100): Promi
   }
   return false;
 }
+// -- E2E_PROFILE=1: dynamic wall-clock accounting (harness-speed work) --------
+// Tallies every sleep by CALL SITE (the textual sleep total wildly understates
+// helper-multiplied sleeps) and every CDP send by method with its await time.
+// Prints a summary on process exit, to stderr. Inert without the env flag.
+const PROFILE = process.env.E2E_PROFILE === "1";
+const profSleeps = new Map<string, { n: number; ms: number }>();
+const profSends = new Map<string, { n: number; ms: number }>();
+function profBump(map: Map<string, { n: number; ms: number }>, key: string, ms: number): void {
+  const e = map.get(key) ?? { n: 0, ms: 0 };
+  e.n++;
+  e.ms += ms;
+  map.set(key, e);
+}
+if (PROFILE) {
+  process.on("exit", () => {
+    const dump = (title: string, map: Map<string, { n: number; ms: number }>): void => {
+      let total = 0;
+      for (const e of map.values()) total += e.ms;
+      console.error(`\n== E2E_PROFILE: ${title} — total ${Math.round(total)}ms ==`);
+      const rows = [...map.entries()].sort((a, b) => b[1].ms - a[1].ms).slice(0, 25);
+      for (const [k, e] of rows) console.error(`  ${Math.round(e.ms)}ms  (${e.n}x)  ${k}`);
+    };
+    dump("sleep by call site", profSleeps);
+    dump("CDP send by method", profSends);
+  });
+}
+
 export function sleep(ms: number): Promise<void> {
+  if (PROFILE) {
+    // frame 0 = Error, 1 = this fn, 2 = the caller — the site we attribute to
+    const site = (new Error().stack ?? "").split("\n")[2]?.trim().replace(/^at\s+/, "") ?? "?";
+    profBump(profSleeps, site, ms);
+  }
   return new Promise((r) => setTimeout(r, ms));
 }
 
@@ -182,7 +214,11 @@ export class E2EDriver {
   }
 
   send(method: string, params: object): Promise<any> {
-    return this.raw({ sessionId: this.sessionId, method, params });
+    if (!PROFILE) return this.raw({ sessionId: this.sessionId, method, params });
+    const t0 = performance.now();
+    return this.raw({ sessionId: this.sessionId, method, params }).finally(() => {
+      profBump(profSends, method, performance.now() - t0);
+    });
   }
 
   on(method: string, fn: (params: any) => void): void {

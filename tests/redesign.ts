@@ -117,7 +117,10 @@ const greenCount = (d: E2EDriver, b64: string) =>
     return n;
   })()`);
 
-let portBase = 9000;
+// E2E_PORT_BASE: the parallel runner gives each scenario CHILD PROCESS its own
+// disjoint port range (bridge [base, base+8], CDP [base+300, base+308] per the
+// +300 relation below). A plain serial run keeps the historical 9000 base.
+let portBase = Number(process.env.E2E_PORT_BASE ?? 9000);
 async function withDriver(
   fn: (d: E2EDriver) => Promise<void>,
   w = 1180,
@@ -6087,6 +6090,18 @@ async function S35(): Promise<void> {
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
 const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36 };
+/** Scenarios that must run ALONE, never in a parallel pool, with the reason.
+ * S29 mutates the real repo .molaro/mods (delete + finally-restore) while
+ * EVERY scenario's bridge scans that directory at boot. Single-sourced here,
+ * next to the scenario table; the parallel runner reads it via --list. */
+const EXCLUSIVE: readonly string[] = ["S29"];
+// Machine-readable listing for the parallel runner (tests/run_e2e.ts): the
+// ONE source of scenario names + exclusivity — the runner never hardcodes
+// them (the "two lists that must agree" defect class).
+if (which[0] === "--list") {
+  console.log(JSON.stringify({ scenarios: Object.keys(all), exclusive: EXCLUSIVE }));
+  process.exit(0);
+}
 const run = which.length ? which : Object.keys(all);
 for (const name of run) {
   const fn = all[name];
