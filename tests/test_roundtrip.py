@@ -110,6 +110,10 @@ def test_validator_rejects_bad_data() -> None:
     bad.channels[-1].components = 2  # only 1 or 3 are defined
     expect_error(lambda: validate_header(bad))
 
+    bad = _source().give_header()
+    bad.channels[-1].min = 0.0  # min/max are not defined for vector channels
+    expect_error(lambda: validate_header(bad))
+
     bad_chunk = source.give_frames(0, 2)
     # a 3-wide block truncated to width-1 length: fails CLOSED (a wrong
     # stride would otherwise corrupt silently)

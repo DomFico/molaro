@@ -151,10 +151,19 @@ test("validators reject violations", () => {
     /channel 'flow' block has .* expected/,
   );
   // A header-carried channel with components=3 needs data length N × 3.
+  // (min/max stripped so the width rule below can't fire first — this test
+  // is about data length.)
   const badData = parseHeader(headerText);
   const mass = badData.channels.find((c) => c.name === "mass") as {
-    components?: number; data: number[];
+    components?: number; min?: number; max?: number; data: number[];
   };
   mass.components = 3;
+  delete mass.min;
+  delete mass.max;
   assert.throws(() => validateHeader(badData), /data must have length/);
+  // min/max on a vector channel: forbidden — a scalar range over a 3-vector
+  // has no defined meaning in v0.1.0, so declaring one fails closed.
+  const rangedFlow = parseHeader(headerText);
+  (rangedFlow.channels.find((c) => c.name === "flow") as { min?: number }).min = 0;
+  assert.throws(() => validateHeader(rangedFlow), /min\/max are not defined for vector channels/);
 });

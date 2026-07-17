@@ -66,7 +66,7 @@ length N, indexed by point index `p ∈ [0, N)`.
 | `name` | string | yes | Unique among channels (all scopes share one namespace). |
 | `scope` | string | yes | One of `"per_point"`, `"per_frame"`, `"per_point_per_frame"`. |
 | `dtype` | string | yes | Only `"float32"` is defined in v0.1.0. |
-| `min`, `max` | number | no | Optional range hint for later normalization. If both present, `min <= max`. |
+| `min`, `max` | number | no | Optional range hint for later normalization. If both present, `min <= max`. **Forbidden when `components` is `3`** — a scalar range over a 3-vector has no defined meaning in v0.1.0. |
 | `components` | int | no | Values **per element**: `1` (default when absent) or `3`. `3` declares a **vector** channel — three float32 per element, interleaved per element — riding the same blocks, validation, and caching as any channel. Every length rule in this spec scales by `components`; nothing else about the wire format changes. |
 | `data` | number[] | scope-dependent | **Required** for `per_point` (length `N × components`) and `per_frame` (length `T × components`); **must be absent** for `per_point_per_frame` (values ship in FrameChunks). |
 

@@ -377,6 +377,11 @@ def validate_header(h: Header) -> None:
             fail(f"channel {ch.name!r}: min > max")
         if ch.components is not None and ch.components not in (1, 3):
             fail(f"channel {ch.name!r}: components must be 1 or 3, got {ch.components!r}")
+        if channel_components(ch) == 3 and (ch.min is not None or ch.max is not None):
+            # A scalar range over a 3-vector has no defined meaning in v0.1.0 —
+            # rejecting beats letting producers ship a number consumers would
+            # guess at.
+            fail(f"channel {ch.name!r}: min/max are not defined for vector channels (components: 3)")
         if ch.scope == SCOPE_PER_POINT_PER_FRAME:
             if ch.data is not None:
                 fail(f"channel {ch.name!r}: per_point_per_frame must not carry data in the header")
