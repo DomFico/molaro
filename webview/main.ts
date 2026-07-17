@@ -45,7 +45,7 @@ import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
 import { applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
 import { BindingRegistry, type Binding } from "./bindings.ts";
-import { BIND_SIZE_MAX, mapScalar, type BindAxis } from "./channelmap.ts";
+import { BIND_AXES, BIND_SIZE_MAX, mapScalar, ORIENTATION_AXIS, type BindAxis } from "./channelmap.ts";
 import { bindTypedResult } from "./claudebind.ts";
 import { parseTypedResult } from "./claudemodel.ts";
 import { listRecipes, rainbow, registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
@@ -1760,8 +1760,25 @@ async function main(): Promise<void> {
       if (channelScopeByName.get(b.channel) !== "per_point_per_frame") continue;
       const block = chunk.channels.get(b.channel);
       if (!block) continue; // validated chunks always carry declared channels
+      if (b.axis === ORIENTATION_AXIS) {
+        // The vector arm: b.points holds polyline-VERTEX ids; each vertex
+        // stores ITS point's raw 3-vector at this frame. No normalization
+        // (parked), no range, no colormap — a straight strided copy. The
+        // repWrite dispatch is a no-op today (nothing subscribes — O-2's
+        // generator will) but keeps the cadence contract uniform.
+        const off3 = (f - chunk.start) * header.n_points * 3;
+        const buf = rep.state.orientation;
+        for (const v of b.points) {
+          const at = off3 + traceVertices[v] * 3;
+          buf[v * 3] = block[at];
+          buf[v * 3 + 1] = block[at + 1];
+          buf[v * 3 + 2] = block[at + 2];
+        }
+        registry.repWrite("orientation", b.points);
+        continue;
+      }
       const off = (f - chunk.start) * header.n_points; // scalar block: components = 1, gate-enforced
-      const [lo, hi] = b.range;
+      const [lo, hi] = b.range!;
       if (b.axis === "color") {
         const buf = rep.state.color;
         for (const p of b.points) {
@@ -1780,6 +1797,14 @@ async function main(): Promise<void> {
       registry.repWrite(b.axis, b.points);
     }
   };
+  // The orientation writer: per-vertex RAW 3-vectors through the SAME
+  // stride-parameterized writer core color rides — capture, one stroke,
+  // LWW-clear of same-axis coverage (vertex-id space), write-cadence
+  // dispatch (no subscriber yet: state-only until the oriented generator).
+  const orientationVerticesEach = withBindingClear(
+    ORIENTATION_AXIS,
+    makeRepEachWriter(rep.state.orientation, 3, repWrite("orientation")),
+  );
   const colorPoints = withBindingClear("color", makeRepWriter(rep.state.color, 3, repWrite("color")));
   const colorPointsEach = withBindingClear("color", makeRepEachWriter(rep.state.color, 3, repWrite("color")));
   const sizePointsEach = withBindingClear("size", makeRepEachWriter(rep.state.size, 1, repWrite("size")));
@@ -1951,10 +1976,11 @@ async function main(): Promise<void> {
     // buffers AND any taken-over coverage together. The takeover report
     // comes from overlapStats BEFORE the stroke, because the actual
     // clearing happens inside the composite.
-    createBinding: (b: Binding, scalars: readonly number[]) => {
+    createBinding: (b: Binding, values: readonly number[]) => {
       const takeover = bindingRegistry.overlapStats(b.points, b.axis);
       model.beginStroke();
-      applyScalarsToAxis(commandContext, b.axis, b.points, scalars);
+      if (b.axis === ORIENTATION_AXIS) orientationVerticesEach(b.points, values);
+      else applyScalarsToAxis(commandContext, b.axis, b.points, values);
       const snap = bindingRegistry.snapshot();
       bindingRegistry.add(b);
       refreshBindingBadge();
@@ -1966,19 +1992,38 @@ async function main(): Promise<void> {
       model.endStroke();
       return takeover;
     },
-    releaseBindings: (points: readonly number[] | null, axis: BindAxis | null) => {
+    // Release runs PER AXIS with that axis's own id space — scalar coverage
+    // by point ids, orientation coverage by vertex ids. The two spaces
+    // overlap numerically; one unscoped release() over both would shrink
+    // the wrong coverage, so the composite never calls it that way.
+    releaseBindings: (
+      sel: { points: readonly number[] | null; vertices: readonly number[] | null },
+      axis: BindAxis | null,
+    ) => {
       const snap = bindingRegistry.snapshot();
-      const stats = bindingRegistry.release(points, axis);
-      if (stats.touched === 0) return stats; // nothing changed — record no op
+      const total = { touched: 0, removed: 0, points: 0 };
+      const acc = (s: { touched: number; removed: number; points: number }): void => {
+        total.touched += s.touched;
+        total.removed += s.removed;
+        total.points += s.points;
+      };
+      for (const a of BIND_AXES) {
+        if (axis === null || axis === a) acc(bindingRegistry.release(sel.points, a));
+      }
+      if (axis === null || axis === ORIENTATION_AXIS) {
+        acc(bindingRegistry.release(sel.vertices, ORIENTATION_AXIS));
+      }
+      if (total.touched === 0) return total; // nothing changed — record no op
       refreshBindingBadge();
       model.recordOp(() => {
         bindingRegistry.restore(snap);
         refreshBindingBadge();
         return [];
       });
-      return stats;
+      return total;
     },
     listBindings: () => bindingRegistry.all(),
+    orientationVerticesEach,
     // The bake/bind gate's READ surface. Declarations come from the header;
     // values come from whatever is IN HAND at the displayed frame — the
     // header block for per_point, the displayed chunk's zero-copy view for
@@ -2061,6 +2106,7 @@ async function main(): Promise<void> {
     colorPoints: () => 0, colorPointsEach: () => 0, sizePointsEach: () => 0, opacityPointsEach: () => 0,
     createBinding: () => ({ touched: 0, removed: 0, points: 0 }),
     releaseBindings: () => ({ touched: 0, removed: 0, points: 0 }),
+    orientationVerticesEach: () => 0,
     colorEdges: () => 0, colorTrace: () => 0,
     sizePoints: () => 0, sizeEdges: () => 0, sizeTrace: () => 0,
     opacityPoints: () => 0, opacityEdges: () => 0, opacityTrace: () => 0,

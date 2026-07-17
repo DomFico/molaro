@@ -47,7 +47,7 @@ function makeHeader(): Header {
   };
 }
 
-function makeRegistry() {
+function makeRegistry(fixture?: { traceVertices?: number[] }) {
   const header = makeHeader();
   const hierarchy = new Hierarchy(header);
   const calls = { focus: 0, frame: 0, flash: 0 };
@@ -73,6 +73,7 @@ function makeRegistry() {
   ]);
   const bindingReg = new BindingRegistry();
   const bindCalls: { b: Binding; scalars: number[] }[] = [];
+  const orientationOps: { vertexIds: number[]; values: number[] }[] = [];
   const refOps: { names: string[]; hidden: boolean }[] = [];
   const memberOps: { name: string; mode: "add" | "remove"; entries: Entry[] }[] = [];
   const colorOps: { points: number[]; rgb: [number, number, number] }[] = [];
@@ -87,9 +88,13 @@ function makeRegistry() {
   // incident distinction is decidable from these two alone
   const edges: [number, number][] = [[0, 1], [1, 2]];
   const traceOps: { vertexIds: number[]; rgb: [number, number, number] }[] = [];
-  // ONE polyline vertex: point 0 (subgroup s0). Point 1 shares s0 but is NOT
-  // a vertex (pins the map-up); s1 owns no vertex (pins the nomatch).
-  const traceVertices: number[] = [0];
+  // Default: ONE polyline vertex, point 0 (subgroup s0). Point 1 shares s0
+  // but is NOT a vertex (pins the map-up); s1 owns no vertex (pins the
+  // nomatch). The ORIENTATION tests override with [0, 2] — a NON-identity
+  // vertex→point map (vertex 1 → point 2), because with [0] alone the
+  // vertex-id and point-id spaces are numerically identical and a
+  // space-mixing regression is undetectable (a vacuous guard).
+  const traceVertices: number[] = fixture?.traceVertices ?? [0];
   const sizeOps: { kind: "points" | "edges" | "trace"; ids: number[]; size: number }[] = [];
   const opacityOps: { kind: "points" | "edges" | "trace"; ids: number[]; opacity: number }[] = [];
   const ctx: CommandContext = {
@@ -257,8 +262,25 @@ function makeRegistry() {
       bindCalls.push({ b: { ...b, points: [...b.points] }, scalars: [...scalars] });
       return bindingReg.add(b);
     },
-    releaseBindings: (points, axis) => bindingReg.release(points, axis),
+    releaseBindings: (sel, axis) => {
+      // mirror the main.ts composite: each axis gets ITS OWN id space
+      const total = { touched: 0, removed: 0, points: 0 };
+      const acc = (s: { touched: number; removed: number; points: number }): void => {
+        total.touched += s.touched;
+        total.removed += s.removed;
+        total.points += s.points;
+      };
+      for (const a of ["color", "size", "opacity"] as const) {
+        if (axis === null || axis === a) acc(bindingReg.release(sel.points, a));
+      }
+      if (axis === null || axis === "orientation") acc(bindingReg.release(sel.vertices, "orientation"));
+      return total;
+    },
     listBindings: () => bindingReg.all(),
+    orientationVerticesEach: (vertexIds, values) => {
+      orientationOps.push({ vertexIds: [...vertexIds], values: [...values] });
+      return vertexIds.length;
+    },
     edges,
     colorEdges: (edgeIds, rgb) => {
       edgeOps.push({ edgeIds: [...edgeIds], rgb });
@@ -309,7 +331,7 @@ function makeRegistry() {
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
     colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, modRunCode, rmArms, sels,
-    bindCalls, bindingReg,
+    bindCalls, bindingReg, orientationOps,
   };
 }
 
@@ -1240,7 +1262,7 @@ test("bind: last-bind-wins WITHIN an axis — the overlap is taken and reported;
   // the SAME axis over a subset: element-level takeover, reported
   const r = registry.runCommand("bind c1 mass color 1 3");
   assert.equal(r.status, "ok");
-  assert.match(r.message, /took 1 points from 1 earlier binding/);
+  assert.match(r.message, /took 1 elements from 1 earlier binding/);
   assert.deepEqual(bindingReg.all().map((b) => ({ channel: b.channel, axis: b.axis, points: b.points })), [
     { channel: "energy", axis: "color", points: [0, 1] },
     { channel: "mass", axis: "size", points: [0, 1, 2] },
@@ -1254,11 +1276,11 @@ test("unbind: element-wise release; all clears; empty and no-overlap are nomatch
   registry.runCommand("bind all energy color 0 2.5");
   const part = registry.runCommand("unbind c1"); // point 2 only
   assert.equal(part.status, "ok");
-  assert.equal(part.message, "released 1 bound points across 1 binding — values stay as last applied");
+  assert.equal(part.message, "released 1 bound elements across 1 binding — values stay as last applied");
   assert.deepEqual(bindingReg.all().map((b) => b.points), [[0, 1]]);
   const rest = registry.runCommand("unbind all");
   assert.equal(rest.status, "ok");
-  assert.equal(rest.message, "released 2 bound points across 1 binding (1 removed) — values stay as last applied");
+  assert.equal(rest.message, "released 2 bound elements across 1 binding (1 removed) — values stay as last applied");
   assert.equal(bindingReg.count(), 0);
   assert.equal(registry.runCommand("unbind").status, "error", "bare unbind is a usage error");
 });
@@ -1269,23 +1291,93 @@ test("unbind: an axis word scopes the release to that axis alone", () => {
   registry.runCommand("bind all mass size");
   const r = registry.runCommand("unbind all color");
   assert.equal(r.status, "ok");
-  assert.equal(r.message, "released 3 bound points across 1 binding (1 removed) on color — values stay as last applied");
+  assert.equal(r.message, "released 3 bound elements across 1 binding (1 removed) on color — values stay as last applied");
   assert.deepEqual(bindingReg.all().map((b) => b.axis), ["size"], "the size binding is untouched");
   const part = registry.runCommand("unbind c1 size");
-  assert.equal(part.message, "released 1 bound points across 1 binding on size — values stay as last applied");
+  assert.equal(part.message, "released 1 bound elements across 1 binding on size — values stay as last applied");
   assert.equal(registry.runCommand("unbind c1 color").status, "nomatch", "nothing bound on that axis there");
 });
 
-test("orientation: every entry point refuses LOUDLY — no consumer exists", () => {
-  const { registry, bindingReg, colorEachOps, eachOps } = makeRegistry();
-  const want = /no consumer for the orientation axis yet/;
-  for (const cmd of ["bind all flow orientation", "bake all flow orientation", "unbind all orientation"]) {
+// -- orientation (O-1): the vector axis, STATE-ONLY — stored, listed, never drawn --
+
+// The orientation tests run on a NON-IDENTITY vertex→point map ([0, 2]:
+// vertex 1 → point 2), so the vertex-id and point-id spaces are numerically
+// DISTINCT — with the default [0] fixture the two spaces coincide and a
+// space-mixing regression is undetectable (found by adversarial review).
+const ORI_FIXTURE = { traceVertices: [0, 2] };
+
+test("orientation: bind accepts a 3-wide channel RAW onto polyline vertices, and says stored-only", () => {
+  const { registry, bindingReg, bindCalls } = makeRegistry(ORI_FIXTURE);
+  // vertex 0 → point 0's flow (1,0,0); vertex 1 → point 2's flow (0,0,1)
+  const r = registry.runCommand("bind all flow orientation");
+  assert.equal(r.status, "ok");
+  assert.equal(
+    r.message,
+    'bound "flow" → orientation on 2 vertices of "all" (applied at frame 4, raw vectors) — live: re-derives as the displayed frame changes; STORED ONLY, no shape reads orientation yet',
+  );
+  assert.equal(bindCalls.length, 1);
+  assert.deepEqual(bindCalls[0].b.points, [0, 1],
+    "coverage holds VERTEX ids — [0, 2] here would be the point ids leaking in");
+  assert.deepEqual(bindCalls[0].scalars, [1, 0, 0, 0, 0, 1], "each vertex's OWN point's raw vector");
+  assert.deepEqual(
+    bindingReg.all().map((b) => ({ axis: b.axis, points: b.points, range: b.range })),
+    [{ axis: "orientation", points: [0, 1], range: null }],
+  );
+  const list = registry.runCommand("bindings");
+  assert.match(list.message, /flow → orientation on "all" — 2 vertices · raw vectors \(stored; nothing draws orientation yet\)/);
+});
+
+test("orientation: bake stores once without a binding; wrong shapes refuse loudly", () => {
+  const { registry, bindingReg, orientationOps } = makeRegistry(ORI_FIXTURE);
+  const bake = registry.runCommand("bake all flow orientation");
+  assert.equal(bake.status, "ok");
+  assert.match(bake.message, /baked "flow" → orientation on 2 vertices of "all" \(frame 4, raw vectors\) — stored; no shape reads orientation yet/);
+  assert.equal(orientationOps.length, 1);
+  assert.deepEqual(orientationOps[0], { vertexIds: [0, 1], values: [1, 0, 0, 0, 0, 1] },
+    "vertex ids + each vertex's own point's raw vector");
+  assert.equal(bindingReg.count(), 0, "bake registers nothing");
+  const cases: [string, RegExp][] = [
+    ["bind all energy orientation", /orientation needs a vector \(3-wide\) channel — "energy" is scalar/],
+    ["bind all flow orientation 0 1", /meaningless for the orientation axis/],
+    ["bake all energy orientation", /orientation needs a vector/],
+  ];
+  for (const [cmd, want] of cases) {
     const r = registry.runCommand(cmd);
     assert.equal(r.status, "error", cmd);
     assert.match(r.message, want, cmd);
   }
-  assert.equal(bindingReg.count(), 0);
-  assert.equal(colorEachOps.length + eachOps.length, 0, "nothing was written or bound");
+  assert.equal(orientationOps.length, 1, "no refusal wrote anything");
+});
+
+test("orientation: the two id spaces never mix — the DISCRIMINATING partial unbind", () => {
+  const { registry, bindingReg } = makeRegistry(ORI_FIXTURE);
+  registry.runCommand("bind all flow orientation"); // VERTEX ids: [0, 1]
+  registry.runCommand("bind all energy color 0 2.5"); // POINT ids: [0, 1, 2]
+  assert.equal(bindingReg.count(), 2, "cross-axis coexistence");
+  // c1 = point 2. In vertex space that is vertex 1 (traceVertices[1] = 2).
+  // CORRECT: orientation loses vertex 1, color loses point 2 → 2 elements
+  // across 2 bindings, orientation coverage [0].
+  // A space-mixing regression (releasing orientation with POINT ids {2})
+  // would leave orientation [0, 1] untouched — this fixture DISCRIMINATES
+  // (with the identity map [0] it could not; adversarial-review finding).
+  const part = registry.runCommand("unbind c1");
+  assert.equal(part.message, "released 2 bound elements across 2 bindings — values stay as last applied");
+  assert.deepEqual(
+    bindingReg.all().map((b) => ({ axis: b.axis, points: b.points })),
+    [{ axis: "orientation", points: [0] }, { axis: "color", points: [0, 1] }],
+  );
+  // …and the mirror: point 0 / vertex 0 collide numerically; unbind c0.g0.s0.a
+  // (= point 0 = vertex 0's point) must shrink BOTH bindings by their OWN
+  // element, never cross-shrink.
+  const both = registry.runCommand("unbind c0.g0.s0.a");
+  assert.equal(both.message, "released 2 bound elements across 2 bindings (1 removed) — values stay as last applied");
+  assert.deepEqual(
+    bindingReg.all().map((b) => ({ axis: b.axis, points: b.points })),
+    [{ axis: "color", points: [1] }],
+  );
+  // axis-scoped: unbind all orientation touches nothing (already gone)
+  const none = registry.runCommand("unbind all orientation");
+  assert.equal(none.status, "nomatch");
 });
 
 test("bindings: read-only list with the live notice; empty says so; bare only", () => {

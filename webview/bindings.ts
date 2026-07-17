@@ -32,13 +32,18 @@ export interface Binding {
   /** Header-declared channel name (gate-validated before entry). */
   channel: string;
   axis: BindAxis;
-  /** Covered element ids, header order — the resolved target MINUS any
-   * coverage later bindings took (disjointness). */
+  /** Covered element ids in THE AXIS'S OWN DOMAIN, header order — POINT ids
+   * for the scalar axes, polyline-VERTEX ids for orientation. The two id
+   * spaces overlap numerically and must never be mixed: every release is
+   * axis-scoped (the ctx.releaseBindings composite passes each axis its own
+   * id set). Coverage = the resolved target MINUS anything later bindings
+   * took (per-axis disjointness). */
   points: number[];
   /** The address text as typed, for display only. */
   expr: string;
-  /** Normalization range frozen at bind time. */
-  range: [number, number];
+  /** Normalization range frozen at bind time — null for the orientation
+   * axis (vectors are consumed raw; a range is a category error there). */
+  range: [number, number] | null;
 }
 
 export interface ReleaseStats {
@@ -64,11 +69,11 @@ export class BindingRegistry {
 
   /** Deep copy for the undo seam (points/range arrays owned by the copy). */
   snapshot(): Binding[] {
-    return this.list.map((b) => ({ ...b, points: [...b.points], range: [...b.range] as [number, number] }));
+    return this.list.map((b) => ({ ...b, points: [...b.points], range: b.range ? ([...b.range] as [number, number]) : null }));
   }
 
   restore(snap: Binding[]): void {
-    this.list = snap.map((b) => ({ ...b, points: [...b.points], range: [...b.range] as [number, number] }));
+    this.list = snap.map((b) => ({ ...b, points: [...b.points], range: b.range ? ([...b.range] as [number, number]) : null }));
   }
 
   /** Register a binding, enforcing per-axis disjointness LAST-BIND-WINS:
@@ -77,7 +82,7 @@ export class BindingRegistry {
    * verb's report. */
   add(b: Binding): ReleaseStats {
     const stats = this.release(b.points, b.axis);
-    this.list.push({ ...b, points: [...b.points], range: [...b.range] as [number, number] });
+    this.list.push({ ...b, points: [...b.points], range: b.range ? ([...b.range] as [number, number]) : null });
     return stats;
   }
 

@@ -67,6 +67,11 @@ export interface RepresentationState {
   edgeOpacity: Float32Array;
   /** length V — per-POLYLINE-VERTEX alpha; boundary segments interpolate. */
   traceOpacity: Float32Array;
+  /** length 3V — per-POLYLINE-VERTEX raw 3-vector (the orientation axis: a
+   * vector channel's "across" direction, stored UNNORMALIZED — the
+   * normalization call is parked). Zero = no orientation. STATE-ONLY until
+   * the oriented generator: no draw pass reads this buffer yet. */
+  orientation: Float32Array;
 }
 
 export class RepresentationLayer {
@@ -102,9 +107,15 @@ export class RepresentationLayer {
     const opacity = new Float32Array(nPoints).fill(DEFAULT_OPACITY);
     const edgeOpacity = new Float32Array(nEdges).fill(DEFAULT_OPACITY);
     const traceOpacity = new Float32Array(nTraceVertices).fill(DEFAULT_OPACITY);
+    // Per-vertex RAW 3-vectors on the polyline domain (the "across"
+    // direction a vector channel binds to). Zero = "no orientation" — the
+    // honest default; whether stored vectors should be unit-normalized is
+    // a PARKED design call, so this layer stores what it is given.
+    // STATE-ONLY until the oriented generator (O-2): nothing reads it.
+    const orientation = new Float32Array(nTraceVertices * 3);
     this.state = {
       color, size, visible, edgeColor, traceColor, edgeSize, traceSize,
-      opacity, edgeOpacity, traceOpacity,
+      opacity, edgeOpacity, traceOpacity, orientation,
     };
   }
 }

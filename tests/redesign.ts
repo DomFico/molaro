@@ -6130,10 +6130,13 @@ async function S37(): Promise<void> {
     check("S37: a partial declaration without an explicit range is refused",
       noRange.status === "error" && /does not declare a full min\/max range/.test(noRange.message),
       JSON.stringify(noRange));
-    const orient = await cmd("bind alpha flow orientation");
-    check("S37: orientation is refused LOUDLY — no consumer exists",
-      orient.status === "error" && /no consumer for the orientation axis yet/.test(orient.message),
-      JSON.stringify(orient));
+    // (orientation is a REAL axis since O-1 — its acceptance and its own
+    // refusal matrix live in S39; here we keep a width refusal so this
+    // block still proves "a refusal leaves nothing behind")
+    const wrongWidth = await cmd("bind alpha flow color");
+    check("S37: a vector channel on a scalar axis is refused LOUDLY",
+      wrongWidth.status === "error" && /vector channel \(components: 3\)/.test(wrongWidth.message),
+      JSON.stringify(wrongWidth));
     check("S37: refusals bound nothing, wrote nothing, recorded nothing",
       (await cmd("bindings")).message === "no bindings" &&
         (await changedVs("__preC", "color")) === 0 && (await undoDepth()) === depth0);
@@ -6452,9 +6455,199 @@ async function S38(): Promise<void> {
   }
 }
 
+// ============ S39: the orientation seam (O-1) — stored ≡ supplied, state-only =
+// The vector axis exists as STATE: a 3-wide channel binds to orientation,
+// the per-vertex buffer stores the RAW vectors, re-derives on flip, and
+// NOTHING draws it. Every check is a buffer/seam assertion — there are no
+// pixels to photograph. `stored ≡ supplied` is the load-bearing identity:
+// it is the precursor of O-2's `drawn ≡ supplied`.
+async function S39(): Promise<void> {
+  console.log("S39 — the orientation seam (O-1): stored ≡ supplied, nothing draws");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const statusLine = () => d.evaluate<string>(`document.getElementById('status').textContent`);
+    const rafs = () => d.evaluate(`(async () => {
+      for (let i = 0; i < 3; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`);
+    const seekTo = async (f: number): Promise<void> => {
+      await d.evaluate(`${V}.player.seek(${f})`);
+      await d.waitFor(`${V}.player.frame === ${f} && ${V}.player.getFrame(${f}) !== null`, 20000);
+      await rafs();
+    };
+    const vers = () =>
+      d.evaluate<{ p: { color: number; size: number; opacity: number };
+                   e: { sizeA: number; sizeB: number };
+                   t: { radius: number; color: number } }>(
+        `({ p: ${V}.repAttrVersions(), e: ${V}.edgeAttrVersions(), t: ${V}.traceAttrVersions() })`);
+    // stored ≡ supplied at frame f, spot vertices (first/mid/last): the
+    // orientation buffer's per-vertex triple equals the vertex's OWN
+    // point's channel vector, straight from the chunk block.
+    const storedEqualsSupplied = (f: number) =>
+      d.evaluate<{ ok: boolean; detail: string }>(`(()=>{
+        const tv = ${V}.traceVertices;
+        const chunk = ${V}.player.getFrame(${f});
+        const off = (${f} - chunk.start) * 6000 * 3;
+        const block = chunk.channels.get("flow");
+        const buf = ${V}.rep.state.orientation;
+        const spots = [0, Math.floor(tv.length / 2), tv.length - 1];
+        for (const v of spots) {
+          for (let c = 0; c < 3; c++) {
+            const want = block[off + tv[v] * 3 + c];
+            const got = buf[v * 3 + c];
+            if (Math.abs(got - want) > 1e-7) {
+              return { ok: false, detail: "v=" + v + " c=" + c + " got=" + got + " want=" + want };
+            }
+          }
+        }
+        return { ok: true, detail: "spots " + spots.join(",") + " at frame " + ${f} };
+      })()`);
+    const oriAllZero = () =>
+      d.evaluate<boolean>(`${V}.rep.state.orientation.every((x) => x === 0)`);
+
+    // Pause autoplay: every check reads the buffer at a specific seeked
+    // frame, so the displayed frame must not advance under us and re-derive
+    // to a different frame (the same determinism S38 needs).
+    await d.evaluate(`${V}.setPlaying(false)`);
+    await seekTo(0);
+
+    // -- A: the buffer exists, per-vertex ×3, zero, and UNBOUND PAYS ZERO --
+    const shape = await d.evaluate<{ len: number; tv: number }>(
+      `({ len: ${V}.rep.state.orientation.length, tv: ${V}.traceVertices.length })`);
+    check("S39: the orientation buffer is per-vertex stride 3, zero by default",
+      shape.tv > 0 && shape.len === shape.tv * 3 && (await oriAllZero()),
+      JSON.stringify(shape));
+    const depA = await undoDepth();
+    await seekTo(5); await seekTo(10);
+    check("S39: UNBOUND PAYS ZERO — flips leave the buffer zero and the undo stack flat",
+      (await oriAllZero()) && (await undoDepth()) === depA);
+
+    // -- B: the gate refuses the wrong shapes loudly, writing nothing ------
+    const refusals: [string, RegExp][] = [
+      ["bind all energy orientation", /orientation needs a vector \(3-wide\) channel — "energy" is scalar/],
+      ["bind all flow orientation 0 1", /meaningless for the orientation axis/],
+      ["bind all flow color", /vector channel \(components: 3\)/],
+    ];
+    for (const [text, want] of refusals) {
+      const r = await cmd(text);
+      check(`S39: refusal — ${text}`, r.status === "error" && want.test(r.message), JSON.stringify(r));
+    }
+    check("S39: no refusal wrote anything", await oriAllZero());
+
+    // -- C: bind accepts, says STORED-ONLY, lists, badges ------------------
+    const bind = await cmd("bind all flow orientation");
+    check("S39: bind all flow orientation is accepted and says stored-only",
+      bind.status === "ok" &&
+        /raw vectors/.test(bind.message) && /STORED ONLY, no shape reads orientation yet/.test(bind.message) &&
+        new RegExp(`on ${shape.tv} vertices`).test(bind.message),
+      JSON.stringify(bind));
+    check("S39: the badge counts it", /· 1 binding live$/.test(await statusLine()), await statusLine());
+    check("S39: bindings lists the vector row",
+      /flow → orientation on "all" — \d+ vertices · raw vectors \(stored; nothing draws orientation yet\)/.test(
+        (await cmd("bindings")).message),
+      (await cmd("bindings")).message);
+
+    // -- D/E: STORED ≡ SUPPLIED, live across flips, touching nothing else --
+    const eq0 = await storedEqualsSupplied(10);
+    check("S39: STORED ≡ SUPPLIED at the bound frame", eq0.ok, eq0.detail);
+    const vD = await vers();
+    const depD = await undoDepth();
+    await seekTo(40);
+    const eq40 = await storedEqualsSupplied(40);
+    check("S39: the binding is LIVE — the buffer re-derives to frame 40's vectors", eq40.ok, eq40.detail);
+    // precondition: the two frames genuinely differ, so equality discriminates
+    const differ = await d.evaluate<boolean>(`(()=>{
+      const tv = ${V}.traceVertices;
+      const a = ${V}.player.getFrame(10), b = ${V}.player.getFrame(40);
+      const ax = a.channels.get("flow")[(10 - a.start) * 6000 * 3 + tv[0] * 3];
+      const bx = b.channels.get("flow")[(40 - b.start) * 6000 * 3 + tv[0] * 3];
+      return Math.abs(ax - bx) > 1e-4;
+    })()`);
+    check("S39: (data precondition) frames 10 and 40 supply different vectors", differ);
+    const vE = await vers();
+    check("S39: orientation flips touch NO other buffer and record NOTHING",
+      vE.p.color === vD.p.color && vE.p.size === vD.p.size && vE.p.opacity === vD.p.opacity &&
+        vE.e.sizeA === vD.e.sizeA && vE.e.sizeB === vD.e.sizeB &&
+        vE.t.radius === vD.t.radius && vE.t.color === vD.t.color &&
+        (await undoDepth()) === depD,
+      JSON.stringify({ vD, vE }));
+
+    // -- F: one undo after bind + flips → pristine zeros, binding gone -----
+    await d.ctrlZ();
+    await sleep(300);
+    check("S39: ONE Ctrl+Z restores the zero buffer and removes the binding",
+      (await oriAllZero()) && (await cmd("bindings")).message === "no bindings" &&
+        (await undoDepth()) === depA);
+    await seekTo(50);
+    check("S39: …and a further seek does not re-derive (truly gone)", await oriAllZero());
+
+    // -- G: bake stores once, no binding, and does NOT re-derive on flip ---
+    await seekTo(50);
+    const bake = await cmd("bake all flow orientation");
+    check("S39: bake stores the raw vectors without a binding",
+      bake.status === "ok" && /stored; no shape reads orientation yet/.test(bake.message) &&
+        (await storedEqualsSupplied(50)).ok && (await cmd("bindings")).message === "no bindings",
+      JSON.stringify(bake));
+    // precondition: frames 50 and 60 supply different vectors, so "stale"
+    // and "re-derived" are distinguishable
+    const differ5060 = await d.evaluate<boolean>(`(()=>{
+      const tv = ${V}.traceVertices;
+      const a = ${V}.player.getFrame(50), b = ${V}.player.getFrame(60);
+      const ax = a.channels.get("flow")[(50 - a.start) * 6000 * 3 + tv[0] * 3];
+      const bx = b.channels.get("flow")[(60 - b.start) * 6000 * 3 + tv[0] * 3];
+      return Math.abs(ax - bx) > 1e-4;
+    })()`);
+    check("S39: (data precondition) frames 50 and 60 supply different vectors", differ5060);
+    await seekTo(60);
+    const keeps50 = (await storedEqualsSupplied(50)).ok;
+    const isNot60 = !(await storedEqualsSupplied(60)).ok;
+    check("S39: a bake does NOT re-derive on flip — buffer keeps frame-50 values, stale to 60",
+      keeps50 && isNot60, JSON.stringify({ keeps50, isNot60 }));
+    await d.ctrlZ();
+    await sleep(300);
+    check("S39: undoing the bake restores the zero buffer", await oriAllZero());
+
+    // -- H: the two id spaces through the REAL release composite ----------
+    // The unit layer proves the verbs against a stub that MIRRORS the
+    // main.ts composite; this block proves the composite itself. The probe
+    // vertex's POINT id exceeds every vertex id, so a space-mixing
+    // regression (releasing orientation coverage with POINT ids) provably
+    // could not touch any vertex — the check discriminates by construction.
+    const probe = await d.evaluate<{ v: number; p: number }>(`(()=>{
+      const tv = ${V}.traceVertices;
+      for (let v = 0; v < tv.length; v++) if (tv[v] >= tv.length) return { v, p: tv[v] };
+      return { v: -1, p: -1 };
+    })()`);
+    check("S39: (data precondition) a vertex exists whose point id exceeds every vertex id",
+      probe.v >= 0, JSON.stringify(probe));
+    await cmd("bind all flow orientation");
+    await seekTo(70);
+    check("S39: (setup) the fresh binding re-derives at frame 70", (await storedEqualsSupplied(70)).ok);
+    const un = await cmd(`unbind #${probe.p} orientation`);
+    check("S39: the REAL composite releases in VERTEX space — exactly one vertex released",
+      un.status === "ok" && /released 1 bound elements across 1 binding on orientation/.test(un.message),
+      JSON.stringify(un));
+    await seekTo(80);
+    const spaces = await d.evaluate<{ probeStale: boolean; otherLive: boolean }>(`(()=>{
+      const tv = ${V}.traceVertices;
+      const chunk = ${V}.player.getFrame(80);
+      const off = (80 - chunk.start) * 6000 * 3;
+      const block = chunk.channels.get("flow");
+      const buf = ${V}.rep.state.orientation;
+      const eq = (v) => Math.abs(buf[v*3] - block[off + tv[v]*3]) < 1e-7
+        && Math.abs(buf[v*3+1] - block[off + tv[v]*3+1]) < 1e-7;
+      const vOther = ${probe.v} === 0 ? 1 : 0;
+      return { probeStale: !eq(${probe.v}), otherLive: eq(vOther) };
+    })()`);
+    check("S39: …the released vertex STOPS re-deriving; the rest keep following the channel",
+      spaces.probeStale && spaces.otherLive, JSON.stringify(spaces));
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 mutates the real repo .molaro/mods (delete + finally-restore) while
  * EVERY scenario's bridge scans that directory at boot. Single-sourced here,
@@ -6477,7 +6670,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S22: "full", S23: "full", S24: "full", S25: "full", S26: "full",
   S27: "full", S28: "full", S29: "full", S30: "full", S31: "full",
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
-  S37: "fast", S38: "fast",
+  S37: "fast", S38: "fast", S39: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

@@ -48,8 +48,8 @@ point types `anchor` and `t0`–`t3`).
 | `bondopacityof <expr> <a>` | Alpha for edges **touching** the target (either endpoint — the incident reach) | `bondopacityof #124 0.3` |
 | `traceopacity <expr> <a>` | Alpha for polyline vertices whose **subgroup** contains a resolved point | `traceopacity alpha 0.7` |
 | `rainbow <expr>` | Color those points an even hue ramp in resolution order (the first **recipe**: per-point values, not one constant; one undo stroke) | `rainbow alpha.group-0` |
-| `bake <expr> <channel> <axis> [<min> <max>]` | Write a declared **scalar data channel** (at the displayed frame) onto `color`/`size`/`opacity`, normalized over min..max — declared on the channel, or explicit when the declaration is partial (one undo stroke) | `bake all energy color 0 2.5` |
-| `bind <expr> <channel> <axis> [<min> <max>]` | Register a **channel→axis binding** (same gate/range as `bake`; applied once now — **INERT: per-flip re-derive is not wired yet**; last-bind-wins per element; one undo stroke) | `bind all energy color 0 2.5` |
+| `bake <expr> <channel> <axis> [<min> <max>]` | Write a declared data channel (at the displayed frame) onto a representation axis — scalar channel → `color`/`size`/`opacity` normalized over min..max; **vector (3-wide) channel → `orientation`, raw** (one undo stroke) | `bake all energy color 0 2.5` |
+| `bind <expr> <channel> <axis> [<min> <max>]` | Register a **channel→axis binding** (same gate as `bake`): the axis **re-derives from the channel on every frame flip**; last-bind-wins per element within an axis; one undo stroke. Vector channel → `orientation` (raw; **stored only — no shape reads it yet**) | `bind all energy color 0 2.5` |
 | `unbind <expr> [<axis>]` / `unbind all [<axis>]` | Release binding **coverage element-wise**, one axis or all (values stay as last applied; one undo op) | `unbind alpha color` |
 | `bindings` | Read-only list of the channel bindings (bare — takes no target) | `bindings` |
 | `mods` | List the **recipe registry** (read-only): each recipe's name, axis, origin, and credit — bare, takes no target | `mods` |
@@ -573,9 +573,14 @@ listed by `bindings` and counted in the status-line badge.
   the write lands, those elements stop being channel-driven, and one
   Ctrl+Z restores both the values and the coverage. The last explicit
   action wins, visibly, element by element.
-- **Orientation fails loudly**: `bind … orientation` (any entry point) is
-  refused with "no consumer for the orientation axis yet" — the oriented
-  shape generator does not exist, and nothing silently no-ops.
+- **The orientation axis — a vector channel, stored only (for now)**:
+  `bind <target> <vector-channel> orientation` binds a **3-wide** channel to
+  the per-vertex **orientation** buffer on the polyline domain, raw (no
+  range — a min/max there is a category error and refuses). It re-derives on
+  flip and undoes like any axis, but **nothing draws it yet** — no shape
+  reads orientation, so the effect is invisible; every message and the
+  `bindings` row say so. A scalar channel on `orientation`, or a vector
+  channel on a scalar axis, both refuse loudly by width.
 - **Static channels stay exact for free**: a `per_point` channel's values
   cannot change per frame, so its binding's bind-time apply is already
   correct at every frame (the per-flip applier skips it).

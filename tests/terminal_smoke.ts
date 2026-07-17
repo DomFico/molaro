@@ -666,7 +666,7 @@ try {
   lastLine = await runLine("unbind all");
   check("unbind all releases element-wise and reports",
     /term-ok/.test(lastLine?.cls ?? "") &&
-      lastLine?.text === "released 400 bound points across 1 binding (1 removed) — values stay as last applied",
+      lastLine?.text === "released 400 bound elements across 1 binding (1 removed) — values stay as last applied",
     JSON.stringify(lastLine));
   check("…and the badge clears", !/binding/.test(await statusText()), await statusText());
 

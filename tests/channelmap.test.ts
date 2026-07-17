@@ -29,12 +29,19 @@ test("gate: the axis list is the three scalar point axes", () => {
   assert.equal(BIND_SIZE_MAX, 6);
 });
 
-test("gate: orientation is refused loudly BY NAME — it has no consumer yet", () => {
-  // Even a 3-wide channel (the width orientation will eventually take)
-  // refuses on the axis first: the loud line names the missing consumer,
-  // never a silent no-op or a generic unknown-axis shrug.
+test("gate: orientation ACCEPTS a 3-wide channel raw — range null, no normalization", () => {
   const r = gateChannelBind(scalar({ components: 3 }), "orientation", null, [1, 0, 0]);
-  assert.ok("error" in r && r.error.includes("no consumer for the orientation axis yet"), JSON.stringify(r));
+  assert.deepEqual(r, { range: null });
+});
+
+test("gate: scalar→orientation refuses by width; a range on orientation is a category error", () => {
+  const narrow = gateChannelBind(scalar(), "orientation", null, VALUES);
+  assert.ok("error" in narrow && narrow.error.includes("orientation needs a vector (3-wide) channel"), JSON.stringify(narrow));
+  const ranged = gateChannelBind(scalar({ components: 3 }), "orientation", [0, 1], [1, 0, 0]);
+  assert.ok("error" in ranged && ranged.error.includes("meaningless for the orientation axis"), JSON.stringify(ranged));
+  // the finiteness spot-check runs on the vector path too, element = i / 3
+  const bad = gateChannelBind(scalar({ components: 3 }), "orientation", null, [1, 0, 0, 0, NaN, 0]);
+  assert.ok("error" in bad && bad.error.includes("non-finite value at element 1"), JSON.stringify(bad));
 });
 
 test("gate: unknown axis is refused by name", () => {

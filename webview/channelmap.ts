@@ -34,7 +34,17 @@ export interface ChannelDecl {
  * it arrives with the oriented generator, and the gate's width check below is
  * where it will unlock. */
 export const BIND_AXES = ["color", "size", "opacity"] as const;
-export type BindAxis = (typeof BIND_AXES)[number];
+/** The three SCALAR axes — the ones a 1-wide channel drives through the
+ * normalization lens. */
+export type ScalarAxis = (typeof BIND_AXES)[number];
+/** The vector axis: a 3-wide channel consumed RAW (no range, no
+ * normalization — the A-1 ruling made min/max on 3-wide a contract
+ * violation). STATE-ONLY until the oriented generator lands (O-2): the
+ * orientation buffer is written and re-derived, and nothing draws it. */
+export const ORIENTATION_AXIS = "orientation" as const;
+/** Every bindable axis. Code that MAPS scalars must take ScalarAxis; code
+ * that routes bindings takes BindAxis and branches on the vector case. */
+export type BindAxis = ScalarAxis | typeof ORIENTATION_AXIS;
 
 /** size axis: scalar 0..1 → point size 0..BIND_SIZE_MAX (2× the base size 3 —
  * a fixed visual range, NOT an interpretation of the values). The opacity
@@ -42,14 +52,17 @@ export type BindAxis = (typeof BIND_AXES)[number];
  * every scalar→axis consumer (claudebind re-exports it). */
 export const BIND_SIZE_MAX = 6;
 
-export type GateResult = { range: [number, number] } | { error: string };
+/** `range` is the scalar normalization lens; NULL means the orientation
+ * axis (vectors are consumed raw — there is no range, by ruling). */
+export type GateResult = { range: [number, number] | null } | { error: string };
 
 /**
  * Validate one channel→axis request. `explicitRange` is a user-supplied
- * [min, max] that OVERRIDES the declaration; `values` is the per-element
- * block in hand for the current frame (length N × components), which gets
- * the finiteness spot-check. Returns the normalization range to use, or the
- * loud reason nothing will be applied.
+ * [min, max] that OVERRIDES the declaration (scalar axes only — meaningless
+ * for orientation and refused); `values` is the per-element block in hand
+ * for the current frame (length N × components), which gets the finiteness
+ * spot-check on every path. Returns the normalization range to use (null
+ * for orientation), or the loud reason nothing will be applied.
  */
 export function gateChannelBind(
   decl: ChannelDecl,
@@ -57,39 +70,48 @@ export function gateChannelBind(
   explicitRange: readonly [number, number] | null,
   values: ArrayLike<number> | null,
 ): GateResult {
-  if (axis === "orientation") {
-    // The 3-wide axis is real in the design but has NO consumer: the
-    // oriented shape generator does not exist yet. Loud refusal, never a
-    // silent no-op — this line is the entire orientation story for now.
-    return {
-      error: `no consumer for the orientation axis yet (the oriented shape generator does not exist) — bindable axes: ${BIND_AXES.join(" | ")}`,
-    };
-  }
-  if (!(BIND_AXES as readonly string[]).includes(axis)) {
-    return { error: `unknown axis "${axis}" — use ${BIND_AXES.join(" | ")}` };
+  if (axis !== ORIENTATION_AXIS && !(BIND_AXES as readonly string[]).includes(axis)) {
+    return { error: `unknown axis "${axis}" — use ${BIND_AXES.join(" | ")} | ${ORIENTATION_AXIS}` };
   }
   if (decl.scope === "per_frame") {
     return {
       error: `channel "${decl.name}" is per-frame (one value per frame — a series, not per-element); it cannot drive a point axis`,
     };
   }
-  if (decl.components !== 1) {
-    return {
-      error: `channel "${decl.name}" is a vector channel (components: ${decl.components}) — ${BIND_AXES.join("/")} need a scalar (1-wide) channel`,
-    };
-  }
-  const range: readonly [number, number] | null =
-    explicitRange ??
-    (decl.min !== undefined && decl.max !== undefined ? [decl.min, decl.max] : null);
-  if (range === null) {
-    return {
-      error: `channel "${decl.name}" does not declare a full min/max range — pass one explicitly: <min> <max>`,
-    };
-  }
-  if (!(range[0] < range[1])) {
-    return {
-      error: `empty range ${range[0]}..${range[1]} — min must be strictly less than max`,
-    };
+  let range: readonly [number, number] | null = null;
+  if (axis === ORIENTATION_AXIS) {
+    // The vector axis: width 3, consumed RAW. A range is a category error
+    // (the contract already forbids min/max on 3-wide declarations; the
+    // gate refuses the explicit form for the same reason).
+    if (decl.components !== 3) {
+      return {
+        error: `orientation needs a vector (3-wide) channel — "${decl.name}" is scalar (components: ${decl.components})`,
+      };
+    }
+    if (explicitRange !== null) {
+      return {
+        error: "a min/max range is meaningless for the orientation axis — vector values are consumed raw",
+      };
+    }
+  } else {
+    if (decl.components !== 1) {
+      return {
+        error: `channel "${decl.name}" is a vector channel (components: ${decl.components}) — ${BIND_AXES.join("/")} need a scalar (1-wide) channel`,
+      };
+    }
+    range =
+      explicitRange ??
+      (decl.min !== undefined && decl.max !== undefined ? [decl.min, decl.max] : null);
+    if (range === null) {
+      return {
+        error: `channel "${decl.name}" does not declare a full min/max range — pass one explicitly: <min> <max>`,
+      };
+    }
+    if (!(range[0] < range[1])) {
+      return {
+        error: `empty range ${range[0]}..${range[1]} — min must be strictly less than max`,
+      };
+    }
   }
   if (values === null) {
     return { error: `no values in hand for channel "${decl.name}" at the current frame` };
@@ -101,7 +123,7 @@ export function gateChannelBind(
       };
     }
   }
-  return { range: [range[0], range[1]] };
+  return { range: range === null ? null : [range[0], range[1]] };
 }
 
 /** THE normalization atom — one raw value through the range lens,
