@@ -104,13 +104,20 @@ export function gateChannelBind(
   return { range: [range[0], range[1]] };
 }
 
+/** THE normalization atom — one raw value through the range lens,
+ * SATURATING: t = (v − min) / (max − min) clamped to [0,1] (the range is a
+ * declared or user-given lens, not a validity bound; other frames of a
+ * stream may legally exceed it). The command-cadence path
+ * (normalizeScalars below) and the per-flip applier (main.ts) both ride
+ * THIS function — one mapping, two cadences, no second formula. */
+export function mapScalar(v: number, lo: number, hi: number): number {
+  return Math.min(1, Math.max(0, (v - lo) / (hi - lo)));
+}
+
 /**
- * Map raw per-element values to [0,1] scalars for the resolved points:
- * t = (v − min) / (max − min), CLAMPED to [0,1] — values outside the range
- * saturate rather than reject (the range is a declared or user-given lens,
- * not a validity bound; other frames of a stream may legally exceed it).
- * `values` is the whole-scene block (element id → value); `points` selects
- * and orders the output.
+ * Map raw per-element values to [0,1] scalars for the resolved points
+ * (mapScalar over the selection). `values` is the whole-scene block
+ * (element id → value); `points` selects and orders the output.
  */
 export function normalizeScalars(
   values: ArrayLike<number>,
@@ -118,6 +125,5 @@ export function normalizeScalars(
   range: readonly [number, number],
 ): number[] {
   const [lo, hi] = range;
-  const span = hi - lo;
-  return points.map((p) => Math.min(1, Math.max(0, (values[p] - lo) / span)));
+  return points.map((p) => mapScalar(values[p], lo, hi));
 }

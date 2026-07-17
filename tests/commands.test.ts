@@ -1196,13 +1196,13 @@ test("bake: help surfaces the verb in both the summary and describe", () => {
 
 // -- bind/unbind/bindings: the INERT binding registry (C-2) -----------------------
 
-test("bind: registers through the SHARED gate, applies once, and says inert", () => {
+test("bind: registers through the SHARED gate, applies once, and says live", () => {
   const { registry, bindCalls, bindingReg } = makeRegistry();
   const r = registry.runCommand("bind all energy color 0 2.5");
   assert.equal(r.status, "ok");
   assert.equal(
     r.message,
-    'bound "energy" → color on 3 points of "all" (applied at frame 4, range 0..2.5) — inert: re-derive on flip is not wired yet',
+    'bound "energy" → color on 3 points of "all" (applied at frame 4, range 0..2.5) — live: re-derives as the displayed frame changes',
   );
   // the composite got the binding AND the normalized scalars (the same
   // mapping bake proved: raw [0, 1.25, 2.5] over 0..2.5 → [0, 0.5, 1])
@@ -1288,14 +1288,14 @@ test("orientation: every entry point refuses LOUDLY — no consumer exists", () 
   assert.equal(colorEachOps.length + eachOps.length, 0, "nothing was written or bound");
 });
 
-test("bindings: read-only list with the inert notice; empty says so; bare only", () => {
+test("bindings: read-only list with the live notice; empty says so; bare only", () => {
   const { registry } = makeRegistry();
   assert.equal(registry.runCommand("bindings").message, "no bindings");
   registry.runCommand("bind all energy opacity 0 2.5");
   const r = registry.runCommand("bindings");
   assert.equal(r.status, "ok");
   const lines = r.message.split("\n");
-  assert.match(lines[0], /1 binding \(inert: applied once at bind; per-flip re-derive is not wired yet\):/);
+  assert.match(lines[0], /1 binding \(live: re-derived from the channel as the displayed frame changes\):/);
   assert.equal(lines[1], '  energy → opacity on "all" — 3 points · range 0..2.5');
   assert.equal(registry.runCommand("bindings all").status, "error", "takes no arguments");
 });

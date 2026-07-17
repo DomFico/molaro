@@ -174,8 +174,9 @@ export interface CommandContext {
   channelValues(name: string): { values: ArrayLike<number>; frame: number | null } | null;
   /** Register a channel binding AND apply its initial scalars — ONE stroke
    * (the writers' capture + a registry snapshot), so one Ctrl+Z removes the
-   * binding and restores prior values together. Bindings do not re-derive
-   * on flip until the live link lands. Returns what last-bind-wins took
+   * binding and restores prior values together. The binding then re-derives
+   * on every displayed-frame flip (raw, unrecorded — derived state).
+   * Returns what last-bind-wins took
    * from earlier SAME-AXIS bindings' coverage. */
   createBinding(b: Binding, scalars: readonly number[]): ReleaseStats;
   /** Release binding coverage element-wise (points null = every element;
@@ -1159,9 +1160,9 @@ export function makeBakeHandler(ctx: CommandContext): CommandHandler {
  * released from earlier bindings in the same stroke; one Ctrl+Z restores
  * both the values and the coverage).
  *
- * INERT THIS INCREMENT, and the message says so: the values are applied
- * once at bind time; the per-flip re-derive is the next (attended)
- * increment. Nothing here may claim liveness until it exists.
+ * LIVE: after the initial apply, the bound axis re-derives from the
+ * channel on every displayed-frame flip (the applier in main.ts — raw,
+ * unrecorded). The message says so, because now it is true.
  */
 export function makeBindHandler(ctx: CommandContext): CommandHandler {
   const usage =
@@ -1182,7 +1183,7 @@ export function makeBindHandler(ctx: CommandContext): CommandHandler {
       status: "ok",
       message:
         `bound "${r.channel}" → ${r.axis} on ${r.points.length} points of "${r.expr}" ` +
-        `(applied at ${at}, range ${r.range[0]}..${r.range[1]})${took} — inert: re-derive on flip is not wired yet`,
+        `(applied at ${at}, range ${r.range[0]}..${r.range[1]})${took} — live: re-derives as the displayed frame changes`,
     };
   };
 }
@@ -1243,7 +1244,7 @@ export function makeUnbindHandler(ctx: CommandContext): CommandHandler {
 }
 
 /** `bindings` — read-only list of the channel bindings (the `mods`/`ls`
- * precedent), carrying the inert notice until the live link lands. */
+ * precedent). */
 export function makeBindingsHandler(ctx: CommandContext): CommandHandler {
   return (args: string): CommandResult => {
     if (args.trim() !== "") {
@@ -1257,7 +1258,7 @@ export function makeBindingsHandler(ctx: CommandContext): CommandHandler {
     return {
       status: "ok",
       message: [
-        `${list.length} binding${list.length === 1 ? "" : "s"} (inert: applied once at bind; per-flip re-derive is not wired yet):`,
+        `${list.length} binding${list.length === 1 ? "" : "s"} (live: re-derived from the channel as the displayed frame changes):`,
         ...rows,
       ].join("\n"),
     };
@@ -1834,9 +1835,9 @@ export const HELP_TEXT = [
   "               normalized over min..max (declared on the channel, or",
   "               explicit when the declaration is partial; one undo stroke)",
   "  bind <expr> <channel> <axis> [<min> <max>]   register a channel→axis",
-  "               binding (same gate as bake; applied once now — INERT:",
-  "               per-flip re-derive is not wired yet; last-bind-wins per",
-  "               element WITHIN an axis, axes coexist; one undo stroke;",
+  "               binding (same gate as bake): the axis RE-DERIVES from the",
+  "               channel on every frame flip; last-bind-wins per element",
+  "               WITHIN an axis, axes coexist; one undo stroke;",
   "               a later direct write CLEARS its overlap, same stroke)",
   "  unbind <expr>|all [<axis>]  release binding coverage element-wise,",
   "               one axis or all (values stay as last applied)",
@@ -1968,7 +1969,7 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registry.register(
     "bind",
     makeBindHandler(ctx),
-    "register a channel→axis binding over the target (same gate/range as bake; applied once now — INERT: per-flip re-derive is not wired yet; last-bind-wins per element; one undo stroke): bind <target> <channel> <axis> [<min> <max>]",
+    "register a channel→axis binding over the target (same gate/range as bake): the axis re-derives from the channel on every frame flip; last-bind-wins per element within an axis; one undo stroke: bind <target> <channel> <axis> [<min> <max>]",
   );
   registry.register(
     "unbind",

@@ -13,10 +13,10 @@
  *   later consumer — the per-flip apply, the LWW-clear rule — leans on it:
  *   "which binding drives element p's axis a" always has one answer.
  *
- * THIS INCREMENT (C-2) BINDINGS ARE INERT: created, applied ONCE at bind
- * time through the ordinary recorded writers, listed, badged, undoable —
- * but nothing re-derives on frame flips yet (the flip apply is the next,
- * attended increment). The verbs' messages say so.
+ * Bindings are LIVE: applied once at bind time through the ordinary
+ * recorded writers, then RE-DERIVED on every displayed-frame flip by the
+ * applier in main.ts (raw, unrecorded — derived state). The registry
+ * itself never touches buffers; it only answers who covers what.
  *
  * Undo rides one seam: `snapshot()` before a mutation, `restore(snap)` in
  * the recorded op — whole-list, so no index/order bookkeeping can drift.

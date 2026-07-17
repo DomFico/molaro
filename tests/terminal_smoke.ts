@@ -651,16 +651,16 @@ try {
     /term-err/.test(lastLine?.cls ?? "") && /does not declare a full min\/max range/.test(lastLine?.text ?? ""),
     JSON.stringify(lastLine));
   lastLine = await runLine("bind alpha energy color 0 2.5");
-  check("bind registers, applies once, and says INERT",
+  check("bind registers, applies, and says LIVE",
     /term-ok/.test(lastLine?.cls ?? "") &&
       /^bound "energy" → color on 400 points of "alpha" \(applied at frame \d+, range 0\.\.2\.5\)/.test(lastLine?.text ?? "") &&
-      /inert/.test(lastLine?.text ?? ""),
+      /live/.test(lastLine?.text ?? ""),
     JSON.stringify(lastLine));
-  check("the status badge counts it", /1 binding \(inert\)/.test(await statusText()), await statusText());
+  check("the status badge counts it", /· 1 binding live$/.test(await statusText()), await statusText());
   lastLine = await runLine("bindings");
-  check("bindings lists the row with the inert notice",
+  check("bindings lists the row with the live notice",
     /term-ok/.test(lastLine?.cls ?? "") &&
-      /inert/.test(lastLine?.text ?? "") &&
+      /live/.test(lastLine?.text ?? "") &&
       /energy → color on "alpha" — 400 points · range 0\.\.2\.5/.test(lastLine?.text ?? ""),
     JSON.stringify(lastLine));
   lastLine = await runLine("unbind all");

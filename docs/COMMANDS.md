@@ -547,14 +547,18 @@ NOT re-derive (a *live* per-flip binding is separate, future work).
   (`components: 3` — scalar axes need 1-wide), a missing or empty range,
   or a non-finite value in the displayed frame's block.
 
-### Bindings: `bind` / `unbind` / `bindings` — inert this build
+### Bindings: `bind` / `unbind` / `bindings` — the live channel link
 
 `bind <target> <channel> <axis> [<min> <max>]` registers a **binding** —
 the durable statement "this channel drives this axis over these points" —
-through the exact gate and normalization `bake` uses, and applies the
-current frame's values once, in the same single undo stroke (one Ctrl+Z
-removes the binding *and* restores prior values). Bindings are listed by
-`bindings` and counted in the status-line badge.
+through the exact gate and normalization `bake` uses, applies the current
+frame's values in the same single undo stroke (one Ctrl+Z removes the
+binding *and* restores prior values), and from then on **re-derives the
+bound axis from the channel on every displayed-frame flip**: scrub, seek,
+or play and the bound elements follow the data. The per-flip re-derive is
+*derived state* — it is never recorded, so one undo after any amount of
+playback still restores the pre-bind picture in one step. Bindings are
+listed by `bindings` and counted in the status-line badge.
 
 - **Coverage is element-disjoint PER AXIS**: a new bind takes its overlap
   from earlier **same-axis** bindings (last-bind-wins, element by
@@ -572,11 +576,11 @@ removes the binding *and* restores prior values). Bindings are listed by
 - **Orientation fails loudly**: `bind … orientation` (any entry point) is
   refused with "no consumer for the orientation axis yet" — the oriented
   shape generator does not exist, and nothing silently no-ops.
-
-**Inert, loudly:** in this build a binding does **not** re-derive on frame
-flips — scrub or play and the bound axis keeps its bind-time values. The
-live per-flip apply is the next, attended increment; every bind message
-and the `bindings` listing say "inert" until it lands.
+- **Static channels stay exact for free**: a `per_point` channel's values
+  cannot change per frame, so its binding's bind-time apply is already
+  correct at every frame (the per-flip applier skips it).
+- **Unbound scenes pay zero**: with no bindings, per-flip work is
+  byte-identical to a viewer without this feature.
 
 
 A mod is one of two kinds. **Representation** mods (like `rainbow`) compute

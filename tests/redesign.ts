@@ -6154,13 +6154,13 @@ async function S37(): Promise<void> {
     check("S37: …and no other buffer", (await changedVs("__preS", "size")) === 0);
     check("S37: bindings lists it",
       /energy → color on "#0-199" — 200 points · range 0\.\.2\.5/.test((await cmd("bindings")).message));
-    check("S37: the status badge counts it", /1 binding \(inert\)/.test(await statusLine()),
+    check("S37: the status badge counts it", /· 1 binding live$/.test(await statusLine()),
       await statusLine());
 
     // -- cross-axis coexistence over the SAME elements -------------------------
     const bind2 = await cmd("bind #0-199 energy size 0 2.5");
     check("S37: a second axis over the same elements coexists — no takeover",
-      bind2.status === "ok" && !/took/.test(bind2.message) && /2 bindings \(inert\)/.test(await statusLine()),
+      bind2.status === "ok" && !/took/.test(bind2.message) && /· 2 bindings live$/.test(await statusLine()),
       JSON.stringify(bind2));
 
     // -- LWW: a direct PARTIAL write clears same-axis coverage, same stroke ----
@@ -6189,7 +6189,7 @@ async function S37(): Promise<void> {
     const un = await cmd("unbind all color");
     check("S37: axis-scoped unbind releases color only",
       un.status === "ok" && / on color — values stay as last applied$/.test(un.message) &&
-        /1 binding \(inert\)/.test(await statusLine()),
+        /· 1 binding live$/.test(await statusLine()),
       JSON.stringify(un));
 
     // -- unwinding to the start: pristine buffers, zero bindings, clean badge --
@@ -6202,9 +6202,259 @@ async function S37(): Promise<void> {
   });
 }
 
+// ============ S38: the LIVE channel link — the interleaving suite (C-3) =======
+// The heavy-bar gate for shared-buffer duality: baked and channel-derived
+// values coexist element-by-element in one buffer, and every individually-
+// green behavior can compose into ghost writes across bind / direct-write /
+// pause / seek / undo interleavings. Each lettered block is one CONSUMER.md
+// §2.7 assertion; the pixel blocks prove buffer→PICTURE (state without
+// pixels is the defect class this project exists to catch). Runs under BOTH
+// depth variants. Load-immunity: every capture waits for fresh rendered
+// frames; every seek waits for the chunk AND the displayed flip.
+async function S38(): Promise<void> {
+  for (const variant of [2, 1] as const) {
+    console.log(`S38 — the live channel link, depth variant ${variant}`);
+    await withDriver(async (d) => {
+      const cmd = (text: string) =>
+        d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+      const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+      const vers = () =>
+        d.evaluate<{ p: { color: number; size: number; opacity: number };
+                     e: { start: number; sizeA: number; sizeB: number };
+                     t: { start: number; radius: number; color: number } }>(
+          `({ p: ${V}.repAttrVersions(), e: ${V}.edgeAttrVersions(), t: ${V}.traceAttrVersions() })`);
+      const rafs = () => d.evaluate(`(async () => {
+        for (let i = 0; i < 3; i++) await new Promise(r => requestAnimationFrame(r));
+      })()`);
+      // seek = playhead + chunk cached + the DISPLAYED flip actually ran
+      const seekTo = async (f: number): Promise<void> => {
+        await d.evaluate(`${V}.player.seek(${f})`);
+        await d.waitFor(`${V}.player.frame === ${f} && ${V}.player.getFrame(${f}) !== null`, 20000);
+        await rafs();
+      };
+      // the mapped expectation, computed from the SAME chunk data the flip
+      // reads — proves offset/stride/mapping end to end (RANGE pinned below)
+      const RANGE = "0, 0.004";
+      const expectSize = (f: number, p: number) =>
+        d.evaluate<number>(`(()=>{
+          const chunk = ${V}.player.getFrame(${f});
+          const v = chunk.channels.get("energy")[(${f} - chunk.start) * 6000 + ${p}];
+          const [lo, hi] = [${RANGE}];
+          return Math.min(1, Math.max(0, (v - lo) / (hi - lo))) * 6;
+        })()`);
+      const sizeAt = (p: number) => d.evaluate<number>(`${V}.rep.state.size[${p}]`);
+
+      await seekTo(0);
+
+      // -- A: UNBOUND PAYS ZERO --------------------------------------------
+      const vA = await vers();
+      const depA = await undoDepth();
+      await seekTo(5); await seekTo(10);
+      const vA2 = await vers();
+      check("S38: flips actually ran (endpoint copies bumped)",
+        vA2.e.start > vA.e.start && vA2.t.start > vA.t.start,
+        JSON.stringify({ vA, vA2 }));
+      check("S38: UNBOUND PAYS ZERO — no rep attribute uploads, no junction fills, no undo entries",
+        vA2.p.color === vA.p.color && vA2.p.size === vA.p.size && vA2.p.opacity === vA.p.opacity &&
+          vA2.e.sizeA === vA.e.sizeA && vA2.e.sizeB === vA.e.sizeB &&
+          vA2.t.radius === vA.t.radius && vA2.t.color === vA.t.color &&
+          (await undoDepth()) === depA,
+        JSON.stringify({ vA, vA2 }));
+
+      // -- B: BOUND AXIS UPDATES ON FLIP, ALONE (+ the junction carve-out) --
+      const bindSize = await cmd(`bind #0-199 energy size ${RANGE.replace(",", "")}`);
+      check("S38: (setup) size binding is live", bindSize.status === "ok" && /live/.test(bindSize.message),
+        JSON.stringify(bindSize));
+      const vB = await vers();
+      await seekTo(20); await seekTo(25);
+      const vB2 = await vers();
+      check("S38: BOUND AXIS ALONE — size uploads on flip; color/opacity/trace stay silent; iSizeA/iSizeB re-derive (the S34 carve-out, bound scenes only)",
+        vB2.p.size > vB.p.size && vB2.p.color === vB.p.color && vB2.p.opacity === vB.p.opacity &&
+          vB2.e.sizeA > vB.e.sizeA && vB2.e.sizeB > vB.e.sizeB &&
+          vB2.t.radius === vB.t.radius && vB2.t.color === vB.t.color,
+        JSON.stringify({ vB, vB2 }));
+
+      // -- C: VALUES CORRECT AT TWO FRAMES (offset/stride/mapping proof) ----
+      for (const f of [25, 40]) {
+        await seekTo(f);
+        const got7 = await sizeAt(7); const want7 = await expectSize(f, 7);
+        const got150 = await sizeAt(150); const want150 = await expectSize(f, 150);
+        check(`S38: derived values EQUAL the mapped channel at frame ${f} (spot points 7, 150)`,
+          Math.abs(got7 - want7) < 1e-5 && Math.abs(got150 - want150) < 1e-5,
+          JSON.stringify({ f, got7, want7, got150, want150 }));
+      }
+      check("S38: an unbound point keeps the base size through it all",
+        Math.abs((await sizeAt(300)) - 3) < 1e-6, `size[300]=${await sizeAt(300)}`);
+
+      // -- C2: SEEK BACK to an already-displayed, already-CACHED frame ------
+      // The dangerous case for any cache-shaped design: landing on a frame
+      // whose chunk is already in the LRU fires NO arrival event. The
+      // recompute trigger here is the DISPLAYED-FRAME FLIP itself, so a
+      // cached landing must re-derive — the buffer shows the LANDED frame's
+      // values, never the previous frame's. Precondition asserted first:
+      // the two frames map to genuinely different values, so equality
+      // discriminates (a stale buffer cannot pass both arms).
+      const backWant = await expectSize(25, 150);
+      const fortyWant = await expectSize(40, 150);
+      check("S38: (data precondition) frames 25 and 40 map to different values at the spot point",
+        Math.abs(backWant - fortyWant) > 1e-3, JSON.stringify({ backWant, fortyWant }));
+      await seekTo(25); // 40 → BACK to 25: both chunks long cached, zero fetches
+      const backGot = await sizeAt(150);
+      check("S38: SEEK-TO-CACHED-FRAME re-derives — frame 25's values, NOT a stale frame 40",
+        Math.abs(backGot - backWant) < 1e-5 && Math.abs(backGot - fortyWant) > 1e-3,
+        JSON.stringify({ backGot, backWant, fortyWant }));
+
+      // -- D: BIND → PLAY → ONE UNDO (the never-recorded assertion) ---------
+      await d.evaluate(`void (window.__preC = Float32Array.from(${V}.rep.state.color))`);
+      const depD = await undoDepth();
+      await cmd(`bind #0-199 energy color ${RANGE.replace(",", "")}`);
+      check("S38: bind is one stroke", (await undoDepth()) === depD + 1);
+      const colorVerBefore = (await vers()).p.color;
+      await d.evaluate(`${V}.setPlaying(true)`);
+      await sleep(1500);
+      await d.evaluate(`${V}.setPlaying(false)`);
+      await rafs();
+      const colorVerAfter = (await vers()).p.color;
+      check("S38: playback re-derived the bound color (uploads happened)",
+        colorVerAfter > colorVerBefore, `${colorVerBefore} → ${colorVerAfter}`);
+      check("S38: NEVER RECORDED — any amount of playback adds ZERO undo entries",
+        (await undoDepth()) === depD + 1, `depth=${await undoDepth()} want=${depD + 1}`);
+      const colorDiff = () => d.evaluate<number>(`(()=>{
+        const c=${V}.rep.state.color, s=window.__preC; let n=0;
+        for (let i=0;i<c.length;i++) if (Math.abs(c[i]-s[i])>1e-6) n++; return n;
+      })()`);
+      await d.ctrlZ();
+      await sleep(300);
+      check("S38: ONE Ctrl+Z after playback → pristine pre-bind buffer, binding gone, depth back",
+        (await colorDiff()) === 0 && (await undoDepth()) === depD &&
+          !/energy → color/.test((await cmd("bindings")).message),
+        `diff=${await colorDiff()} depth=${await undoDepth()}`);
+      const fNow = await d.evaluate<number>(`${V}.player.frame`);
+      await seekTo((fNow + 7) % 140);
+      check("S38: …and a further seek does NOT re-trample (the binding is truly gone)",
+        (await colorDiff()) === 0, `diff=${await colorDiff()}`);
+
+      // -- E: PAUSE → DIRECT WRITE → SEEK (the ghost-write check) -----------
+      await seekTo(40);
+      const write = await cmd("pointsize #0-99 5");
+      check("S38: (paused) the direct write lands and shrinks coverage",
+        write.status === "ok" &&
+          /energy → size on "#0-199" — 100 points/.test((await cmd("bindings")).message),
+        (await cmd("bindings")).message);
+      await seekTo(50);
+      check("S38: PAUSE-WRITE-SEEK — written elements SURVIVE the flip; unwritten keep animating",
+        Math.abs((await sizeAt(50)) - 5) < 1e-6 &&
+          Math.abs((await sizeAt(150)) - (await expectSize(50, 150))) < 1e-5,
+        JSON.stringify({ s50: await sizeAt(50), s150: await sizeAt(150), want150: await expectSize(50, 150) }));
+      await seekTo(60);
+      check("S38: …and keep surviving on further seeks",
+        Math.abs((await sizeAt(50)) - 5) < 1e-6, `size[50]=${await sizeAt(50)}`);
+      await d.ctrlZ();
+      await sleep(300);
+      await seekTo(70);
+      check("S38: undoing the write RESTORES coverage — those elements re-derive again",
+        Math.abs((await sizeAt(50)) - (await expectSize(70, 50))) < 1e-5 &&
+          /energy → size on "#0-199" — 200 points/.test((await cmd("bindings")).message),
+        JSON.stringify({ s50: await sizeAt(50), want: await expectSize(70, 50) }));
+
+      // -- F: TWO BINDINGS, DISJOINT AXES, OVERLAPPING TARGETS --------------
+      await cmd(`bind #100-299 energy color ${RANGE.replace(",", "")}`);
+      const vF = await vers();
+      await seekTo(80);
+      const vF2 = await vers();
+      const rgb150 = await d.evaluate<number[]>(`[...${V}.rep.state.color.slice(450, 453)]`);
+      const t150 = (await expectSize(80, 150)) / 6;
+      check("S38: TWO LIVE BINDINGS — one flip re-derives both axes; both correct at the overlap",
+        vF2.p.color > vF.p.color && vF2.p.size > vF.p.size &&
+          Math.abs((await sizeAt(150)) - t150 * 6) < 1e-5 && rgb150.length === 3,
+        JSON.stringify({ rgb150, t150 }));
+
+      // -- G: PIXELS — the animated claim and the stopped claim -------------
+      // Probe point 150: color-bound (live), given a FAT FIXED size via a
+      // deliberate LWW write on the size axis (clears size coverage on 150
+      // only — the color binding is untouched; axes are orthogonal).
+      await cmd("pointsize #150 8");
+      // occlusion isolation (the standing pixel-proof rule): fade every
+      // OTHER element to zero — zero-alpha impostor fragments DISCARD, so
+      // nothing can sit in front of the probe sphere at any frame. The
+      // opacity writes ride the opacity axis (no binding there — nothing
+      // to clear); the color binding is untouched.
+      await cmd("pointopacity all 0");
+      await cmd("pointopacity #150 1");
+      await cmd("bondopacity all 0");
+      await cmd("bondopacityof all 0");
+      await cmd("traceopacity all 0");
+      // find two frames where the DERIVED hue at 150 is red (t≈0) vs blue
+      // (t≈0.75): computed from the data, asserted found — a dataset drift
+      // fails loudly instead of weakening the pixel claim.
+      const frames = await d.evaluate<{ fRed: number; fBlue: number }>(`(()=>{
+        let fRed = -1, fBlue = -1;
+        for (let f = 0; f < 140; f++) {
+          const chunk = ${V}.player.getFrame(f);
+          if (!chunk) continue;
+          const v = chunk.channels.get("energy")[(f - chunk.start) * 6000 + 150];
+          const t = Math.min(1, Math.max(0, v / 0.004));
+          if (fRed < 0 && t < 0.05) fRed = f;
+          if (fBlue < 0 && t > 0.7 && t < 0.85) fBlue = f;
+        }
+        return { fRed, fBlue };
+      })()`);
+      check("S38: (data precondition) a red-frame and a blue-frame exist for the probe point",
+        frames.fRed >= 0 && frames.fBlue >= 0, JSON.stringify(frames));
+      const settle = async (): Promise<void> => {
+        for (let i = 0; i < 40; i++) {
+          const a = await d.evaluate<number[]>(`${V}.camera.position.toArray()`);
+          await rafs();
+          const b = await d.evaluate<number[]>(`${V}.camera.position.toArray()`);
+          if (Math.hypot(a[0]-b[0], a[1]-b[1], a[2]-b[2]) < 1e-4) return;
+        }
+      };
+      // The probe point MOVES between frames (analytic oscillation), so
+      // every capture re-frames it first — zoomToPoints is the flash-free
+      // camera path (no pulse overlay to tint the patch).
+      const patchAt150 = async (tag: string): Promise<{ red: number; blue: number }> => {
+        await d.evaluate(`${V}.zoomToPoints([150])`);
+        await settle();
+        await rafs();
+        const pr = await d.evaluate<{ x: number; y: number; front: boolean }>(`${V}.debug.projectPoint(150)`);
+        const b64 = await d.captureB64(`${REPORT}/S38_v${variant}_${tag}.png`);
+        return d.evaluate<{ red: number; blue: number }>(`(async () => {
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+          const px = g.getImageData(${Math.round(pr.x) - 3}, ${Math.round(pr.y) - 3}, 7, 7).data;
+          let red = 0, blue = 0;
+          for (let i = 0; i < px.length; i += 4) {
+            if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) red++;
+            if (px[i+2] > px[i] + 60 && px[i+2] > px[i+1] + 40) blue++;
+          }
+          return { red, blue };
+        })()`);
+      };
+      await seekTo(frames.fRed);
+      const pxRed = await patchAt150("red");
+      check("S38: PIXELS ANIMATE — at the red frame the probe sphere RENDERS red",
+        pxRed.red > 5 && pxRed.blue === 0, JSON.stringify(pxRed));
+      await seekTo(frames.fBlue);
+      const pxBlue = await patchAt150("blue");
+      check("S38: …and at the blue frame the SAME sphere renders blue — the picture follows the data",
+        pxBlue.blue > 5 && pxBlue.red === 0, JSON.stringify(pxBlue));
+      // the STOPPED claim: a direct write takes the element out of the live
+      // link, and the PICTURE stops following the data
+      await cmd("colorpoints #150 red");
+      await seekTo(frames.fRed);
+      await seekTo(frames.fBlue); // a frame whose DERIVED hue would be blue
+      const pxStopped = await patchAt150("stopped");
+      check("S38: PIXELS STOP — after a direct write the sphere stays red at the blue frame",
+        pxStopped.red > 5 && pxStopped.blue === 0, JSON.stringify(pxStopped));
+    });
+  }
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 mutates the real repo .molaro/mods (delete + finally-restore) while
  * EVERY scenario's bridge scans that directory at boot. Single-sourced here,
@@ -6227,7 +6477,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S22: "full", S23: "full", S24: "full", S25: "full", S26: "full",
   S27: "full", S28: "full", S29: "full", S30: "full", S31: "full",
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
-  S37: "fast",
+  S37: "fast", S38: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

@@ -45,10 +45,10 @@ import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
 import { applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
 import { BindingRegistry, type Binding } from "./bindings.ts";
-import type { BindAxis } from "./channelmap.ts";
+import { BIND_SIZE_MAX, mapScalar, type BindAxis } from "./channelmap.ts";
 import { bindTypedResult } from "./claudebind.ts";
 import { parseTypedResult } from "./claudemodel.ts";
-import { listRecipes, registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
+import { listRecipes, rainbow, registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
 import {
   installModList,
   isFileAlreadyGone,
@@ -437,8 +437,11 @@ function highlightMaterial(
 // ---------------------------------------------------------------------------
 
 /** Base points: ray-traced sphere impostors reading the per-point buffers.
- * The per-point attributes ride the host's ONE repAttrs re-upload list, so
- * the write hooks only flag rep.dirty — the render loop uploads. */
+ * Rep-write uploads are attribute-TARGETED: each channel flags ITS
+ * attribute only, never the other three — a bound axis re-deriving on
+ * every flip (the live channel link) must not re-upload untouched buffers,
+ * and the cadence assertions read these attributes' version counters.
+ * Visibility still rides the host's rep.dirty batch (refreshPoints). */
 const spherePointsGenerator: ShapeGenerator = {
   name: "sphere-points",
   elementKind: "point",
@@ -449,12 +452,13 @@ const spherePointsGenerator: ShapeGenerator = {
     pointsGeo.setAttribute("aSize", env.pointAttrs.size);
     pointsGeo.setAttribute("aVisible", env.pointAttrs.visible);
     pointsGeo.setAttribute("aOpacity", env.pointAttrs.opacity);
-    const repDirty = (): void => {
-      env.rep.dirty = true; // the render loop re-uploads every per-point attribute
-    };
     return {
       objects: [new THREE.Points(pointsGeo, env.materials.points)],
-      onRepWrite: { color: repDirty, size: repDirty, opacity: repDirty },
+      onRepWrite: {
+        color: () => { env.pointAttrs.color.needsUpdate = true; },
+        size: () => { env.pointAttrs.size.needsUpdate = true; },
+        opacity: () => { env.pointAttrs.opacity.needsUpdate = true; },
+      },
     };
   },
 };
@@ -1700,8 +1704,8 @@ async function main(): Promise<void> {
    * same hook, so GPU sync on undo is automatic. */
   const repWrite = (channel: RepChannel) =>
     (ids: readonly number[]): void => registry.repWrite(channel, ids);
-  // The channel-binding registry (bindings do not re-derive on flip until
-  // the live link lands) and its status badge. The badge seam is assigned
+  // The channel-binding registry (live: the applier below re-derives on
+  // every flip) and its status badge. The badge seam is assigned
   // where the steady-state status line is composed (after boot); everything
   // here only ever runs at command time, well after that.
   const bindingRegistry = new BindingRegistry();
@@ -1736,6 +1740,46 @@ async function main(): Promise<void> {
       model.endStroke();
       return n;
     };
+  /** THE LIVE LINK (C-3): on every displayed-frame flip, each binding
+   * re-derives its axis buffer from that frame's channel block — the SAME
+   * mapping the bake/bind verbs use (mapScalar + the built-in colormap +
+   * BIND_SIZE_MAX; one mapping, two cadences), written RAW into the rep
+   * buffers: DERIVED STATE, NEVER RECORDED (the fillEdges/visibility
+   * precedent — one Ctrl+Z after a thousand flips restores pre-bind state
+   * in one step, because the bind stroke's writer op still holds the
+   * captured priors). GPU sync + the junction carve-out ride the ordinary
+   * write-cadence dispatch: repWrite(axis) reaches the point pass's
+   * attribute-targeted upload and, for size, the edge pass's iSizeA/iSizeB
+   * fill. An UNBOUND scene returns before touching anything — zero
+   * per-flip cost off the bound path. Static (per_point) channels are
+   * skipped: their bind-time apply is already exact at every frame. */
+  const channelScopeByName = new Map(header.channels.map((c) => [c.name, c.scope]));
+  const applyBindings = (chunk: FrameChunk, f: number): void => {
+    if (bindingRegistry.count() === 0) return;
+    for (const b of bindingRegistry.all()) {
+      if (channelScopeByName.get(b.channel) !== "per_point_per_frame") continue;
+      const block = chunk.channels.get(b.channel);
+      if (!block) continue; // validated chunks always carry declared channels
+      const off = (f - chunk.start) * header.n_points; // scalar block: components = 1, gate-enforced
+      const [lo, hi] = b.range;
+      if (b.axis === "color") {
+        const buf = rep.state.color;
+        for (const p of b.points) {
+          const [r, g, bl] = rainbow.colormap(mapScalar(block[off + p], lo, hi));
+          buf[p * 3] = r;
+          buf[p * 3 + 1] = g;
+          buf[p * 3 + 2] = bl;
+        }
+      } else if (b.axis === "size") {
+        const buf = rep.state.size;
+        for (const p of b.points) buf[p] = mapScalar(block[off + p], lo, hi) * BIND_SIZE_MAX;
+      } else {
+        const buf = rep.state.opacity;
+        for (const p of b.points) buf[p] = mapScalar(block[off + p], lo, hi);
+      }
+      registry.repWrite(b.axis, b.points);
+    }
+  };
   const colorPoints = withBindingClear("color", makeRepWriter(rep.state.color, 3, repWrite("color")));
   const colorPointsEach = withBindingClear("color", makeRepEachWriter(rep.state.color, 3, repWrite("color")));
   const sizePointsEach = withBindingClear("size", makeRepEachWriter(rep.state.size, 1, repWrite("size")));
@@ -1899,7 +1943,7 @@ async function main(): Promise<void> {
     colorPointsEach,
     sizePointsEach,
     opacityPointsEach,
-    // Channel bindings (no per-flip re-derive until the live link lands).
+    // Channel bindings (LIVE — applyBindings re-derives them per flip).
     // createBinding is ONE compound stroke: the wrapped writer's recorded
     // capture (which ALSO clears overlapping same-axis coverage — the
     // last-bind-wins pre-step, via withBindingClear) plus a registry
@@ -2291,6 +2335,7 @@ async function main(): Promise<void> {
     positionAttr.array = chunk.positions.subarray(offset, offset + header.n_points * 3);
     positionAttr.needsUpdate = true;
     registry.frameFlip(); // the instanced edge pass owns copies of these endpoints
+    applyBindings(chunk, f); // live channel bindings re-derive (no-op when unbound)
     if (displayedFrame === -1) for (const obj of registry.objects()) obj.visible = true;
     displayedFrame = f;
     shownSinceMark++;
@@ -2367,10 +2412,10 @@ async function main(): Promise<void> {
     `${header.categories.length} categories · live producer stream` +
     (scale.fallback ? ` · ${NO_BBOX_WARNING}` : "");
   // The binding badge composes onto the steady-state line (principle 2: a
-  // binding must be visible without asking). "(inert)" until the live link.
+  // binding must be visible without asking).
   refreshBindingBadge = () => {
     const n = bindingRegistry.count();
-    setStatus(baseStatus + (n > 0 ? ` · ${n} binding${n === 1 ? "" : "s"} (inert)` : ""));
+    setStatus(baseStatus + (n > 0 ? ` · ${n} binding${n === 1 ? "" : "s"} live` : ""));
   };
   refreshBindingBadge();
 
@@ -2394,6 +2439,13 @@ async function main(): Promise<void> {
         ? edgePass.attrVersions
         : (): { start: number; sizeA: number; sizeB: number } =>
             ({ start: 0, sizeA: 0, sizeB: 0 }),
+      // binding cadence seam: the point attributes' upload versions —
+      // unbound flips bump NONE of these; a bound axis bumps ITS OWN only
+      repAttrVersions: () => ({
+        color: pointAttrs.color.version,
+        size: pointAttrs.size.version,
+        opacity: pointAttrs.opacity.version,
+      }),
       // trace-tube cadence seam: a flip bumps start, never radius/color
       traceAttrVersions: tracePass
         ? tracePass.attrVersions
