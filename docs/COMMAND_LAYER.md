@@ -697,6 +697,19 @@ higher cost.
 
 ## Test topology
 
+> **Test-authoring note — label subsets are not strict subsets.** The
+> synthetic harness dataset shares group ids across categories: e.g.
+> `alpha.group-0` resolves the whole group entity (400 points), only 200 of
+> which lie in category `alpha` (resolution descends to the entry and takes
+> `pointsOf(group id)`, which is global). A label-based "subset of the
+> parent" assumption therefore FAILS SILENTLY — a subset test can pass for
+> the wrong reason or compute wrong overlap arithmetic. When a test needs
+> strict-subset or intersection arithmetic (coverage shrink, LWW overlap,
+> partial hide), use **`#index` targets** (`#0-199` ⊃ `#0-99` is
+> self-evident) — S37 is the precedent. Whether the resolution semantics
+> themselves should change is a separate, undecided question; tests must
+> not encode either answer.
+
 - **Unit** (`npm test`, Node-native TS): `address.test.ts` (grammar + resolver
   + completion, incl. spanning fixtures, quoted spaced labels, and the
   argument-shape splitters `splitTrailingName`/`splitLeadingRef`/
