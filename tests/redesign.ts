@@ -497,10 +497,17 @@ async function S3(): Promise<void> {
     const scrollBefore = await scrollTop(d);
     const camBefore = await camPos(d);
     await d.click(proj.x, proj.y);
+    // The flash FLAGS are set synchronously by the click — sample them FIRST.
+    // The 900ms one-shot envelope can legally expire during the tween wait
+    // below (each CDP round-trip can cost hundreds of ms on a busy page); the
+    // old fixed boot settle merely dodged the post-boot busy window that
+    // exposes the race. Same assertion, sampled while the asserted state
+    // exists — the one-shot-probe family's standard retrofit.
+    const pulseCovered = (await flashCount(d)) > 1;
     await sleep(600);
     check("S3: plain click focuses the subgroup (camera orients)", camMoved(camBefore, await camPos(d)));
     check("S3: plain click selects nothing", (await pendingEntries(d)) === 0);
-    check("S3: focus pulse covers the subgroup", (await flashCount(d)) > 1);
+    check("S3: focus pulse covers the subgroup", pulseCovered);
     check("S3: no auto-scroll of the panel from 3D actions", (await scrollTop(d)) === scrollBefore);
     const d1 = await dist();
     check("S3: focus zoomed in", d1 < d0 * 0.8, `${d1.toFixed(1)} vs home ${d0.toFixed(1)}`);
