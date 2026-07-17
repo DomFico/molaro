@@ -6095,11 +6095,41 @@ const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S
  * EVERY scenario's bridge scans that directory at boot. Single-sourced here,
  * next to the scenario table; the parallel runner reads it via --list. */
 const EXCLUSIVE: readonly string[] = ["S29"];
+/** Every scenario belongs to EXACTLY ONE lane — single-sourced here, next to
+ * the scenario table, and asserted exhaustive in BOTH directions below, so a
+ * scenario can never silently fall out of both lanes or into neither.
+ *   fast — the pixel-sensitive / correctness-critical set (junction, overlay,
+ *          depth variants, buffer independence, pulses, null-bbox, the trace
+ *          pixel proofs): what runs on every change during iteration.
+ *   full — everything else. The full LANE runs every scenario (fast included);
+ *          tiering decides WHEN a scenario runs, never WHETHER it still holds.
+ */
+const TIER: Record<string, "fast" | "full"> = {
+  S0: "full", S1: "full", S2: "full", S3: "full", S4: "full", S5: "fast",
+  S6: "full", S7: "full", S8: "full", S9: "full", S10: "full", S11: "full",
+  S12: "full", S13: "full", S14: "full", S15: "full", S16: "full",
+  S17: "fast", S18: "fast", S19: "fast", S20: "full", S21: "full",
+  S22: "full", S23: "full", S24: "full", S25: "full", S26: "full",
+  S27: "full", S28: "full", S29: "full", S30: "full", S31: "full",
+  S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
+};
+for (const name of Object.keys(all)) {
+  if (!(name in TIER)) {
+    console.error(`scenario ${name} has NO TIER — every scenario must be in exactly one lane`);
+    process.exit(2);
+  }
+}
+for (const name of Object.keys(TIER)) {
+  if (!(name in all)) {
+    console.error(`tier entry ${name} has no scenario`);
+    process.exit(2);
+  }
+}
 // Machine-readable listing for the parallel runner (tests/run_e2e.ts): the
-// ONE source of scenario names + exclusivity — the runner never hardcodes
-// them (the "two lists that must agree" defect class).
+// ONE source of scenario names, exclusivity, and tiers — the runner never
+// hardcodes them (the "two lists that must agree" defect class).
 if (which[0] === "--list") {
-  console.log(JSON.stringify({ scenarios: Object.keys(all), exclusive: EXCLUSIVE }));
+  console.log(JSON.stringify({ scenarios: Object.keys(all), exclusive: EXCLUSIVE, tiers: TIER }));
   process.exit(0);
 }
 const run = which.length ? which : Object.keys(all);

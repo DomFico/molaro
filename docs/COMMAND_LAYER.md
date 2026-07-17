@@ -601,6 +601,18 @@ deliberate decisions:
 
 ### Open threads (deliberate deferrals)
 
+- **⚠ HARNESS HAZARD — S29 deletes the shipped workspace mod files.** The rm
+  scenario writes a fixture into the REAL `.molaro/mods/`, `rm all`-deletes
+  every shipped mod file, and restores them from in-memory snapshots in a
+  `finally`. Two consequences, both live: (1) one crashed/killed harness
+  process between delete and restore removes the reference mods from the
+  working tree for real (recoverable only via git) — a latent data-loss bug
+  awaiting a proper fix (point S29's bridge at a temp mods dir); (2) every
+  scenario's bridge scans `.molaro/mods` at boot, so S29 can NEVER run
+  concurrently with anything — it is tagged EXCLUSIVE in the scenario table
+  (tests/redesign.ts) and the parallel runner (tests/run_e2e.ts) runs it
+  alone after the pool drains. Do not un-tag it without fixing (1).
+
 - **The mod registry has no invalidation story — only a re-push.** KNOWN GAP.
   The webview's two mod caches are written by `installModList` and evicted by
   `rm`/`delete_mod`. There is **no file watcher and no `reload` verb**, and

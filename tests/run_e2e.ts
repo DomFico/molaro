@@ -43,6 +43,8 @@ const PORT_STRIDE = 400;
 interface Listing {
   scenarios: string[];
   exclusive: string[];
+  /** scenario → lane, exhaustive both ways (asserted at the source). */
+  tiers: Record<string, "fast" | "full">;
 }
 
 interface Result {
@@ -126,16 +128,29 @@ async function pool(names: string[], width: number): Promise<Result[]> {
 // -- main ---------------------------------------------------------------------
 const argv = process.argv.slice(2);
 let width = 6; // default from the measured width curve (see the runner commit)
+let lane: "fast" | "full" = "full"; // full is the safe default: everything runs
 const names: string[] = [];
 for (let i = 0; i < argv.length; i++) {
   if (argv[i] === "--width") width = Number(argv[++i]);
-  else names.push(argv[i]);
+  else if (argv[i] === "--lane") {
+    const l = argv[++i];
+    if (l !== "fast" && l !== "full") {
+      console.error(`--lane must be fast or full (got "${l}")`);
+      process.exit(2);
+    }
+    lane = l;
+  } else names.push(argv[i]);
 }
 
 mkdirSync(LOG_DIR, { recursive: true });
 const listing = await listScenarios();
 const canonical = listing.scenarios;
-const wanted = names.length ? names : canonical;
+// the full LANE runs every scenario (tiering decides WHEN, never WHETHER);
+// the fast lane is the iteration subset. Explicit names override the lane.
+const laneSet = lane === "full"
+  ? canonical
+  : canonical.filter((n) => listing.tiers[n] === "fast");
+const wanted = names.length ? names : laneSet;
 for (const n of wanted) {
   if (!canonical.includes(n)) {
     console.error(`unknown scenario ${n}`);
