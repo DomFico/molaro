@@ -29,14 +29,20 @@ export interface ChannelDecl {
   max?: number;
 }
 
-/** The point axes a scalar channel can drive — the same three the typed-result
- * binding writes. Orientation (the 3-wide axis) is deliberately NOT here yet:
- * it arrives with the oriented generator, and the gate's width check below is
- * where it will unlock. */
+/** The scalar axes, by ELEMENT DOMAIN. Every scalar axis takes a 1-wide
+ * channel through the normalization lens; they differ only in which
+ * elements they cover and how a per-POINT channel value reaches them:
+ *   point axes — the element's own value;
+ *   trace axes — the vertex's OWN point's value (the orientation map);
+ *   edge axes  — the ENDPOINT MEAN of the edge's two points (the ruled
+ *                combining rule; mean of raws, THEN the lens).
+ * Edge axis tokens say "bond" because that is the verb family's
+ * established vocabulary (colorbonds/bondsize/bondopacity). */
 export const BIND_AXES = ["color", "size", "opacity"] as const;
-/** The three SCALAR axes — the ones a 1-wide channel drives through the
- * normalization lens. */
-export type ScalarAxis = (typeof BIND_AXES)[number];
+export const EDGE_AXES = ["bondcolor", "bondsize", "bondopacity"] as const;
+export const TRACE_AXES = ["tracecolor", "tracesize", "traceopacity"] as const;
+export const SCALAR_AXES = [...BIND_AXES, ...EDGE_AXES, ...TRACE_AXES] as const;
+export type ScalarAxis = (typeof SCALAR_AXES)[number];
 /** The vector axis: a 3-wide channel consumed RAW (no range, no
  * normalization — the A-1 ruling made min/max on 3-wide a contract
  * violation). STATE-ONLY until the oriented generator lands (O-2): the
@@ -45,6 +51,16 @@ export const ORIENTATION_AXIS = "orientation" as const;
 /** Every bindable axis. Code that MAPS scalars must take ScalarAxis; code
  * that routes bindings takes BindAxis and branches on the vector case. */
 export type BindAxis = ScalarAxis | typeof ORIENTATION_AXIS;
+/** Which element DOMAIN an axis covers — the id space its coverage lives
+ * in. Point ids, edge ids, and polyline-vertex ids overlap numerically;
+ * every consumer keys releases and applies by THIS map, never by numbers
+ * alone. */
+export const AXIS_DOMAIN: Record<BindAxis, "point" | "edge" | "vertex"> = {
+  color: "point", size: "point", opacity: "point",
+  bondcolor: "edge", bondsize: "edge", bondopacity: "edge",
+  tracecolor: "vertex", tracesize: "vertex", traceopacity: "vertex",
+  orientation: "vertex",
+};
 
 /** size axis: scalar 0..1 → point size 0..BIND_SIZE_MAX (2× the base size 3 —
  * a fixed visual range, NOT an interpretation of the values). The opacity
@@ -70,8 +86,8 @@ export function gateChannelBind(
   explicitRange: readonly [number, number] | null,
   values: ArrayLike<number> | null,
 ): GateResult {
-  if (axis !== ORIENTATION_AXIS && !(BIND_AXES as readonly string[]).includes(axis)) {
-    return { error: `unknown axis "${axis}" — use ${BIND_AXES.join(" | ")} | ${ORIENTATION_AXIS}` };
+  if (axis !== ORIENTATION_AXIS && !(SCALAR_AXES as readonly string[]).includes(axis)) {
+    return { error: `unknown axis "${axis}" — use ${SCALAR_AXES.join(" | ")} | ${ORIENTATION_AXIS}` };
   }
   if (decl.scope === "per_frame") {
     return {
@@ -96,7 +112,7 @@ export function gateChannelBind(
   } else {
     if (decl.components !== 1) {
       return {
-        error: `channel "${decl.name}" is a vector channel (components: ${decl.components}) — ${BIND_AXES.join("/")} need a scalar (1-wide) channel`,
+        error: `channel "${decl.name}" is a vector channel (components: ${decl.components}) — the scalar axes need a scalar (1-wide) channel`,
       };
     }
     range =

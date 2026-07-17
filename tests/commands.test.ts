@@ -34,6 +34,7 @@ import {
 import { BIND_SIZE_MAX, bindTypedResult } from "../webview/claudebind.ts";
 import type { ChannelDecl } from "../webview/channelmap.ts";
 import { BindingRegistry, type Binding } from "../webview/bindings.ts";
+import { AXIS_DOMAIN, SCALAR_AXES } from "../webview/channelmap.ts";
 
 function makeHeader(): Header {
   const category = [0, 0, 1];
@@ -74,6 +75,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
   const bindingReg = new BindingRegistry();
   const bindCalls: { b: Binding; scalars: number[] }[] = [];
   const orientationOps: { vertexIds: number[]; values: number[] }[] = [];
+  const elemEachOps: { axis: string; ids: number[]; values: number[] }[] = [];
   const refOps: { names: string[]; hidden: boolean }[] = [];
   const memberOps: { name: string; mode: "add" | "remove"; entries: Entry[] }[] = [];
   const colorOps: { points: number[]; rgb: [number, number, number] }[] = [];
@@ -270,8 +272,10 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
         total.removed += s.removed;
         total.points += s.points;
       };
-      for (const a of ["color", "size", "opacity"] as const) {
-        if (axis === null || axis === a) acc(bindingReg.release(sel.points, a));
+      const idsFor = (a: (typeof SCALAR_AXES)[number]) =>
+        AXIS_DOMAIN[a] === "point" ? sel.points : AXIS_DOMAIN[a] === "edge" ? sel.edges : sel.vertices;
+      for (const a of SCALAR_AXES) {
+        if (axis === null || axis === a) acc(bindingReg.release(idsFor(a), a));
       }
       if (axis === null || axis === "orientation") acc(bindingReg.release(sel.vertices, "orientation"));
       return total;
@@ -280,6 +284,30 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     orientationVerticesEach: (vertexIds, values) => {
       orientationOps.push({ vertexIds: [...vertexIds], values: [...values] });
       return vertexIds.length;
+    },
+    colorEdgesEach: (ids, rgb) => {
+      elemEachOps.push({ axis: "bondcolor", ids: [...ids], values: [...rgb] });
+      return ids.length;
+    },
+    sizeEdgesEach: (ids, values) => {
+      elemEachOps.push({ axis: "bondsize", ids: [...ids], values: [...values] });
+      return ids.length;
+    },
+    opacityEdgesEach: (ids, values) => {
+      elemEachOps.push({ axis: "bondopacity", ids: [...ids], values: [...values] });
+      return ids.length;
+    },
+    colorTraceEach: (ids, rgb) => {
+      elemEachOps.push({ axis: "tracecolor", ids: [...ids], values: [...rgb] });
+      return ids.length;
+    },
+    sizeTraceEach: (ids, values) => {
+      elemEachOps.push({ axis: "tracesize", ids: [...ids], values: [...values] });
+      return ids.length;
+    },
+    opacityTraceEach: (ids, values) => {
+      elemEachOps.push({ axis: "traceopacity", ids: [...ids], values: [...values] });
+      return ids.length;
     },
     edges,
     colorEdges: (edgeIds, rgb) => {
@@ -331,7 +359,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
     colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, modRunCode, rmArms, sels,
-    bindCalls, bindingReg, orientationOps,
+    bindCalls, bindingReg, orientationOps, elemEachOps,
   };
 }
 
@@ -1390,6 +1418,65 @@ test("bindings: read-only list with the live notice; empty says so; bare only", 
   assert.match(lines[0], /1 binding \(live: re-derived from the channel as the displayed frame changes\):/);
   assert.equal(lines[1], '  energy → opacity on "all" — 3 points · range 0..2.5');
   assert.equal(registry.runCommand("bindings all").status, "error", "takes no arguments");
+});
+
+// -- A-1: per-element edge/trace axes (bond*/trace* — the completeness pass) -----
+
+test("A-1 bake: edge axes use the ENDPOINT MEAN, contained edges only", () => {
+  const { registry, elemEachOps } = makeRegistry();
+  // edges [[0,1],[1,2]]; energy raw [0, 1.25, 2.5], range 0..2.5:
+  // edge0 mean 0.625 → t 0.25 → size 1.5; edge1 mean 1.875 → t 0.75 → 4.5
+  const r = registry.runCommand("bake all energy bondsize 0 2.5");
+  assert.equal(r.status, "ok");
+  assert.equal(r.message, 'baked "energy" → bondsize on 2 edges of "all" (frame 4, range 0..2.5, endpoint mean)');
+  assert.deepEqual(elemEachOps, [{ axis: "bondsize", ids: [0, 1], values: [1.5, 4.5] }]);
+  // contained rule: a target holding only ONE endpoint matches no edge
+  const none = registry.runCommand("bake c1 energy bondsize 0 2.5");
+  assert.equal(none.status, "nomatch");
+  assert.match(none.message, /no edges contained in "c1"/);
+});
+
+test("A-1 bake: trace axes read each vertex's OWN point (the orientation map)", () => {
+  const { registry, elemEachOps } = makeRegistry(ORI_FIXTURE);
+  // vertices [0,1] → points [0,2] → raw [0, 2.5] → t [0,1] → sizes [0,6]
+  const r = registry.runCommand("bake all energy tracesize 0 2.5");
+  assert.equal(r.status, "ok");
+  assert.equal(r.message, 'baked "energy" → tracesize on 2 vertices of "all" (frame 4, range 0..2.5)');
+  assert.deepEqual(elemEachOps, [{ axis: "tracesize", ids: [0, 1], values: [0, 6] }]);
+});
+
+test("A-1 bind: edge/trace bindings register in their own id spaces and list with their nouns", () => {
+  const { registry, bindingReg } = makeRegistry(ORI_FIXTURE);
+  registry.runCommand("bind all energy bondsize 0 2.5");
+  registry.runCommand("bind all energy tracecolor 0 2.5");
+  assert.deepEqual(
+    bindingReg.all().map((b) => ({ axis: b.axis, points: b.points })),
+    [{ axis: "bondsize", points: [0, 1] }, { axis: "tracecolor", points: [0, 1] }],
+  );
+  const list = registry.runCommand("bindings").message;
+  assert.match(list, /energy → bondsize on "all" — 2 edges · range 0\.\.2\.5 · endpoint mean/);
+  assert.match(list, /energy → tracecolor on "all" — 2 vertices · range 0\.\.2\.5/);
+});
+
+test("A-1: the THREE id spaces never mix — the edge-space discriminator", () => {
+  const { registry, bindingReg } = makeRegistry(ORI_FIXTURE);
+  registry.runCommand("bind all energy size 0 2.5"); // points [0,1,2]
+  registry.runCommand("bind all energy bondsize 0 2.5"); // edges [0,1]
+  registry.runCommand("bind all energy tracesize 0 2.5"); // vertices [0,1]
+  assert.equal(bindingReg.count(), 3);
+  // c0 = points {0,1}: contained edges = {0} ONLY (edge 1 needs point 2).
+  // A space-mixing regression releasing edge coverage with POINT ids {0,1}
+  // would drop BOTH edges — this discriminates: edge 1 must survive.
+  const r = registry.runCommand("unbind c0");
+  assert.equal(r.message, "released 4 bound elements across 3 bindings — values stay as last applied");
+  assert.deepEqual(
+    bindingReg.all().map((b) => ({ axis: b.axis, points: b.points })),
+    [
+      { axis: "size", points: [2] },
+      { axis: "bondsize", points: [1] },
+      { axis: "tracesize", points: [1] },
+    ],
+  );
 });
 
 test("bind family: help surfaces all three verbs", () => {

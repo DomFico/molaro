@@ -45,7 +45,7 @@ import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
 import { applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
 import { BindingRegistry, type Binding } from "./bindings.ts";
-import { BIND_AXES, BIND_SIZE_MAX, mapScalar, ORIENTATION_AXIS, type BindAxis } from "./channelmap.ts";
+import { AXIS_DOMAIN, BIND_SIZE_MAX, mapScalar, ORIENTATION_AXIS, SCALAR_AXES, type BindAxis } from "./channelmap.ts";
 import { bindTypedResult } from "./claudebind.ts";
 import { parseTypedResult } from "./claudemodel.ts";
 import { listRecipes, rainbow, registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
@@ -1779,22 +1779,50 @@ async function main(): Promise<void> {
       }
       const off = (f - chunk.start) * header.n_points; // scalar block: components = 1, gate-enforced
       const [lo, hi] = b.range!;
-      if (b.axis === "color") {
-        const buf = rep.state.color;
-        for (const p of b.points) {
-          const [r, g, bl] = rainbow.colormap(mapScalar(block[off + p], lo, hi));
-          buf[p * 3] = r;
-          buf[p * 3 + 1] = g;
-          buf[p * 3 + 2] = bl;
+      // Each scalar axis re-derives in ITS OWN domain: point axes read the
+      // element's value; trace axes the vertex's OWN point; edge axes the
+      // ENDPOINT MEAN (the ruled rule — mean of raws, then the lens). The
+      // repWrite key is the REP-CHANNEL name (the write-cadence dispatch's
+      // key space), mapped per axis below.
+      const raw = (id: number): number => {
+        const d = AXIS_DOMAIN[b.axis];
+        if (d === "point") return block[off + id];
+        if (d === "vertex") return block[off + traceVertices[id]];
+        const [ea, eb] = header.edges[id];
+        return (block[off + ea] + block[off + eb]) / 2;
+      };
+      const t = (id: number): number => mapScalar(raw(id), lo, hi);
+      switch (b.axis) {
+        case "color": case "bondcolor": case "tracecolor": {
+          const buf = b.axis === "color" ? rep.state.color
+            : b.axis === "bondcolor" ? rep.state.edgeColor : rep.state.traceColor;
+          for (const id of b.points) {
+            const [r, g, bl] = rainbow.colormap(t(id));
+            buf[id * 3] = r;
+            buf[id * 3 + 1] = g;
+            buf[id * 3 + 2] = bl;
+          }
+          break;
         }
-      } else if (b.axis === "size") {
-        const buf = rep.state.size;
-        for (const p of b.points) buf[p] = mapScalar(block[off + p], lo, hi) * BIND_SIZE_MAX;
-      } else {
-        const buf = rep.state.opacity;
-        for (const p of b.points) buf[p] = mapScalar(block[off + p], lo, hi);
+        case "size": case "bondsize": case "tracesize": {
+          const buf = b.axis === "size" ? rep.state.size
+            : b.axis === "bondsize" ? rep.state.edgeSize : rep.state.traceSize;
+          for (const id of b.points) buf[id] = t(id) * BIND_SIZE_MAX;
+          break;
+        }
+        default: {
+          const buf = b.axis === "opacity" ? rep.state.opacity
+            : b.axis === "bondopacity" ? rep.state.edgeOpacity : rep.state.traceOpacity;
+          for (const id of b.points) buf[id] = t(id);
+        }
       }
-      registry.repWrite(b.axis, b.points);
+      const repChannel = (
+        { color: "color", size: "size", opacity: "opacity",
+          bondcolor: "edgeColor", bondsize: "edgeSize", bondopacity: "edgeOpacity",
+          tracecolor: "traceColor", tracesize: "traceSize", traceopacity: "traceOpacity",
+        } as const
+      )[b.axis];
+      registry.repWrite(repChannel, b.points);
     }
   };
   // The orientation writer: per-vertex RAW 3-vectors through the SAME
@@ -1811,12 +1839,22 @@ async function main(): Promise<void> {
   const opacityPointsEach = withBindingClear("opacity", makeRepEachWriter(rep.state.opacity, 1, repWrite("opacity")));
   const sizePoints = withBindingClear("size", makeRepWriter(rep.state.size, 1, repWrite("size")));
   const opacityPoints = withBindingClear("opacity", makeRepWriter(rep.state.opacity, 1, repWrite("opacity")));
-  const colorEdges = makeRepWriter(rep.state.edgeColor, 3, repWrite("edgeColor"));
-  const sizeEdges = makeRepWriter(rep.state.edgeSize, 1, repWrite("edgeSize"));
-  const opacityEdges = makeRepWriter(rep.state.edgeOpacity, 1, repWrite("edgeOpacity"));
-  const colorTrace = makeRepWriter(rep.state.traceColor, 3, repWrite("traceColor"));
-  const sizeTrace = makeRepWriter(rep.state.traceSize, 1, repWrite("traceSize"));
-  const opacityTrace = makeRepWriter(rep.state.traceOpacity, 1, repWrite("traceOpacity"));
+  // Edge/trace writers carry the SAME LWW-clear discipline as points: a
+  // direct write (broadcast verb or per-element consumer) releases
+  // overlapping same-axis binding coverage in its own id space (edge ids /
+  // vertex ids — the axis names key the spaces via AXIS_DOMAIN).
+  const colorEdges = withBindingClear("bondcolor", makeRepWriter(rep.state.edgeColor, 3, repWrite("edgeColor")));
+  const sizeEdges = withBindingClear("bondsize", makeRepWriter(rep.state.edgeSize, 1, repWrite("edgeSize")));
+  const opacityEdges = withBindingClear("bondopacity", makeRepWriter(rep.state.edgeOpacity, 1, repWrite("edgeOpacity")));
+  const colorTrace = withBindingClear("tracecolor", makeRepWriter(rep.state.traceColor, 3, repWrite("traceColor")));
+  const sizeTrace = withBindingClear("tracesize", makeRepWriter(rep.state.traceSize, 1, repWrite("traceSize")));
+  const opacityTrace = withBindingClear("traceopacity", makeRepWriter(rep.state.traceOpacity, 1, repWrite("traceOpacity")));
+  const colorEdgesEach = withBindingClear("bondcolor", makeRepEachWriter(rep.state.edgeColor, 3, repWrite("edgeColor")));
+  const sizeEdgesEach = withBindingClear("bondsize", makeRepEachWriter(rep.state.edgeSize, 1, repWrite("edgeSize")));
+  const opacityEdgesEach = withBindingClear("bondopacity", makeRepEachWriter(rep.state.edgeOpacity, 1, repWrite("edgeOpacity")));
+  const colorTraceEach = withBindingClear("tracecolor", makeRepEachWriter(rep.state.traceColor, 3, repWrite("traceColor")));
+  const sizeTraceEach = withBindingClear("tracesize", makeRepEachWriter(rep.state.traceSize, 1, repWrite("traceSize")));
+  const opacityTraceEach = withBindingClear("traceopacity", makeRepEachWriter(rep.state.traceOpacity, 1, repWrite("traceOpacity")));
 
   // -- Type A (analysis) mods: the async producer round-trip ---------------------
   // Follow-up terminal lines ride the commandResult channel — the terminal
@@ -1997,7 +2035,11 @@ async function main(): Promise<void> {
     // overlap numerically; one unscoped release() over both would shrink
     // the wrong coverage, so the composite never calls it that way.
     releaseBindings: (
-      sel: { points: readonly number[] | null; vertices: readonly number[] | null },
+      sel: {
+        points: readonly number[] | null;
+        vertices: readonly number[] | null;
+        edges: readonly number[] | null;
+      },
       axis: BindAxis | null,
     ) => {
       const snap = bindingRegistry.snapshot();
@@ -2007,8 +2049,12 @@ async function main(): Promise<void> {
         total.removed += s.removed;
         total.points += s.points;
       };
-      for (const a of BIND_AXES) {
-        if (axis === null || axis === a) acc(bindingRegistry.release(sel.points, a));
+      // Each axis releases with ITS domain's id set — the three spaces
+      // overlap numerically and must never cross (AXIS_DOMAIN is the key).
+      const idsFor = (a: BindAxis): readonly number[] | null =>
+        AXIS_DOMAIN[a] === "point" ? sel.points : AXIS_DOMAIN[a] === "edge" ? sel.edges : sel.vertices;
+      for (const a of SCALAR_AXES) {
+        if (axis === null || axis === a) acc(bindingRegistry.release(idsFor(a), a));
       }
       if (axis === null || axis === ORIENTATION_AXIS) {
         acc(bindingRegistry.release(sel.vertices, ORIENTATION_AXIS));
@@ -2024,6 +2070,12 @@ async function main(): Promise<void> {
     },
     listBindings: () => bindingRegistry.all(),
     orientationVerticesEach,
+    colorEdgesEach,
+    sizeEdgesEach,
+    opacityEdgesEach,
+    colorTraceEach,
+    sizeTraceEach,
+    opacityTraceEach,
     // The bake/bind gate's READ surface. Declarations come from the header;
     // values come from whatever is IN HAND at the displayed frame — the
     // header block for per_point, the displayed chunk's zero-copy view for
@@ -2107,6 +2159,8 @@ async function main(): Promise<void> {
     createBinding: () => ({ touched: 0, removed: 0, points: 0 }),
     releaseBindings: () => ({ touched: 0, removed: 0, points: 0 }),
     orientationVerticesEach: () => 0,
+    colorEdgesEach: () => 0, sizeEdgesEach: () => 0, opacityEdgesEach: () => 0,
+    colorTraceEach: () => 0, sizeTraceEach: () => 0, opacityTraceEach: () => 0,
     colorEdges: () => 0, colorTrace: () => 0,
     sizePoints: () => 0, sizeEdges: () => 0, sizeTrace: () => 0,
     opacityPoints: () => 0, opacityEdges: () => 0, opacityTrace: () => 0,

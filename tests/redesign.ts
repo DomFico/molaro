@@ -6645,9 +6645,126 @@ async function S39(): Promise<void> {
   });
 }
 
+// ====== S40: per-element edge/trace channel consumers (A-1, real wiring) ======
+// The bond*/trace* scalar axes through the REAL applier: trace values read
+// each vertex's OWN point, edge values the ENDPOINT MEAN (mean of raws,
+// then the lens), both re-deriving on flip, undoing in one stroke, and
+// paying zero when unbound. Buffer/seam assertions; the drawn pixels for
+// these buffers are already pinned by the fast lane's existing scenarios.
+async function S40(): Promise<void> {
+  console.log("S40 — edge/trace channel consumers: mean rule + own-point rule, live");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const rafs = () => d.evaluate(`(async () => {
+      for (let i = 0; i < 3; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`);
+    const seekTo = async (f: number): Promise<void> => {
+      await d.evaluate(`${V}.player.seek(${f})`);
+      await d.waitFor(`${V}.player.frame === ${f} && ${V}.player.getFrame(${f}) !== null`, 20000);
+      await rafs();
+    };
+    // stored ≡ supplied for the two new domains at frame f, spot elements
+    const traceEquals = (f: number) =>
+      d.evaluate<{ ok: boolean; detail: string }>(`(()=>{
+        const tv = ${V}.traceVertices;
+        const chunk = ${V}.player.getFrame(${f});
+        const off = (${f} - chunk.start) * 6000;
+        const block = chunk.channels.get("energy");
+        const buf = ${V}.rep.state.traceSize;
+        const t = (v) => Math.min(1, Math.max(0, block[off + tv[v]] / 0.004)) * 6;
+        for (const v of [0, tv.length - 1]) {
+          if (Math.abs(buf[v] - t(v)) > 1e-5) {
+            return { ok: false, detail: "v=" + v + " got=" + buf[v] + " want=" + t(v) };
+          }
+        }
+        return { ok: true, detail: "frame " + ${f} };
+      })()`);
+    const edgeEquals = (f: number) =>
+      d.evaluate<{ ok: boolean; detail: string }>(`(()=>{
+        const chunk = ${V}.player.getFrame(${f});
+        const off = (${f} - chunk.start) * 6000;
+        const block = chunk.channels.get("energy");
+        const buf = ${V}.rep.state.edgeOpacity;
+        const edges = ${V}.edges;
+        for (const e of [0, 1234, edges.length - 1]) {
+          const mean = (block[off + edges[e][0]] + block[off + edges[e][1]]) / 2;
+          const want = Math.min(1, Math.max(0, mean / 0.004));
+          if (Math.abs(buf[e] - want) > 1e-5) {
+            return { ok: false, detail: "e=" + e + " got=" + buf[e] + " want=" + want };
+          }
+        }
+        return { ok: true, detail: "frame " + ${f} };
+      })()`);
+
+    await d.evaluate(`${V}.setPlaying(false)`);
+    await seekTo(0);
+
+    // -- unbound pays zero on the NEW axes ---------------------------------
+    const snap0 = await d.evaluate<boolean>(`(()=>{
+      window.__preTS = Float32Array.from(${V}.rep.state.traceSize);
+      window.__preEO = Float32Array.from(${V}.rep.state.edgeOpacity);
+      return true;
+    })()`);
+    check("S40: (setup) pre-bind snapshots taken", snap0);
+    const depth0 = await undoDepth();
+    await seekTo(5); await seekTo(10);
+    const flat = await d.evaluate<boolean>(`(()=>{
+      const a = ${V}.rep.state.traceSize, b = window.__preTS;
+      const c = ${V}.rep.state.edgeOpacity, e = window.__preEO;
+      for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+      for (let i = 0; i < c.length; i++) if (c[i] !== e[i]) return false;
+      return true;
+    })()`);
+    check("S40: UNBOUND PAYS ZERO — flips leave the edge/trace buffers untouched",
+      flat && (await undoDepth()) === depth0);
+
+    // -- bind both new domains; stored ≡ supplied, live across flips -------
+    const b1 = await cmd("bind all energy tracesize 0 0.004");
+    check("S40: tracesize binds (own-point rule)",
+      b1.status === "ok" && /→ tracesize on \d+ vertices/.test(b1.message), JSON.stringify(b1));
+    const b2 = await cmd("bind all energy bondopacity 0 0.004");
+    check("S40: bondopacity binds and names the mean rule",
+      b2.status === "ok" && /→ bondopacity on \d+ edges/.test(b2.message) && /endpoint mean/.test(b2.message),
+      JSON.stringify(b2));
+    const eqT = await traceEquals(10);
+    check("S40: STORED ≡ SUPPLIED (trace: vertex's own point)", eqT.ok, eqT.detail);
+    const eqE = await edgeEquals(10);
+    check("S40: STORED ≡ SUPPLIED (edge: endpoint mean)", eqE.ok, eqE.detail);
+    await seekTo(40);
+    const eqT2 = await traceEquals(40);
+    const eqE2 = await edgeEquals(40);
+    check("S40: both re-derive LIVE on flip", eqT2.ok && eqE2.ok, eqT2.detail + " / " + eqE2.detail);
+    check("S40: flips recorded NOTHING", (await undoDepth()) === depth0 + 2);
+
+    // -- one undo each → pristine buffers ----------------------------------
+    await d.ctrlZ();
+    await sleep(250);
+    await d.ctrlZ();
+    await sleep(250);
+    const pristine = await d.evaluate<boolean>(`(()=>{
+      const a = ${V}.rep.state.traceSize, b = window.__preTS;
+      const c = ${V}.rep.state.edgeOpacity, e = window.__preEO;
+      for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 1e-7) return false;
+      for (let i = 0; i < c.length; i++) if (Math.abs(c[i] - e[i]) > 1e-7) return false;
+      return true;
+    })()`);
+    check("S40: one undo per bind → pristine pre-bind buffers, bindings gone",
+      pristine && (await cmd("bindings")).message === "no bindings" && (await undoDepth()) === depth0);
+    await seekTo(50);
+    const still = await d.evaluate<boolean>(`(()=>{
+      const a = ${V}.rep.state.traceSize, b = window.__preTS;
+      for (let i = 0; i < a.length; i++) if (Math.abs(a[i] - b[i]) > 1e-7) return false;
+      return true;
+    })()`);
+    check("S40: …and further seeks never re-trample", still);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 mutates the real repo .molaro/mods (delete + finally-restore) while
  * EVERY scenario's bridge scans that directory at boot. Single-sourced here,
@@ -6670,7 +6787,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S22: "full", S23: "full", S24: "full", S25: "full", S26: "full",
   S27: "full", S28: "full", S29: "full", S30: "full", S31: "full",
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
-  S37: "fast", S38: "fast", S39: "fast",
+  S37: "fast", S38: "fast", S39: "fast", S40: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

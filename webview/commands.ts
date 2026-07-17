@@ -28,11 +28,14 @@ import {
 import type { Binding, ReleaseStats } from "./bindings.ts";
 import type { TreeModel } from "./classification.ts";
 import {
+  AXIS_DOMAIN,
   BIND_AXES,
   BIND_SIZE_MAX,
   gateChannelBind,
+  mapScalar,
   normalizeScalars,
   ORIENTATION_AXIS,
+  SCALAR_AXES,
   type BindAxis,
   type ScalarAxis,
   type ChannelDecl,
@@ -187,9 +190,22 @@ export interface CommandContext {
    * slot = every element of that space; axis null = every axis. One
    * recorded op when anything changed. Values stay as last applied. */
   releaseBindings(
-    sel: { points: readonly number[] | null; vertices: readonly number[] | null },
+    sel: {
+      points: readonly number[] | null;
+      vertices: readonly number[] | null;
+      edges: readonly number[] | null;
+    },
     axis: BindAxis | null,
   ): ReleaseStats;
+  /** Per-element edge/trace writers — the Each siblings of the broadcast
+   * writers, for the channel consumers (bake/bind) and any future
+   * per-element scalar source. Same one-stroke capture/LWW discipline. */
+  colorEdgesEach(edgeIds: readonly number[], rgb: readonly number[]): number;
+  sizeEdgesEach(edgeIds: readonly number[], values: readonly number[]): number;
+  opacityEdgesEach(edgeIds: readonly number[], values: readonly number[]): number;
+  colorTraceEach(vertexIds: readonly number[], rgb: readonly number[]): number;
+  sizeTraceEach(vertexIds: readonly number[], values: readonly number[]): number;
+  opacityTraceEach(vertexIds: readonly number[], values: readonly number[]): number;
   /** The orientation writer: per-vertex RAW 3-vectors (flat, 3 × ids
    * length) into the stride-3 orientation buffer — the SAME writer core
    * color rides (capture, LWW-clear of same-axis coverage, one stroke,
@@ -1041,12 +1057,30 @@ export function makeRainbowHandler(ctx: CommandContext): CommandHandler {
 export function applyScalarsToAxis(
   ctx: CommandContext,
   axis: ScalarAxis,
-  points: readonly number[],
+  ids: readonly number[],
   scalars: readonly number[],
 ): number {
-  if (axis === "color") return applyColorScalars(ctx, points, scalars, rainbow.colormap);
-  if (axis === "size") return ctx.sizePointsEach(points, scalars.map((t) => t * BIND_SIZE_MAX));
-  return ctx.opacityPointsEach(points, scalars);
+  const rgbOf = (ts: readonly number[]): number[] => {
+    const rgb = new Array<number>(ts.length * 3);
+    for (let i = 0; i < ts.length; i++) {
+      const [cr, cg, cb] = rainbow.colormap(ts[i]);
+      rgb[i * 3] = cr;
+      rgb[i * 3 + 1] = cg;
+      rgb[i * 3 + 2] = cb;
+    }
+    return rgb;
+  };
+  switch (axis) {
+    case "color": return applyColorScalars(ctx, ids, scalars, rainbow.colormap);
+    case "size": return ctx.sizePointsEach(ids, scalars.map((t) => t * BIND_SIZE_MAX));
+    case "opacity": return ctx.opacityPointsEach(ids, scalars);
+    case "bondcolor": return ctx.colorEdgesEach(ids, rgbOf(scalars));
+    case "bondsize": return ctx.sizeEdgesEach(ids, scalars.map((t) => t * BIND_SIZE_MAX));
+    case "bondopacity": return ctx.opacityEdgesEach(ids, scalars);
+    case "tracecolor": return ctx.colorTraceEach(ids, rgbOf(scalars));
+    case "tracesize": return ctx.sizeTraceEach(ids, scalars.map((t) => t * BIND_SIZE_MAX));
+    case "traceopacity": return ctx.opacityTraceEach(ids, scalars);
+  }
 }
 
 /** The bake/bind SHARED argument front half: walk trailing words back to
@@ -1092,12 +1126,16 @@ function parseChannelAxisArgs(
 /** The bake/bind SHARED resolve half: declaration lookup (loud with the
  * channel list), target resolution (view's exact core), the gate, and the
  * value extraction — everything up to "what happens with the values", which
- * is the ONLY place the two verbs differ. Two result kinds, one per axis
- * family: "scalar" carries normalized [0,1] scalars over POINT ids;
- * "vector" (the orientation axis) carries RAW per-vertex 3-vectors over
- * POLYLINE-VERTEX ids — the vertex's own point's channel value, direct
- * membership (a vertex is covered iff ITS point resolved; the trace verbs'
- * subgroup map-up is a constant-write convenience, not a data read). */
+ * is the ONLY place the two verbs differ. Two result kinds:
+ *   "scalar" — normalized [0,1] scalars over the axis's OWN element domain:
+ *     point axes → the point's value over POINT ids; trace axes → the
+ *     vertex's OWN point's value over VERTEX ids (direct membership; the
+ *     trace verbs' subgroup map-up is a constant-write convenience, not a
+ *     data read); edge axes → the ENDPOINT MEAN over CONTAINED edge ids
+ *     (both endpoints resolved — colorbonds' rule; mean of raws, THEN the
+ *     lens).
+ *   "vector" — the orientation axis: RAW per-vertex 3-vectors, VERTEX ids.
+ */
 function resolveChannelAxis(
   ctx: CommandContext,
   verb: string,
@@ -1106,7 +1144,8 @@ function resolveChannelAxis(
 ):
   | {
       kind: "scalar";
-      points: number[];
+      domain: "point" | "edge" | "vertex";
+      ids: number[];
       scalars: number[];
       range: [number, number];
       channel: string;
@@ -1162,16 +1201,59 @@ function resolveChannelAxis(
     }
     return { kind: "vector", vertexIds, values, channel: p.channel, expr: p.expr, frame: inHand!.frame };
   }
+  const axis = p.axisWord as ScalarAxis;
+  const domain = AXIS_DOMAIN[axis];
+  const src = inHand!.values;
+  const range = gate.range!;
+  let ids: number[];
+  let scalars: number[];
+  if (domain === "vertex") {
+    const inSet = new Set(r.points);
+    ids = [];
+    for (let v = 0; v < ctx.traceVertices.length; v++) {
+      if (inSet.has(ctx.traceVertices[v])) ids.push(v);
+    }
+    if (ids.length === 0) {
+      return {
+        status: "nomatch",
+        message: `no polyline vertices in "${p.expr}" — ${axis} lives on the polyline domain`,
+      };
+    }
+    scalars = normalizeScalars(src, ids.map((v) => ctx.traceVertices[v]), range);
+  } else if (domain === "edge") {
+    ids = edgesMatching(ctx.edges, r.points, true); // CONTAINED — colorbonds' rule
+    if (ids.length === 0) {
+      return {
+        status: "nomatch",
+        message: `no edges contained in "${p.expr}" — ${axis} lives on the edge domain (both endpoints must resolve)`,
+      };
+    }
+    // The ruled combining rule: the edge's raw value is the MEAN of its two
+    // endpoints' channel values, then the normalization lens.
+    scalars = ids.map((e) => {
+      const [a, b] = ctx.edges[e];
+      return mapScalar((Number(src[a]) + Number(src[b])) / 2, range[0], range[1]);
+    });
+  } else {
+    ids = r.points;
+    scalars = normalizeScalars(src, ids, range);
+  }
   return {
     kind: "scalar",
-    points: r.points,
-    scalars: normalizeScalars(inHand!.values, r.points, gate.range!),
-    range: gate.range!,
+    domain,
+    ids,
+    scalars,
+    range,
     channel: p.channel,
-    axis: p.axisWord as ScalarAxis,
+    axis,
     expr: p.expr,
     frame: inHand!.frame,
   };
+}
+
+/** The unit noun for a scalar result's element domain (messages/listings). */
+function domainNoun(domain: "point" | "edge" | "vertex"): string {
+  return domain === "point" ? "points" : domain === "edge" ? "edges" : "vertices";
 }
 
 /**
@@ -1187,7 +1269,7 @@ function resolveChannelAxis(
  */
 export function makeBakeHandler(ctx: CommandContext): CommandHandler {
   const usage =
-    "bake <target> <channel> <axis> [<min> <max>] (axis: color | size | opacity | orientation; e.g. bake all energy color 0 2.5)";
+    "bake <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondsize|bondopacity · polyline tracecolor|tracesize|traceopacity · orientation; e.g. bake all energy color 0 2.5)";
   return (args: string): CommandResult => {
     const r = resolveChannelAxis(ctx, "bake", usage, args);
     if ("status" in r) return r;
@@ -1199,11 +1281,12 @@ export function makeBakeHandler(ctx: CommandContext): CommandHandler {
         message: `baked "${r.channel}" → orientation on ${n} vertices of "${r.expr}" (${at}, raw vectors) — stored; no shape reads orientation yet`,
       };
     }
-    const n = applyScalarsToAxis(ctx, r.axis, r.points, r.scalars);
+    const n = applyScalarsToAxis(ctx, r.axis, r.ids, r.scalars);
     const at = r.frame === null ? "static" : `frame ${r.frame}`;
+    const rule = r.domain === "edge" ? ", endpoint mean" : "";
     return {
       status: "ok",
-      message: `baked "${r.channel}" → ${r.axis} on ${n} points of "${r.expr}" (${at}, range ${r.range[0]}..${r.range[1]})`,
+      message: `baked "${r.channel}" → ${r.axis} on ${n} ${domainNoun(r.domain)} of "${r.expr}" (${at}, range ${r.range[0]}..${r.range[1]}${rule})`,
     };
   };
 }
@@ -1223,7 +1306,7 @@ export function makeBakeHandler(ctx: CommandContext): CommandHandler {
  */
 export function makeBindHandler(ctx: CommandContext): CommandHandler {
   const usage =
-    "bind <target> <channel> <axis> [<min> <max>] (axis: color | size | opacity | orientation; e.g. bind all energy color 0 2.5)";
+    "bind <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondsize|bondopacity · polyline tracecolor|tracesize|traceopacity · orientation; e.g. bind all energy color 0 2.5)";
   return (args: string): CommandResult => {
     const r = resolveChannelAxis(ctx, "bind", usage, args);
     if ("status" in r) return r;
@@ -1246,18 +1329,19 @@ export function makeBindHandler(ctx: CommandContext): CommandHandler {
       };
     }
     const released = ctx.createBinding(
-      { channel: r.channel, axis: r.axis, points: r.points, expr: r.expr, range: r.range },
+      { channel: r.channel, axis: r.axis, points: r.ids, expr: r.expr, range: r.range },
       r.scalars,
     );
     const took =
       released.points > 0
         ? `; took ${released.points} elements from ${released.touched} earlier binding${released.touched === 1 ? "" : "s"}`
         : "";
+    const rule = r.domain === "edge" ? ", endpoint mean" : "";
     return {
       status: "ok",
       message:
-        `bound "${r.channel}" → ${r.axis} on ${r.points.length} points of "${r.expr}" ` +
-        `(applied at ${at}, range ${r.range[0]}..${r.range[1]})${took} — live: re-derives as the displayed frame changes`,
+        `bound "${r.channel}" → ${r.axis} on ${r.ids.length} ${domainNoun(r.domain)} of "${r.expr}" ` +
+        `(applied at ${at}, range ${r.range[0]}..${r.range[1]}${rule})${took} — live: re-derives as the displayed frame changes`,
     };
   };
 }
@@ -1278,7 +1362,7 @@ export function makeUnbindHandler(ctx: CommandContext): CommandHandler {
     const split = splitTrailingWord(expr);
     if (
       split.word !== null &&
-      ((BIND_AXES as readonly string[]).includes(split.word) || split.word === ORIENTATION_AXIS)
+      ((SCALAR_AXES as readonly string[]).includes(split.word) || split.word === ORIENTATION_AXIS)
     ) {
       axis = split.word as BindAxis;
       expr = split.expr;
@@ -1292,19 +1376,21 @@ export function makeUnbindHandler(ctx: CommandContext): CommandHandler {
     let stats: ReleaseStats;
     if (expr === "all") {
       // exact: every binding (of the axis), no resolution needed
-      stats = ctx.releaseBindings({ points: null, vertices: null }, axis);
+      stats = ctx.releaseBindings({ points: null, vertices: null, edges: null }, axis);
     } else {
       const r = resolveTargetPoints(ctx, expr);
       if ("status" in r) return r;
-      // Two id spaces, one target: scalar coverage is released by POINT id,
-      // orientation coverage by the target's polyline-VERTEX ids (direct
-      // membership — the same mapping bind used to build the coverage).
+      // THREE id spaces, one target: point coverage releases by POINT id;
+      // trace/orientation coverage by the target's polyline-VERTEX ids
+      // (direct membership); edge coverage by CONTAINED edge ids — each
+      // the same mapping bind used to build that coverage.
       const inSet = new Set(r.points);
       const vertices: number[] = [];
       for (let v = 0; v < ctx.traceVertices.length; v++) {
         if (inSet.has(ctx.traceVertices[v])) vertices.push(v);
       }
-      stats = ctx.releaseBindings({ points: r.points, vertices }, axis);
+      const edges = edgesMatching(ctx.edges, r.points, true);
+      stats = ctx.releaseBindings({ points: r.points, vertices, edges }, axis);
     }
     if (stats.touched === 0) {
       return {
@@ -1335,7 +1421,9 @@ export function makeBindingsHandler(ctx: CommandContext): CommandHandler {
     const rows = list.map(
       (b) =>
         `  ${b.channel} → ${b.axis} on "${b.expr}" — ${b.points.length} ${
-          b.axis === ORIENTATION_AXIS ? "vertices · raw vectors (stored; nothing draws orientation yet)" : `points · range ${b.range![0]}..${b.range![1]}`
+          b.axis === ORIENTATION_AXIS
+            ? "vertices · raw vectors (stored; nothing draws orientation yet)"
+            : `${domainNoun(AXIS_DOMAIN[b.axis])} · range ${b.range![0]}..${b.range![1]}${AXIS_DOMAIN[b.axis] === "edge" ? " · endpoint mean" : ""}`
         }`,
     );
     return {
@@ -1922,9 +2010,12 @@ export const HELP_TEXT = [
   "               channel on every frame flip; last-bind-wins per element",
   "               WITHIN an axis, axes coexist; one undo stroke;",
   "               a later direct write CLEARS its overlap, same stroke)",
-  "               axis `orientation` takes a VECTOR (3-wide) channel, raw",
-  "               (no range), onto polyline vertices — STORED ONLY for now:",
-  "               no shape reads orientation yet",
+  "               axes cover all three domains: point color|size|opacity,",
+  "               edge bondcolor|bondsize|bondopacity (value = ENDPOINT MEAN,",
+  "               contained edges), polyline tracecolor|tracesize|traceopacity",
+  "               (each vertex reads ITS point); axis `orientation` takes a",
+  "               VECTOR (3-wide) channel, raw (no range), onto polyline",
+  "               vertices — STORED ONLY for now: no shape reads it yet",
   "  unbind <expr>|all [<axis>]  release binding coverage element-wise,",
   "               one axis or all (values stay as last applied)",
   "  bindings     list channel bindings (read-only)",
