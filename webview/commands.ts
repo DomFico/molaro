@@ -25,6 +25,7 @@ import {
   type Segment,
   type TargetAst,
 } from "./address.ts";
+import type { Binding, ReleaseStats } from "./bindings.ts";
 import type { TreeModel } from "./classification.ts";
 import {
   BIND_AXES,
@@ -171,6 +172,17 @@ export interface CommandContext {
    * frame: the displayed chunk's zero-copy view at the displayed frame.
    * null = unknown channel, a non-per-element scope, or no data in hand. */
   channelValues(name: string): { values: ArrayLike<number>; frame: number | null } | null;
+  /** Register a channel binding AND apply its initial scalars — ONE stroke
+   * (the writers' capture + a registry snapshot), so one Ctrl+Z removes the
+   * binding and restores prior values together. INERT this increment:
+   * nothing re-derives on flip. Returns what last-bind-wins released from
+   * earlier bindings' coverage. */
+  createBinding(b: Binding, scalars: readonly number[]): ReleaseStats;
+  /** Release binding coverage element-wise (null = every binding): one
+   * recorded op when anything changed. Values stay as last applied. */
+  releaseBindings(points: readonly number[] | null): ReleaseStats;
+  /** The binding registry, read-only (the bindings verb + status badge). */
+  listBindings(): readonly Binding[];
   /** The contract's edge list — endpoint point-index pairs, in header order.
    * colorbonds/colorbondsof test these endpoints against the resolved point
    * set; edge ids (indexes into this list) key the edge-color buffer. */
@@ -1023,75 +1035,209 @@ export function applyScalarsToAxis(
   return ctx.opacityPointsEach(points, scalars);
 }
 
+/** The bake/bind SHARED argument front half: walk trailing words back to
+ * front — [<min> <max>] when the last word is numeric, then <axis>, then
+ * <channel>; the remainder is the target expression (which may itself
+ * contain spaces). ONE parser for both verbs (resolveRepArgs' discipline:
+ * shared shape, impossible drift). */
+function parseChannelAxisArgs(
+  verb: string,
+  usage: string,
+  args: string,
+): { expr: string; channel: string; axisWord: string; explicitRange: [number, number] | null } | CommandResult {
+  const needs: CommandResult = {
+    status: "error",
+    message: `${verb} needs a target, a channel, and an axis — ${usage}`,
+  };
+  const w1 = splitTrailingWord(args);
+  if (w1.word === null) return needs;
+  let explicitRange: [number, number] | null = null;
+  let axisWord: string;
+  let rest: string;
+  const hi = parseNumericToken(w1.word);
+  if (hi !== null) {
+    const w2 = splitTrailingWord(w1.expr);
+    const lo = w2.word === null ? null : parseNumericToken(w2.word);
+    if (lo === null) {
+      return { status: "error", message: `an explicit range needs BOTH bounds — ${usage}` };
+    }
+    explicitRange = [lo, hi];
+    const w3 = splitTrailingWord(w2.expr);
+    if (w3.word === null) return needs;
+    axisWord = w3.word;
+    rest = w3.expr;
+  } else {
+    axisWord = w1.word;
+    rest = w1.expr;
+  }
+  const w4 = splitTrailingWord(rest);
+  if (w4.word === null || w4.expr === "") return needs;
+  return { expr: w4.expr, channel: w4.word, axisWord, explicitRange };
+}
+
+/** The bake/bind SHARED resolve half: declaration lookup (loud with the
+ * channel list), target resolution (view's exact core), the gate, and the
+ * normalization — everything up to "what happens with the scalars", which
+ * is the ONLY place the two verbs differ. */
+function resolveChannelAxis(
+  ctx: CommandContext,
+  verb: string,
+  usage: string,
+  args: string,
+):
+  | {
+      points: number[];
+      scalars: number[];
+      range: [number, number];
+      channel: string;
+      axis: BindAxis;
+      expr: string;
+      frame: number | null;
+    }
+  | CommandResult {
+  const p = parseChannelAxisArgs(verb, usage, args);
+  if ("status" in p) return p;
+  const decl = ctx.channels().find((c) => c.name === p.channel);
+  if (!decl) {
+    const names = ctx.channels().map((c) => c.name);
+    return {
+      status: "error",
+      message: `no channel named "${p.channel}"${
+        names.length > 0 ? ` — channels: ${names.join(", ")}` : " — this dataset declares none"
+      }`,
+    };
+  }
+  const r = resolveTargetPoints(ctx, p.expr);
+  if ("status" in r) return r;
+  const inHand = ctx.channelValues(p.channel);
+  const gate = gateChannelBind(decl, p.axisWord, p.explicitRange, inHand ? inHand.values : null);
+  if ("error" in gate) return { status: "error", message: gate.error };
+  return {
+    points: r.points,
+    scalars: normalizeScalars(inHand!.values, r.points, gate.range),
+    range: gate.range,
+    channel: p.channel,
+    axis: p.axisWord as BindAxis,
+    expr: p.expr,
+    frame: inHand!.frame,
+  };
+}
+
 /**
  * `bake <target> <channel> <axis> [<min> <max>]` — the Tier-1 channel
  * consumer: read the named channel's per-element values AT THE DISPLAYED
- * FRAME, gate the request (gateChannelBind — THE choke point the live bind
- * verb must share), normalize over the range (declared min/max, or the
- * explicit trailing pair when the declaration is partial), and write the
- * target's points through the per-element writers. A PLAIN RECORDED WRITE:
- * one undo stroke, LWW, indistinguishable from a hand-typed rep verb —
- * nothing lives past it (a LIVE per-flip link is Tier 2's binding object,
- * not this verb). Verb name is provisional (parked P-4).
+ * FRAME, gate the request (gateChannelBind — THE choke point bind shares),
+ * normalize over the range (declared min/max, or the explicit trailing pair
+ * when the declaration is partial), and write the target's points through
+ * the per-element writers. A PLAIN RECORDED WRITE: one undo stroke, LWW,
+ * indistinguishable from a hand-typed rep verb — nothing lives past it
+ * (the LIVE link is `bind`'s binding object, not this verb). Verb name is
+ * provisional (parked P-4).
  */
 export function makeBakeHandler(ctx: CommandContext): CommandHandler {
   const usage =
     "bake <target> <channel> <axis> [<min> <max>] (axis: color | size | opacity; e.g. bake all energy color 0 2.5)";
   return (args: string): CommandResult => {
-    // Walk trailing words back to front: [<min> <max>] first when the last
-    // word is numeric, then <axis>, then <channel>; the remainder is the
-    // target expression (which may itself contain spaces).
-    const w1 = splitTrailingWord(args);
-    if (w1.word === null) {
-      return { status: "error", message: `bake needs a target, a channel, and an axis — ${usage}` };
-    }
-    let explicitRange: [number, number] | null = null;
-    let axisWord: string;
-    let rest: string;
-    const hi = parseNumericToken(w1.word);
-    if (hi !== null) {
-      const w2 = splitTrailingWord(w1.expr);
-      const lo = w2.word === null ? null : parseNumericToken(w2.word);
-      if (lo === null) {
-        return { status: "error", message: `an explicit range needs BOTH bounds — ${usage}` };
-      }
-      explicitRange = [lo, hi];
-      const w3 = splitTrailingWord(w2.expr);
-      if (w3.word === null) {
-        return { status: "error", message: `bake needs a target, a channel, and an axis — ${usage}` };
-      }
-      axisWord = w3.word;
-      rest = w3.expr;
-    } else {
-      axisWord = w1.word;
-      rest = w1.expr;
-    }
-    const w4 = splitTrailingWord(rest);
-    if (w4.word === null || w4.expr === "") {
-      return { status: "error", message: `bake needs a target, a channel, and an axis — ${usage}` };
-    }
-    const channelName = w4.word;
-    const decl = ctx.channels().find((c) => c.name === channelName);
-    if (!decl) {
-      const names = ctx.channels().map((c) => c.name);
-      return {
-        status: "error",
-        message: `no channel named "${channelName}"${
-          names.length > 0 ? ` — channels: ${names.join(", ")}` : " — this dataset declares none"
-        }`,
-      };
-    }
-    const r = resolveTargetPoints(ctx, w4.expr);
+    const r = resolveChannelAxis(ctx, "bake", usage, args);
     if ("status" in r) return r;
-    const inHand = ctx.channelValues(channelName);
-    const gate = gateChannelBind(decl, axisWord, explicitRange, inHand ? inHand.values : null);
-    if ("error" in gate) return { status: "error", message: gate.error };
-    const scalars = normalizeScalars(inHand!.values, r.points, gate.range);
-    const n = applyScalarsToAxis(ctx, axisWord as BindAxis, r.points, scalars);
-    const at = inHand!.frame === null ? "static" : `frame ${inHand!.frame}`;
+    const n = applyScalarsToAxis(ctx, r.axis, r.points, r.scalars);
+    const at = r.frame === null ? "static" : `frame ${r.frame}`;
     return {
       status: "ok",
-      message: `baked "${channelName}" → ${axisWord} on ${n} points of "${w4.expr}" (${at}, range ${gate.range[0]}..${gate.range[1]})`,
+      message: `baked "${r.channel}" → ${r.axis} on ${n} points of "${r.expr}" (${at}, range ${r.range[0]}..${r.range[1]})`,
+    };
+  };
+}
+
+/**
+ * `bind <target> <channel> <axis> [<min> <max>]` — register a channel→axis
+ * BINDING: the durable statement "this channel drives this axis over these
+ * points". Same parse, same gate, same normalization, same initial write as
+ * bake (resolveChannelAxis + ctx.createBinding's one stroke) — PLUS the
+ * registry entry, with LAST-BIND-WINS element-level coverage (an overlap is
+ * released from earlier bindings in the same stroke; one Ctrl+Z restores
+ * both the values and the coverage).
+ *
+ * INERT THIS INCREMENT, and the message says so: the values are applied
+ * once at bind time; the per-flip re-derive is the next (attended)
+ * increment. Nothing here may claim liveness until it exists.
+ */
+export function makeBindHandler(ctx: CommandContext): CommandHandler {
+  const usage =
+    "bind <target> <channel> <axis> [<min> <max>] (axis: color | size | opacity; e.g. bind all energy color 0 2.5)";
+  return (args: string): CommandResult => {
+    const r = resolveChannelAxis(ctx, "bind", usage, args);
+    if ("status" in r) return r;
+    const released = ctx.createBinding(
+      { channel: r.channel, axis: r.axis, points: r.points, expr: r.expr, range: r.range },
+      r.scalars,
+    );
+    const at = r.frame === null ? "static" : `frame ${r.frame}`;
+    const took =
+      released.points > 0
+        ? `; took ${released.points} points from ${released.touched} earlier binding${released.touched === 1 ? "" : "s"}`
+        : "";
+    return {
+      status: "ok",
+      message:
+        `bound "${r.channel}" → ${r.axis} on ${r.points.length} points of "${r.expr}" ` +
+        `(applied at ${at}, range ${r.range[0]}..${r.range[1]})${took} — inert: re-derive on flip is not wired yet`,
+    };
+  };
+}
+
+/** `unbind <target>` / `unbind all` — release binding coverage ELEMENT-WISE
+ * (the ruled partial-clear granularity): covered elements of the target
+ * leave their bindings (shrink; emptied bindings drop). Values stay as last
+ * applied — releasing a binding freezes the current look, it repaints
+ * nothing. One recorded op when anything changed. */
+export function makeUnbindHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const expr = args.trim();
+    if (expr === "") {
+      return { status: "error", message: "unbind needs a target — unbind <target> | unbind all" };
+    }
+    if (ctx.listBindings().length === 0) {
+      return { status: "nomatch", message: "no bindings to release" };
+    }
+    let stats: ReleaseStats;
+    if (expr === "all") {
+      stats = ctx.releaseBindings(null); // exact: every binding, no resolution needed
+    } else {
+      const r = resolveTargetPoints(ctx, expr);
+      if ("status" in r) return r;
+      stats = ctx.releaseBindings(r.points);
+    }
+    if (stats.touched === 0) {
+      return { status: "nomatch", message: `nothing bound matches "${expr}"` };
+    }
+    return {
+      status: "ok",
+      message: `released ${stats.points} bound points across ${stats.touched} binding${
+        stats.touched === 1 ? "" : "s"
+      }${stats.removed > 0 ? ` (${stats.removed} removed)` : ""} — values stay as last applied`,
+    };
+  };
+}
+
+/** `bindings` — read-only list of the channel bindings (the `mods`/`ls`
+ * precedent), carrying the inert notice until the live link lands. */
+export function makeBindingsHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    if (args.trim() !== "") {
+      return { status: "error", message: "bindings takes no arguments — it lists the channel bindings" };
+    }
+    const list = ctx.listBindings();
+    if (list.length === 0) return { status: "ok", message: "no bindings" };
+    const rows = list.map(
+      (b) => `  ${b.channel} → ${b.axis} on "${b.expr}" — ${b.points.length} points · range ${b.range[0]}..${b.range[1]}`,
+    );
+    return {
+      status: "ok",
+      message: [
+        `${list.length} binding${list.length === 1 ? "" : "s"} (inert: applied once at bind; per-flip re-derive is not wired yet):`,
+        ...rows,
+      ].join("\n"),
     };
   };
 }
@@ -1665,6 +1811,12 @@ export const HELP_TEXT = [
   "               channel (at the displayed frame) onto color|size|opacity,",
   "               normalized over min..max (declared on the channel, or",
   "               explicit when the declaration is partial; one undo stroke)",
+  "  bind <expr> <channel> <axis> [<min> <max>]   register a channel→axis",
+  "               binding (same gate as bake; applied once now — INERT:",
+  "               per-flip re-derive is not wired yet; last-bind-wins per",
+  "               element; one undo stroke)",
+  "  unbind <expr>|all           release binding coverage element-wise",
+  "               (values stay as last applied) · bindings  list them",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  mods         list the recipe registry: name, axis, origin, and credit",
   "               (author · source, display-only; recipes, not verbs)",
@@ -1788,6 +1940,21 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "bake",
     makeBakeHandler(ctx),
     "write a declared scalar channel's values (at the displayed frame) onto a point axis, normalized over min..max (declared, or explicit when the declaration is partial; one undo stroke): bake <target> <channel> <axis> [<min> <max>]",
+  );
+  registry.register(
+    "bind",
+    makeBindHandler(ctx),
+    "register a channel→axis binding over the target (same gate/range as bake; applied once now — INERT: per-flip re-derive is not wired yet; last-bind-wins per element; one undo stroke): bind <target> <channel> <axis> [<min> <max>]",
+  );
+  registry.register(
+    "unbind",
+    makeUnbindHandler(ctx),
+    "release binding coverage element-wise — unbind <target> | unbind all (values stay as last applied; one undo op)",
+  );
+  registry.register(
+    "bindings",
+    makeBindingsHandler(ctx),
+    "read-only list of the channel bindings — channel → axis on target, points, range (bare — takes no target)",
   );
   registry.register(
     "ls",

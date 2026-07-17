@@ -33,6 +33,7 @@ import {
 } from "../webview/recipes.ts";
 import { BIND_SIZE_MAX, bindTypedResult } from "../webview/claudebind.ts";
 import type { ChannelDecl } from "../webview/channelmap.ts";
+import { BindingRegistry, type Binding } from "../webview/bindings.ts";
 
 function makeHeader(): Header {
   const category = [0, 0, 1];
@@ -70,6 +71,8 @@ function makeRegistry() {
     ["mass", { values: [1, 2, 3], frame: null }],
     ["flow", { values: [1, 0, 0, 0, 1, 0, 0, 0, 1], frame: 4 }],
   ]);
+  const bindingReg = new BindingRegistry();
+  const bindCalls: { b: Binding; scalars: number[] }[] = [];
   const refOps: { names: string[]; hidden: boolean }[] = [];
   const memberOps: { name: string; mode: "add" | "remove"; entries: Entry[] }[] = [];
   const colorOps: { points: number[]; rgb: [number, number, number] }[] = [];
@@ -247,6 +250,15 @@ function makeRegistry() {
     // (a series — refused), "flow" is 3-wide (refused for scalar axes).
     channels: () => chanDecls,
     channelValues: (name) => chanValues.get(name) ?? null,
+    // A REAL registry behind the binding stubs — the verbs' semantics
+    // (last-bind-wins, element-level release) are the registry's, and the
+    // stub records what the composite (main.ts's one stroke) was asked for.
+    createBinding: (b, scalars) => {
+      bindCalls.push({ b: { ...b, points: [...b.points] }, scalars: [...scalars] });
+      return bindingReg.add(b);
+    },
+    releaseBindings: (points) => (points === null ? bindingReg.clear() : bindingReg.release(points)),
+    listBindings: () => bindingReg.all(),
     edges,
     colorEdges: (edgeIds, rgb) => {
       edgeOps.push({ edgeIds: [...edgeIds], rgb });
@@ -297,6 +309,7 @@ function makeRegistry() {
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
     colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, modRunCode, rmArms, sels,
+    bindCalls, bindingReg,
   };
 }
 
@@ -1179,6 +1192,89 @@ test("bake: help surfaces the verb in both the summary and describe", () => {
   const { registry } = makeRegistry();
   assert.match(HELP_TEXT, /bake <expr> <channel> <axis>/);
   assert.match(registry.runCommand("help bake").message, /^bake — /);
+});
+
+// -- bind/unbind/bindings: the INERT binding registry (C-2) -----------------------
+
+test("bind: registers through the SHARED gate, applies once, and says inert", () => {
+  const { registry, bindCalls, bindingReg } = makeRegistry();
+  const r = registry.runCommand("bind all energy color 0 2.5");
+  assert.equal(r.status, "ok");
+  assert.equal(
+    r.message,
+    'bound "energy" → color on 3 points of "all" (applied at frame 4, range 0..2.5) — inert: re-derive on flip is not wired yet',
+  );
+  // the composite got the binding AND the normalized scalars (the same
+  // mapping bake proved: raw [0, 1.25, 2.5] over 0..2.5 → [0, 0.5, 1])
+  assert.equal(bindCalls.length, 1);
+  assert.deepEqual(bindCalls[0].b, {
+    channel: "energy", axis: "color", points: [0, 1, 2], expr: "all", range: [0, 2.5],
+  });
+  assert.deepEqual(bindCalls[0].scalars, [0, 0.5, 1]);
+  assert.equal(bindingReg.count(), 1);
+});
+
+test("bind: gate parity with bake — the same refusals, word for word", () => {
+  const { registry, bindingReg } = makeRegistry();
+  for (const [bakeCmd, bindCmd] of [
+    ["bake all flow color", "bind all flow color"],
+    ["bake all energy color", "bind all energy color"],
+    ["bake all time color", "bind all time color"],
+  ]) {
+    const bake = registry.runCommand(bakeCmd);
+    const bind = registry.runCommand(bindCmd);
+    assert.equal(bind.status, "error", bindCmd);
+    assert.equal(bind.message, bake.message, `${bakeCmd} vs ${bindCmd}`);
+  }
+  assert.equal(bindingReg.count(), 0, "no failure registered anything");
+});
+
+test("bind: last-bind-wins — the overlap is TAKEN from the earlier binding, and reported", () => {
+  const { registry, bindingReg } = makeRegistry();
+  registry.runCommand("bind all energy color 0 2.5");
+  const r = registry.runCommand("bind c1 mass size");
+  assert.equal(r.status, "ok");
+  assert.match(r.message, /took 1 points from 1 earlier binding/);
+  assert.deepEqual(bindingReg.all().map((b) => ({ channel: b.channel, points: b.points })), [
+    { channel: "energy", points: [0, 1] },
+    { channel: "mass", points: [2] },
+  ]);
+});
+
+test("unbind: element-wise release; all clears; empty and no-overlap are nomatch", () => {
+  const { registry, bindingReg } = makeRegistry();
+  assert.equal(registry.runCommand("unbind all").status, "nomatch", "nothing bound yet");
+  registry.runCommand("bind all energy color 0 2.5");
+  const part = registry.runCommand("unbind c1"); // point 2 only
+  assert.equal(part.status, "ok");
+  assert.equal(part.message, "released 1 bound points across 1 binding — values stay as last applied");
+  assert.deepEqual(bindingReg.all().map((b) => b.points), [[0, 1]]);
+  const rest = registry.runCommand("unbind all");
+  assert.equal(rest.status, "ok");
+  assert.equal(rest.message, "released 2 bound points across 1 binding (1 removed) — values stay as last applied");
+  assert.equal(bindingReg.count(), 0);
+  assert.equal(registry.runCommand("unbind").status, "error", "bare unbind is a usage error");
+});
+
+test("bindings: read-only list with the inert notice; empty says so; bare only", () => {
+  const { registry } = makeRegistry();
+  assert.equal(registry.runCommand("bindings").message, "no bindings");
+  registry.runCommand("bind all energy opacity 0 2.5");
+  const r = registry.runCommand("bindings");
+  assert.equal(r.status, "ok");
+  const lines = r.message.split("\n");
+  assert.match(lines[0], /1 binding \(inert: applied once at bind; per-flip re-derive is not wired yet\):/);
+  assert.equal(lines[1], '  energy → opacity on "all" — 3 points · range 0..2.5');
+  assert.equal(registry.runCommand("bindings all").status, "error", "takes no arguments");
+});
+
+test("bind family: help surfaces all three verbs", () => {
+  const { registry } = makeRegistry();
+  assert.match(HELP_TEXT, /bind <expr> <channel> <axis>/);
+  assert.match(HELP_TEXT, /unbind <expr>\|all/);
+  for (const verb of ["bind", "unbind", "bindings"]) {
+    assert.match(registry.runCommand(`help ${verb}`).message, new RegExp(`^${verb} — `));
+  }
 });
 
 test("mods: lists the registry — rainbow grouped under built-in with its credit", () => {

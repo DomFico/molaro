@@ -642,6 +642,34 @@ try {
       lastLine?.text === "mods takes no arguments — it lists the recipe registry",
     JSON.stringify(lastLine));
 
+  // bind/unbind/bindings: the INERT binding registry through the real relay
+  // (synthetic "energy" declares min only → the explicit range is required),
+  // plus the status-line badge the registry drives.
+  const statusText = () => d.evaluate<string>(`document.getElementById('status').textContent`);
+  lastLine = await runLine("bind alpha energy color");
+  check("bind without a range hits the shared gate's partial-declaration refusal",
+    /term-err/.test(lastLine?.cls ?? "") && /does not declare a full min\/max range/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  lastLine = await runLine("bind alpha energy color 0 2.5");
+  check("bind registers, applies once, and says INERT",
+    /term-ok/.test(lastLine?.cls ?? "") &&
+      /^bound "energy" → color on 400 points of "alpha" \(applied at frame \d+, range 0\.\.2\.5\)/.test(lastLine?.text ?? "") &&
+      /inert/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  check("the status badge counts it", /1 binding \(inert\)/.test(await statusText()), await statusText());
+  lastLine = await runLine("bindings");
+  check("bindings lists the row with the inert notice",
+    /term-ok/.test(lastLine?.cls ?? "") &&
+      /inert/.test(lastLine?.text ?? "") &&
+      /energy → color on "alpha" — 400 points · range 0\.\.2\.5/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  lastLine = await runLine("unbind all");
+  check("unbind all releases element-wise and reports",
+    /term-ok/.test(lastLine?.cls ?? "") &&
+      lastLine?.text === "released 400 bound points across 1 binding (1 removed) — values stay as last applied",
+    JSON.stringify(lastLine));
+  check("…and the badge clears", !/binding/.test(await statusText()), await statusText());
+
   // /claude: the conversation panel toggles, and a scripted round-trip
   // completes through the relay path (deep panel assertions live in S23)
   const panelOpen = () =>

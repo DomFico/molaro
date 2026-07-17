@@ -43,7 +43,8 @@ import { bulkCategories, buildTree } from "./classification.ts";
 import { flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
-import { createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
+import { applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
+import { BindingRegistry, type Binding } from "./bindings.ts";
 import { bindTypedResult } from "./claudebind.ts";
 import { parseTypedResult } from "./claudemodel.ts";
 import { listRecipes, registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
@@ -1833,6 +1834,13 @@ async function main(): Promise<void> {
     })();
   };
 
+  // The channel-binding registry (INERT this increment — see the ctx
+  // closures below) and its status badge. The badge seam is assigned where
+  // the steady-state status line is composed (after boot); the closures
+  // only ever run at command time, well after that.
+  const bindingRegistry = new BindingRegistry();
+  let refreshBindingBadge = (): void => {};
+
   const commandContext = {
     hierarchy,
     tree: fullTree, // the SAME model the bottom tree renders — click parity
@@ -1861,6 +1869,39 @@ async function main(): Promise<void> {
     colorPointsEach,
     sizePointsEach,
     opacityPointsEach,
+    // Channel bindings (INERT this increment: created/applied-once/listed/
+    // badged/undoable; the per-flip re-derive is the next, attended
+    // increment). createBinding is ONE compound stroke: the writers' own
+    // recorded op (which captures prior values) plus a whole-registry
+    // snapshot op — a single Ctrl+Z removes the binding and restores the
+    // buffers together, and the badge refreshes on both directions.
+    createBinding: (b: Binding, scalars: readonly number[]) => {
+      model.beginStroke();
+      applyScalarsToAxis(commandContext, b.axis, b.points, scalars);
+      const snap = bindingRegistry.snapshot();
+      const released = bindingRegistry.add(b);
+      refreshBindingBadge();
+      model.recordOp(() => {
+        bindingRegistry.restore(snap);
+        refreshBindingBadge();
+        return [];
+      });
+      model.endStroke();
+      return released;
+    },
+    releaseBindings: (points: readonly number[] | null) => {
+      const snap = bindingRegistry.snapshot();
+      const stats = points === null ? bindingRegistry.clear() : bindingRegistry.release(points);
+      if (stats.touched === 0) return stats; // nothing changed — record no op
+      refreshBindingBadge();
+      model.recordOp(() => {
+        bindingRegistry.restore(snap);
+        refreshBindingBadge();
+        return [];
+      });
+      return stats;
+    },
+    listBindings: () => bindingRegistry.all(),
     // The bake/bind gate's READ surface. Declarations come from the header;
     // values come from whatever is IN HAND at the displayed frame — the
     // header block for per_point, the displayed chunk's zero-copy view for
@@ -1941,6 +1982,8 @@ async function main(): Promise<void> {
     deleteSelections: (names) =>
       names.every((n) => commandContext.committedEntries().has(n)) ? { deleted: 0, points: 0 } : null,
     colorPoints: () => 0, colorPointsEach: () => 0, sizePointsEach: () => 0, opacityPointsEach: () => 0,
+    createBinding: () => ({ touched: 0, removed: 0, points: 0 }),
+    releaseBindings: () => ({ touched: 0, removed: 0, points: 0 }),
     colorEdges: () => 0, colorTrace: () => 0,
     sizePoints: () => 0, sizeEdges: () => 0, sizeTrace: () => 0,
     opacityPoints: () => 0, opacityEdges: () => 0, opacityTrace: () => 0,
@@ -2285,12 +2328,18 @@ async function main(): Promise<void> {
     renderer.render(scene, camera);
   });
 
-  setStatus(
+  const baseStatus =
     `${header.name} — N=${header.n_points}, T=${nFrames} · ` +
-      `${header.edges.length} edges, ${header.polylines.length} polylines · ` +
-      `${header.categories.length} categories · live producer stream` +
-      (scale.fallback ? ` · ${NO_BBOX_WARNING}` : ""),
-  );
+    `${header.edges.length} edges, ${header.polylines.length} polylines · ` +
+    `${header.categories.length} categories · live producer stream` +
+    (scale.fallback ? ` · ${NO_BBOX_WARNING}` : "");
+  // The binding badge composes onto the steady-state line (principle 2: a
+  // binding must be visible without asking). "(inert)" until the live link.
+  refreshBindingBadge = () => {
+    const n = bindingRegistry.count();
+    setStatus(baseStatus + (n > 0 ? ` · ${n} binding${n === 1 ? "" : "s"} (inert)` : ""));
+  };
+  refreshBindingBadge();
 
   if (cfg.test) {
     // Test seam (harness only; production sets no `test` flag): lets the E2E
