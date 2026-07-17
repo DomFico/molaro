@@ -1266,7 +1266,7 @@ async function S9(): Promise<void> {
       grp?.querySelector('.caret')?.click();
     })()`);
     await sleep(300);
-    const home = await camState();
+    const home = await camSettled();
     const rA = await cmd("view alpha.group-0.subgroup-0");
     check("S9: view <path> resolves and reports the point count",
       rA.status === "ok" && rA.message === "focused 100 points", JSON.stringify(rA));
@@ -1276,7 +1276,7 @@ async function S9(): Promise<void> {
     check("S9: command flashes the mounted matching row (same row feedback)",
       await rowFlashed("/subgroup-0\\b/"));
     await sleep(500);
-    const camCmd = await camState();
+    const camCmd = await camSettled();
     check("S9: command moved the camera off home", !closeCam(home, camCmd));
 
     await reset();
@@ -1288,7 +1288,7 @@ async function S9(): Promise<void> {
       `flash=${await flashCount(d)}`);
     check("S9: gesture flashes the same row class", await rowFlashed("/subgroup-0\\b/"));
     await sleep(500);
-    const camGesture = await camState();
+    const camGesture = await camSettled();
     check("S9: command and gesture land the camera on the SAME pose",
       closeCam(camCmd, camGesture),
       `cmd=${camCmd.map((v) => v.toFixed(3))} gesture=${camGesture.map((v) => v.toFixed(3))}`);
@@ -1310,7 +1310,7 @@ async function S9(): Promise<void> {
     check("S9: ...pulsing the whole spanning group", (await flashCount(d)) === 400,
       `flash=${await flashCount(d)}`);
     await sleep(500);
-    const camGroupCmd = await camState();
+    const camGroupCmd = await camSettled();
     await reset();
     const grpRow = (await d.evaluate<{ x: number; y: number } | null>(`(()=>{
       const rows=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
@@ -1324,7 +1324,7 @@ async function S9(): Promise<void> {
     check("S9: a real click on that category-scoped group row pulses the same 400",
       (await flashCount(d)) === 400, `flash=${await flashCount(d)}`);
     await sleep(500);
-    const camGroupClick = await camState();
+    const camGroupClick = await camSettled();
     check("S9: bare-group command ≡ clicking the category-scoped group row",
       closeCam(camGroupCmd, camGroupClick),
       `cmd=${camGroupCmd.map((v) => v.toFixed(3))} click=${camGroupClick.map((v) => v.toFixed(3))}`);
@@ -1336,7 +1336,7 @@ async function S9(): Promise<void> {
     check("S9: descent through the spanning group stays inside alpha's branch",
       rScope.status === "ok" && rScope.message === "focused 200 points", JSON.stringify(rScope));
     await sleep(650);
-    const camScopeCmd = await camState();
+    const camScopeCmd = await camSettled();
     await reset();
     const s0 = (await bottomRow(d, "/subgroup-0\\b/"))!;
     const s3 = (await bottomRow(d, "/subgroup-3\\b/"))!;
@@ -1345,7 +1345,7 @@ async function S9(): Promise<void> {
     check("S9: right-drag over the SAME rendered rows pulses the same 200",
       (await flashCount(d)) === 200, `flash=${await flashCount(d)}`);
     await sleep(500);
-    const camScopeDrag = await camState();
+    const camScopeDrag = await camSettled();
     check("S9: category-scoped descent ≡ dragging the rows the tree shows",
       closeCam(camScopeCmd, camScopeDrag),
       `cmd=${camScopeCmd.map((v) => v.toFixed(3))} drag=${camScopeDrag.map((v) => v.toFixed(3))}`);
@@ -1380,14 +1380,14 @@ async function S9(): Promise<void> {
     check("S9: #index pulses one point", (await flashCount(d)) === 1,
       `flash=${await flashCount(d)}`);
     await sleep(500);
-    const camIdxCmd = await camState();
+    const camIdxCmd = await camSettled();
     await reset();
     await d.rightClick(ptRow.x, ptRow.y);
     await sleep(150);
     check("S9: the real point-row click pulses the same single point",
       (await flashCount(d)) === 1, `flash=${await flashCount(d)}`);
     await sleep(500);
-    const camIdxClick = await camState();
+    const camIdxClick = await camSettled();
     check("S9: view #N ≡ clicking that point's row (same camera pose)",
       closeCam(camIdxCmd, camIdxClick),
       `cmd=${camIdxCmd.map((v) => v.toFixed(3))} click=${camIdxClick.map((v) => v.toFixed(3))}`);
@@ -1440,7 +1440,7 @@ async function S9(): Promise<void> {
     check("S9: @sel.#N contains-and-frames one point",
       rSelIdx.status === "ok" && rSelIdx.message === "focused 1 points", JSON.stringify(rSelIdx));
     await sleep(650);
-    const camSelIdx = await camState();
+    const camSelIdx = await camSettled();
     await reset();
     const p1Row = (await d.evaluate<{ x: number; y: number } | null>(`(()=>{
       const el=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
@@ -1452,7 +1452,7 @@ async function S9(): Promise<void> {
     await d.rightClick(p1Row.x, p1Row.y);
     await sleep(650);
     check("S9: @sel.#N ≡ clicking that point's row (same camera pose)",
-      closeCam(camSelIdx, await camState()),
+      closeCam(camSelIdx, await camSettled()),
       `cmd=${camSelIdx.map((v) => v.toFixed(3))}`);
 
     // glob filter parity: the same subset a manual pick of those rows frames
@@ -1462,7 +1462,7 @@ async function S9(): Promise<void> {
       rSelGlob.status === "ok" && rSelGlob.message === "focused 2 points",
       JSON.stringify(rSelGlob));
     await sleep(650);
-    const camSelGlob = await camState();
+    const camSelGlob = await camSettled();
     await reset();
     const rows12 = await d.evaluate<{ x: number; y: number }[]>(`(()=>{
       const ids=[${firstPointRows[1].id},${firstPointRows[2].id}];
@@ -1479,7 +1479,7 @@ async function S9(): Promise<void> {
       `flash=${await flashCount(d)}`);
     await sleep(500);
     check("S9: @sel.<glob> ≡ a manual pick of those rows (same camera pose)",
-      closeCam(camSelGlob, await camState()),
+      closeCam(camSelGlob, await camSettled()),
       `cmd=${camSelGlob.map((v) => v.toFixed(3))}`);
 
     // remaining filter forms: literal, list, containment miss
@@ -1548,7 +1548,7 @@ async function S9(): Promise<void> {
     check("S9: glob command flashes every mounted matching row",
       (await rowFlashed("/alpha/")) && (await rowFlashed("/beta/")) && (await rowFlashed("/gamma/")));
     await sleep(500);
-    const camGlob = await camState();
+    const camGlob = await camSettled();
 
     await reset();
     const alpha = (await bottomRow(d, "/alpha/"))!;
@@ -1558,7 +1558,7 @@ async function S9(): Promise<void> {
     check("S9: right-drag over the same rows pulses the same union",
       (await flashCount(d)) === 1200, `flash=${await flashCount(d)}`);
     await sleep(500);
-    const camDrag = await camState();
+    const camDrag = await camSettled();
     check("S9: glob command frames the SAME union a right-drag frames",
       closeCam(camGlob, camDrag),
       `cmd=${camGlob.map((v) => v.toFixed(3))} drag=${camDrag.map((v) => v.toFixed(3))}`);
@@ -1569,7 +1569,7 @@ async function S9(): Promise<void> {
     check("S9: @name resolves the committed selection",
       rAt.status === "ok" && rAt.message === "focused 4800 points", JSON.stringify(rAt));
     await sleep(650);
-    const camAt = await camState();
+    const camAt = await camSettled();
     await reset();
     const nm = (await d.evaluate<{ x: number; y: number } | null>(`(()=>{
       const blocks=[...document.querySelectorAll('#selections .sel-block')];
@@ -1579,7 +1579,7 @@ async function S9(): Promise<void> {
     })()`))!;
     await d.click(nm.x, nm.y); // name click = focus the whole selection
     await sleep(650);
-    const camName = await camState();
+    const camName = await camSettled();
     check("S9: @name frames the selection exactly like the name-click gesture",
       closeCam(camAt, camName),
       `cmd=${camAt.map((v) => v.toFixed(3))} click=${camName.map((v) => v.toFixed(3))}`);
@@ -1601,12 +1601,12 @@ async function S9(): Promise<void> {
 
     // -- nomatch: no camera move, one-line message ------------------------------
     await sleep(1000); // let the last flash fade fully
-    const camBeforeMiss = await camState();
+    const camBeforeMiss = await camSettled();
     const rMiss = await cmd("view alpha.group-0.subgroup-99");
     await sleep(400);
     check("S9: empty match is nomatch, not an error", rMiss.status === "nomatch",
       JSON.stringify(rMiss));
-    check("S9: nomatch moves nothing", closeCam(camBeforeMiss, await camState()) &&
+    check("S9: nomatch moves nothing", closeCam(camBeforeMiss, await camSettled()) &&
       (await flashCount(d)) === 0);
 
     // -- hidden targets: view frames them like a real click on the hidden row —
@@ -1625,7 +1625,7 @@ async function S9(): Promise<void> {
     check("S9: ...with ZERO visible pulse (hidden points don't glow)",
       (await flashCount(d)) === 0, `flash=${await flashCount(d)}`);
     await sleep(500);
-    const camHiddenCmd = await camState();
+    const camHiddenCmd = await camSettled();
     check("S9: ...and the camera moved to it", !closeCam(camBeforeMiss, camHiddenCmd));
     // parity: a REAL click on the hidden selection's name frames the same pose
     await reset();
@@ -1640,7 +1640,7 @@ async function S9(): Promise<void> {
     check("S9: the real hidden-row click pulses nothing visible either",
       (await flashCount(d)) === 0, `flash=${await flashCount(d)}`);
     await sleep(500);
-    const camHiddenClick = await camState();
+    const camHiddenClick = await camSettled();
     check("S9: hidden view ≡ clicking the hidden row (same camera pose)",
       closeCam(camHiddenCmd, camHiddenClick),
       `cmd=${camHiddenCmd.map((v) => v.toFixed(3))} click=${camHiddenClick.map((v) => v.toFixed(3))}`);
