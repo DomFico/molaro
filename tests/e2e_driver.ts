@@ -368,7 +368,30 @@ export class E2EDriver {
     await this.evaluate("window.dispatchEvent(new Event('resize'))");
   }
 
+  /** Poll an in-page expression until truthy — a CONDITION wait, not a sleep:
+   * returns the moment the condition holds; throws after timeoutMs (generous
+   * caps only — the timeout is a failure detector, never a disguised sleep). */
+  async waitFor(expr: string, timeoutMs = 15000): Promise<void> {
+    const t0 = performance.now();
+    for (;;) {
+      if (await this.evaluate<boolean>(`!!(${expr})`)) return;
+      if (performance.now() - t0 > timeoutMs) {
+        throw new Error(`waitFor timed out after ${timeoutMs}ms: ${expr}`);
+      }
+      await sleep(100);
+    }
+  }
+
   async screenshot(path: string): Promise<Buffer> {
+    // EVIDENCE GATE: every d.screenshot() call in the suite is a bare await —
+    // its Buffer is never consumed by an assertion (grep-proven; the assertion
+    // path is captureB64, which this gate never touches). E2E_EVIDENCE=0 skips
+    // the capture entirely (a capture can cost 6–172s queued behind a starved
+    // render loop). UNSET means capture: full evidence is the DEFAULT and the
+    // fast lane opts out explicitly — never make "less evidence" the thing you
+    // get by forgetting a variable. Assertion outcomes are identical either
+    // way, by construction.
+    if (process.env.E2E_EVIDENCE === "0") return Buffer.alloc(0);
     return Buffer.from(await this.captureB64(path), "base64");
   }
 

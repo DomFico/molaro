@@ -80,7 +80,7 @@ function runScenario(name: string): Promise<Result> {
   return new Promise((resolve) => {
     const p = spawn("node", [join(root, "tests", "redesign.ts"), name], {
       cwd: root,
-      env: { ...process.env, E2E_PORT_BASE: String(portBase) },
+      env: { ...process.env, E2E_PORT_BASE: String(portBase), ...evidenceEnv },
     });
     let log = "";
     let tail = ""; // carry partial lines across chunks so FAIL-streaming never splits
@@ -141,6 +141,14 @@ for (let i = 0; i < argv.length; i++) {
     lane = l;
   } else names.push(argv[i]);
 }
+
+// Evidence policy (three fences, all honored): capture is the DEFAULT; the
+// fast lane opts out of the unconsumed-evidence screenshots (the iteration
+// loop's dead weight) unless the caller set E2E_EVIDENCE explicitly — an
+// explicit user setting always wins. The gate lives in the driver's
+// screenshot(); the assertion path (captureB64) is untouched by construction.
+const evidenceEnv: Record<string, string> =
+  lane === "fast" && process.env.E2E_EVIDENCE === undefined ? { E2E_EVIDENCE: "0" } : {};
 
 mkdirSync(LOG_DIR, { recursive: true });
 const listing = await listScenarios();

@@ -135,7 +135,16 @@ async function withDriver(
   try {
     await d.start();
     await d.navigate(route);
-    await sleep(3200);
+    // Settle = the CONDITION the old fixed 3200ms approximated: the seam
+    // mounted and the stream live (first chunk cached), then two rendered
+    // frames. Poll-until-condition — the common case returns in under a
+    // second (measured ~0.84s to stream-live); the generous cap is a failure
+    // detector, and under a starved render loop this is MORE correct than
+    // any fixed duration, not just faster.
+    await d.waitFor(`window.__viewer && window.__viewer.player.stats().cachedChunks > 0`, 20000);
+    await d.evaluate(`(async () => {
+      for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`);
     await pause(d);
     await fn(d);
   } finally {
