@@ -26,6 +26,7 @@ import * as THREE from "three";
 import { TrackballControls } from "three/addons/controls/TrackballControls.js";
 
 import {
+  channelComponents,
   decodeFrameChunk,
   parseHeader,
   validateFrameChunk,
@@ -1860,6 +1861,34 @@ async function main(): Promise<void> {
     colorPointsEach,
     sizePointsEach,
     opacityPointsEach,
+    // The bake/bind gate's READ surface. Declarations come from the header;
+    // values come from whatever is IN HAND at the displayed frame — the
+    // header block for per_point, the displayed chunk's zero-copy view for
+    // per_point_per_frame (protected in the LRU while displayed). These are
+    // reads, so the validation context inherits them un-stubbed.
+    channels: () =>
+      header.channels.map((c) => ({
+        name: c.name,
+        scope: c.scope,
+        components: channelComponents(c),
+        ...(c.min !== undefined ? { min: c.min } : {}),
+        ...(c.max !== undefined ? { max: c.max } : {}),
+      })),
+    channelValues: (name: string) => {
+      const decl = header.channels.find((c) => c.name === name);
+      if (!decl) return null;
+      if (decl.scope === "per_point") {
+        return decl.data ? { values: decl.data, frame: null } : null;
+      }
+      if (decl.scope !== "per_point_per_frame") return null;
+      const f = displayedFrame === -1 ? 0 : displayedFrame;
+      const chunk = player.getFrame(f);
+      const block = chunk?.channels.get(name);
+      if (!chunk || !block) return null;
+      const w = channelComponents(decl);
+      const off = (f - chunk.start) * header.n_points * w;
+      return { values: block.subarray(off, off + header.n_points * w), frame: f };
+    },
     edges: header.edges,
     colorEdges,
     traceVertices,

@@ -27,24 +27,23 @@
  *
  * Pure module: no DOM, no Three — unit-tested against the stub ctx.
  */
+import { BIND_SIZE_MAX } from "./channelmap.ts";
 import {
-  applyColorScalars,
+  applyScalarsToAxis,
   resolveTargetPoints,
   type CommandContext,
   type CommandResult,
 } from "./commands.ts";
 import { parseTypedResult } from "./claudemodel.ts";
-import { rainbow } from "./recipes.ts";
 
 export interface BindOutcome {
   ok: boolean;
   message: string;
 }
 
-/** size axis: scalar 0..1 → point size 0..BIND_SIZE_MAX (2× the base size
- * 3 — a fixed visual range, NOT an interpretation of the values). The
- * opacity axis needs no mapping: [0,1] IS its full range. */
-export const BIND_SIZE_MAX = 6;
+/** Re-exported from channelmap.ts (the scalar→axis mapping's single source —
+ * shared with the bake verb so the two visual ranges cannot diverge). */
+export { BIND_SIZE_MAX };
 
 export function bindTypedResult(
   ctx: CommandContext,
@@ -69,15 +68,13 @@ export function bindTypedResult(
           message: `scalar count mismatch: ${result.scalars.length} values for ${r.points.length} points of "${result.target}" — nothing written`,
         };
       }
+      const n = applyScalarsToAxis(ctx, result.axis, r.points, result.scalars);
       if (result.axis === "color") {
-        const n = applyColorScalars(ctx, r.points, result.scalars, rainbow.colormap);
         return { ok: true, message: `colored ${n} points of "${result.target}" from scalars` };
       }
       if (result.axis === "size") {
-        const n = ctx.sizePointsEach(r.points, result.scalars.map((t) => t * BIND_SIZE_MAX));
         return { ok: true, message: `sized ${n} points of "${result.target}" from scalars (0..${BIND_SIZE_MAX})` };
       }
-      const n = ctx.opacityPointsEach(r.points, result.scalars);
       return { ok: true, message: `faded ${n} points of "${result.target}" from scalars` };
     }
     case "command": {

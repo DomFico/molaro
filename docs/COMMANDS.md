@@ -48,6 +48,7 @@ point types `anchor` and `t0`–`t3`).
 | `bondopacityof <expr> <a>` | Alpha for edges **touching** the target (either endpoint — the incident reach) | `bondopacityof #124 0.3` |
 | `traceopacity <expr> <a>` | Alpha for polyline vertices whose **subgroup** contains a resolved point | `traceopacity alpha 0.7` |
 | `rainbow <expr>` | Color those points an even hue ramp in resolution order (the first **recipe**: per-point values, not one constant; one undo stroke) | `rainbow alpha.group-0` |
+| `bake <expr> <channel> <axis> [<min> <max>]` | Write a declared **scalar data channel** (at the displayed frame) onto `color`/`size`/`opacity`, normalized over min..max — declared on the channel, or explicit when the declaration is partial (one undo stroke) | `bake all energy color 0 2.5` |
 | `mods` | List the **recipe registry** (read-only): each recipe's name, axis, origin, and credit — bare, takes no target | `mods` |
 | `rm <mods>` | Delete **workspace mod files** (y/n confirmed, **not undoable**; built-ins refused) | `rm index_ramp + xy_metric` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |
@@ -477,8 +478,9 @@ Shared rules (identical across the twelve verbs):
   usage error — it needs both a target and a value.
 - Constant values only, deliberately, within this family: each of the
   twelve verbs writes ONE value across its elements. Values that *vary* per
-  element are the **recipes'** job (see `rainbow` below); by-channel
-  mappings and shape/primitive-type verbs remain future work. (The trace
+  element are the **recipes'** job (see `rainbow` below) or the **channel
+  consumer's** (see `bake`); live per-flip channel bindings and
+  shape/primitive-type verbs remain future work. (The trace
   shapes' boundary interpolation is a rendering consequence of per-vertex
   state, not a mapping feature; size-0 and opacity-0 are distinct literal
   values on distinct channels, and neither is a hide.)
@@ -515,7 +517,33 @@ color-mapping step.
 - Recipes live in an in-memory registry (name → recipe) the verb resolves
   through; parameters and other axes are future work.
 
-### Analysis mods — Python compute in the producer
+## Channels: `bake`
+
+```
+bake all energy color 0 2.5
+bake polymer mass size
+bake @selection_1 energy opacity 0 1
+```
+
+`bake` is the first **channel consumer**: it reads a header-declared data
+channel's per-element values **at the displayed frame** (`per_point`
+channels are static — their header block is the value source at every
+frame), normalizes them into `[0,1]` over a range, and writes the target's
+points on one axis — `color` through the built-in hue ramp, `size` over the
+fixed `0..6` visual range, `opacity` as-is. It is a **plain recorded
+write**, indistinguishable from a hand-typed rep verb: one undo stroke,
+last-write-wins, nothing persists past it — scrubbing to another frame does
+NOT re-derive (a *live* per-flip binding is separate, future work).
+
+- The **range**: the channel's declared `min`/`max` when both are present;
+  otherwise the explicit trailing pair is required (`bake … <min> <max>`,
+  which also *overrides* a full declaration). Values outside the range
+  saturate at 0/1 — the range is a lens, not a validity bound.
+- The **gate** fails loudly and writes nothing: unknown channel or axis,
+  a `per_frame` channel (a series, not per-element), a vector channel
+  (`components: 3` — scalar axes need 1-wide), a missing or empty range,
+  or a non-finite value in the displayed frame's block.
+
 
 A mod is one of two kinds. **Representation** mods (like `rainbow`) compute
 in the webview over geometry only. **Analysis** mods carry Python source

@@ -32,6 +32,7 @@ import {
   type AnalysisMod,
 } from "../webview/recipes.ts";
 import { BIND_SIZE_MAX, bindTypedResult } from "../webview/claudebind.ts";
+import type { ChannelDecl } from "../webview/channelmap.ts";
 
 function makeHeader(): Header {
   const category = [0, 0, 1];
@@ -57,6 +58,17 @@ function makeRegistry() {
   const sels = new Map<string, readonly Entry[]>([
     ["stored", [{ level: "subgroup", id: 0 }, { level: "point", id: 2 }]],
     ["second", [{ level: "subgroup", id: 1 }]],
+  ]);
+  const chanDecls: ChannelDecl[] = [
+    { name: "energy", scope: "per_point_per_frame", components: 1, min: 0 },
+    { name: "mass", scope: "per_point", components: 1, min: 1, max: 3 },
+    { name: "time", scope: "per_frame", components: 1, min: 0, max: 9 },
+    { name: "flow", scope: "per_point_per_frame", components: 3 },
+  ];
+  const chanValues = new Map<string, { values: number[]; frame: number | null }>([
+    ["energy", { values: [0, 1.25, 2.5], frame: 4 }],
+    ["mass", { values: [1, 2, 3], frame: null }],
+    ["flow", { values: [1, 0, 0, 0, 1, 0, 0, 0, 1], frame: 4 }],
   ]);
   const refOps: { names: string[]; hidden: boolean }[] = [];
   const memberOps: { name: string; mode: "add" | "remove"; entries: Entry[] }[] = [];
@@ -229,6 +241,12 @@ function makeRegistry() {
       eachOps.push({ kind: "opacity", points: [...points], values: [...values] });
       return points.length;
     },
+    // The bake/bind gate's read surface: one channel per gate case —
+    // "energy" declares min ONLY (partial: the explicit-range path),
+    // "mass" is static per_point with a full range, "time" is per-frame
+    // (a series — refused), "flow" is 3-wide (refused for scalar axes).
+    channels: () => chanDecls,
+    channelValues: (name) => chanValues.get(name) ?? null,
     edges,
     colorEdges: (edgeIds, rgb) => {
       edgeOps.push({ edgeIds: [...edgeIds], rgb });
@@ -1092,6 +1110,75 @@ test("rainbow: full grammar rides the shared resolve core (@name, all, leaf)", (
   assert.equal(registry.runCommand("rainbow c0.g0.s0.a").message, "colored 1 points rainbow");
   assert.deepEqual(colorEachOps[1], { points: [0], rgb: [1, 0, 0] });
   assert.equal(registry.runCommand("rainbow all").message, "colored 3 points rainbow");
+});
+
+// -- bake: the Tier-1 channel consumer (channel → axis via the shared gate) -------
+
+test("bake: a streamed channel with an explicit range writes each axis, one stroke", () => {
+  const { registry, colorEachOps, eachOps } = makeRegistry();
+  // energy declares min only — the explicit range is REQUIRED and given.
+  // raw [0, 1.25, 2.5] over 0..2.5 → t = [0, 0.5, 1].
+  const size = registry.runCommand("bake all energy size 0 2.5");
+  assert.equal(size.status, "ok");
+  assert.equal(size.message, 'baked "energy" → size on 3 points of "all" (frame 4, range 0..2.5)');
+  assert.deepEqual(eachOps, [{ kind: "size", points: [0, 1, 2], values: [0, BIND_SIZE_MAX / 2, BIND_SIZE_MAX] }],
+    "one writer stroke, t × BIND_SIZE_MAX");
+  const opacity = registry.runCommand("bake all energy opacity 0 2.5");
+  assert.equal(opacity.status, "ok");
+  assert.deepEqual(eachOps[1], { kind: "opacity", points: [0, 1, 2], values: [0, 0.5, 1] }, "opacity is t as-is");
+  const color = registry.runCommand("bake all energy color 0 2.5");
+  assert.equal(color.status, "ok");
+  // the built-in colormap: t=0 → red, t=1 → magenta (rainbow's exact ramp)
+  assert.deepEqual(colorEachOps[0].rgb.slice(0, 3), [1, 0, 0]);
+  assert.deepEqual(colorEachOps[0].rgb.slice(6, 9), [1, 0, 1]);
+});
+
+test("bake: a static per_point channel uses its DECLARED range and says static", () => {
+  const { registry, eachOps } = makeRegistry();
+  // mass [1,2,3] declared 1..3 → t = [0, 0.5, 1]
+  const r = registry.runCommand("bake all mass size");
+  assert.equal(r.status, "ok");
+  assert.equal(r.message, 'baked "mass" → size on 3 points of "all" (static, range 1..3)');
+  assert.deepEqual(eachOps[0].values, [0, BIND_SIZE_MAX / 2, BIND_SIZE_MAX]);
+});
+
+test("bake: out-of-range values saturate; the target selects and orders the write", () => {
+  const { registry, eachOps } = makeRegistry();
+  // range 0..1 over raw [0, 1.25, 2.5]: t clamps to [0, 1, 1]
+  assert.equal(registry.runCommand("bake all energy opacity 0 1").status, "ok");
+  assert.deepEqual(eachOps[0].values, [0, 1, 1]);
+  // subgroup s1 = point 2 only → one element, its own value
+  assert.equal(registry.runCommand("bake c1 energy opacity 0 2.5").status, "ok");
+  assert.deepEqual(eachOps[1], { kind: "opacity", points: [2], values: [1] });
+});
+
+test("bake: the gate refuses loudly — nothing written on any failure", () => {
+  const { registry, colorEachOps, eachOps } = makeRegistry();
+  const cases: [string, RegExp][] = [
+    ["bake all nope color", /no channel named "nope" — channels: energy, mass, time, flow/],
+    ["bake all time color", /per-frame/],
+    ["bake all flow color", /components: 3/],
+    ["bake all energy color", /does not declare a full min\/max range/],
+    ["bake all energy colr 0 1", /unknown axis "colr"/],
+    ["bake all energy color 2 2", /min must be strictly less than max/],
+    ["bake all energy color 1", /explicit range needs BOTH bounds/],
+    ["bake all energy", /bake needs a target, a channel, and an axis/],
+    ["bake", /bake needs a target, a channel, and an axis/],
+  ];
+  for (const [cmd, want] of cases) {
+    const r = registry.runCommand(cmd);
+    assert.equal(r.status, "error", cmd);
+    assert.match(r.message, want, cmd);
+  }
+  // valid syntax, empty result: nomatch — the grammar's standing distinction
+  assert.equal(registry.runCommand("bake zz energy color 0 1").status, "nomatch");
+  assert.equal(colorEachOps.length + eachOps.length, 0, "no failure wrote anything");
+});
+
+test("bake: help surfaces the verb in both the summary and describe", () => {
+  const { registry } = makeRegistry();
+  assert.match(HELP_TEXT, /bake <expr> <channel> <axis>/);
+  assert.match(registry.runCommand("help bake").message, /^bake — /);
 });
 
 test("mods: lists the registry — rainbow grouped under built-in with its credit", () => {

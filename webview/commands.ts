@@ -27,8 +27,17 @@ import {
 } from "./address.ts";
 import type { TreeModel } from "./classification.ts";
 import {
+  BIND_AXES,
+  BIND_SIZE_MAX,
+  gateChannelBind,
+  normalizeScalars,
+  type BindAxis,
+  type ChannelDecl,
+} from "./channelmap.ts";
+import {
   getRecipe,
   listRecipes,
+  rainbow,
   resolveModSelector,
   type AnalysisMod,
   type Mod,
@@ -154,6 +163,14 @@ export interface CommandContext {
    * binding (claudebind.ts); no verb writes through these yet. */
   sizePointsEach(points: readonly number[], values: readonly number[]): number;
   opacityPointsEach(points: readonly number[], values: readonly number[]): number;
+  /** Header channel declarations (width already resolved), for the bake/bind
+   * gate — READ surface, real in the validation context too. */
+  channels(): ChannelDecl[];
+  /** The named channel's per-element values IN HAND at the displayed frame —
+   * per_point: the header-carried block (frame null: static); per_point_per_
+   * frame: the displayed chunk's zero-copy view at the displayed frame.
+   * null = unknown channel, a non-per-element scope, or no data in hand. */
+  channelValues(name: string): { values: ArrayLike<number>; frame: number | null } | null;
   /** The contract's edge list — endpoint point-index pairs, in header order.
    * colorbonds/colorbondsof test these endpoints against the resolved point
    * set; edge ids (indexes into this list) key the edge-color buffer. */
@@ -990,6 +1007,95 @@ export function makeRainbowHandler(ctx: CommandContext): CommandHandler {
   };
 }
 
+/** The [0,1]-scalar→axis application, written ONCE for every scalar source —
+ * the bake verb and the typed-result binding (claudebind.ts) both land here:
+ * color through the built-in colormap, size through the fixed 0..BIND_SIZE_MAX
+ * visual range, opacity as-is. One per-element writer stroke; the caller owns
+ * normalization. */
+export function applyScalarsToAxis(
+  ctx: CommandContext,
+  axis: BindAxis,
+  points: readonly number[],
+  scalars: readonly number[],
+): number {
+  if (axis === "color") return applyColorScalars(ctx, points, scalars, rainbow.colormap);
+  if (axis === "size") return ctx.sizePointsEach(points, scalars.map((t) => t * BIND_SIZE_MAX));
+  return ctx.opacityPointsEach(points, scalars);
+}
+
+/**
+ * `bake <target> <channel> <axis> [<min> <max>]` — the Tier-1 channel
+ * consumer: read the named channel's per-element values AT THE DISPLAYED
+ * FRAME, gate the request (gateChannelBind — THE choke point the live bind
+ * verb must share), normalize over the range (declared min/max, or the
+ * explicit trailing pair when the declaration is partial), and write the
+ * target's points through the per-element writers. A PLAIN RECORDED WRITE:
+ * one undo stroke, LWW, indistinguishable from a hand-typed rep verb —
+ * nothing lives past it (a LIVE per-flip link is Tier 2's binding object,
+ * not this verb). Verb name is provisional (parked P-4).
+ */
+export function makeBakeHandler(ctx: CommandContext): CommandHandler {
+  const usage =
+    "bake <target> <channel> <axis> [<min> <max>] (axis: color | size | opacity; e.g. bake all energy color 0 2.5)";
+  return (args: string): CommandResult => {
+    // Walk trailing words back to front: [<min> <max>] first when the last
+    // word is numeric, then <axis>, then <channel>; the remainder is the
+    // target expression (which may itself contain spaces).
+    const w1 = splitTrailingWord(args);
+    if (w1.word === null) {
+      return { status: "error", message: `bake needs a target, a channel, and an axis — ${usage}` };
+    }
+    let explicitRange: [number, number] | null = null;
+    let axisWord: string;
+    let rest: string;
+    const hi = parseNumericToken(w1.word);
+    if (hi !== null) {
+      const w2 = splitTrailingWord(w1.expr);
+      const lo = w2.word === null ? null : parseNumericToken(w2.word);
+      if (lo === null) {
+        return { status: "error", message: `an explicit range needs BOTH bounds — ${usage}` };
+      }
+      explicitRange = [lo, hi];
+      const w3 = splitTrailingWord(w2.expr);
+      if (w3.word === null) {
+        return { status: "error", message: `bake needs a target, a channel, and an axis — ${usage}` };
+      }
+      axisWord = w3.word;
+      rest = w3.expr;
+    } else {
+      axisWord = w1.word;
+      rest = w1.expr;
+    }
+    const w4 = splitTrailingWord(rest);
+    if (w4.word === null || w4.expr === "") {
+      return { status: "error", message: `bake needs a target, a channel, and an axis — ${usage}` };
+    }
+    const channelName = w4.word;
+    const decl = ctx.channels().find((c) => c.name === channelName);
+    if (!decl) {
+      const names = ctx.channels().map((c) => c.name);
+      return {
+        status: "error",
+        message: `no channel named "${channelName}"${
+          names.length > 0 ? ` — channels: ${names.join(", ")}` : " — this dataset declares none"
+        }`,
+      };
+    }
+    const r = resolveTargetPoints(ctx, w4.expr);
+    if ("status" in r) return r;
+    const inHand = ctx.channelValues(channelName);
+    const gate = gateChannelBind(decl, axisWord, explicitRange, inHand ? inHand.values : null);
+    if ("error" in gate) return { status: "error", message: gate.error };
+    const scalars = normalizeScalars(inHand!.values, r.points, gate.range);
+    const n = applyScalarsToAxis(ctx, axisWord as BindAxis, r.points, scalars);
+    const at = inHand!.frame === null ? "static" : `frame ${inHand!.frame}`;
+    return {
+      status: "ok",
+      message: `baked "${channelName}" → ${axisWord} on ${n} points of "${w4.expr}" (${at}, range ${gate.range[0]}..${gate.range[1]})`,
+    };
+  };
+}
+
 /**
  * The own-verb handler for a Type A (analysis) mod: resolve the target
  * through the SAME resolver every verb uses, then hand off to the async
@@ -1555,6 +1661,10 @@ export const HELP_TEXT = [
   "  rainbow <expr>              color those points an even hue ramp in",
   "               resolution order (the first recipe: per-point values,",
   "               not one constant; one undo stroke)",
+  "  bake <expr> <channel> <axis> [<min> <max>]   write a scalar data",
+  "               channel (at the displayed frame) onto color|size|opacity,",
+  "               normalized over min..max (declared on the channel, or",
+  "               explicit when the declaration is partial; one undo stroke)",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  mods         list the recipe registry: name, axis, origin, and credit",
   "               (author · source, display-only; recipes, not verbs)",
@@ -1673,6 +1783,11 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "rainbow",
     makeRainbowHandler(ctx),
     "color the target's points an even hue ramp in resolution order (the first recipe — per-point values, one undo stroke): rainbow <target>",
+  );
+  registry.register(
+    "bake",
+    makeBakeHandler(ctx),
+    "write a declared scalar channel's values (at the displayed frame) onto a point axis, normalized over min..max (declared, or explicit when the declaration is partial; one undo stroke): bake <target> <channel> <axis> [<min> <max>]",
   );
   registry.register(
     "ls",
