@@ -214,6 +214,9 @@ interface BuiltPass {
 
 interface ShapeGenerator<B extends BuiltPass = BuiltPass> {
   name: string;
+  /** Verb-facing shape name (`shape <domain> <label>`); defaults to `name`.
+   * Overlays never set one — they are not selectable. */
+  shapeLabel?: string;
   /** The element kind the pass draws over; "overlay" marks the two built-in
    * decorations (never pluggable — they exist to shadow the point pass). */
   elementKind: "point" | "edge" | "vertex" | "overlay";
@@ -224,16 +227,26 @@ interface ShapeGenerator<B extends BuiltPass = BuiltPass> {
 /** Construction + cadence dispatch. Nothing else — state stays with the host
  * or inside the built passes' closures. */
 class ShapeRegistry {
-  private readonly built: BuiltPass[] = [];
+  private readonly built: {
+    pass: BuiltPass;
+    domain: ShapeGenerator["elementKind"];
+    /** the verb-facing shape name ("sphere", "tube", "ribbon"); overlays
+     * carry their generator name and are never selectable. */
+    label: string;
+    enabled: boolean;
+  }[] = [];
   private readonly sceneObjects: THREE.Object3D[] = [];
 
   /** Build and adopt a generator's pass. Returns the CONCRETE pass (typed
-   * wider than BuiltPass) so the host keeps handles a builder exports. */
-  add<B extends BuiltPass>(gen: ShapeGenerator<B>, env: PassEnv): B | null {
+   * wider than BuiltPass) so the host keeps handles a builder exports.
+   * `enabled` (default true) — a domain's alternates register disabled;
+   * exactly one pass per selectable domain draws at a time. */
+  add<B extends BuiltPass>(gen: ShapeGenerator<B>, env: PassEnv, enabled = true): B | null {
     const pass = gen.build(env);
     if (!pass) return null;
-    this.built.push(pass);
+    this.built.push({ pass, domain: gen.elementKind, label: gen.shapeLabel ?? gen.name, enabled });
     this.sceneObjects.push(...pass.objects);
+    for (const o of pass.objects) o.visible = false; // revealed on first frame, enabled-only
     return pass;
   }
 
@@ -242,20 +255,47 @@ class ShapeRegistry {
     return this.sceneObjects;
   }
 
+  /** First-frame reveal — and the ONE place enable-state reaches
+   * THREE.Object3D.visible. */
+  reveal(): void {
+    for (const b of this.built) for (const o of b.pass.objects) o.visible = b.enabled;
+  }
+
+  /** The selectable shape names of a domain (registration order). */
+  available(domain: ShapeGenerator["elementKind"]): string[] {
+    return this.built.filter((b) => b.domain === domain).map((b) => b.label);
+  }
+
+  activeOf(domain: ShapeGenerator["elementKind"]): string | null {
+    return this.built.find((b) => b.domain === domain && b.enabled)?.label ?? null;
+  }
+
+  /** Draw a domain as the named shape: enable it, disable the domain's
+   * others, sync visibility. Returns the previous active label, or null if
+   * the name isn't registered for the domain. */
+  setActive(domain: ShapeGenerator["elementKind"], label: string): string | null {
+    const target = this.built.find((b) => b.domain === domain && b.label === label);
+    if (!target) return null;
+    const prev = this.activeOf(domain);
+    for (const b of this.built) if (b.domain === domain) b.enabled = b === target;
+    this.reveal();
+    return prev;
+  }
+
   frameFlip(): void {
-    for (const p of this.built) p.onFrameFlip?.();
+    for (const b of this.built) if (b.enabled) b.pass.onFrameFlip?.();
   }
 
   repWrite(channel: RepChannel, ids: readonly number[]): void {
-    for (const p of this.built) p.onRepWrite?.[channel]?.(ids);
+    for (const b of this.built) if (b.enabled) b.pass.onRepWrite?.[channel]?.(ids);
   }
 
   visibilityChange(): void {
-    for (const p of this.built) p.onVisibilityChange?.();
+    for (const b of this.built) if (b.enabled) b.pass.onVisibilityChange?.();
   }
 
   renderTick(nowMs: number): void {
-    for (const p of this.built) p.onRenderTick?.(nowMs);
+    for (const b of this.built) if (b.enabled) b.pass.onRenderTick?.(nowMs);
   }
 }
 
@@ -444,6 +484,7 @@ function highlightMaterial(
  * Visibility still rides the host's rep.dirty batch (refreshPoints). */
 const spherePointsGenerator: ShapeGenerator = {
   name: "sphere-points",
+  shapeLabel: "sphere",
   elementKind: "point",
   build(env): BuiltPass {
     const pointsGeo = new THREE.BufferGeometry();
@@ -485,6 +526,7 @@ interface EdgeTubePass extends BuiltPass {
 }
 const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
   name: "edge-tubes",
+  shapeLabel: "tube",
   elementKind: "edge",
   build(env): EdgeTubePass | null {
     const header = env.header;
@@ -647,6 +689,7 @@ interface TraceTubePass extends BuiltPass {
 }
 const traceTubesGenerator: ShapeGenerator<TraceTubePass> = {
   name: "trace-tubes",
+  shapeLabel: "tube",
   elementKind: "vertex",
   build(env): TraceTubePass | null {
     const header = env.header;
@@ -2117,6 +2160,27 @@ async function main(): Promise<void> {
     styleTrace,
     styleNames: () => listStyles().map((st) => st.name),
     styleIndexOf: styleIndex,
+    // Per-DOMAIN shape selection (the ruled fallback: per-target shape
+    // assignment is parked — it needs mixed-shape passes). One undo op:
+    // the swap-back rides recordOp like every scene mutation.
+    setShape: (domain: "point" | "edge" | "vertex", label: string) => {
+      const prev = registry.setActive(domain, label);
+      if (prev === null) return null;
+      if (prev !== label) {
+        model.recordOp(() => {
+          registry.setActive(domain, prev);
+          return [];
+        });
+      }
+      return { prev };
+    },
+    shapesInfo: () => (
+      (["point", "edge", "vertex"] as const).map((domain) => ({
+        domain,
+        names: registry.available(domain),
+        active: registry.activeOf(domain),
+      }))
+    ),
     // The bake/bind gate's READ surface. Declarations come from the header;
     // values come from whatever is IN HAND at the displayed frame — the
     // header block for per_point, the displayed chunk's zero-copy view for
@@ -2203,6 +2267,10 @@ async function main(): Promise<void> {
     colorEdgesEach: () => 0, sizeEdgesEach: () => 0, opacityEdgesEach: () => 0,
     colorTraceEach: () => 0, sizeTraceEach: () => 0, opacityTraceEach: () => 0,
     stylePoints: () => 0, styleEdges: () => 0, styleTrace: () => 0,
+    setShape: (domain, label) =>
+      commandContext.shapesInfo().some((s) => s.domain === domain && s.names.includes(label))
+        ? { prev: label }
+        : null,
     colorEdges: () => 0, colorTrace: () => 0,
     sizePoints: () => 0, sizeEdges: () => 0, sizeTrace: () => 0,
     opacityPoints: () => 0, opacityEdges: () => 0, opacityTrace: () => 0,
@@ -2478,7 +2546,7 @@ async function main(): Promise<void> {
     positionAttr.needsUpdate = true;
     registry.frameFlip(); // the instanced edge pass owns copies of these endpoints
     applyBindings(chunk, f); // live channel bindings re-derive (no-op when unbound)
-    if (displayedFrame === -1) for (const obj of registry.objects()) obj.visible = true;
+    if (displayedFrame === -1) registry.reveal(); // enabled passes only
     displayedFrame = f;
     shownSinceMark++;
     // the ONE displayed-frame flip point — playback and scrub both land here,

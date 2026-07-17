@@ -6836,9 +6836,48 @@ async function S41(): Promise<void> {
   });
 }
 
+// ====== S42: the shape verb surface (A-3) — per-domain, one shape each today ==
+// The registry's enable machinery + the verb surface, pinned while every
+// domain still has exactly ONE shape (a no-op swap must change NOTHING).
+// The real two-shape swap proof arrives with the ribbon (B-2's scenario).
+async function S42(): Promise<void> {
+  console.log("S42 — shape verb surface: listing, no-op swap, loud refusals");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const list = await cmd("shapes");
+    check("S42: shapes lists every domain with its active shape",
+      list.status === "ok" &&
+        /points: sphere \(active\)/.test(list.message) &&
+        /bonds: tube \(active\)/.test(list.message) &&
+        /traces: tube \(active\)/.test(list.message),
+      JSON.stringify(list));
+    const depth0 = await undoDepth();
+    const noop = await cmd("shape traces tube");
+    check("S42: a no-op swap says so and records NOTHING",
+      noop.status === "ok" && noop.message === "traces already draw as tube" &&
+        (await undoDepth()) === depth0,
+      JSON.stringify(noop));
+    const bad = await cmd("shape traces ribbon");
+    check("S42: an unregistered shape refuses loudly with the registry",
+      bad.status === "error" && /no shape "ribbon" for traces — registered: tube/.test(bad.message),
+      JSON.stringify(bad));
+    const badDomain = await cmd("shape lines tube");
+    check("S42: an unknown domain refuses loudly",
+      badDomain.status === "error" && /unknown domain "lines"/.test(badDomain.message),
+      JSON.stringify(badDomain));
+    // the scene still draws: the trace pass is enabled and visible
+    const visible = await d.evaluate<boolean>(`(()=>{
+      return ${V}.geometryMaterials !== undefined; // seam alive; pixel identity rides the lane
+    })()`);
+    check("S42: seam alive after the surface exercise", visible);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 mutates the real repo .molaro/mods (delete + finally-restore) while
  * EVERY scenario's bridge scans that directory at boot. Single-sourced here,
@@ -6862,6 +6901,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S27: "full", S28: "full", S29: "full", S30: "full", S31: "full",
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
+  S42: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

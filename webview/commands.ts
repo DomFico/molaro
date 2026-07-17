@@ -216,6 +216,12 @@ export interface CommandContext {
   styleNames(): string[];
   /** name → registry index, -1 unknown (single-sourced from styles.ts). */
   styleIndexOf(name: string): number;
+  /** Draw a DOMAIN as a named registered shape (scene-level, per the
+   * ruling's fallback — per-target assignment is a parked chapter). One
+   * undo op. null = the name isn't registered for the domain. */
+  setShape(domain: "point" | "edge" | "vertex", label: string): { prev: string | null } | null;
+  /** The shape registry's read surface: each domain's names + active. */
+  shapesInfo(): { domain: "point" | "edge" | "vertex"; names: string[]; active: string | null }[];
   /** The orientation writer: per-vertex RAW 3-vectors (flat, 3 × ids
    * length) into the stride-3 orientation buffer — the SAME writer core
    * color rides (capture, LWW-clear of same-axis coverage, one stroke,
@@ -1266,6 +1272,61 @@ function domainNoun(domain: "point" | "edge" | "vertex"): string {
   return domain === "point" ? "points" : domain === "edge" ? "edges" : "vertices";
 }
 
+/** The verb-facing domain tokens (the family vocabulary: points/bonds/
+ * traces) → the registry's element domains. */
+const SHAPE_DOMAINS = { points: "point", bonds: "edge", traces: "vertex" } as const;
+
+/** `shape <domain> <name>` — draw a whole DOMAIN as a named registered
+ * shape (points | bonds | traces; scene-level by ruling — the per-target
+ * form is a parked chapter). One undo op; `shapes` lists the registry. */
+export function makeShapeHandler(ctx: CommandContext): CommandHandler {
+  const usage = "shape <domain> <name> (domain: points | bonds | traces; see `shapes`)";
+  return (args: string): CommandResult => {
+    const words = args.trim().split(/\s+/).filter((w) => w !== "");
+    if (words.length !== 2) {
+      return { status: "error", message: `shape needs a domain and a shape name — ${usage}` };
+    }
+    const [domWord, label] = words;
+    const domain = (SHAPE_DOMAINS as Record<string, "point" | "edge" | "vertex">)[domWord];
+    if (!domain) {
+      return {
+        status: "error",
+        message: `unknown domain "${domWord}" — use ${Object.keys(SHAPE_DOMAINS).join(" | ")}`,
+      };
+    }
+    const r = ctx.setShape(domain, label);
+    if (r === null) {
+      const info = ctx.shapesInfo().find((i) => i.domain === domain);
+      return {
+        status: "error",
+        message: `no shape "${label}" for ${domWord} — registered: ${info?.names.join(", ") ?? "none"}`,
+      };
+    }
+    return {
+      status: "ok",
+      message: r.prev === label
+        ? `${domWord} already draw as ${label}`
+        : `${domWord} now draw as ${label} (was ${r.prev ?? "none"})`,
+    };
+  };
+}
+
+/** `shapes` — read-only listing of the shape registry per domain. */
+export function makeShapesHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    if (args.trim() !== "") {
+      return { status: "error", message: "shapes takes no arguments — it lists the shape registry" };
+    }
+    const names = Object.entries(SHAPE_DOMAINS) as ["points" | "bonds" | "traces", "point" | "edge" | "vertex"][];
+    const rows = names.map(([word, domain]) => {
+      const info = ctx.shapesInfo().find((i) => i.domain === domain);
+      const list = (info?.names ?? []).map((n) => (n === info?.active ? `${n} (active)` : n));
+      return `  ${word}: ${list.length > 0 ? list.join("  ") : "none"}`;
+    });
+    return { status: "ok", message: ["shapes:", ...rows].join("\n") };
+  };
+}
+
 /** The style verbs' shared front half — resolveRepArgs with the trailing
  * word being a REGISTERED STYLE NAME (resolved to its registry index). */
 function resolveStyleArgs(ctx: CommandContext, verb: string, args: string) {
@@ -2097,6 +2158,8 @@ export const HELP_TEXT = [
   "               registered shading style per target (standard | matte;",
   "               standard is the default look; one undo stroke)",
   "  styles       list the style registry (read-only)",
+  "  shape <points|bonds|traces> <name>   draw a whole domain as a named",
+  "               registered shape (scene-level; one undo op) · shapes  list",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  mods         list the recipe registry: name, axis, origin, and credit",
   "               (author · source, display-only; recipes, not verbs)",
@@ -2255,6 +2318,16 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "styles",
     makeStylesHandler(ctx),
     "read-only listing of the style registry (bare — takes no target; index 0 is the default)",
+  );
+  registry.register(
+    "shape",
+    makeShapeHandler(ctx),
+    "draw a whole domain as a named registered shape (scene-level; one undo op): shape <points|bonds|traces> <name>",
+  );
+  registry.register(
+    "shapes",
+    makeShapesHandler(ctx),
+    "read-only listing of the shape registry per domain (bare — takes no target)",
   );
   registry.register(
     "ls",

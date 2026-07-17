@@ -54,6 +54,8 @@ point types `anchor` and `t0`–`t3`).
 | `bindings` | Read-only list of the channel bindings (bare — takes no target) | `bindings` |
 | `stylepoints` / `stylebonds` / `styletrace` `<expr> <style>` | Select a registered **shading style** per target (per-element style index; `standard` is the default look, byte-identical; `stylebonds` = contained edges, `styletrace` = subgroup map-up; one undo stroke) | `stylepoints alpha matte` |
 | `styles` | Read-only listing of the style registry (bare; index 0 = default) | `styles` |
+| `shape <points\|bonds\|traces> <name>` | Draw a whole **domain** as a named registered shape (scene-level — per-target assignment is a parked chapter; one undo op) | `shape traces tube` |
+| `shapes` | Read-only listing of the shape registry per domain (bare) | `shapes` |
 | `mods` | List the **recipe registry** (read-only): each recipe's name, axis, origin, and credit — bare, takes no target | `mods` |
 | `rm <mods>` | Delete **workspace mod files** (y/n confirmed, **not undoable**; built-ins refused) | `rm index_ramp + xy_metric` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |

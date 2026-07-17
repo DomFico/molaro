@@ -77,6 +77,9 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
   const orientationOps: { vertexIds: number[]; values: number[] }[] = [];
   const elemEachOps: { axis: string; ids: number[]; values: number[] }[] = [];
   const styleOps: { kind: "points" | "edges" | "trace"; ids: number[]; index: number }[] = [];
+  const shapeState: Record<string, string[]> = { point: ["sphere"], edge: ["tube"], vertex: ["tube", "ribbon"] };
+  const shapeActive: Record<string, string> = { point: "sphere", edge: "tube", vertex: "tube" };
+  const shapeOps: { domain: string; label: string }[] = [];
   const refOps: { names: string[]; hidden: boolean }[] = [];
   const memberOps: { name: string; mode: "add" | "remove"; entries: Entry[] }[] = [];
   const colorOps: { points: number[]; rgb: [number, number, number] }[] = [];
@@ -324,6 +327,18 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     },
     styleNames: () => ["standard", "matte"],
     styleIndexOf: (name) => ["standard", "matte"].indexOf(name),
+    setShape: (domain, label) => {
+      const names = shapeState[domain] ?? [];
+      if (!names.includes(label)) return null;
+      const prev = shapeActive[domain];
+      shapeActive[domain] = label;
+      shapeOps.push({ domain, label });
+      return { prev };
+    },
+    shapesInfo: () =>
+      (["point", "edge", "vertex"] as const).map((domain) => ({
+        domain, names: shapeState[domain] ?? [], active: shapeActive[domain] ?? null,
+      })),
     edges,
     colorEdges: (edgeIds, rgb) => {
       edgeOps.push({ edgeIds: [...edgeIds], rgb });
@@ -374,7 +389,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
     colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, modRunCode, rmArms, sels,
-    bindCalls, bindingReg, orientationOps, elemEachOps, styleOps,
+    bindCalls, bindingReg, orientationOps, elemEachOps, styleOps, shapeOps, shapeActive,
   };
 }
 
@@ -1516,6 +1531,28 @@ test("A-2: style verbs write the REGISTRY INDEX per family targeting; unknown na
   assert.equal(styleOps.length, 3, "no failure wrote anything");
   const list = registry.runCommand("styles");
   assert.equal(list.message, "styles:\n  standard (default)\n  matte");
+});
+
+// -- A-3: per-domain shape selection ----------------------------------------------
+
+test("A-3: shape swaps a domain's active shape; wrong names list the registry; shapes lists all", () => {
+  const { registry, shapeOps, shapeActive } = makeRegistry();
+  const r = registry.runCommand("shape traces ribbon");
+  assert.equal(r.status, "ok");
+  assert.equal(r.message, "traces now draw as ribbon (was tube)");
+  assert.deepEqual(shapeOps, [{ domain: "vertex", label: "ribbon" }]);
+  assert.equal(shapeActive.vertex, "ribbon");
+  const noop = registry.runCommand("shape traces ribbon");
+  assert.equal(noop.message, "traces already draw as ribbon");
+  const badShape = registry.runCommand("shape points cube");
+  assert.equal(badShape.status, "error");
+  assert.match(badShape.message, /no shape "cube" for points — registered: sphere/);
+  const badDomain = registry.runCommand("shape lines tube");
+  assert.match(badDomain.message, /unknown domain "lines" — use points \| bonds \| traces/);
+  const bare = registry.runCommand("shape traces");
+  assert.equal(bare.status, "error");
+  const list = registry.runCommand("shapes");
+  assert.equal(list.message, "shapes:\n  points: sphere (active)\n  bonds: tube (active)\n  traces: tube  ribbon (active)");
 });
 
 test("bind family: help surfaces all three verbs", () => {
