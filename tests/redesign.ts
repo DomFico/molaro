@@ -6762,9 +6762,83 @@ async function S40(): Promise<void> {
   });
 }
 
+// ========== S41: per-target style — the highlight obeys the style axis ========
+// A-2's visible proof: `stylepoints <target> matte` kills the specular
+// highlight on exactly the styled elements (style index rides a per-element
+// attribute; params come from ONE packed uniform array, looked up in the
+// vertex stage). Default = byte-identical `standard` — the full lane pins
+// that; here we prove the SELECTED style changes pixels and undoes.
+async function S41(): Promise<void> {
+  console.log("S41 — per-target style: matte kills the highlight, one undo restores it");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const rafs = () => d.evaluate(`(async () => {
+      for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`);
+    await d.evaluate(`${V}.setPlaying(false)`);
+    await d.evaluate(`${V}.player.seek(0)`);
+    await d.waitFor(`${V}.player.frame === 0 && ${V}.player.getFrame(0) !== null`, 20000);
+    await rafs();
+    // occlusion isolation + a fat probe, the standing pixel recipe
+    await cmd("pointopacity all 0");
+    await cmd("pointopacity #150 1");
+    await cmd("pointsize #150 8");
+    await cmd("bondopacity all 0");
+    await cmd("bondopacityof all 0");
+    await cmd("traceopacity all 0");
+    await d.evaluate(`${V}.zoomToPoints([150])`);
+    for (let i = 0; i < 40; i++) {
+      const a = await d.evaluate<number[]>(`${V}.camera.position.toArray()`);
+      await rafs();
+      const b = await d.evaluate<number[]>(`${V}.camera.position.toArray()`);
+      if (Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) < 1e-4) break;
+    }
+    // the specular highlight sits at the sphere's view-facing center (nz≈1)
+    const centerLum = async (tag: string): Promise<number> => {
+      await rafs();
+      const pr = await d.evaluate<{ x: number; y: number }>(`${V}.debug.projectPoint(150)`);
+      const b64 = await d.captureB64(`${REPORT}/S41_${tag}.png`);
+      return d.evaluate<number>(`(async () => {
+        const img = new Image();
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+        const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+        const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+        const px = g.getImageData(${Math.round(pr.x) - 1}, ${Math.round(pr.y) - 1}, 3, 3).data;
+        let sum = 0;
+        for (let i = 0; i < px.length; i += 4) sum += (px[i] + px[i + 1] + px[i + 2]) / 3;
+        return sum / 9;
+      })()`);
+    };
+    const base = await centerLum("standard");
+    check("S41: (baseline) the standard highlight saturates the center", base > 245, `lum=${base}`);
+    const styled = await cmd("stylepoints #150 matte");
+    check("S41: stylepoints reports the action", styled.status === "ok" && styled.message === "styled 1 points matte",
+      JSON.stringify(styled));
+    const matte = await centerLum("matte");
+    check("S41: MATTE KILLS THE HIGHLIGHT — center luminance drops measurably",
+      base - matte > 12, `standard=${base} matte=${matte}`);
+    // buffer truth + the other domains' writers
+    check("S41: the style buffer holds the index", (await d.evaluate<number>(`${V}.rep.state.style[150]`)) === 1);
+    await cmd("stylebonds all matte");
+    check("S41: edge style buffer written", (await d.evaluate<number>(`${V}.rep.state.edgeStyle[0]`)) === 1);
+    await cmd("styletrace all matte");
+    const tStyled = await d.evaluate<boolean>(`${V}.rep.state.traceStyle.every((x) => x === 1)`);
+    check("S41: trace style buffer written (map-up covers every vertex under all)", tStyled);
+    await d.ctrlZ(); await sleep(200);
+    await d.ctrlZ(); await sleep(200);
+    await d.ctrlZ(); await sleep(200);
+    const back = await centerLum("restored");
+    check("S41: three undos → highlight restored, buffers pristine",
+      back > 245 && (await d.evaluate<number>(`${V}.rep.state.style[150]`)) === 0 &&
+        (await d.evaluate<number>(`${V}.rep.state.edgeStyle[0]`)) === 0,
+      `lum=${back}`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 mutates the real repo .molaro/mods (delete + finally-restore) while
  * EVERY scenario's bridge scans that directory at boot. Single-sourced here,
@@ -6787,7 +6861,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S22: "full", S23: "full", S24: "full", S25: "full", S26: "full",
   S27: "full", S28: "full", S29: "full", S30: "full", S31: "full",
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
-  S37: "fast", S38: "fast", S39: "fast", S40: "fast",
+  S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

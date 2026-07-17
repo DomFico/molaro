@@ -14,10 +14,13 @@ import assert from "node:assert/strict";
 
 import {
   MATTE_STYLE,
+  MAX_STYLES,
   STANDARD_STYLE,
   getStyle,
   listStyles,
   registerStyle,
+  styleIndex,
+  stylesAsUniformArray,
   type Style,
 } from "../webview/styles.ts";
 
@@ -62,4 +65,31 @@ test("register replaces by name (the mod-registry discipline)", () => {
   const replaced: Style = { ...custom, specStrength: 0.2 };
   registerStyle(replaced);
   assert.equal(getStyle("zz_test"), replaced);
+});
+
+test("A-2: the registry packs for the shader — index = registration order, capacity fails closed", () => {
+  assert.equal(styleIndex("standard"), 0, "standard is index 0 — the buffers' default");
+  assert.equal(styleIndex("matte"), 1);
+  assert.equal(styleIndex("nope"), -1);
+  const arr = stylesAsUniformArray();
+  assert.equal(arr.length, MAX_STYLES * 4);
+  assert.deepEqual([...arr.slice(0, 4)], [0.55, 0.45, 0.35, 48].map(Math.fround),
+    "vec4[0] = standard exactly (float32)");
+  assert.deepEqual([...arr.slice(4, 8)], [0.55, 0.45, 0, 48].map(Math.fround),
+    "vec4[1] = matte exactly (float32)");
+  assert.equal(arr[listStyles().length * 4], 0, "past the registry: zero-padded");
+  // capacity: registering beyond MAX_STYLES throws (fail closed, no silent
+  // truncation of the uniform array); re-registering an EXISTING name is
+  // fine at capacity (it replaces, not grows)
+  // NOTE: fillers stay registered for the remainder of THIS file's process —
+  // this test is therefore deliberately LAST in the file.
+  for (let i = listStyles().length; i < MAX_STYLES; i++) {
+    registerStyle({ name: "filler-" + i, lambertFloor: 0, lambertScale: 1, specStrength: 0, specPower: 1 });
+  }
+  assert.throws(
+    () => registerStyle({ name: "overflow", lambertFloor: 0, lambertScale: 1, specStrength: 0, specPower: 1 }),
+    /style registry is full/,
+  );
+  // re-registering an EXISTING name at capacity is fine (replace, not grow)
+  registerStyle({ ...STANDARD_STYLE });
 });

@@ -76,6 +76,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
   const bindCalls: { b: Binding; scalars: number[] }[] = [];
   const orientationOps: { vertexIds: number[]; values: number[] }[] = [];
   const elemEachOps: { axis: string; ids: number[]; values: number[] }[] = [];
+  const styleOps: { kind: "points" | "edges" | "trace"; ids: number[]; index: number }[] = [];
   const refOps: { names: string[]; hidden: boolean }[] = [];
   const memberOps: { name: string; mode: "add" | "remove"; entries: Entry[] }[] = [];
   const colorOps: { points: number[]; rgb: [number, number, number] }[] = [];
@@ -309,6 +310,20 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
       elemEachOps.push({ axis: "traceopacity", ids: [...ids], values: [...values] });
       return ids.length;
     },
+    stylePoints: (points, index) => {
+      styleOps.push({ kind: "points", ids: [...points], index });
+      return points.length;
+    },
+    styleEdges: (edgeIds, index) => {
+      styleOps.push({ kind: "edges", ids: [...edgeIds], index });
+      return edgeIds.length;
+    },
+    styleTrace: (vertexIds, index) => {
+      styleOps.push({ kind: "trace", ids: [...vertexIds], index });
+      return vertexIds.length;
+    },
+    styleNames: () => ["standard", "matte"],
+    styleIndexOf: (name) => ["standard", "matte"].indexOf(name),
     edges,
     colorEdges: (edgeIds, rgb) => {
       edgeOps.push({ edgeIds: [...edgeIds], rgb });
@@ -359,7 +374,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
     colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, modRunCode, rmArms, sels,
-    bindCalls, bindingReg, orientationOps, elemEachOps,
+    bindCalls, bindingReg, orientationOps, elemEachOps, styleOps,
   };
 }
 
@@ -1477,6 +1492,30 @@ test("A-1: the THREE id spaces never mix — the edge-space discriminator", () =
       { axis: "tracesize", points: [1] },
     ],
   );
+});
+
+// -- A-2: per-target style selection ---------------------------------------------
+
+test("A-2: style verbs write the REGISTRY INDEX per family targeting; unknown names list the registry", () => {
+  const { registry, styleOps } = makeRegistry();
+  const p = registry.runCommand("stylepoints all matte");
+  assert.equal(p.status, "ok");
+  assert.equal(p.message, "styled 3 points matte");
+  assert.deepEqual(styleOps[0], { kind: "points", ids: [0, 1, 2], index: 1 });
+  const b = registry.runCommand("stylebonds all standard");
+  assert.equal(b.message, "styled 2 edges standard");
+  assert.deepEqual(styleOps[1], { kind: "edges", ids: [0, 1], index: 0 });
+  // contained rule: c1 = point 2 only → no contained edge
+  assert.equal(registry.runCommand("stylebonds c1 matte").status, "nomatch");
+  const t = registry.runCommand("styletrace c0 matte");
+  assert.equal(t.message, "styled 1 polyline vertices matte");
+  assert.deepEqual(styleOps[2], { kind: "trace", ids: [0], index: 1 });
+  const bad = registry.runCommand("stylepoints all glossy");
+  assert.equal(bad.status, "error");
+  assert.match(bad.message, /unknown style "glossy" — styles: standard, matte/);
+  assert.equal(styleOps.length, 3, "no failure wrote anything");
+  const list = registry.runCommand("styles");
+  assert.equal(list.message, "styles:\n  standard (default)\n  matte");
 });
 
 test("bind family: help surfaces all three verbs", () => {

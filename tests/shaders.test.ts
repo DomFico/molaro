@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   IMPOSTOR_DEPTH_DEFINE,
   IMPOSTOR_SHADE_CHUNK,
+  STYLE_VERTEX_CHUNK,
   IMPOSTOR_SIZING_CHUNK,
   edgeTubeShaders,
   focusFlashShaders,
@@ -159,23 +160,38 @@ test("shading is single-sourced: every geometry fragment embeds THE shade chunk,
   assert.match(pf, /impostorShade\(vColor, nz\)/);
   assert.match(ef, /impostorShade\(vColor\.rgb, nz\)/);
   assert.match(tf, /impostorShade\(vColor\.rgb, nz\)/);
-  // The shading NUMBERS are style uniforms now (webview/styles.ts) — no
-  // fragment may carry a hardcoded lambert/specular constant; the chunk
-  // declares each of the four style uniforms exactly once.
-  for (const u of ["uLambertFloor", "uLambertScale", "uSpecStrength", "uSpecPower"]) {
-    assert.equal(
-      IMPOSTOR_SHADE_CHUNK.split(`uniform float ${u};`).length - 1, 1,
-      `chunk declares ${u} once`,
-    );
-  }
+  // The shading NUMBERS arrive per element via the style varying (A-2:
+  // per-target style — the vertex stage looks up `uniform vec4 uStyles[8]`
+  // by the element's style index and hands the params over as a varying).
+  // No fragment may carry a hardcoded lambert/specular constant, and no
+  // fragment may index the style array (GLSL ES 1.00 only guarantees
+  // dynamic uniform-array indexing in the VERTEX stage).
+  assert.equal(
+    IMPOSTOR_SHADE_CHUNK.split("varying vec4 vStyleParams;").length - 1, 1,
+    "chunk reads the style varying",
+  );
+  assert.doesNotMatch(IMPOSTOR_SHADE_CHUNK, /uStyles/, "fragment never indexes the style array");
+  assert.equal(
+    STYLE_VERTEX_CHUNK.split("uniform vec4 uStyles[8];").length - 1, 1,
+    "vertex chunk declares the packed style array once",
+  );
   for (const [name, src] of [["point", pf], ["edge", ef], ["trace", tf]] as const) {
     assert.doesNotMatch(src, /0\.55|0\.45 \* nz|0\.35 \* pow/,
       `${name}: no hardcoded shading constants outside the style`);
   }
+  // every geometry VERTEX shader performs the lookup exactly once
+  for (const [name, src] of [
+    ["point", pointShaders().vertex],
+    ["edge", edgeTubeShaders().vertex],
+    ["trace", traceTubeShaders().vertex],
+  ] as const) {
+    assert.equal(src.split("vStyleParams = styleParams(").length - 1, 1,
+      `${name}: one style lookup in the vertex stage`);
+  }
 });
 
 test("the highlight is restrained: one specular term, no second light, overlays untouched", () => {
-  assert.match(IMPOSTOR_SHADE_CHUNK, /uSpecStrength \* pow\(max\(nz, 0\.0\), uSpecPower\)/);
+  assert.match(IMPOSTOR_SHADE_CHUNK, /vStyleParams\.z \* pow\(max\(nz, 0\.0\), vStyleParams\.w\)/);
   assert.doesNotMatch(highlightShaders().fragment, /impostorShade|pow\(/);
   assert.doesNotMatch(focusFlashShaders().fragment, /impostorShade|pow\(/);
 });

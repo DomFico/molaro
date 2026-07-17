@@ -48,10 +48,8 @@ export const STANDARD_STYLE: Style = {
   specPower: 48,
 };
 
-/** A second style AS DATA — registered and unit-tested, but not selectable
- * from any surface tonight (the style-assignment verb is a later, attended
- * increment). Differs from standard only in the specular term: proof the
- * axis composes without touching shape or channels. */
+/** A second style AS DATA. Differs from standard only in the specular
+ * term: proof the axis composes without touching shape or channels. */
 export const MATTE_STYLE: Style = {
   name: "matte",
   lambertFloor: 0.55,
@@ -62,8 +60,46 @@ export const MATTE_STYLE: Style = {
 
 const styles = new Map<string, Style>();
 
+/** Shader-side capacity: styles pack into `uniform vec4 uStyles[MAX_STYLES]`
+ * (one vec4 per style — floor/scale/strength/power packs exactly). The
+ * registry fails CLOSED at capacity rather than silently truncating the
+ * uniform array. */
+export const MAX_STYLES = 8;
+
 export function registerStyle(style: Style): void {
+  if (!styles.has(style.name) && styles.size >= MAX_STYLES) {
+    throw new Error(`style registry is full (${MAX_STYLES}) — cannot register "${style.name}"`);
+  }
   styles.set(style.name, style);
+}
+
+/** A style's shader index — REGISTRATION ORDER, the same order
+ * stylesAsUniformArray packs. -1 = unknown. Index 0 is `standard` (the
+ * default: every style buffer initializes to 0). */
+export function styleIndex(name: string): number {
+  let i = 0;
+  for (const s of styles.values()) {
+    if (s.name === name) return i;
+    i++;
+  }
+  return -1;
+}
+
+/** The registry packed for `uniform vec4 uStyles[MAX_STYLES]` — flat
+ * [floor, scale, strength, power] × MAX_STYLES, zero-padded past the
+ * registered count (unreachable: element style ids only ever come from
+ * styleIndex lookups of registered names). */
+export function stylesAsUniformArray(): Float32Array {
+  const out = new Float32Array(MAX_STYLES * 4);
+  let i = 0;
+  for (const s of styles.values()) {
+    out[i * 4] = s.lambertFloor;
+    out[i * 4 + 1] = s.lambertScale;
+    out[i * 4 + 2] = s.specStrength;
+    out[i * 4 + 3] = s.specPower;
+    i++;
+  }
+  return out;
 }
 
 export function getStyle(name: string): Style | undefined {

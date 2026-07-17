@@ -53,14 +53,31 @@ float impostorDiameterPx(float worldRadius, float viewDepth) {
  * byte-identical to the constants this chunk carried before styles
  * existed (pinned by unit test and the pixel scenarios).
  */
+/** VERTEX-side style plumbing: the style registry packs into ONE vec4
+ * array uniform (x=lambertFloor, y=lambertScale, z=specStrength,
+ * w=specPower); each vertex looks its element's style up BY INDEX and
+ * hands the params to the fragment as a varying. The lookup lives in the
+ * VERTEX stage on purpose — GLSL ES 1.00 guarantees dynamic uniform-array
+ * indexing there but not in fragments, and every pass's style id is
+ * constant across a primitive (points are single-vertex; edge/trace quads
+ * carry one id per instance), so the varying never actually blends. */
+export const STYLE_VERTEX_CHUNK = `
+uniform vec4 uStyles[8];
+varying vec4 vStyleParams;
+vec4 styleParams(float id) {
+  return uStyles[int(id + 0.5)];
+}
+`;
+
+/** FRAGMENT-side shade: the same formula the chunk always carried, with
+ * the parameters arriving per element via the style varying instead of
+ * four scalar uniforms. Style index 0 (`standard`, every buffer's default)
+ * packs the EXACT former constants — byte-identical default look. */
 export const IMPOSTOR_SHADE_CHUNK = `
-uniform float uLambertFloor;
-uniform float uLambertScale;
-uniform float uSpecStrength;
-uniform float uSpecPower;
+varying vec4 vStyleParams;
 vec3 impostorShade(vec3 color, float nz) {
-  float lambert = uLambertFloor + uLambertScale * nz;
-  float spec = uSpecStrength * pow(max(nz, 0.0), uSpecPower);
+  float lambert = vStyleParams.x + vStyleParams.y * nz;
+  float spec = vStyleParams.z * pow(max(nz, 0.0), vStyleParams.w);
   return color * lambert + vec3(spec);
 }
 `;
@@ -72,12 +89,14 @@ export function pointShaders(): { vertex: string; fragment: string } {
   return {
     vertex: `
       attribute vec3 aColor; attribute float aSize; attribute float aVisible;
-      attribute float aOpacity;
+      attribute float aOpacity; attribute float aStyle;
       ${IMPOSTOR_SIZING_CHUNK}
+      ${STYLE_VERTEX_CHUNK}
       varying vec3 vColor; varying float vVisible; varying float vOpacity;
       varying float vRadius; varying float vViewDepth;
       void main() {
         vColor = aColor; vVisible = aVisible; vOpacity = aOpacity;
+        vStyleParams = styleParams(aStyle);
         vRadius = uWorldPerSize * aSize;
         vec4 mv = modelViewMatrix * vec4(position, 1.0);
         vViewDepth = -mv.z;
@@ -134,10 +153,12 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
       attribute vec2 aCorner;
       attribute vec3 iStart; attribute vec3 iEnd;
       attribute float iVisible; attribute float iRadius; attribute vec4 iColor;
+      attribute float iStyle;
       // endpoint SPHERE sizes (rep-write cadence, like iRadius): the tube is
       // trimmed analytically to the sphere it meets — see the fragment shader
       attribute float iSizeA; attribute float iSizeB;
       uniform float uWorldPerSize;
+      ${STYLE_VERTEX_CHUNK}
       varying vec4 vColor; varying float vU;
       varying float vRadius;
       varying float vT; varying float vLen;
@@ -145,6 +166,7 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
       varying float vDepthA; varying float vDepthB;
       varying float vRsA; varying float vRsB;
       void main() {
+        vStyleParams = styleParams(iStyle);
         float radius = uWorldPerSize * iRadius;
         vec3 mvA = (modelViewMatrix * vec4(iStart, 1.0)).xyz;
         vec3 mvB = (modelViewMatrix * vec4(iEnd, 1.0)).xyz;
@@ -255,10 +277,13 @@ export function traceTubeShaders(): { vertex: string; fragment: string } {
       attribute float iVisible;
       attribute float iRadiusA; attribute float iRadiusB;
       attribute vec4 iColorA; attribute vec4 iColorB;
+      attribute float iStyle;
       uniform float uWorldPerSize;
+      ${STYLE_VERTEX_CHUNK}
       varying vec4 vColor; varying float vU;
       varying float vRadius; varying float vDepth;
       void main() {
+        vStyleParams = styleParams(iStyle);
         float rA = uWorldPerSize * iRadiusA;
         float rB = uWorldPerSize * iRadiusB;
         vec3 mvA = (modelViewMatrix * vec4(iStart, 1.0)).xyz;

@@ -52,6 +52,8 @@ point types `anchor` and `t0`–`t3`).
 | `bind <expr> <channel> <axis> [<min> <max>]` | Register a **channel→axis binding** (same gate as `bake`): the axis **re-derives from the channel on every frame flip**; last-bind-wins per element within an axis; one undo stroke. Vector channel → `orientation` (raw; **stored only — no shape reads it yet**) | `bind all energy color 0 2.5` |
 | `unbind <expr> [<axis>]` / `unbind all [<axis>]` | Release binding **coverage element-wise**, one axis or all (values stay as last applied; one undo op) | `unbind alpha color` |
 | `bindings` | Read-only list of the channel bindings (bare — takes no target) | `bindings` |
+| `stylepoints` / `stylebonds` / `styletrace` `<expr> <style>` | Select a registered **shading style** per target (per-element style index; `standard` is the default look, byte-identical; `stylebonds` = contained edges, `styletrace` = subgroup map-up; one undo stroke) | `stylepoints alpha matte` |
+| `styles` | Read-only listing of the style registry (bare; index 0 = default) | `styles` |
 | `mods` | List the **recipe registry** (read-only): each recipe's name, axis, origin, and credit — bare, takes no target | `mods` |
 | `rm <mods>` | Delete **workspace mod files** (y/n confirmed, **not undoable**; built-ins refused) | `rm index_ramp + xy_metric` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |

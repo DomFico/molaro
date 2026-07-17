@@ -76,7 +76,7 @@ import {
   pointShaders,
   traceTubeShaders,
 } from "./shaders.ts";
-import { STANDARD_STYLE, type Style } from "./styles.ts";
+import { listStyles, styleIndex, stylesAsUniformArray } from "./styles.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
 const PLAYBACK_FPS = 30;
@@ -180,6 +180,8 @@ interface PassEnv {
     size: THREE.BufferAttribute;
     visible: THREE.BufferAttribute;
     opacity: THREE.BufferAttribute;
+    /** per-point style INDEX (0 = standard) — categorical, command-cadence. */
+    style: THREE.BufferAttribute;
     /** pending-target flag (0/1) drawn by the green overlay. */
     sel: THREE.BufferAttribute;
     /** focus-flash flag (0/1) drawn by the yellow pulse pass. */
@@ -274,21 +276,19 @@ interface SizingUniforms {
  * by every geometry material, so a style's values can never fork between
  * passes (the sizing-uniform discipline, applied to shading). */
 interface StyleUniforms {
-  uLambertFloor: { value: number };
-  uLambertScale: { value: number };
-  uSpecStrength: { value: number };
-  uSpecPower: { value: number };
+  /** ONE vec4 per registered style (floor/scale/strength/power), flat,
+   * zero-padded to MAX_STYLES — shared as ONE object across all three
+   * geometry materials so the registry cannot fork between passes. Every
+   * style buffer defaults to index 0 = `standard` (the byte-identical
+   * anchor). */
+  uStyles: { value: Float32Array };
 }
 
-/** Style → the shared uniform objects (built once, from the DEFAULT style —
- * selecting other registered styles is a later, attended increment). */
-function makeStyleUniforms(style: Style): StyleUniforms {
-  return {
-    uLambertFloor: { value: style.lambertFloor },
-    uLambertScale: { value: style.lambertScale },
-    uSpecStrength: { value: style.specStrength },
-    uSpecPower: { value: style.specPower },
-  };
+/** The style registry packed for the shader — built once at boot
+ * (registration is boot-time; the per-element style AXIS is what changes
+ * at runtime, through the style buffers, not this array). */
+function makeStyleUniforms(): StyleUniforms {
+  return { uStyles: { value: stylesAsUniformArray() } };
 }
 
 /**
@@ -452,12 +452,14 @@ const spherePointsGenerator: ShapeGenerator = {
     pointsGeo.setAttribute("aSize", env.pointAttrs.size);
     pointsGeo.setAttribute("aVisible", env.pointAttrs.visible);
     pointsGeo.setAttribute("aOpacity", env.pointAttrs.opacity);
+    pointsGeo.setAttribute("aStyle", env.pointAttrs.style);
     return {
       objects: [new THREE.Points(pointsGeo, env.materials.points)],
       onRepWrite: {
         color: () => { env.pointAttrs.color.needsUpdate = true; },
         size: () => { env.pointAttrs.size.needsUpdate = true; },
         opacity: () => { env.pointAttrs.opacity.needsUpdate = true; },
+        style: () => { env.pointAttrs.style.needsUpdate = true; },
       },
     };
   },
@@ -507,7 +509,8 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
     // cadence (pointsize writes only), exactly like iRadius; never per flip
     const iSizeA = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
     const iSizeB = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
-    for (const a of [iStart, iEnd, iVisible, iRadius, iColor, iSizeA, iSizeB]) {
+    const iStyle = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
+    for (const a of [iStart, iEnd, iVisible, iRadius, iColor, iSizeA, iSizeB, iStyle]) {
       a.setUsage(THREE.DynamicDrawUsage);
     }
     edgeGeo.setAttribute("iStart", iStart);
@@ -517,6 +520,7 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
     edgeGeo.setAttribute("iColor", iColor);
     edgeGeo.setAttribute("iSizeA", iSizeA);
     edgeGeo.setAttribute("iSizeB", iSizeB);
+    edgeGeo.setAttribute("iStyle", iStyle);
     // point → incident edge ids, built once (header order both sides), so a
     // pointsize write touches exactly its edges' end-size slots
     const edgesOfPoint: number[][] = Array.from({ length: header.n_points }, () => []);
@@ -598,6 +602,11 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
         edgeColor: fillEdgeColors,
         edgeOpacity: fillEdgeColors, // one RGBA interleave serves both axes
         edgeSize: fillEdgeSizes,
+        edgeStyle: (ids) => {
+          const buf = iStyle.array as Float32Array;
+          for (const e of ids) buf[e] = rep.state.edgeStyle[e];
+          iStyle.needsUpdate = true;
+        },
         // the junction trim reads POINT sizes — a cross-pass subscription,
         // at rep-write cadence (never the flip loop)
         size: fillEdgeEndSizes,
@@ -660,7 +669,8 @@ const traceTubesGenerator: ShapeGenerator<TraceTubePass> = {
     const iRadiusB = new THREE.InstancedBufferAttribute(new Float32Array(seg.count), 1);
     const iColorA = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 4), 4);
     const iColorB = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 4), 4);
-    for (const a of [iStart, iEnd, iVisible, iRadiusA, iRadiusB, iColorA, iColorB]) {
+    const iStyle = new THREE.InstancedBufferAttribute(new Float32Array(seg.count), 1);
+    for (const a of [iStart, iEnd, iVisible, iRadiusA, iRadiusB, iColorA, iColorB, iStyle]) {
       a.setUsage(THREE.DynamicDrawUsage);
     }
     tubeGeo.setAttribute("iStart", iStart);
@@ -670,6 +680,7 @@ const traceTubesGenerator: ShapeGenerator<TraceTubePass> = {
     tubeGeo.setAttribute("iRadiusB", iRadiusB);
     tubeGeo.setAttribute("iColorA", iColorA);
     tubeGeo.setAttribute("iColorB", iColorB);
+    tubeGeo.setAttribute("iStyle", iStyle);
 
     // vertex → incident (segment, end) slots, built once from the SAME
     // traversal's arrays, so a trace write touches exactly its segments' end
@@ -695,7 +706,11 @@ const traceTubesGenerator: ShapeGenerator<TraceTubePass> = {
     const jSizeAttr = new THREE.BufferAttribute(jSize, 1);
     const jOpacityAttr = new THREE.BufferAttribute(jOpacity, 1);
     const jVisibleAttr = new THREE.BufferAttribute(jVisible, 1);
-    for (const a of [jColorAttr, jSizeAttr, jOpacityAttr, jVisibleAttr]) {
+    // joint style rides the POINT material's aStyle slot — write-through
+    // from the joint's OWN vertex's traceStyle (categorical, never blended)
+    const jStyle = new Float32Array(n);
+    const jStyleAttr = new THREE.BufferAttribute(jStyle, 1);
+    for (const a of [jColorAttr, jSizeAttr, jOpacityAttr, jVisibleAttr, jStyleAttr]) {
       a.setUsage(THREE.DynamicDrawUsage);
     }
     // joints exist only where segments do (a single-vertex path draws
@@ -707,6 +722,7 @@ const traceTubesGenerator: ShapeGenerator<TraceTubePass> = {
     jointGeo.setAttribute("aSize", jSizeAttr);
     jointGeo.setAttribute("aVisible", jVisibleAttr);
     jointGeo.setAttribute("aOpacity", jOpacityAttr);
+    jointGeo.setAttribute("aStyle", jStyleAttr);
     jointGeo.setIndex(jointPoints);
 
     /** re-copy the per-instance segment endpoints from the current frame —
@@ -799,6 +815,19 @@ const traceTubesGenerator: ShapeGenerator<TraceTubePass> = {
         traceColor: fillTraceColors,
         traceOpacity: fillTraceColors, // one RGBA interleave serves both axes
         traceSize: fillTraceSizes,     // the formerly-silent channel DRAWS
+        traceStyle: (ids) => {
+          // a SEGMENT draws with its A-end vertex's style (flat — style
+          // params are categorical and must not blend along the wall);
+          // the joint takes its own vertex's style
+          const ts = rep.state.traceStyle;
+          const buf = iStyle.array as Float32Array;
+          for (const v of ids) {
+            for (let k = 0; k < seg.count; k++) if (seg.vertexA[k] === v) buf[k] = ts[v];
+            jStyle[env.traceVertices[v]] = ts[v];
+          }
+          iStyle.needsUpdate = true;
+          jStyleAttr.needsUpdate = true;
+        },
       },
       onVisibilityChange: fillTraceVisibility,
       attrVersions: () => ({
@@ -1044,23 +1073,24 @@ async function main(): Promise<void> {
     size: new THREE.BufferAttribute(rep.state.size, 1),
     visible: new THREE.BufferAttribute(rep.state.visible, 1),
     opacity: new THREE.BufferAttribute(rep.state.opacity, 1),
+    style: new THREE.BufferAttribute(rep.state.style, 1),
     sel: new THREE.BufferAttribute(selArray, 1),
     flash: new THREE.BufferAttribute(flashArray, 1),
   };
   for (const a of [
     positionAttr, pointAttrs.color, pointAttrs.size, pointAttrs.visible,
-    pointAttrs.opacity, pointAttrs.sel, pointAttrs.flash,
+    pointAttrs.opacity, pointAttrs.style, pointAttrs.sel, pointAttrs.flash,
   ]) {
     a.setUsage(THREE.DynamicDrawUsage);
   }
-  /** THE re-upload list: color/size/visible/opacity re-upload when the render
-   * loop sees rep.dirty. Any new per-point attribute joins it in the same
-   * edit that binds it, or it silently stops reaching the GPU. */
-  const repAttrs = [pointAttrs.color, pointAttrs.size, pointAttrs.visible, pointAttrs.opacity];
+  /** THE re-upload list: color/size/visible/opacity/style re-upload when the
+   * render loop sees rep.dirty. Any new per-point attribute joins it in the
+   * same edit that binds it, or it silently stops reaching the GPU. */
+  const repAttrs = [pointAttrs.color, pointAttrs.size, pointAttrs.visible, pointAttrs.opacity, pointAttrs.style];
   // shading uniforms from the DEFAULT style — byte-identical to the former
   // hardcoded constants (webview/styles.ts pins this); shared objects, one
   // instance each, across all three geometry materials
-  const styleUniforms = makeStyleUniforms(STANDARD_STYLE);
+  const styleUniforms = makeStyleUniforms();
   const materials = makeGeometryMaterials(sizing, styleUniforms, depthVariant);
   const passEnv: PassEnv = {
     header, rep, positionAttr, pointAttrs, traceVertices, sizing, depthVariant, materials,
@@ -1849,6 +1879,12 @@ async function main(): Promise<void> {
   const colorTrace = withBindingClear("tracecolor", makeRepWriter(rep.state.traceColor, 3, repWrite("traceColor")));
   const sizeTrace = withBindingClear("tracesize", makeRepWriter(rep.state.traceSize, 1, repWrite("traceSize")));
   const opacityTrace = withBindingClear("traceopacity", makeRepWriter(rep.state.traceOpacity, 1, repWrite("traceOpacity")));
+  // Style writers: plain broadcast (style is NOT a bindable axis — no
+  // channel drives it, so no coverage to LWW-clear); value = the style's
+  // REGISTRY INDEX, resolved from its name by the verb.
+  const stylePoints = makeRepWriter(rep.state.style, 1, repWrite("style"));
+  const styleEdges = makeRepWriter(rep.state.edgeStyle, 1, repWrite("edgeStyle"));
+  const styleTrace = makeRepWriter(rep.state.traceStyle, 1, repWrite("traceStyle"));
   const colorEdgesEach = withBindingClear("bondcolor", makeRepEachWriter(rep.state.edgeColor, 3, repWrite("edgeColor")));
   const sizeEdgesEach = withBindingClear("bondsize", makeRepEachWriter(rep.state.edgeSize, 1, repWrite("edgeSize")));
   const opacityEdgesEach = withBindingClear("bondopacity", makeRepEachWriter(rep.state.edgeOpacity, 1, repWrite("edgeOpacity")));
@@ -2076,6 +2112,11 @@ async function main(): Promise<void> {
     colorTraceEach,
     sizeTraceEach,
     opacityTraceEach,
+    stylePoints,
+    styleEdges,
+    styleTrace,
+    styleNames: () => listStyles().map((st) => st.name),
+    styleIndexOf: styleIndex,
     // The bake/bind gate's READ surface. Declarations come from the header;
     // values come from whatever is IN HAND at the displayed frame — the
     // header block for per_point, the displayed chunk's zero-copy view for
@@ -2161,6 +2202,7 @@ async function main(): Promise<void> {
     orientationVerticesEach: () => 0,
     colorEdgesEach: () => 0, sizeEdgesEach: () => 0, opacityEdgesEach: () => 0,
     colorTraceEach: () => 0, sizeTraceEach: () => 0, opacityTraceEach: () => 0,
+    stylePoints: () => 0, styleEdges: () => 0, styleTrace: () => 0,
     colorEdges: () => 0, colorTrace: () => 0,
     sizePoints: () => 0, sizeEdges: () => 0, sizeTrace: () => 0,
     opacityPoints: () => 0, opacityEdges: () => 0, opacityTrace: () => 0,

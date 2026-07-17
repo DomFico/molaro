@@ -206,6 +206,16 @@ export interface CommandContext {
   colorTraceEach(vertexIds: readonly number[], rgb: readonly number[]): number;
   sizeTraceEach(vertexIds: readonly number[], values: readonly number[]): number;
   opacityTraceEach(vertexIds: readonly number[], values: readonly number[]): number;
+  /** Style writers (value = the style's REGISTRY INDEX): per-point,
+   * per-edge (contained targeting), per-trace-vertex (subgroup map-up —
+   * the trace verb family's grain). Style is NOT a bindable axis. */
+  stylePoints(points: readonly number[], index: number): number;
+  styleEdges(edgeIds: readonly number[], index: number): number;
+  styleTrace(vertexIds: readonly number[], index: number): number;
+  /** Registered style names, registration order (index = shader index). */
+  styleNames(): string[];
+  /** name → registry index, -1 unknown (single-sourced from styles.ts). */
+  styleIndexOf(name: string): number;
   /** The orientation writer: per-vertex RAW 3-vectors (flat, 3 × ids
    * length) into the stride-3 orientation buffer — the SAME writer core
    * color rides (capture, LWW-clear of same-axis coverage, one stroke,
@@ -1256,6 +1266,70 @@ function domainNoun(domain: "point" | "edge" | "vertex"): string {
   return domain === "point" ? "points" : domain === "edge" ? "edges" : "vertices";
 }
 
+/** The style verbs' shared front half — resolveRepArgs with the trailing
+ * word being a REGISTERED STYLE NAME (resolved to its registry index). */
+function resolveStyleArgs(ctx: CommandContext, verb: string, args: string) {
+  return resolveRepArgs(ctx, verb, args, "style", "matte",
+    (w) => {
+      const index = ctx.styleIndexOf(w);
+      return index >= 0 ? { index, name: w } : null;
+    },
+    (w) => `unknown style "${w}" — styles: ${ctx.styleNames().join(", ")}`);
+}
+
+/** `stylepoints <target> <style>` — select a registered style's shading
+ * parameters for the target's points (per-element style INDEX; LWW; one
+ * undo stroke; `standard` restores the default look exactly). */
+export function makeStylePointsHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const r = resolveStyleArgs(ctx, "stylepoints", args);
+    if ("status" in r) return r;
+    const n = ctx.stylePoints(r.points, r.value.index);
+    return { status: "ok", message: `styled ${n} points ${r.value.name}` };
+  };
+}
+
+/** `stylebonds <target> <style>` — the contained-edge twin (both endpoints
+ * in the target — colorbonds' rule). */
+export function makeStyleBondsHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const r = resolveStyleArgs(ctx, "stylebonds", args);
+    if ("status" in r) return r;
+    const ids = edgesMatching(ctx.edges, r.points, true);
+    if (ids.length === 0) {
+      return { status: "nomatch", message: `no edges are contained in "${r.expr}"` };
+    }
+    const n = ctx.styleEdges(ids, r.value.index);
+    return { status: "ok", message: `styled ${n} edges ${r.value.name}` };
+  };
+}
+
+/** `styletrace <target> <style>` — the subgroup map-up twin (colortrace's
+ * grain: vertices whose subgroup holds a resolved point). */
+export function makeStyleTraceHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    const r = resolveStyleArgs(ctx, "styletrace", args);
+    if ("status" in r) return r;
+    const ids = activeTraceVertexIds(ctx, r.points);
+    if (ids.length === 0) {
+      return { status: "nomatch", message: `no polyline vertices map up from "${r.expr}"` };
+    }
+    const n = ctx.styleTrace(ids, r.value.index);
+    return { status: "ok", message: `styled ${n} polyline vertices ${r.value.name}` };
+  };
+}
+
+/** `styles` — read-only listing of the style registry (bare). */
+export function makeStylesHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    if (args.trim() !== "") {
+      return { status: "error", message: "styles takes no arguments — it lists the style registry" };
+    }
+    const rows = ctx.styleNames().map((name, i) => `  ${name}${i === 0 ? " (default)" : ""}`);
+    return { status: "ok", message: ["styles:", ...rows].join("\n") };
+  };
+}
+
 /**
  * `bake <target> <channel> <axis> [<min> <max>]` — the Tier-1 channel
  * consumer: read the named channel's per-element values AT THE DISPLAYED
@@ -2019,6 +2093,10 @@ export const HELP_TEXT = [
   "  unbind <expr>|all [<axis>]  release binding coverage element-wise,",
   "               one axis or all (values stay as last applied)",
   "  bindings     list channel bindings (read-only)",
+  "  stylepoints / stylebonds / styletrace <expr> <style>   select a",
+  "               registered shading style per target (standard | matte;",
+  "               standard is the default look; one undo stroke)",
+  "  styles       list the style registry (read-only)",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  mods         list the recipe registry: name, axis, origin, and credit",
   "               (author · source, display-only; recipes, not verbs)",
@@ -2157,6 +2235,26 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "bindings",
     makeBindingsHandler(ctx),
     "read-only list of the channel bindings — channel → axis on target, points, range (bare — takes no target)",
+  );
+  registry.register(
+    "stylepoints",
+    makeStylePointsHandler(ctx),
+    "select a registered style's shading for the target's points (per-element; standard restores the default look): stylepoints <target> <style>",
+  );
+  registry.register(
+    "stylebonds",
+    makeStyleBondsHandler(ctx),
+    "style every edge with BOTH endpoints in the target (contained): stylebonds <target> <style>",
+  );
+  registry.register(
+    "styletrace",
+    makeStyleTraceHandler(ctx),
+    "style polyline vertices whose subgroup contains a resolved point (map-up): styletrace <target> <style>",
+  );
+  registry.register(
+    "styles",
+    makeStylesHandler(ctx),
+    "read-only listing of the style registry (bare — takes no target; index 0 is the default)",
   );
   registry.register(
     "ls",

@@ -72,6 +72,17 @@ export interface RepresentationState {
    * normalization call is parked). Zero = no orientation. STATE-ONLY until
    * the oriented generator: no draw pass reads this buffer yet. */
   orientation: Float32Array;
+  /** length N — per-point STYLE INDEX into the style registry (0 =
+   * `standard`, the byte-identical default). Categorical, never blended:
+   * the shader looks params up per vertex and points are single-vertex. */
+  style: Float32Array;
+  /** length E — per-EDGE style index (one per instance — flat across the
+   * tube quad). */
+  edgeStyle: Float32Array;
+  /** length V — per-POLYLINE-VERTEX style index; a SEGMENT draws with its
+   * A-end vertex's style (flat per instance — style params are categorical
+   * and must not blend along the wall); joints take their own vertex's. */
+  traceStyle: Float32Array;
 }
 
 export class RepresentationLayer {
@@ -113,9 +124,13 @@ export class RepresentationLayer {
     // a PARKED design call, so this layer stores what it is given.
     // STATE-ONLY until the oriented generator (O-2): nothing reads it.
     const orientation = new Float32Array(nTraceVertices * 3);
+    // Style indices: zero = `standard` — the byte-identical default look.
+    const style = new Float32Array(nPoints);
+    const edgeStyle = new Float32Array(nEdges);
+    const traceStyle = new Float32Array(nTraceVertices);
     this.state = {
       color, size, visible, edgeColor, traceColor, edgeSize, traceSize,
-      opacity, edgeOpacity, traceOpacity, orientation,
+      opacity, edgeOpacity, traceOpacity, orientation, style, edgeStyle, traceStyle,
     };
   }
 }
