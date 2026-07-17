@@ -257,7 +257,7 @@ function makeRegistry() {
       bindCalls.push({ b: { ...b, points: [...b.points] }, scalars: [...scalars] });
       return bindingReg.add(b);
     },
-    releaseBindings: (points) => (points === null ? bindingReg.clear() : bindingReg.release(points)),
+    releaseBindings: (points, axis) => bindingReg.release(points, axis),
     listBindings: () => bindingReg.all(),
     edges,
     colorEdges: (edgeIds, rgb) => {
@@ -1229,15 +1229,22 @@ test("bind: gate parity with bake — the same refusals, word for word", () => {
   assert.equal(bindingReg.count(), 0, "no failure registered anything");
 });
 
-test("bind: last-bind-wins — the overlap is TAKEN from the earlier binding, and reported", () => {
+test("bind: last-bind-wins WITHIN an axis — the overlap is taken and reported; cross-axis coexists", () => {
   const { registry, bindingReg } = makeRegistry();
   registry.runCommand("bind all energy color 0 2.5");
-  const r = registry.runCommand("bind c1 mass size");
+  // a DIFFERENT axis over the same elements: coexists, takes nothing
+  const size = registry.runCommand("bind all mass size");
+  assert.equal(size.status, "ok");
+  assert.doesNotMatch(size.message, /took/, "cross-axis bind reports no takeover");
+  assert.equal(bindingReg.count(), 2);
+  // the SAME axis over a subset: element-level takeover, reported
+  const r = registry.runCommand("bind c1 mass color 1 3");
   assert.equal(r.status, "ok");
   assert.match(r.message, /took 1 points from 1 earlier binding/);
-  assert.deepEqual(bindingReg.all().map((b) => ({ channel: b.channel, points: b.points })), [
-    { channel: "energy", points: [0, 1] },
-    { channel: "mass", points: [2] },
+  assert.deepEqual(bindingReg.all().map((b) => ({ channel: b.channel, axis: b.axis, points: b.points })), [
+    { channel: "energy", axis: "color", points: [0, 1] },
+    { channel: "mass", axis: "size", points: [0, 1, 2] },
+    { channel: "mass", axis: "color", points: [2] },
   ]);
 });
 
@@ -1254,6 +1261,31 @@ test("unbind: element-wise release; all clears; empty and no-overlap are nomatch
   assert.equal(rest.message, "released 2 bound points across 1 binding (1 removed) — values stay as last applied");
   assert.equal(bindingReg.count(), 0);
   assert.equal(registry.runCommand("unbind").status, "error", "bare unbind is a usage error");
+});
+
+test("unbind: an axis word scopes the release to that axis alone", () => {
+  const { registry, bindingReg } = makeRegistry();
+  registry.runCommand("bind all energy color 0 2.5");
+  registry.runCommand("bind all mass size");
+  const r = registry.runCommand("unbind all color");
+  assert.equal(r.status, "ok");
+  assert.equal(r.message, "released 3 bound points across 1 binding (1 removed) on color — values stay as last applied");
+  assert.deepEqual(bindingReg.all().map((b) => b.axis), ["size"], "the size binding is untouched");
+  const part = registry.runCommand("unbind c1 size");
+  assert.equal(part.message, "released 1 bound points across 1 binding on size — values stay as last applied");
+  assert.equal(registry.runCommand("unbind c1 color").status, "nomatch", "nothing bound on that axis there");
+});
+
+test("orientation: every entry point refuses LOUDLY — no consumer exists", () => {
+  const { registry, bindingReg, colorEachOps, eachOps } = makeRegistry();
+  const want = /no consumer for the orientation axis yet/;
+  for (const cmd of ["bind all flow orientation", "bake all flow orientation", "unbind all orientation"]) {
+    const r = registry.runCommand(cmd);
+    assert.equal(r.status, "error", cmd);
+    assert.match(r.message, want, cmd);
+  }
+  assert.equal(bindingReg.count(), 0);
+  assert.equal(colorEachOps.length + eachOps.length, 0, "nothing was written or bound");
 });
 
 test("bindings: read-only list with the inert notice; empty says so; bare only", () => {

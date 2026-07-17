@@ -45,6 +45,7 @@ import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
 import { applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
 import { BindingRegistry, type Binding } from "./bindings.ts";
+import type { BindAxis } from "./channelmap.ts";
 import { bindTypedResult } from "./claudebind.ts";
 import { parseTypedResult } from "./claudemodel.ts";
 import { listRecipes, registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
@@ -1699,12 +1700,48 @@ async function main(): Promise<void> {
    * same hook, so GPU sync on undo is automatic. */
   const repWrite = (channel: RepChannel) =>
     (ids: readonly number[]): void => registry.repWrite(channel, ids);
-  const colorPoints = makeRepWriter(rep.state.color, 3, repWrite("color"));
-  const colorPointsEach = makeRepEachWriter(rep.state.color, 3, repWrite("color"));
-  const sizePointsEach = makeRepEachWriter(rep.state.size, 1, repWrite("size"));
-  const opacityPointsEach = makeRepEachWriter(rep.state.opacity, 1, repWrite("opacity"));
-  const sizePoints = makeRepWriter(rep.state.size, 1, repWrite("size"));
-  const opacityPoints = makeRepWriter(rep.state.opacity, 1, repWrite("opacity"));
+  // The channel-binding registry (bindings do not re-derive on flip until
+  // the live link lands) and its status badge. The badge seam is assigned
+  // where the steady-state status line is composed (after boot); everything
+  // here only ever runs at command time, well after that.
+  const bindingRegistry = new BindingRegistry();
+  let refreshBindingBadge = (): void => {};
+  /** The ruled LWW rule, wired where every direct write flows: a point-axis
+   * write CLEARS overlapping SAME-AXIS binding coverage in the SAME stroke —
+   * the write lands AND those elements stop being channel-driven, and one
+   * Ctrl+Z restores the values and the coverage together. Wraps ONLY the
+   * three point axes (bindings cover nothing else); a write that changed
+   * nothing (n=0) or overlapped no coverage records no extra op. Strokes
+   * are reentrant, so a caller composing a larger stroke (bind's initial
+   * apply, a command macro) folds this in rather than splitting undo. */
+  const withBindingClear = <A extends unknown[]>(
+    axis: BindAxis,
+    writer: (ids: readonly number[], ...rest: A) => number,
+  ) =>
+    (ids: readonly number[], ...rest: A): number => {
+      model.beginStroke();
+      const n = writer(ids, ...rest);
+      if (n > 0) {
+        const snap = bindingRegistry.snapshot();
+        const stats = bindingRegistry.release(ids, axis);
+        if (stats.touched > 0) {
+          refreshBindingBadge();
+          model.recordOp(() => {
+            bindingRegistry.restore(snap);
+            refreshBindingBadge();
+            return [];
+          });
+        }
+      }
+      model.endStroke();
+      return n;
+    };
+  const colorPoints = withBindingClear("color", makeRepWriter(rep.state.color, 3, repWrite("color")));
+  const colorPointsEach = withBindingClear("color", makeRepEachWriter(rep.state.color, 3, repWrite("color")));
+  const sizePointsEach = withBindingClear("size", makeRepEachWriter(rep.state.size, 1, repWrite("size")));
+  const opacityPointsEach = withBindingClear("opacity", makeRepEachWriter(rep.state.opacity, 1, repWrite("opacity")));
+  const sizePoints = withBindingClear("size", makeRepWriter(rep.state.size, 1, repWrite("size")));
+  const opacityPoints = withBindingClear("opacity", makeRepWriter(rep.state.opacity, 1, repWrite("opacity")));
   const colorEdges = makeRepWriter(rep.state.edgeColor, 3, repWrite("edgeColor"));
   const sizeEdges = makeRepWriter(rep.state.edgeSize, 1, repWrite("edgeSize"));
   const opacityEdges = makeRepWriter(rep.state.edgeOpacity, 1, repWrite("edgeOpacity"));
@@ -1834,13 +1871,6 @@ async function main(): Promise<void> {
     })();
   };
 
-  // The channel-binding registry (INERT this increment — see the ctx
-  // closures below) and its status badge. The badge seam is assigned where
-  // the steady-state status line is composed (after boot); the closures
-  // only ever run at command time, well after that.
-  const bindingRegistry = new BindingRegistry();
-  let refreshBindingBadge = (): void => {};
-
   const commandContext = {
     hierarchy,
     tree: fullTree, // the SAME model the bottom tree renders — click parity
@@ -1869,17 +1899,20 @@ async function main(): Promise<void> {
     colorPointsEach,
     sizePointsEach,
     opacityPointsEach,
-    // Channel bindings (INERT this increment: created/applied-once/listed/
-    // badged/undoable; the per-flip re-derive is the next, attended
-    // increment). createBinding is ONE compound stroke: the writers' own
-    // recorded op (which captures prior values) plus a whole-registry
+    // Channel bindings (no per-flip re-derive until the live link lands).
+    // createBinding is ONE compound stroke: the wrapped writer's recorded
+    // capture (which ALSO clears overlapping same-axis coverage — the
+    // last-bind-wins pre-step, via withBindingClear) plus a registry
     // snapshot op — a single Ctrl+Z removes the binding and restores the
-    // buffers together, and the badge refreshes on both directions.
+    // buffers AND any taken-over coverage together. The takeover report
+    // comes from overlapStats BEFORE the stroke, because the actual
+    // clearing happens inside the composite.
     createBinding: (b: Binding, scalars: readonly number[]) => {
+      const takeover = bindingRegistry.overlapStats(b.points, b.axis);
       model.beginStroke();
       applyScalarsToAxis(commandContext, b.axis, b.points, scalars);
       const snap = bindingRegistry.snapshot();
-      const released = bindingRegistry.add(b);
+      bindingRegistry.add(b);
       refreshBindingBadge();
       model.recordOp(() => {
         bindingRegistry.restore(snap);
@@ -1887,11 +1920,11 @@ async function main(): Promise<void> {
         return [];
       });
       model.endStroke();
-      return released;
+      return takeover;
     },
-    releaseBindings: (points: readonly number[] | null) => {
+    releaseBindings: (points: readonly number[] | null, axis: BindAxis | null) => {
       const snap = bindingRegistry.snapshot();
-      const stats = points === null ? bindingRegistry.clear() : bindingRegistry.release(points);
+      const stats = bindingRegistry.release(points, axis);
       if (stats.touched === 0) return stats; // nothing changed — record no op
       refreshBindingBadge();
       model.recordOp(() => {

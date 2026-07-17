@@ -29,6 +29,14 @@ test("gate: the axis list is the three scalar point axes", () => {
   assert.equal(BIND_SIZE_MAX, 6);
 });
 
+test("gate: orientation is refused loudly BY NAME — it has no consumer yet", () => {
+  // Even a 3-wide channel (the width orientation will eventually take)
+  // refuses on the axis first: the loud line names the missing consumer,
+  // never a silent no-op or a generic unknown-axis shrug.
+  const r = gateChannelBind(scalar({ components: 3 }), "orientation", null, [1, 0, 0]);
+  assert.ok("error" in r && r.error.includes("no consumer for the orientation axis yet"), JSON.stringify(r));
+});
+
 test("gate: unknown axis is refused by name", () => {
   const r = gateChannelBind(scalar({ min: 0, max: 1 }), "colr", null, VALUES);
   assert.ok("error" in r && r.error.includes('unknown axis "colr"'));

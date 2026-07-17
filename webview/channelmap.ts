@@ -57,6 +57,14 @@ export function gateChannelBind(
   explicitRange: readonly [number, number] | null,
   values: ArrayLike<number> | null,
 ): GateResult {
+  if (axis === "orientation") {
+    // The 3-wide axis is real in the design but has NO consumer: the
+    // oriented shape generator does not exist yet. Loud refusal, never a
+    // silent no-op — this line is the entire orientation story for now.
+    return {
+      error: `no consumer for the orientation axis yet (the oriented shape generator does not exist) — bindable axes: ${BIND_AXES.join(" | ")}`,
+    };
+  }
   if (!(BIND_AXES as readonly string[]).includes(axis)) {
     return { error: `unknown axis "${axis}" — use ${BIND_AXES.join(" | ")}` };
   }

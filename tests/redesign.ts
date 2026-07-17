@@ -6103,9 +6103,108 @@ async function S35(): Promise<void> {
   }, 1180, 780, "/terminal");
 }
 
+// ============ S37: channel bindings — static semantics (C-2) ==================
+// bind/unbind/bindings + the ruled LWW-clear and undo composition, all BEFORE
+// the live link exists (the binding bakes once; nothing re-derives on flip).
+// The claims here are about state, coverage, and stroke composition, so the
+// proofs are buffer- and registry-level through the seam; the ANIMATED pixel
+// claims belong to the live-link scenario (C-3), not here.
+async function S37(): Promise<void> {
+  console.log("S37 — channel bindings: bind / LWW-clear / undo, static semantics");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const statusLine = () => d.evaluate<string>(`document.getElementById('status').textContent`);
+    const changedVs = (snap: string, buf: string) => d.evaluate<number>(`(()=>{
+      const c=${V}.rep.state.${buf}, s=window.${snap}; let n=0;
+      for (let i=0;i<c.length;i++) if (Math.abs(c[i]-s[i])>1e-6) n++; return n;
+    })()`);
+
+    await d.evaluate(`void (window.__preC = Float32Array.from(${V}.rep.state.color))`);
+    await d.evaluate(`void (window.__preS = Float32Array.from(${V}.rep.state.size))`);
+    const depth0 = await undoDepth();
+
+    // -- the gate refuses loudly, and a refusal leaves NOTHING behind ----------
+    const noRange = await cmd("bind alpha energy color");
+    check("S37: a partial declaration without an explicit range is refused",
+      noRange.status === "error" && /does not declare a full min\/max range/.test(noRange.message),
+      JSON.stringify(noRange));
+    const orient = await cmd("bind alpha flow orientation");
+    check("S37: orientation is refused LOUDLY — no consumer exists",
+      orient.status === "error" && /no consumer for the orientation axis yet/.test(orient.message),
+      JSON.stringify(orient));
+    check("S37: refusals bound nothing, wrote nothing, recorded nothing",
+      (await cmd("bindings")).message === "no bindings" &&
+        (await changedVs("__preC", "color")) === 0 && (await undoDepth()) === depth0);
+
+    // -- bind: applied once, ONE stroke, listed, badged ------------------------
+    // Index addressing (#lo-hi) keeps the subset arithmetic self-evident: the
+    // harness dataset's label tree shares group ids across categories, so
+    // label subsets are not strict subsets (a pre-existing resolution fact,
+    // not this feature's concern).
+    const bind1 = await cmd("bind #0-199 energy color 0 2.5");
+    check("S37: bind applies the current frame's values and reports",
+      bind1.status === "ok" && /^bound "energy" → color on 200 points of "#0-199"/.test(bind1.message),
+      JSON.stringify(bind1));
+    check("S37: bind is exactly ONE undo stroke", (await undoDepth()) === depth0 + 1);
+    const changedAfterBind = await changedVs("__preC", "color");
+    check("S37: the write touched ONLY the bound elements' color slots",
+      changedAfterBind >= 200 && changedAfterBind <= 600, `changed=${changedAfterBind}`);
+    check("S37: …and no other buffer", (await changedVs("__preS", "size")) === 0);
+    check("S37: bindings lists it",
+      /energy → color on "#0-199" — 200 points · range 0\.\.2\.5/.test((await cmd("bindings")).message));
+    check("S37: the status badge counts it", /1 binding \(inert\)/.test(await statusLine()),
+      await statusLine());
+
+    // -- cross-axis coexistence over the SAME elements -------------------------
+    const bind2 = await cmd("bind #0-199 energy size 0 2.5");
+    check("S37: a second axis over the same elements coexists — no takeover",
+      bind2.status === "ok" && !/took/.test(bind2.message) && /2 bindings \(inert\)/.test(await statusLine()),
+      JSON.stringify(bind2));
+
+    // -- LWW: a direct PARTIAL write clears same-axis coverage, same stroke ----
+    await d.evaluate(`void (window.__preLww = Float32Array.from(${V}.rep.state.color))`);
+    const depthLww = await undoDepth();
+    const write = await cmd("colorpoints #0-99 red");
+    check("S37: the direct write lands", write.status === "ok" && write.message === "colored 100 points red",
+      JSON.stringify(write));
+    check("S37: write + coverage clear are ONE stroke", (await undoDepth()) === depthLww + 1);
+    const list2 = (await cmd("bindings")).message;
+    check("S37: the color binding SHRANK by exactly the written elements; size untouched",
+      list2.includes('energy → color on "#0-199" — 100 points') &&
+        list2.includes('energy → size on "#0-199" — 200 points'),
+      list2);
+
+    // -- one Ctrl+Z restores the write AND the taken coverage together ---------
+    await d.ctrlZ();
+    await sleep(400);
+    check("S37: one Ctrl+Z restores the written values AND the coverage",
+      (await changedVs("__preLww", "color")) === 0 &&
+        (await cmd("bindings")).message.includes('energy → color on "#0-199" — 200 points') &&
+        (await undoDepth()) === depthLww,
+      (await cmd("bindings")).message);
+
+    // -- axis-scoped unbind touches only its axis ------------------------------
+    const un = await cmd("unbind all color");
+    check("S37: axis-scoped unbind releases color only",
+      un.status === "ok" && / on color — values stay as last applied$/.test(un.message) &&
+        /1 binding \(inert\)/.test(await statusLine()),
+      JSON.stringify(un));
+
+    // -- unwinding to the start: pristine buffers, zero bindings, clean badge --
+    for (let i = 0; i < 3; i++) { await d.ctrlZ(); await sleep(200); } // unbind, bind2, bind1
+    check("S37: full unwind → pristine color+size buffers, no bindings, no badge, base depth",
+      (await changedVs("__preC", "color")) === 0 && (await changedVs("__preS", "size")) === 0 &&
+        (await cmd("bindings")).message === "no bindings" &&
+        !/binding/.test(await statusLine()) && (await undoDepth()) === depth0,
+      `depth=${await undoDepth()} status=${await statusLine()}`);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 mutates the real repo .molaro/mods (delete + finally-restore) while
  * EVERY scenario's bridge scans that directory at boot. Single-sourced here,
@@ -6128,6 +6227,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S22: "full", S23: "full", S24: "full", S25: "full", S26: "full",
   S27: "full", S28: "full", S29: "full", S30: "full", S31: "full",
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
+  S37: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

@@ -174,13 +174,14 @@ export interface CommandContext {
   channelValues(name: string): { values: ArrayLike<number>; frame: number | null } | null;
   /** Register a channel binding AND apply its initial scalars — ONE stroke
    * (the writers' capture + a registry snapshot), so one Ctrl+Z removes the
-   * binding and restores prior values together. INERT this increment:
-   * nothing re-derives on flip. Returns what last-bind-wins released from
-   * earlier bindings' coverage. */
+   * binding and restores prior values together. Bindings do not re-derive
+   * on flip until the live link lands. Returns what last-bind-wins took
+   * from earlier SAME-AXIS bindings' coverage. */
   createBinding(b: Binding, scalars: readonly number[]): ReleaseStats;
-  /** Release binding coverage element-wise (null = every binding): one
-   * recorded op when anything changed. Values stay as last applied. */
-  releaseBindings(points: readonly number[] | null): ReleaseStats;
+  /** Release binding coverage element-wise (points null = every element;
+   * axis null = every axis): one recorded op when anything changed. Values
+   * stay as last applied. */
+  releaseBindings(points: readonly number[] | null, axis: BindAxis | null): ReleaseStats;
   /** The binding registry, read-only (the bindings verb + status badge). */
   listBindings(): readonly Binding[];
   /** The contract's edge list — endpoint point-index pairs, in header order.
@@ -1186,36 +1187,57 @@ export function makeBindHandler(ctx: CommandContext): CommandHandler {
   };
 }
 
-/** `unbind <target>` / `unbind all` — release binding coverage ELEMENT-WISE
- * (the ruled partial-clear granularity): covered elements of the target
- * leave their bindings (shrink; emptied bindings drop). Values stay as last
- * applied — releasing a binding freezes the current look, it repaints
- * nothing. One recorded op when anything changed. */
+/** `unbind <target> [<axis>]` / `unbind all [<axis>]` — release binding
+ * coverage ELEMENT-WISE (the ruled partial-clear granularity): covered
+ * elements of the target leave their bindings (shrink; emptied bindings
+ * drop), scoped to one axis when the trailing word names one, across every
+ * axis otherwise. Values stay as last applied — releasing a binding
+ * freezes the current look, it repaints nothing. One recorded op when
+ * anything changed. */
 export function makeUnbindHandler(ctx: CommandContext): CommandHandler {
+  const usage = "unbind <target> [<axis>] | unbind all [<axis>]";
   return (args: string): CommandResult => {
-    const expr = args.trim();
+    // Optional trailing axis word; anything else trailing is target text.
+    let expr = args.trim();
+    let axis: BindAxis | null = null;
+    const split = splitTrailingWord(expr);
+    if (split.word === "orientation") {
+      return {
+        status: "error",
+        message: `no consumer for the orientation axis yet (the oriented shape generator does not exist) — bindable axes: ${BIND_AXES.join(" | ")}`,
+      };
+    }
+    if (split.word !== null && (BIND_AXES as readonly string[]).includes(split.word)) {
+      axis = split.word as BindAxis;
+      expr = split.expr;
+    }
     if (expr === "") {
-      return { status: "error", message: "unbind needs a target — unbind <target> | unbind all" };
+      return { status: "error", message: `unbind needs a target — ${usage}` };
     }
     if (ctx.listBindings().length === 0) {
       return { status: "nomatch", message: "no bindings to release" };
     }
     let stats: ReleaseStats;
     if (expr === "all") {
-      stats = ctx.releaseBindings(null); // exact: every binding, no resolution needed
+      stats = ctx.releaseBindings(null, axis); // exact: every binding (of the axis), no resolution needed
     } else {
       const r = resolveTargetPoints(ctx, expr);
       if ("status" in r) return r;
-      stats = ctx.releaseBindings(r.points);
+      stats = ctx.releaseBindings(r.points, axis);
     }
     if (stats.touched === 0) {
-      return { status: "nomatch", message: `nothing bound matches "${expr}"` };
+      return {
+        status: "nomatch",
+        message: `nothing bound matches "${expr}"${axis === null ? "" : ` on ${axis}`}`,
+      };
     }
     return {
       status: "ok",
       message: `released ${stats.points} bound points across ${stats.touched} binding${
         stats.touched === 1 ? "" : "s"
-      }${stats.removed > 0 ? ` (${stats.removed} removed)` : ""} — values stay as last applied`,
+      }${stats.removed > 0 ? ` (${stats.removed} removed)` : ""}${
+        axis === null ? "" : ` on ${axis}`
+      } — values stay as last applied`,
     };
   };
 }
@@ -1814,9 +1836,11 @@ export const HELP_TEXT = [
   "  bind <expr> <channel> <axis> [<min> <max>]   register a channel→axis",
   "               binding (same gate as bake; applied once now — INERT:",
   "               per-flip re-derive is not wired yet; last-bind-wins per",
-  "               element; one undo stroke)",
-  "  unbind <expr>|all           release binding coverage element-wise",
-  "               (values stay as last applied) · bindings  list them",
+  "               element WITHIN an axis, axes coexist; one undo stroke;",
+  "               a later direct write CLEARS its overlap, same stroke)",
+  "  unbind <expr>|all [<axis>]  release binding coverage element-wise,",
+  "               one axis or all (values stay as last applied)",
+  "  bindings     list channel bindings (read-only)",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  mods         list the recipe registry: name, axis, origin, and credit",
   "               (author · source, display-only; recipes, not verbs)",
@@ -1949,7 +1973,7 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registry.register(
     "unbind",
     makeUnbindHandler(ctx),
-    "release binding coverage element-wise — unbind <target> | unbind all (values stay as last applied; one undo op)",
+    "release binding coverage element-wise, one axis or all — unbind <target> [<axis>] | unbind all [<axis>] (values stay as last applied; one undo op)",
   );
   registry.register(
     "bindings",

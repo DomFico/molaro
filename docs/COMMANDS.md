@@ -50,7 +50,7 @@ point types `anchor` and `t0`–`t3`).
 | `rainbow <expr>` | Color those points an even hue ramp in resolution order (the first **recipe**: per-point values, not one constant; one undo stroke) | `rainbow alpha.group-0` |
 | `bake <expr> <channel> <axis> [<min> <max>]` | Write a declared **scalar data channel** (at the displayed frame) onto `color`/`size`/`opacity`, normalized over min..max — declared on the channel, or explicit when the declaration is partial (one undo stroke) | `bake all energy color 0 2.5` |
 | `bind <expr> <channel> <axis> [<min> <max>]` | Register a **channel→axis binding** (same gate/range as `bake`; applied once now — **INERT: per-flip re-derive is not wired yet**; last-bind-wins per element; one undo stroke) | `bind all energy color 0 2.5` |
-| `unbind <expr>` / `unbind all` | Release binding **coverage element-wise** (values stay as last applied; one undo op) | `unbind polymer` |
+| `unbind <expr> [<axis>]` / `unbind all [<axis>]` | Release binding **coverage element-wise**, one axis or all (values stay as last applied; one undo op) | `unbind alpha color` |
 | `bindings` | Read-only list of the channel bindings (bare — takes no target) | `bindings` |
 | `mods` | List the **recipe registry** (read-only): each recipe's name, axis, origin, and credit — bare, takes no target | `mods` |
 | `rm <mods>` | Delete **workspace mod files** (y/n confirmed, **not undoable**; built-ins refused) | `rm index_ramp + xy_metric` |
@@ -554,17 +554,29 @@ the durable statement "this channel drives this axis over these points" —
 through the exact gate and normalization `bake` uses, and applies the
 current frame's values once, in the same single undo stroke (one Ctrl+Z
 removes the binding *and* restores prior values). Bindings are listed by
-`bindings`, counted in the status-line badge, and hold **element-disjoint
-coverage**: a new bind takes its overlap from earlier bindings
-(last-bind-wins, element by element), and `unbind <target>` releases
-coverage the same element-wise way (`unbind all` releases everything;
-released values stay as last applied).
+`bindings` and counted in the status-line badge.
+
+- **Coverage is element-disjoint PER AXIS**: a new bind takes its overlap
+  from earlier **same-axis** bindings (last-bind-wins, element by
+  element); bindings on *different* axes coexist over the same elements
+  (color from one channel, size from another). `unbind <target> [<axis>]`
+  releases coverage the same element-wise way — scoped to one axis when
+  named, across all axes otherwise (`unbind all` releases everything;
+  released values stay as last applied).
+- **The LWW rule is live**: a direct representation write (`colorpoints`,
+  `pointsize`, `pointopacity`, `bake`, a recipe) over bound elements
+  **clears the overlapping same-axis coverage in the same undo stroke** —
+  the write lands, those elements stop being channel-driven, and one
+  Ctrl+Z restores both the values and the coverage. The last explicit
+  action wins, visibly, element by element.
+- **Orientation fails loudly**: `bind … orientation` (any entry point) is
+  refused with "no consumer for the orientation axis yet" — the oriented
+  shape generator does not exist, and nothing silently no-ops.
 
 **Inert, loudly:** in this build a binding does **not** re-derive on frame
 flips — scrub or play and the bound axis keeps its bind-time values. The
-live per-flip apply (and the direct-write-clears-binding LWW rule) is the
-next, attended increment; every bind message and the `bindings` listing
-say "inert" until it lands.
+live per-flip apply is the next, attended increment; every bind message
+and the `bindings` listing say "inert" until it lands.
 
 
 A mod is one of two kinds. **Representation** mods (like `rainbow`) compute
