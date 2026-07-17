@@ -67,7 +67,8 @@ length N, indexed by point index `p ∈ [0, N)`.
 | `scope` | string | yes | One of `"per_point"`, `"per_frame"`, `"per_point_per_frame"`. |
 | `dtype` | string | yes | Only `"float32"` is defined in v0.1.0. |
 | `min`, `max` | number | no | Optional range hint for later normalization. If both present, `min <= max`. |
-| `data` | number[] | scope-dependent | **Required** for `per_point` (length N) and `per_frame` (length T); **must be absent** for `per_point_per_frame` (values ship in FrameChunks). |
+| `components` | int | no | Values **per element**: `1` (default when absent) or `3`. `3` declares a **vector** channel — three float32 per element, interleaved per element — riding the same blocks, validation, and caching as any channel. Every length rule in this spec scales by `components`; nothing else about the wire format changes. |
+| `data` | number[] | scope-dependent | **Required** for `per_point` (length `N × components`) and `per_frame` (length `T × components`); **must be absent** for `per_point_per_frame` (values ship in FrameChunks). |
 
 `per_point_per_frame` channels are *declared* here so the renderer knows what to
 expect in every FrameChunk.
@@ -125,10 +126,13 @@ can create `Float32Array` views directly over the received buffer with no copy.
   `p = 0 .. N-1`: `x, y, z`. The float32 for coordinate `c` (0=x, 1=y, 2=z) of point
   `p` at frame `f` begins at block-relative byte offset
   `((f - start) * N * 3 + p * 3 + c) * 4`.
-- **channel** (per_point_per_frame): `count × N` float32 LE,
-  `byte_length = count * N * 4`. Frame-major: for each frame, N values in point
-  order. Value for point `p` at frame `f` begins at block-relative byte offset
-  `((f - start) * N + p) * 4`.
+- **channel** (per_point_per_frame): `count × N × components` float32 LE,
+  `byte_length = count * N * components * 4` (`components` from the channel's
+  declaration; 1 when absent). Frame-major: for each frame, N elements in point
+  order, each element's `components` values consecutive. Element `p`'s first
+  value at frame `f` begins at block-relative byte offset
+  `((f - start) * N + p) * components * 4` (component `c` of the element is
+  `c` float32s further on).
 
 ---
 

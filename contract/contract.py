@@ -34,8 +34,19 @@ class Channel:
     dtype: str = DTYPE_FLOAT32
     min: Optional[float] = None
     max: Optional[float] = None
-    # Present for per_point (length N) and per_frame (length T); None otherwise.
+    # Values per element (None means 1). 3 declares a VECTOR channel — three
+    # float32 per element, interleaved (x,y,z per element), riding the same
+    # blocks/validation/caching as any channel; every length rule scales by
+    # this factor and nothing else about the wire format changes.
+    components: Optional[int] = None
+    # Present for per_point (length N*components) and per_frame (length
+    # T*components); None otherwise.
     data: Optional[List[float]] = None
+
+
+def channel_components(c: Channel) -> int:
+    """A channel's per-element width (components defaults to 1)."""
+    return 1 if c.components is None else c.components
 
 
 @dataclass
@@ -138,6 +149,8 @@ def _channel_to_obj(c: Channel) -> Dict[str, Any]:
         obj["min"] = c.min
     if c.max is not None:
         obj["max"] = c.max
+    if c.components is not None:
+        obj["components"] = c.components
     if c.data is not None:
         obj["data"] = c.data
     return obj
@@ -177,6 +190,7 @@ def header_from_json(text: str) -> Header:
                 dtype=c["dtype"],
                 min=c.get("min"),
                 max=c.get("max"),
+                components=c.get("components"),
                 data=c.get("data"),
             )
             for c in obj["channels"]
@@ -361,11 +375,14 @@ def validate_header(h: Header) -> None:
             fail(f"channel {ch.name!r}: unsupported dtype {ch.dtype!r}")
         if ch.min is not None and ch.max is not None and ch.min > ch.max:
             fail(f"channel {ch.name!r}: min > max")
+        if ch.components is not None and ch.components not in (1, 3):
+            fail(f"channel {ch.name!r}: components must be 1 or 3, got {ch.components!r}")
         if ch.scope == SCOPE_PER_POINT_PER_FRAME:
             if ch.data is not None:
                 fail(f"channel {ch.name!r}: per_point_per_frame must not carry data in the header")
         else:
-            expected = n if ch.scope == SCOPE_PER_POINT else h.n_frames
+            base = n if ch.scope == SCOPE_PER_POINT else h.n_frames
+            expected = base * channel_components(ch)
             if ch.data is None or len(ch.data) != expected:
                 fail(f"channel {ch.name!r}: data must have length {expected}")
 
@@ -390,8 +407,8 @@ def validate_frame_chunk(chunk: FrameChunk, header: Header) -> None:
             f"channel blocks {sorted(chunk.channels.keys())} do not match declared "
             f"per_point_per_frame channels {sorted(declared)}"
         )
-    expected_ch = chunk.count * header.n_points * 4
-    for name in declared:
-        got = len(chunk.channels[name])
+    for ch in header.per_point_per_frame_channels():
+        got = len(chunk.channels[ch.name])
+        expected_ch = chunk.count * header.n_points * channel_components(ch) * 4
         if got != expected_ch:
-            fail(f"channel {name!r} block is {got} bytes, expected {expected_ch}")
+            fail(f"channel {ch.name!r} block is {got} bytes, expected {expected_ch}")

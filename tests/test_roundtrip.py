@@ -58,6 +58,9 @@ def test_chunking_is_deterministic() -> None:
     frame_bytes = n * 3 * 4
     assert part.positions == whole.positions[6 * frame_bytes : 8 * frame_bytes]
     assert part.channels["energy"] == whole.channels["energy"][6 * n * 4 : 8 * n * 4]
+    # the VECTOR channel slices with a ×3 frame stride — the same identity,
+    # exercised at the wider element width
+    assert part.channels["flow"] == whole.channels["flow"][6 * n * 3 * 4 : 8 * n * 3 * 4]
 
 
 def test_synthetic_scales() -> None:
@@ -102,6 +105,16 @@ def test_validator_rejects_bad_data() -> None:
     bad = _source().give_header()
     bad.channels[0].data = bad.channels[0].data[:-1]  # wrong channel length
     expect_error(lambda: validate_header(bad))
+
+    bad = _source().give_header()
+    bad.channels[-1].components = 2  # only 1 or 3 are defined
+    expect_error(lambda: validate_header(bad))
+
+    bad_chunk = source.give_frames(0, 2)
+    # a 3-wide block truncated to width-1 length: fails CLOSED (a wrong
+    # stride would otherwise corrupt silently)
+    bad_chunk.channels["flow"] = bad_chunk.channels["flow"][: 2 * header.n_points * 4]
+    expect_error(lambda: validate_frame_chunk(bad_chunk, header))
 
     # Chunk violations.
     expect_error(lambda: decode_frame_chunk(b"XXXX" + envelope[4:]))  # bad magic

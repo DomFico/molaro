@@ -227,6 +227,13 @@ class SyntheticSource(DataSource):
                     data=[float(self._time(f)) for f in range(self.n_frames)],
                 ),
                 Channel(name="energy", scope="per_point_per_frame", min=0.0),
+                # A VECTOR channel (components=3): one unit direction per point
+                # per frame — an arbitrary analytic direction that exercises the
+                # 3-wide declaration/validation/transport path end to end. It
+                # means nothing and must mean nothing; nothing renders it.
+                # (min/max are omitted: their semantics for vector channels are
+                # deliberately unstated in v0.1.0.)
+                Channel(name="flow", scope="per_point_per_frame", components=3),
             ],
         )
 
@@ -238,6 +245,7 @@ class SyntheticSource(DataSource):
         # '<f4' pins little-endian float32 regardless of host byte order.
         positions = np.empty((count, self.n_points, 3), dtype="<f4")
         energy = np.empty((count, self.n_points), dtype="<f4")
+        flow = np.empty((count, self.n_points, 3), dtype="<f4")
         for k in range(count):
             f = start + k
             theta = self._omega() * f + self.phase
@@ -246,11 +254,18 @@ class SyntheticSource(DataSource):
             # Kinetic energy of the oscillation: 0.5 * m * v^2.
             speed = _AMPLITUDE * self._omega() * np.cos(theta)
             energy[k] = (0.5 * self.mass * speed * speed).astype(np.float32)
+            # The vector channel: a unit direction per point per frame,
+            # analytic in (point phase, frame). The constant z keeps the norm
+            # away from zero, so normalization never divides by ~0.
+            raw = np.stack(
+                [np.cos(theta), np.sin(theta), np.full_like(theta, 0.5)], axis=1
+            )
+            flow[k] = (raw / np.linalg.norm(raw, axis=1)[:, None]).astype(np.float32)
         return FrameChunk(
             start=start,
             count=count,
             positions=positions.tobytes(),
-            channels={"energy": energy.tobytes()},
+            channels={"energy": energy.tobytes(), "flow": flow.tobytes()},
         )
 
     # -- internals -------------------------------------------------------------

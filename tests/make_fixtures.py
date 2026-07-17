@@ -49,6 +49,10 @@ def main() -> None:
     def energy(f: int, p: int) -> float:
         return _f32_at(chunk.channels["energy"], (f - CHUNK_START) * N_POINTS + p)
 
+    def flow(f: int, p: int, c: int) -> float:
+        # the VECTOR channel (components=3): element stride is 3
+        return _f32_at(chunk.channels["flow"], ((f - CHUNK_START) * N_POINTS + p) * 3 + c)
+
     expected = {
         "n_points": N_POINTS,
         "n_frames": N_FRAMES,
@@ -68,6 +72,11 @@ def main() -> None:
         "position_f6_p7": [pos(6, 7, 0), pos(6, 7, 1), pos(6, 7, 2)],
         "position_f8_p299": [pos(8, 299, 0), pos(8, 299, 1), pos(8, 299, 2)],
         "energy_f8_p123": energy(8, 123),
+        # the vector channel, spot-checked at BOTH ends of the stride math —
+        # a wrong stride reads a neighbour's value silently, so the fixture
+        # pins full triples at two (frame, element) sites plus unit length
+        "flow_f6_p0": [flow(6, 0, 0), flow(6, 0, 1), flow(6, 0, 2)],
+        "flow_f8_p123": [flow(8, 123, 0), flow(8, 123, 1), flow(8, 123, 2)],
         "envelope_bytes": len(envelope),
     }
 

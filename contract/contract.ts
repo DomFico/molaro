@@ -23,8 +23,19 @@ export interface Channel {
   dtype: "float32";
   min?: number;
   max?: number;
-  /** Present for per_point (length N) and per_frame (length T); absent otherwise. */
+  /** Values per element (default 1). 3 declares a VECTOR channel — three
+   * float32 per element, interleaved (x,y,z per element), riding the same
+   * blocks/validation/caching as any channel. Every length rule below
+   * scales by this factor; nothing else about the wire format changes. */
+  components?: 1 | 3;
+  /** Present for per_point (length N×components) and per_frame (length
+   * T×components); absent otherwise. */
   data?: number[];
+}
+
+/** A channel's per-element width (components defaults to 1). */
+export function channelComponents(c: Channel): number {
+  return c.components ?? 1;
 }
 
 export interface BBox {
@@ -358,12 +369,15 @@ export function validateHeader(h: Header): void {
     if (ch.min !== undefined && ch.max !== undefined && ch.min > ch.max) {
       fail(`header: channel '${ch.name}': min > max`);
     }
+    if (ch.components !== undefined && ch.components !== 1 && ch.components !== 3) {
+      fail(`header: channel '${ch.name}': components must be 1 or 3, got ${ch.components}`);
+    }
     if (ch.scope === "per_point_per_frame") {
       if (ch.data !== undefined) {
         fail(`header: channel '${ch.name}': per_point_per_frame must not carry data in the header`);
       }
     } else {
-      const expected = ch.scope === "per_point" ? n : h.n_frames;
+      const expected = (ch.scope === "per_point" ? n : h.n_frames) * channelComponents(ch);
       if (!Array.isArray(ch.data) || ch.data.length !== expected) {
         fail(`header: channel '${ch.name}': data must have length ${expected}`);
       }
@@ -394,11 +408,13 @@ export function validateFrameChunk(chunk: FrameChunk, header: Header): void {
         `per_point_per_frame channels [${want}]`,
     );
   }
-  const expectedCh = chunk.count * header.n_points;
-  for (const name of declared) {
-    const arr = chunk.channels.get(name) as Float32Array;
+  for (const ch of perPointPerFrameChannels(header)) {
+    const arr = chunk.channels.get(ch.name) as Float32Array;
+    const expectedCh = chunk.count * header.n_points * channelComponents(ch);
     if (arr.length !== expectedCh) {
-      fail(`frame chunk: channel '${name}' block has ${arr.length} floats, expected ${expectedCh}`);
+      fail(
+        `frame chunk: channel '${ch.name}' block has ${arr.length} floats, expected ${expectedCh}`,
+      );
     }
   }
 }
@@ -411,6 +427,15 @@ export function positionIndex(chunk: FrameChunk, nPoints: number, f: number, p: 
   return ((f - chunk.start) * nPoints + p) * 3;
 }
 
-export function channelIndex(chunk: FrameChunk, nPoints: number, f: number, p: number): number {
-  return (f - chunk.start) * nPoints + p;
+/** Index of element p's FIRST value at frame f in a channel block. For a
+ * scalar channel this is the value; for a vector channel (components = 3)
+ * the element's values are the `components` consecutive floats from here. */
+export function channelIndex(
+  chunk: FrameChunk,
+  nPoints: number,
+  f: number,
+  p: number,
+  components = 1,
+): number {
+  return ((f - chunk.start) * nPoints + p) * components;
 }

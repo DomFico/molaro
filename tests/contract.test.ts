@@ -89,6 +89,24 @@ test("frame chunk decodes, validates, and matches expected binary values", () =>
   const energy = chunk.channels.get("energy");
   if (!energy) throw new Error("energy channel block missing");
   assert.equal(energy[channelIndex(chunk, n, 8, 123)], expected.energy_f8_p123);
+
+  // The VECTOR channel (components=3): declared width survives the JSON
+  // round-trip, the block is element-count × 3, and the stride math reads
+  // Python's exact float32 triples element-for-element, frame-for-frame —
+  // a wrong stride would silently read a neighbour's values, so this is
+  // pinned at two (frame, element) sites and both stride factors.
+  const flowDecl = header.channels.find((c) => c.name === "flow");
+  assert.equal(flowDecl?.components, 3, "flow declares components: 3");
+  const flow = chunk.channels.get("flow");
+  if (!flow) throw new Error("flow channel block missing");
+  assert.equal(flow.length, chunk.count * n * 3, "vector block is elements × 3");
+  for (const [key, [f, p]] of [
+    ["flow_f6_p0", [6, 0]],
+    ["flow_f8_p123", [8, 123]],
+  ] as const) {
+    const base = channelIndex(chunk, n, f, p, 3);
+    assert.deepEqual([flow[base], flow[base + 1], flow[base + 2]], expected[key], key);
+  }
 });
 
 test("validators reject violations", () => {
@@ -119,4 +137,24 @@ test("validators reject violations", () => {
   const bad3 = parseHeader(headerText);
   bad3.points.group_id[0] += 1; // puts a subgroup in two groups
   assert.throws(() => validateHeader(bad3), ContractError);
+
+  // Vector-width violations fail CLOSED and loudly (a wrong stride would
+  // otherwise corrupt silently — the whole reason this is heavy).
+  const badWidth = parseHeader(headerText);
+  (badWidth.channels.find((c) => c.name === "flow") as { components: number }).components = 2;
+  assert.throws(() => validateHeader(badWidth), /components must be 1 or 3/);
+  // A 3-wide block whose length is right for width 1 but wrong for width 3.
+  const shortFlow = new Map(chunk.channels);
+  shortFlow.set("flow", chunk.channels.get("flow")!.subarray(0, chunk.count * header.n_points));
+  assert.throws(
+    () => validateFrameChunk({ ...chunk, channels: shortFlow }, header),
+    /channel 'flow' block has .* expected/,
+  );
+  // A header-carried channel with components=3 needs data length N × 3.
+  const badData = parseHeader(headerText);
+  const mass = badData.channels.find((c) => c.name === "mass") as {
+    components?: number; data: number[];
+  };
+  mass.components = 3;
+  assert.throws(() => validateHeader(badData), /data must have length/);
 });
