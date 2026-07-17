@@ -43,13 +43,24 @@ float impostorDiameterPx(float worldRadius, float viewDepth) {
  * Blinn half-vector is ~the view axis and the term reduces to a power of
  * the surface normal's view-space z — the same `nz` every impostor already
  * computes. One highlight, no second light, no environment: just enough
- * for a sphere to read as ROUND instead of clay. Consumed by the sphere
- * and tube fragments (traces inherit it with increment C's tube pass).
+ * for a sphere to read as ROUND instead of clay. Consumed by every
+ * geometry fragment (spheres, edge tubes, trace tubes).
+ *
+ * The four shading numbers are UNIFORMS — a STYLE (webview/styles.ts) is a
+ * set of values for them, data never code. The uniform OBJECTS are shared
+ * across all consuming materials (main.ts), one instance each, so the
+ * values cannot fork between passes; the default style's values are
+ * byte-identical to the constants this chunk carried before styles
+ * existed (pinned by unit test and the pixel scenarios).
  */
 export const IMPOSTOR_SHADE_CHUNK = `
+uniform float uLambertFloor;
+uniform float uLambertScale;
+uniform float uSpecStrength;
+uniform float uSpecPower;
 vec3 impostorShade(vec3 color, float nz) {
-  float lambert = 0.55 + 0.45 * nz;
-  float spec = 0.35 * pow(max(nz, 0.0), 48.0);
+  float lambert = uLambertFloor + uLambertScale * nz;
+  float spec = uSpecStrength * pow(max(nz, 0.0), uSpecPower);
   return color * lambert + vec3(spec);
 }
 `;

@@ -159,14 +159,23 @@ test("shading is single-sourced: every geometry fragment embeds THE shade chunk,
   assert.match(pf, /impostorShade\(vColor, nz\)/);
   assert.match(ef, /impostorShade\(vColor\.rgb, nz\)/);
   assert.match(tf, /impostorShade\(vColor\.rgb, nz\)/);
+  // The shading NUMBERS are style uniforms now (webview/styles.ts) — no
+  // fragment may carry a hardcoded lambert/specular constant; the chunk
+  // declares each of the four style uniforms exactly once.
+  for (const u of ["uLambertFloor", "uLambertScale", "uSpecStrength", "uSpecPower"]) {
+    assert.equal(
+      IMPOSTOR_SHADE_CHUNK.split(`uniform float ${u};`).length - 1, 1,
+      `chunk declares ${u} once`,
+    );
+  }
   for (const [name, src] of [["point", pf], ["edge", ef], ["trace", tf]] as const) {
-    assert.equal(src.split("0.55 + 0.45").length - 1, 1,
-      `${name}: the lambert term exists ONLY inside the chunk`);
+    assert.doesNotMatch(src, /0\.55|0\.45 \* nz|0\.35 \* pow/,
+      `${name}: no hardcoded shading constants outside the style`);
   }
 });
 
 test("the highlight is restrained: one specular term, no second light, overlays untouched", () => {
-  assert.match(IMPOSTOR_SHADE_CHUNK, /0\.35 \* pow\(max\(nz, 0\.0\), 48\.0\)/);
+  assert.match(IMPOSTOR_SHADE_CHUNK, /uSpecStrength \* pow\(max\(nz, 0\.0\), uSpecPower\)/);
   assert.doesNotMatch(highlightShaders().fragment, /impostorShade|pow\(/);
   assert.doesNotMatch(focusFlashShaders().fragment, /impostorShade|pow\(/);
 });

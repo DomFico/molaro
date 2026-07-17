@@ -73,6 +73,7 @@ import {
   pointShaders,
   traceTubeShaders,
 } from "./shaders.ts";
+import { STANDARD_STYLE, type Style } from "./styles.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
 const PLAYBACK_FPS = 30;
@@ -265,6 +266,28 @@ interface SizingUniforms {
   uProjZ: { value: THREE.Vector2 };
 }
 
+/** The four shading uniforms the shared shade chunk reads — a STYLE
+ * (webview/styles.ts) is a set of values for them. ONE object each, shared
+ * by every geometry material, so a style's values can never fork between
+ * passes (the sizing-uniform discipline, applied to shading). */
+interface StyleUniforms {
+  uLambertFloor: { value: number };
+  uLambertScale: { value: number };
+  uSpecStrength: { value: number };
+  uSpecPower: { value: number };
+}
+
+/** Style → the shared uniform objects (built once, from the DEFAULT style —
+ * selecting other registered styles is a later, attended increment). */
+function makeStyleUniforms(style: Style): StyleUniforms {
+  return {
+    uLambertFloor: { value: style.lambertFloor },
+    uLambertScale: { value: style.lambertScale },
+    uSpecStrength: { value: style.specStrength },
+    uSpecPower: { value: style.specPower },
+  };
+}
+
 /**
  * THE geometry-material factory — the one place the depth-variant switch is
  * consumed and the one place depthWrite is set on the geometry passes.
@@ -289,6 +312,7 @@ interface SizingUniforms {
  */
 function makeGeometryMaterials(
   sizing: SizingUniforms,
+  style: StyleUniforms,
   depthVariant: 1 | 2,
 ): { points: THREE.ShaderMaterial; edges: THREE.ShaderMaterial; traces: THREE.ShaderMaterial } {
   const defines = depthVariant === 2 ? { [IMPOSTOR_DEPTH_DEFINE]: "" } : {};
@@ -302,6 +326,7 @@ function makeGeometryMaterials(
       uWorldPerSize: sizing.uWorldPerSize,
       uPxPerWorld: sizing.uPxPerWorld,
       uProjZ: sizing.uProjZ,
+      ...style,
     },
     vertexShader: s.vertex,
     fragmentShader: s.fragment,
@@ -318,7 +343,7 @@ function makeGeometryMaterials(
     depthTest: true,
     side: THREE.DoubleSide,
     defines,
-    uniforms: { uWorldPerSize: sizing.uWorldPerSize, uProjZ: sizing.uProjZ },
+    uniforms: { uWorldPerSize: sizing.uWorldPerSize, uProjZ: sizing.uProjZ, ...style },
     vertexShader: et.vertex,
     fragmentShader: et.fragment,
   });
@@ -333,7 +358,7 @@ function makeGeometryMaterials(
     depthTest: true,
     side: THREE.DoubleSide,
     defines,
-    uniforms: { uWorldPerSize: sizing.uWorldPerSize, uProjZ: sizing.uProjZ },
+    uniforms: { uWorldPerSize: sizing.uWorldPerSize, uProjZ: sizing.uProjZ, ...style },
     vertexShader: tt.vertex,
     fragmentShader: tt.fragment,
   });
@@ -1025,7 +1050,11 @@ async function main(): Promise<void> {
    * loop sees rep.dirty. Any new per-point attribute joins it in the same
    * edit that binds it, or it silently stops reaching the GPU. */
   const repAttrs = [pointAttrs.color, pointAttrs.size, pointAttrs.visible, pointAttrs.opacity];
-  const materials = makeGeometryMaterials(sizing, depthVariant);
+  // shading uniforms from the DEFAULT style — byte-identical to the former
+  // hardcoded constants (webview/styles.ts pins this); shared objects, one
+  // instance each, across all three geometry materials
+  const styleUniforms = makeStyleUniforms(STANDARD_STYLE);
+  const materials = makeGeometryMaterials(sizing, styleUniforms, depthVariant);
   const passEnv: PassEnv = {
     header, rep, positionAttr, pointAttrs, traceVertices, sizing, depthVariant, materials,
   };

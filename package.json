@@ -29,9 +29,12 @@
         },
         "molaro.viewer.depthVariant": {
           "type": "number",
-          "enum": [1, 2],
+          "enum": [
+            1,
+            2
+          ],
           "default": 1,
-          "description": "Development/measurement switch for the impostor depth path: 1 = flat sprite depth (early-Z preserved), 2 = analytic per-fragment depth (correct interpenetration). Used by the renderer measurement script; the default is provisional (1 — the variant that cannot regress frame rate on unmeasured hardware). Takes effect when a viewer panel is (re)opened."
+          "description": "Development/measurement switch for the impostor depth path: 1 = flat sprite depth (early-Z preserved), 2 = analytic per-fragment depth (correct interpenetration). Used by the renderer measurement script; the default is provisional (1 \u2014 the variant that cannot regress frame rate on unmeasured hardware). Takes effect when a viewer panel is (re)opened."
         }
       }
     },
@@ -74,7 +77,7 @@
     "build:webview": "esbuild webview/main.ts webview/terminal.ts webview/plot.ts --bundle --format=iife --minify --outdir=dist/webview",
     "typecheck": "tsc --noEmit",
     "fixtures": "python3 -m tests.make_fixtures && python3 tests/make_webview_fixture.py",
-    "test": "node --test tests/contract.test.ts tests/geometry.test.ts tests/shaders.test.ts tests/framing.test.ts tests/playback.test.ts tests/producer_protocol.test.ts tests/classification.test.ts tests/picking.test.ts tests/sets.test.ts tests/address.test.ts tests/commands.test.ts tests/recipes.test.ts tests/claude.test.ts tests/plot.test.ts tests/claudelayout.test.ts tests/prompt.test.ts tests/claudebackend.test.ts tests/tool_surface.test.ts tests/get_context.test.ts tests/hostmessages.test.ts tests/prompt_examples.test.ts"
+    "test": "node --test tests/contract.test.ts tests/geometry.test.ts tests/shaders.test.ts tests/styles.test.ts tests/framing.test.ts tests/playback.test.ts tests/producer_protocol.test.ts tests/classification.test.ts tests/picking.test.ts tests/sets.test.ts tests/address.test.ts tests/commands.test.ts tests/recipes.test.ts tests/claude.test.ts tests/plot.test.ts tests/claudelayout.test.ts tests/prompt.test.ts tests/claudebackend.test.ts tests/tool_surface.test.ts tests/get_context.test.ts tests/hostmessages.test.ts tests/prompt_examples.test.ts"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",
