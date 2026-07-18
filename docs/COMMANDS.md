@@ -56,6 +56,15 @@ point types `anchor` and `t0`–`t3`).
 | `styles` | Read-only listing of the style registry (bare; index 0 = default) | `styles` |
 | `shape <points\|bonds\|traces> <name>` | Draw a whole **domain** as a named registered shape (scene-level — per-target assignment is a parked chapter; one undo op) | `shape traces tube` |
 | `shapes` | Read-only listing of the shape registry per domain (bare) | `shapes` |
+
+**The ribbon** (`shape traces ribbon`) is the first ORIENTED shape: a flat
+band along each polyline whose plane comes from the **orientation** buffer —
+bind a 3-wide vector channel (`bind all <vector-channel> orientation`) and
+the band's "across" follows the data every frame. Unbound orientation means
+no defined plane: every segment **collapses and nothing draws** (the honest
+degeneracy — the tube stays the default shape). Width reads `tracesize`,
+colors/opacity the trace axes, shading the style axis; ends/bends are naive
+(no joint caps — the tube's joint-sphere trick needs rotational symmetry).
 | `mods` | List the **recipe registry** (read-only): each recipe's name, axis, origin, and credit — bare, takes no target | `mods` |
 | `rm <mods>` | Delete **workspace mod files** (y/n confirmed, **not undoable**; built-ins refused) | `rm index_ramp + xy_metric` |
 | `ls [@name` / `<path>]` | List selections / a selection's members / a node's contents (read-only) | `ls @selection_1` |

@@ -1413,7 +1413,7 @@ export function makeBakeHandler(ctx: CommandContext): CommandHandler {
       const at = r.frame === null ? "static" : `frame ${r.frame}`;
       return {
         status: "ok",
-        message: `baked "${r.channel}" → orientation on ${n} vertices of "${r.expr}" (${at}, raw vectors) — stored; no shape reads orientation yet`,
+        message: `baked "${r.channel}" → orientation on ${n} vertices of "${r.expr}" (${at}, raw vectors) — stored; drawn by the oriented shapes`,
       };
     }
     const n = applyScalarsToAxis(ctx, r.axis, r.ids, r.scalars);
@@ -1460,7 +1460,7 @@ export function makeBindHandler(ctx: CommandContext): CommandHandler {
         message:
           `bound "${r.channel}" → orientation on ${r.vertexIds.length} vertices of "${r.expr}" ` +
           `(applied at ${at}, raw vectors)${took} — live: re-derives as the displayed frame changes; ` +
-          `STORED ONLY, no shape reads orientation yet`,
+          `drives the oriented shapes (shape traces ribbon)`,
       };
     }
     const released = ctx.createBinding(
@@ -1557,7 +1557,7 @@ export function makeBindingsHandler(ctx: CommandContext): CommandHandler {
       (b) =>
         `  ${b.channel} → ${b.axis} on "${b.expr}" — ${b.points.length} ${
           b.axis === ORIENTATION_AXIS
-            ? "vertices · raw vectors (stored; nothing draws orientation yet)"
+            ? "vertices · raw vectors"
             : `${domainNoun(AXIS_DOMAIN[b.axis])} · range ${b.range![0]}..${b.range![1]}${AXIS_DOMAIN[b.axis] === "edge" ? " · endpoint mean" : ""}`
         }`,
     );
@@ -2150,7 +2150,8 @@ export const HELP_TEXT = [
   "               contained edges), polyline tracecolor|tracesize|traceopacity",
   "               (each vertex reads ITS point); axis `orientation` takes a",
   "               VECTOR (3-wide) channel, raw (no range), onto polyline",
-  "               vertices — STORED ONLY for now: no shape reads it yet",
+  "               vertices — it drives the oriented shapes (shape traces",
+  "               ribbon; unbound orientation = collapsed, nothing draws)",
   "  unbind <expr>|all [<axis>]  release binding coverage element-wise,",
   "               one axis or all (values stay as last applied)",
   "  bindings     list channel bindings (read-only)",

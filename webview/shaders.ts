@@ -400,3 +400,83 @@ export function focusFlashShaders(): { vertex: string; fragment: string } {
       }`,
   };
 }
+
+/**
+ * Trace RIBBON pass (the first ORIENTED, non-camera-facing shape): one
+ * instanced quad per path segment whose plane is spanned by the segment's
+ * ALONG and the supplied per-vertex ACROSS (the orientation buffer — a
+ * bound vector channel). NOT an impostor: real oriented geometry, real
+ * depth, no analytic raytrace, no IMPOSTOR_DEPTH variant (that switch is
+ * a sprite concern; real fragments carry true depth natively).
+ *
+ * The across is consumed RAW (O-1 stores it unnormalized, by design) and
+ * conditioned HERE, where the geometry lives: transformed to view space,
+ * projected ⊥ along, then normalized. The DEGENERACY RULE (the ruled
+ * collapse-to-zero): a zero across, or one parallel to along, has no
+ * defined plane — that end's half-width collapses to zero. An UNBOUND
+ * orientation buffer is all zeros, so a ribbon without orientation data
+ * draws NOTHING — honest, and the reason the tube stays the default shape.
+ *
+ * Width = uWorldPerSize × traceSize per END (the tube's radius scale, so
+ * tube↔ribbon swaps keep footprint); RGBA per end interpolates along the
+ * segment exactly like the tube wall; style is flat per segment (A-end).
+ * Shading: the shared style chunk on the quad's REAL normal, TWO-SIDED
+ * (|nz| — a ribbon has a back face; the highlight follows the plane, which
+ * is exactly what breaking symmetry means).
+ */
+export function ribbonShaders(): { vertex: string; fragment: string } {
+  return {
+    vertex: `
+      // static per-corner: x = side (-1 | +1 across width), y = end (0 | 1)
+      attribute vec2 aCorner;
+      attribute vec3 iStart; attribute vec3 iEnd;
+      attribute float iVisible;
+      attribute float iWidthA; attribute float iWidthB;
+      attribute vec4 iColorA; attribute vec4 iColorB;
+      attribute vec3 iAcrossA; attribute vec3 iAcrossB;
+      attribute float iStyle;
+      uniform float uWorldPerSize;
+      ${STYLE_VERTEX_CHUNK}
+      varying vec4 vColor;
+      varying vec3 vNormal;
+      void main() {
+        vStyleParams = styleParams(iStyle);
+        float wA = uWorldPerSize * iWidthA;
+        float wB = uWorldPerSize * iWidthB;
+        vec3 mvA = (modelViewMatrix * vec4(iStart, 1.0)).xyz;
+        vec3 mvB = (modelViewMatrix * vec4(iEnd, 1.0)).xyz;
+        vec3 seg = mvB - mvA;
+        float len = length(seg);
+        if (iVisible < 0.5 || len * len < 1e-16 || max(wA, wB) <= 0.0) {
+          gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
+          vColor = vec4(0.0); vNormal = vec3(0.0, 0.0, 1.0);
+          return;
+        }
+        vec3 along = seg / len;
+        // the supplied across, per end: world → view (rotation only), then
+        // ⊥ along, then unit — the O-1 recommendation executed here
+        bool atB = aCorner.y > 0.5;
+        vec3 acrossWorld = atB ? iAcrossB : iAcrossA;
+        vec3 acrossView = mat3(modelViewMatrix) * acrossWorld;
+        vec3 aperp = acrossView - along * dot(acrossView, along);
+        float alen = length(aperp);
+        // DEGENERACY: no defined plane at this end → zero width (collapse)
+        float w = (atB ? wB : wA) * (alen < 1e-6 ? 0.0 : 1.0);
+        vec3 across = alen < 1e-6 ? vec3(0.0) : aperp / alen;
+        vec3 pos = (atB ? mvB : mvA) + across * (aCorner.x * w);
+        vColor = atB ? iColorB : iColorA;
+        vNormal = cross(along, across);
+        gl_Position = projectionMatrix * vec4(pos, 1.0);
+      }`,
+    fragment: `
+      ${IMPOSTOR_SHADE_CHUNK}
+      varying vec4 vColor;
+      varying vec3 vNormal;
+      void main() {
+        if (vColor.a <= 0.0) discard;
+        // TWO-SIDED: the plane's headlight response is |view-space z|
+        float nz = abs(normalize(vNormal).z);
+        gl_FragColor = vec4(impostorShade(vColor.rgb, nz), vColor.a);
+      }`,
+  };
+}

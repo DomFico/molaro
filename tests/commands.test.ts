@@ -1371,7 +1371,7 @@ test("orientation: bind accepts a 3-wide channel RAW onto polyline vertices, and
   assert.equal(r.status, "ok");
   assert.equal(
     r.message,
-    'bound "flow" → orientation on 2 vertices of "all" (applied at frame 4, raw vectors) — live: re-derives as the displayed frame changes; STORED ONLY, no shape reads orientation yet',
+    'bound "flow" → orientation on 2 vertices of "all" (applied at frame 4, raw vectors) — live: re-derives as the displayed frame changes; drives the oriented shapes (shape traces ribbon)',
   );
   assert.equal(bindCalls.length, 1);
   assert.deepEqual(bindCalls[0].b.points, [0, 1],
@@ -1382,14 +1382,14 @@ test("orientation: bind accepts a 3-wide channel RAW onto polyline vertices, and
     [{ axis: "orientation", points: [0, 1], range: null }],
   );
   const list = registry.runCommand("bindings");
-  assert.match(list.message, /flow → orientation on "all" — 2 vertices · raw vectors \(stored; nothing draws orientation yet\)/);
+  assert.match(list.message, /flow → orientation on "all" — 2 vertices · raw vectors/);
 });
 
 test("orientation: bake stores once without a binding; wrong shapes refuse loudly", () => {
   const { registry, bindingReg, orientationOps } = makeRegistry(ORI_FIXTURE);
   const bake = registry.runCommand("bake all flow orientation");
   assert.equal(bake.status, "ok");
-  assert.match(bake.message, /baked "flow" → orientation on 2 vertices of "all" \(frame 4, raw vectors\) — stored; no shape reads orientation yet/);
+  assert.match(bake.message, /baked "flow" → orientation on 2 vertices of "all" \(frame 4, raw vectors\) — stored; drawn by the oriented shapes/);
   assert.equal(orientationOps.length, 1);
   assert.deepEqual(orientationOps[0], { vertexIds: [0, 1], values: [1, 0, 0, 0, 0, 1] },
     "vertex ids + each vertex's own point's raw vector");

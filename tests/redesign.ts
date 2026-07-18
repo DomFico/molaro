@@ -6539,12 +6539,12 @@ async function S39(): Promise<void> {
     const bind = await cmd("bind all flow orientation");
     check("S39: bind all flow orientation is accepted and says stored-only",
       bind.status === "ok" &&
-        /raw vectors/.test(bind.message) && /STORED ONLY, no shape reads orientation yet/.test(bind.message) &&
+        /raw vectors/.test(bind.message) && /drives the oriented shapes/.test(bind.message) &&
         new RegExp(`on ${shape.tv} vertices`).test(bind.message),
       JSON.stringify(bind));
     check("S39: the badge counts it", /· 1 binding live$/.test(await statusLine()), await statusLine());
     check("S39: bindings lists the vector row",
-      /flow → orientation on "all" — \d+ vertices · raw vectors \(stored; nothing draws orientation yet\)/.test(
+      /flow → orientation on "all" — \d+ vertices · raw vectors/.test(
         (await cmd("bindings")).message),
       (await cmd("bindings")).message);
 
@@ -6586,7 +6586,7 @@ async function S39(): Promise<void> {
     await seekTo(50);
     const bake = await cmd("bake all flow orientation");
     check("S39: bake stores the raw vectors without a binding",
-      bake.status === "ok" && /stored; no shape reads orientation yet/.test(bake.message) &&
+      bake.status === "ok" && /stored; drawn by the oriented shapes/.test(bake.message) &&
         (await storedEqualsSupplied(50)).ok && (await cmd("bindings")).message === "no bindings",
       JSON.stringify(bake));
     // precondition: frames 50 and 60 supply different vectors, so "stale"
@@ -6851,7 +6851,7 @@ async function S42(): Promise<void> {
       list.status === "ok" &&
         /points: sphere \(active\)/.test(list.message) &&
         /bonds: tube \(active\)/.test(list.message) &&
-        /traces: tube \(active\)/.test(list.message),
+        /traces: tube \(active\)  ribbon/.test(list.message),
       JSON.stringify(list));
     const depth0 = await undoDepth();
     const noop = await cmd("shape traces tube");
@@ -6859,9 +6859,9 @@ async function S42(): Promise<void> {
       noop.status === "ok" && noop.message === "traces already draw as tube" &&
         (await undoDepth()) === depth0,
       JSON.stringify(noop));
-    const bad = await cmd("shape traces ribbon");
+    const bad = await cmd("shape traces cube");
     check("S42: an unregistered shape refuses loudly with the registry",
-      bad.status === "error" && /no shape "ribbon" for traces — registered: tube/.test(bad.message),
+      bad.status === "error" && /no shape "cube" for traces — registered: tube, ribbon/.test(bad.message),
       JSON.stringify(bad));
     const badDomain = await cmd("shape lines tube");
     check("S42: an unknown domain refuses loudly",
@@ -6875,9 +6875,241 @@ async function S42(): Promise<void> {
   });
 }
 
+// ====== S43: the RIBBON — the first oriented shape, driven by the vector ======
+// B-2's gate, part 1: the two-shape swap is REAL (tube pixels vanish when
+// the collapsed ribbon takes over), the degeneracy rule holds (no
+// orientation data → no plane → no pixels), drawn ≡ supplied closes the
+// O-1 chain (channel → buffer [S39] → instance attrs [versions] → PIXELS
+// that follow the data across frames), the cadence split holds on the
+// oriented axis, and one undo after playback restores the pre-bind
+// picture. Runs under the DEFAULT variant; the crossing composition proof
+// is S44's job (both variants).
+async function S43(): Promise<void> {
+  console.log("S43 — the ribbon: swap, degeneracy, drawn ≡ supplied, cadence, undo");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const rafs = () => d.evaluate(`(async () => {
+      for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`);
+    const seekTo = async (f: number): Promise<void> => {
+      await d.evaluate(`${V}.player.seek(${f})`);
+      await d.waitFor(`${V}.player.frame === ${f} && ${V}.player.getFrame(${f}) !== null`, 20000);
+      await rafs();
+    };
+    const redCount = async (tag: string): Promise<number> => {
+      await rafs();
+      const b64 = await d.captureB64(`${REPORT}/S43_${tag}.png`);
+      return d.evaluate<number>(`(async () => {
+        const app = document.getElementById('app').getBoundingClientRect();
+        const img = new Image();
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+        const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+        const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+        const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+          Math.round(app.width), Math.round(app.height) - 60).data;
+        let n = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) n++;
+        }
+        return n;
+      })()`);
+    };
+    await d.evaluate(`${V}.setPlaying(false)`);
+    await seekTo(0);
+    // isolate the trace: hide the crowd, paint the path red, fatten it
+    await cmd("pointopacity all 0");
+    await cmd("bondopacity all 0");
+    await cmd("bondopacityof all 0");
+    await cmd("colortrace all red");
+    await cmd("tracesize all 5");
+    await d.evaluate(`${V}.frameVisible ? 0 : 0`);
+    await d.evaluate(`${V}.resetCamera()`);
+    await sleep(700);
+    const tubeRed = await redCount("tube");
+    check("S43: (baseline) the red tube draws", tubeRed > 300, `red=${tubeRed}`);
+
+    // -- the swap is REAL + the degeneracy rule ---------------------------
+    const swap = await cmd("shape traces ribbon");
+    check("S43: the swap reports", swap.status === "ok" && /traces now draw as ribbon/.test(swap.message),
+      JSON.stringify(swap));
+    const collapsed = await redCount("ribbon_unbound");
+    check("S43: DEGENERACY — no orientation data, no plane, no pixels (and the tube is truly gone)",
+      collapsed < 40, `red=${collapsed} (tube had ${tubeRed})`);
+
+    // -- bind the vector: the ribbon MATERIALIZES -------------------------
+    const bind = await cmd("bind all flow orientation");
+    check("S43: (setup) orientation binds", bind.status === "ok", JSON.stringify(bind));
+    const bound = await redCount("ribbon_bound");
+    check("S43: the ribbon DRAWS from the vector channel", bound > 200, `red=${bound}`);
+
+    // -- cadence: flips re-derive ACROSS alone; nothing records -----------
+    const v0 = await d.evaluate<{ start: number; across: number; width: number; color: number }>(
+      `${V}.ribbonAttrVersions()`);
+    const dep0 = await undoDepth();
+    await seekTo(10); await seekTo(20);
+    const v1 = await d.evaluate<{ start: number; across: number; width: number; color: number }>(
+      `${V}.ribbonAttrVersions()`);
+    check("S43: BOUND-AXIS-ALONE, oriented edition — flips bump start AND across; width/color never; undo flat",
+      v1.start > v0.start && v1.across > v0.across &&
+        v1.width === v0.width && v1.color === v0.color && (await undoDepth()) === dep0,
+      JSON.stringify({ v0, v1 }));
+
+    // -- drawn ≡ supplied, the visible half: pixels FOLLOW the data -------
+    // flow rotates with frame; the plane's projected area changes → the
+    // red footprint measurably differs between distant frames, and stays
+    // PRESENT at adjacent frames (no whip-to-zero: supplied is smooth,
+    // stored ≡ supplied is S39's identity, so drawn follows smoothly)
+    const r20 = await redCount("f20");
+    await seekTo(21);
+    const r21 = await redCount("f21");
+    await seekTo(40);
+    const r40 = await redCount("f40");
+    check("S43: pixels FOLLOW the vector data across frames",
+      Math.abs(r40 - r20) > 40, `f20=${r20} f40=${r40}`);
+    check("S43: …and smoothly (adjacent frames both draw, bounded change)",
+      r20 > 150 && r21 > 150 && Math.abs(r21 - r20) < Math.max(200, r20),
+      `f20=${r20} f21=${r21}`);
+
+    // -- one undo after playback: pre-bind picture, collapsed again -------
+    await d.ctrlZ();
+    await sleep(250);
+    await rafs();
+    const undone = await redCount("undone");
+    check("S43: ONE Ctrl+Z after seeks → the binding is gone and the ribbon collapses",
+      undone < 40 && (await cmd("bindings")).message === "no bindings",
+      `red=${undone}`);
+    // swap back: the tube returns (onEnable re-fills after the skip gap)
+    await cmd("shape traces tube");
+    const tubeBack = await redCount("tube_back");
+    check("S43: swapping back re-fills the tube (enable after the dispatch gap)",
+      tubeBack > 300, `red=${tubeBack}`);
+  });
+}
+
+// ====== S44: the CROSSING — real ribbon depth × impostor sphere depth =========
+// §0.4's test: the one that catches the depth-composition defect. A ribbon
+// (REAL per-fragment depth) crosses an impostor sphere; at every found
+// crossing the pixel must belong to whichever surface is CLOSER — computed
+// analytically (segment depth at the crossing vs the sphere's SURFACE
+// depth at that pixel), across several frames (in motion). Assertions run
+// under VARIANT 2 (the chosen default: analytic sprite depth composes
+// with real geometry by construction). Under variant 1 the same probes
+// run and their outcomes are LOGGED, not asserted — flat billboard depth
+// mis-sorting near-depth crossings is precisely why variant 2 was chosen;
+// the record documents what the other default would have cost.
+async function S44(): Promise<void> {
+  for (const variant of [2, 1] as const) {
+    const assertive = variant === 2;
+    console.log(`S44 — crossing composition, depth variant ${variant}${assertive ? " (ASSERTED)" : " (recorded)"}`);
+    await withDriver(async (d) => {
+      const cmd = (text: string) =>
+        d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+      const rafs = () => d.evaluate(`(async () => {
+        for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r));
+      })()`);
+      const seekTo = async (f: number): Promise<void> => {
+        await d.evaluate(`${V}.player.seek(${f})`);
+        await d.waitFor(`${V}.player.frame === ${f} && ${V}.player.getFrame(${f}) !== null`, 20000);
+        await rafs();
+      };
+      await d.evaluate(`${V}.setPlaying(false)`);
+      await seekTo(0);
+      const PROBE = 300;
+      await cmd("pointopacity all 0");
+      await cmd(`pointopacity #${PROBE} 1`);
+      await cmd(`colorpoints #${PROBE} blue`);
+      await cmd(`pointsize #${PROBE} 8`);
+      await cmd("bondopacity all 0");
+      await cmd("bondopacityof all 0");
+      await cmd("colortrace all red");
+      await cmd("tracesize all 5");
+      await cmd("bind all flow orientation");
+      await cmd("shape traces ribbon");
+      await d.evaluate(`${V}.resetCamera()`);
+      await sleep(700);
+      // scan frames for screen-space crossings of the probe's disc and a
+      // path segment; expected winner computed analytically per crossing
+      type Crossing = { f: number; x: number; y: number; winner: "sphere" | "ribbon"; near: boolean };
+      const crossings: Crossing[] = [];
+      for (let f = 0; f <= 72 && crossings.length < 4; f += 4) {
+        await seekTo(f);
+        const found = await d.evaluate<Omit<Crossing, "f"> | null>(`(()=>{
+          const tv = ${V}.traceVertices;
+          const pw = ${V}.sizing.pxPerWorld();
+          const wps = ${V}.sizing.worldPerSize;
+          const pr = ${V}.debug.projectPoint(${PROBE});
+          if (!pr.front) return null;
+          const rWorld = wps * 8;
+          const rPx = rWorld * pw / pr.depth;
+          for (let k = 0; k + 1 < tv.length; k++) {
+            const A = ${V}.debug.projectPoint(tv[k]);
+            const B = ${V}.debug.projectPoint(tv[k + 1]);
+            if (!A.front || !B.front) continue;
+            const dx = B.x - A.x, dy = B.y - A.y;
+            const L2 = dx * dx + dy * dy;
+            if (L2 < 1) continue;
+            let t = ((pr.x - A.x) * dx + (pr.y - A.y) * dy) / L2;
+            t = Math.min(0.9, Math.max(0.1, t));
+            const cx = A.x + t * dx, cy = A.y + t * dy;
+            const distPx = Math.hypot(pr.x - cx, pr.y - cy);
+            if (distPx > rPx * 0.7) continue;
+            const segDepth = A.depth + t * (B.depth - A.depth);
+            const dWorld = distPx * pr.depth / pw;
+            const bulge = Math.sqrt(Math.max(0, rWorld * rWorld - dWorld * dWorld));
+            const sphereSurface = pr.depth - bulge;
+            const sep = Math.abs(segDepth - sphereSurface);
+            if (sep < 0.15 * rWorld) continue; // genuinely ambiguous — skip
+            return {
+              x: cx, y: cy,
+              winner: sphereSurface < segDepth ? "sphere" : "ribbon",
+              near: sep < rWorld,
+            };
+          }
+          return null;
+        })()`);
+        if (found) crossings.push({ f, ...(found as Omit<Crossing, "f">) });
+      }
+      check(`S44 v${variant}: (data precondition) crossings found across frames — in motion`,
+        crossings.length >= 2, JSON.stringify(crossings.map((c) => ({ f: c.f, w: c.winner, near: c.near }))));
+      let logLine = "";
+      for (const c of crossings) {
+        await seekTo(c.f);
+        const b64 = await d.captureB64(`${REPORT}/S44_v${variant}_f${c.f}.png`);
+        const patch = await d.evaluate<{ red: number; blue: number }>(`(async () => {
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+          const cv = document.createElement('canvas'); cv.width = img.width; cv.height = img.height;
+          const g = cv.getContext('2d'); g.drawImage(img, 0, 0);
+          const px = g.getImageData(${Math.round(c.x) - 2}, ${Math.round(c.y) - 2}, 5, 5).data;
+          let red = 0, blue = 0;
+          for (let i = 0; i < px.length; i += 4) {
+            if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) red++;
+            if (px[i+2] > px[i] + 60 && px[i+2] > px[i+1] + 40) blue++;
+          }
+          return { red, blue };
+        })()`);
+        const correct = c.winner === "sphere" ? patch.blue > 0 && patch.red === 0 : patch.red > 0 && patch.blue === 0;
+        if (assertive) {
+          check(`S44 v2: CROSSING f${c.f} — the ${c.winner} is closer and OWNS the pixel${c.near ? " (near-depth)" : ""}`,
+            correct, `expected ${c.winner}, patch=${JSON.stringify(patch)}`);
+        } else {
+          logLine += ` f${c.f}:${c.winner}${c.near ? "~" : ""}=${correct ? "OK" : "MIS-SORT"}(${patch.red}r/${patch.blue}b)`;
+        }
+      }
+      if (!assertive) {
+        console.log(`  [INFO] S44 v1 recorded outcomes:${logLine || " (none)"}`);
+        check("S44 v1: the scene RENDERS under the non-default variant (both variants build)",
+          crossings.length >= 2);
+      }
+    }, 1180, 780, `/?depthVariant=${variant}`);
+  }
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 mutates the real repo .molaro/mods (delete + finally-restore) while
  * EVERY scenario's bridge scans that directory at boot. Single-sourced here,
@@ -6901,7 +7133,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S27: "full", S28: "full", S29: "full", S30: "full", S31: "full",
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
-  S42: "fast",
+  S42: "fast", S43: "fast", S44: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

@@ -74,6 +74,7 @@ import {
   focusFlashShaders,
   highlightShaders,
   pointShaders,
+  ribbonShaders,
   traceTubeShaders,
 } from "./shaders.ts";
 import { listStyles, styleIndex, stylesAsUniformArray } from "./styles.ts";
@@ -191,6 +192,8 @@ interface PassEnv {
   traceVertices: readonly number[];
   /** The shared sizing uniform OBJECTS (one instance each — values can't fork). */
   sizing: SizingUniforms;
+  /** The packed style array — ONE object, shared by every pass that shades. */
+  styleUniforms: StyleUniforms;
   depthVariant: 1 | 2;
   /** The three GEOMETRY materials from the ONE factory — the only consumer of
    * the depth-variant switch; depthWrite pinned explicitly there (C2). */
@@ -210,6 +213,10 @@ interface BuiltPass {
   onRepWrite?: Partial<Record<RepChannel, (ids: readonly number[]) => void>>;
   onVisibilityChange?: () => void;
   onRenderTick?: (nowMs: number) => void;
+  /** Called when the pass becomes the domain's ACTIVE shape after being
+   * disabled: the dispatch skips disabled passes, so its GPU arrays are
+   * stale — this hook re-fills EVERY cadence from the rep buffers. */
+  onEnable?: () => void;
 }
 
 interface ShapeGenerator<B extends BuiltPass = BuiltPass> {
@@ -277,7 +284,9 @@ class ShapeRegistry {
     const target = this.built.find((b) => b.domain === domain && b.label === label);
     if (!target) return null;
     const prev = this.activeOf(domain);
+    const wasEnabled = target.enabled;
     for (const b of this.built) if (b.domain === domain) b.enabled = b === target;
+    if (!wasEnabled) target.pass.onEnable?.(); // re-fill after the skip gap
     this.reveal();
     return prev;
   }
@@ -882,6 +891,188 @@ const traceTubesGenerator: ShapeGenerator<TraceTubePass> = {
   },
 };
 
+/** Trace RIBBONS — the first ORIENTED shape: real (non-impostor) quads
+ * whose plane comes from the orientation buffer (a bound vector channel),
+ * conditioned in the shader (view-space, ⊥ along, unit — the O-1 raw-store
+ * recommendation executed at draw). Registers DISABLED behind the shape
+ * verb; with orientation unbound the buffer is zero and every quad
+ * collapses (the ruled degeneracy: no data, no plane, no pixels). No joint
+ * pass: ribbon ends are naive (logged) — the tube's joint-sphere identity
+ * is rotational symmetry's trick and dies with it. */
+interface RibbonPass extends BuiltPass {
+  attrVersions(): { start: number; across: number; width: number; color: number };
+}
+const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
+  name: "trace-ribbons",
+  shapeLabel: "ribbon",
+  elementKind: "vertex",
+  build(env): RibbonPass | null {
+    const header = env.header;
+    const rep = env.rep;
+    const seg = traceSegments(header.polylines);
+    if (seg.count === 0) return null;
+    const geo = new THREE.InstancedBufferGeometry();
+    geo.instanceCount = seg.count;
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(4 * 3), 3));
+    geo.setAttribute("aCorner", new THREE.Float32BufferAttribute([-1, 0, 1, 0, -1, 1, 1, 1], 2));
+    geo.setIndex([0, 2, 1, 1, 2, 3]);
+    const iStart = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
+    const iEnd = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
+    const iVisible = new THREE.InstancedBufferAttribute(new Float32Array(seg.count).fill(1), 1);
+    const iWidthA = new THREE.InstancedBufferAttribute(new Float32Array(seg.count), 1);
+    const iWidthB = new THREE.InstancedBufferAttribute(new Float32Array(seg.count), 1);
+    const iColorA = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 4), 4);
+    const iColorB = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 4), 4);
+    const iAcrossA = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
+    const iAcrossB = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
+    const iStyle = new THREE.InstancedBufferAttribute(new Float32Array(seg.count), 1);
+    for (const a of [iStart, iEnd, iVisible, iWidthA, iWidthB, iColorA, iColorB, iAcrossA, iAcrossB, iStyle]) {
+      a.setUsage(THREE.DynamicDrawUsage);
+    }
+    geo.setAttribute("iStart", iStart);
+    geo.setAttribute("iEnd", iEnd);
+    geo.setAttribute("iVisible", iVisible);
+    geo.setAttribute("iWidthA", iWidthA);
+    geo.setAttribute("iWidthB", iWidthB);
+    geo.setAttribute("iColorA", iColorA);
+    geo.setAttribute("iColorB", iColorB);
+    geo.setAttribute("iAcrossA", iAcrossA);
+    geo.setAttribute("iAcrossB", iAcrossB);
+    geo.setAttribute("iStyle", iStyle);
+    const endsOfVertex: { k: number; b: boolean }[][] =
+      Array.from({ length: env.traceVertices.length }, () => []);
+    for (let k = 0; k < seg.count; k++) {
+      endsOfVertex[seg.vertexA[k]].push({ k, b: false });
+      endsOfVertex[seg.vertexB[k]].push({ k, b: true });
+    }
+    const visible = rep.state.visible;
+    const fillEnds = (): void => {
+      const pos = env.positionAttr.array as Float32Array;
+      const s = iStart.array as Float32Array;
+      const t = iEnd.array as Float32Array;
+      for (let k = 0; k < seg.count; k++) {
+        const a3 = seg.pointA[k] * 3;
+        const b3 = seg.pointB[k] * 3;
+        const k3 = k * 3;
+        s[k3] = pos[a3]; s[k3 + 1] = pos[a3 + 1]; s[k3 + 2] = pos[a3 + 2];
+        t[k3] = pos[b3]; t[k3 + 1] = pos[b3 + 1]; t[k3 + 2] = pos[b3 + 2];
+      }
+      iStart.needsUpdate = true;
+      iEnd.needsUpdate = true;
+    };
+    const fillColors = (ids?: readonly number[]): void => {
+      const tc = rep.state.traceColor;
+      const to = rep.state.traceOpacity;
+      const cA = iColorA.array as Float32Array;
+      const cB = iColorB.array as Float32Array;
+      const write = (v: number): void => {
+        const r = tc[v * 3], g = tc[v * 3 + 1], b = tc[v * 3 + 2], a = to[v];
+        for (const e of endsOfVertex[v]) {
+          const at = e.k * 4;
+          const arr = e.b ? cB : cA;
+          arr[at] = r; arr[at + 1] = g; arr[at + 2] = b; arr[at + 3] = a;
+        }
+      };
+      if (ids) for (const v of ids) write(v);
+      else for (let v = 0; v < env.traceVertices.length; v++) write(v);
+      iColorA.needsUpdate = true;
+      iColorB.needsUpdate = true;
+    };
+    const fillWidths = (ids?: readonly number[]): void => {
+      const ts = rep.state.traceSize;
+      const wA = iWidthA.array as Float32Array;
+      const wB = iWidthB.array as Float32Array;
+      const write = (v: number): void => {
+        for (const e of endsOfVertex[v]) (e.b ? wB : wA)[e.k] = ts[v];
+      };
+      if (ids) for (const v of ids) write(v);
+      else for (let v = 0; v < env.traceVertices.length; v++) write(v);
+      iWidthA.needsUpdate = true;
+      iWidthB.needsUpdate = true;
+    };
+    const fillAcross = (ids?: readonly number[]): void => {
+      const ori = rep.state.orientation;
+      const aA = iAcrossA.array as Float32Array;
+      const aB = iAcrossB.array as Float32Array;
+      const write = (v: number): void => {
+        const x = ori[v * 3], y = ori[v * 3 + 1], z = ori[v * 3 + 2];
+        for (const e of endsOfVertex[v]) {
+          const at = e.k * 3;
+          const arr = e.b ? aB : aA;
+          arr[at] = x; arr[at + 1] = y; arr[at + 2] = z;
+        }
+      };
+      if (ids) for (const v of ids) write(v);
+      else for (let v = 0; v < env.traceVertices.length; v++) write(v);
+      iAcrossA.needsUpdate = true;
+      iAcrossB.needsUpdate = true;
+    };
+    const fillStyles = (ids?: readonly number[]): void => {
+      const st = rep.state.traceStyle;
+      const buf = iStyle.array as Float32Array;
+      if (ids) {
+        for (const v of ids) {
+          for (let k = 0; k < seg.count; k++) if (seg.vertexA[k] === v) buf[k] = st[v];
+        }
+      } else {
+        for (let k = 0; k < seg.count; k++) buf[k] = st[seg.vertexA[k]];
+      }
+      iStyle.needsUpdate = true;
+    };
+    const fillVisibility = (): void => {
+      const vis = iVisible.array as Float32Array;
+      for (let k = 0; k < seg.count; k++) {
+        vis[k] = visible[seg.pointA[k]] > 0.5 && visible[seg.pointB[k]] > 0.5 ? 1 : 0;
+      }
+      iVisible.needsUpdate = true;
+    };
+    const sh = ribbonShaders();
+    const material = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: true, // C2 discipline: explicit, never inherited
+      depthTest: true,
+      side: THREE.DoubleSide, // a ribbon HAS a back face (two-sided shade)
+      uniforms: {
+        uWorldPerSize: env.sizing.uWorldPerSize,
+        uStyles: env.styleUniforms.uStyles,
+      },
+      vertexShader: sh.vertex,
+      fragmentShader: sh.fragment,
+    });
+    const fillAll = (): void => {
+      fillEnds();
+      fillColors();
+      fillWidths();
+      fillAcross();
+      fillStyles();
+      fillVisibility();
+    };
+    fillAll(); // seed (harmless while disabled; exact when enabled at boot)
+    return {
+      objects: [new THREE.Mesh(geo, material)],
+      onFrameFlip: fillEnds,
+      onRepWrite: {
+        traceColor: fillColors,
+        traceOpacity: fillColors,
+        traceSize: fillWidths,
+        traceStyle: fillStyles,
+        // THE oriented consumer: the orientation buffer (bind-time writes
+        // AND per-flip re-derives both dispatch this channel) reaches the
+        // instance attrs here — O-2 closing the loop O-1 opened.
+        orientation: fillAcross,
+      },
+      onVisibilityChange: fillVisibility,
+      onEnable: fillAll,
+      attrVersions: () => ({
+        start: iStart.version,
+        across: iAcrossA.version,
+        width: iWidthA.version,
+        color: iColorA.version,
+      }),
+    };
+  },
+};
+
 /** The two overlays export their material so host features (the flash
  * envelope, the debug seam) can drive/read uStrength. */
 interface OverlayPass extends BuiltPass {
@@ -1136,7 +1327,7 @@ async function main(): Promise<void> {
   const styleUniforms = makeStyleUniforms();
   const materials = makeGeometryMaterials(sizing, styleUniforms, depthVariant);
   const passEnv: PassEnv = {
-    header, rep, positionAttr, pointAttrs, traceVertices, sizing, depthVariant, materials,
+    header, rep, positionAttr, pointAttrs, traceVertices, sizing, styleUniforms, depthVariant, materials,
   };
   const registry = new ShapeRegistry();
   // Registration order IS draw order (scene order — the naive-transparency
@@ -1144,6 +1335,9 @@ async function main(): Promise<void> {
   registry.add(spherePointsGenerator, passEnv);
   const edgePass = registry.add(edgeTubesGenerator, passEnv);
   const tracePass = registry.add(traceTubesGenerator, passEnv);
+  // The RIBBON registers DISABLED: the tube stays the default; `shape
+  // traces ribbon` swaps (A-3's machinery — onEnable re-fills the gap).
+  const ribbonPass = registry.add(traceRibbonsGenerator, passEnv, false);
   const pendingPass = registry.add(pendingOverlayGenerator, passEnv)!;
   const flashPass = registry.add(focusFlashGenerator, passEnv)!;
   const scene = new THREE.Scene();
@@ -2656,6 +2850,12 @@ async function main(): Promise<void> {
         size: pointAttrs.size.version,
         opacity: pointAttrs.opacity.version,
       }),
+      // ribbon cadence seam: flips bump start; ACROSS bumps on orientation
+      // writes/re-derives; width/color on their own axes — never on flips
+      ribbonAttrVersions: ribbonPass
+        ? ribbonPass.attrVersions
+        : (): { start: number; across: number; width: number; color: number } =>
+            ({ start: 0, across: 0, width: 0, color: 0 }),
       // trace-tube cadence seam: a flip bumps start, never radius/color
       traceAttrVersions: tracePass
         ? tracePass.attrVersions
