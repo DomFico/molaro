@@ -124,10 +124,11 @@ interface ViewerConfig {
   test?: boolean;
   /** Development/measurement switch (NOT a user surface): 1 = flat sprite
    * depth (early-Z kept), 2 = analytic gl_FragDepth (correct
-   * interpenetration). Global across all geometry passes. The PROVISIONAL
-   * default is 1 — the variant that cannot regress frame rate on unmeasured
-   * hardware; the real decision ("upgrade to 2?") is made outside this lane
-   * on tests/impostor_bench.ts numbers. */
+   * interpenetration). Global across all geometry passes. The default is 2
+   * — an ARCHITECTURAL call (real oriented geometry composes only with
+   * analytic sprite depth; S44 is the record), made without hardware
+   * measurement; variant 1 remains selectable if real hardware shows a
+   * frame-rate cost. */
   depthVariant?: number;
 }
 
@@ -1288,7 +1289,13 @@ async function main(): Promise<void> {
   // status line carries the warning for the whole session.
   const scale = sceneExtent(header.bbox);
   if (scale.fallback) console.warn(`[viewer] ${NO_BBOX_WARNING}`);
-  const depthVariant: 1 | 2 = cfg.depthVariant === 2 ? 2 : 1;
+  // DEFAULT = VARIANT 2 (true per-fragment depth): decided on architectural
+  // merits, NOT hardware-measured (bench unrunnable in-environment) — real
+  // geometry (the ribbon) composes with sprite depth correctly only when
+  // sprites write analytic depth; S44 records variant 1 mis-sorting the
+  // same crossings variant 2 gets right. Revert = this default + the
+  // setting default (package.json) + src/extension.ts, one log entry.
+  const depthVariant: 1 | 2 = cfg.depthVariant === 1 ? 1 : 2;
   const TAN_HALF_FOV = Math.tan(((CAMERA_FOV_DEG / 2) * Math.PI) / 180);
   const sizing: SizingUniforms = {
     uWorldPerSize: { value: worldPerSizeUnit(scale.S) },

@@ -733,7 +733,7 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   // the packaged extension. Anything but 2 means the provisional default (1:
   // early-Z kept, cannot regress frame rate on unmeasured hardware).
   const depthVariant =
-    vscode.workspace.getConfiguration("molaro").get<number>("viewer.depthVariant", 1) === 2 ? 2 : 1;
+    vscode.workspace.getConfiguration("molaro").get<number>("viewer.depthVariant", 2) === 1 ? 1 : 2;
 
   const csp = [
     "default-src 'none'",

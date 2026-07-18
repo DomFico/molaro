@@ -33,8 +33,8 @@
             1,
             2
           ],
-          "default": 1,
-          "description": "Development/measurement switch for the impostor depth path: 1 = flat sprite depth (early-Z preserved), 2 = analytic per-fragment depth (correct interpenetration). Used by the renderer measurement script; the default is provisional (1 \u2014 the variant that cannot regress frame rate on unmeasured hardware). Takes effect when a viewer panel is (re)opened."
+          "default": 2,
+          "description": "Impostor depth path: 1 = flat sprite depth (early-Z preserved), 2 = analytic per-fragment depth (correct interpenetration \u2014 required for real oriented geometry such as the ribbon to compose with sprites). Default 2, an architectural call made without hardware measurement; set 1 if frame rate matters more than crossing correctness on your hardware. Takes effect when a viewer panel is (re)opened."
         }
       }
     },
