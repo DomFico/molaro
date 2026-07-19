@@ -626,6 +626,22 @@ existing machinery (nothing new renders):
   "yLabel": str?}` (equal-length finite `x`/`y`; `frames`, if present,
   integer frame indices matching that length — the highlight/seek sync
   hook). Drawn in the plot tab exactly like a scatter tool result.
+- `produces: figure` — a **rendered figure**: `compute` returns a dict
+  `{"png": <base64>, "width": px, "height": px, "axes": [{"bbox": [x0, y0,
+  w, h], "xlim": [lo, hi], "x_is_frames": bool}]}` — the image (≤ 2 MiB
+  decoded) plus **one metadata entry per subplot**, emitted MECHANICALLY
+  from the figure object (`ax.get_position().bounds`, `ax.get_xlim()`; the
+  shipped `figure_metric` example's `_figure_reply` helper does exactly
+  this — never hand-compute it, a wrong bbox is a plausible-looking,
+  silently misaligned playhead). Drawn in the plot tab; every axes flagged
+  `x_is_frames` gets the **live playhead marker** and **click-to-seek**,
+  through the exact `plotSeek` path the series uses; an axes without the
+  flag (histograms, maps, anything) is legitimately static. Matplotlib
+  renders headless in the producer (`Agg`); a producer environment without
+  matplotlib fails the mod loudly ("matplotlib not available"), never a
+  blank panel. Note: figure CONTENT is an image — the harness asserts the
+  mapping numerically but samples content as pixels, a knowingly lighter
+  bar than the built-in kinds' element assertions.
 - `produces: commands` — the **macro** mod: `compute` returns a flat
   **`list[str]`** of command strings (exactly as typed in the terminal), run
   through the existing command path. No `axis`. Because it is Python with the
