@@ -697,6 +697,16 @@ higher cost.
 
 ## Test topology
 
+> **Flake-triage rule (ruled 2026-07-19).** Known-signature flakes (S32's
+> flash probe is probabilistic-in-isolation, not load-exclusive — proven by
+> stash-and-bisect, HEAD 5/5 ≡ tree 5/5): on a red, run isolated **×5** and
+> **record the tally in `reports/e2e_runner/FLAKE_LEDGER.md` EVERY time —
+> including all-green sets** (a rolling baseline only works if the
+> denominator keeps growing; logging only reds rots it). Any repeat red
+> within one isolated set, or any NEW signature → full stash-and-bisect,
+> no exceptions. The real fix for the probe family (hold-the-envelope /
+> in-page GL readback) outranks further characterization.
+
 > **Test-authoring note — label subsets are not strict subsets.** The
 > synthetic harness dataset shares group ids across categories: e.g.
 > `alpha.group-0` resolves the whole group entity (400 points), only 200 of

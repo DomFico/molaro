@@ -7150,6 +7150,11 @@ async function S44(): Promise<void> {
         // AXIS depth, but the band TILTS (its plane's depth varies across
         // the width — both variants render the same few enemy pixels where
         // the band recedes), so ribbon-wins asserts DOMINANCE, not purity.
+        // KNOWN LIMIT (deliberate): dominance is a WEAKER gate than its
+        // sphere-wins twin — a ribbon-side depth bug leaking a FEW pixels
+        // could pass 16/5. The assertion is only as strong as the model
+        // earns; if a ribbon-side defect is ever suspected, TIGHTEN THIS
+        // RATIO FIRST (model the band's tilt, then assert exclusivity).
         const correct = c.winner === "sphere"
           ? patch.blue > 0 && patch.red === 0
           : patch.red >= 12 && patch.red > 3 * patch.blue;
