@@ -19,7 +19,8 @@
  *
  * The handle* methods return true when the message was consumed.
  */
-import { parseTypedResult } from "./claudemodel.ts";
+import { parseTypedResult, PLOT_RESULT_KINDS } from "./claudemodel.ts";
+import { validateFigure, type FigureAxes } from "./plotmodel.ts";
 
 export interface PlotHostIO {
   /** Create or reveal the plot editor panel (no-op in the harness). */
@@ -50,6 +51,8 @@ export function createPlotHost(io: PlotHostIO): PlotHost {
     | { type: "series"; label: string; values: number[] }
     | { type: "scatter"; label: string; x: number[]; y: number[];
         frames?: number[]; xLabel?: string; yLabel?: string }
+    | { type: "figure"; label: string; png: string; width: number; height: number;
+        axes: FigureAxes[] }
     | null = null;
   let lastFrame = 0;
 
@@ -57,6 +60,11 @@ export function createPlotHost(io: PlotHostIO): PlotHost {
     if (!item) return;
     if (item.type === "series") {
       io.postToPlot({ type: "plotSeries", label: item.label, values: item.values, nFrames });
+    } else if (item.type === "figure") {
+      io.postToPlot({
+        type: "plotFigure", label: item.label, png: item.png,
+        width: item.width, height: item.height, axes: item.axes,
+      });
     } else {
       io.postToPlot({
         type: "plotScatter", label: item.label, x: item.x, y: item.y,
@@ -74,16 +82,26 @@ export function createPlotHost(io: PlotHostIO): PlotHost {
       // Consume by RAW kind, so a malformed plot payload fails CLOSED here
       // with a proper error instead of leaking to the viewer's binding.
       const rawKind = (m.result as { kind?: unknown } | null | undefined)?.kind;
-      if (rawKind !== "per-frame-series" && rawKind !== "scatter") return false;
+      if (!(PLOT_RESULT_KINDS as readonly unknown[]).includes(rawKind)) return false;
       const fail = (message: string): true => {
         io.postToTerminal({ type: "claude-bind-result", callId: m.callId, ok: false, message });
         return true; // consumed: NOTHING drawn, the previous item stands
       };
       const typed = parseTypedResult(m.result);
-      if (!typed || (typed.kind !== "per-frame-series" && typed.kind !== "scatter")) {
+      if (!typed ||
+          (typed.kind !== "per-frame-series" && typed.kind !== "scatter" && typed.kind !== "figure")) {
         return fail(`malformed ${rawKind} payload — not drawn`);
       }
-      if (typed.kind === "per-frame-series") {
+      if (typed.kind === "figure") {
+        // THE one deep validator (shared with the mod boundary): bbox/xlim
+        // rules, size cap, and the frames-axis overlap against nFrames
+        const fig = validateFigure(
+          { png: typed.png, width: typed.width, height: typed.height, axes: typed.axes },
+          nFrames,
+        );
+        if (!fig.ok) return fail(`${fig.error} — not drawn`);
+        item = { type: "figure", label: typed.label, ...fig.figure };
+      } else if (typed.kind === "per-frame-series") {
         if (nFrames < 1 || typed.values.length !== nFrames) {
           return fail(`series length mismatch: ${typed.values.length} values for ${nFrames} frames — not drawn`);
         }
@@ -111,7 +129,9 @@ export function createPlotHost(io: PlotHostIO): PlotHost {
         type: "claude-bind-result", callId: m.callId, ok: true,
         message: typed.kind === "per-frame-series"
           ? `series "${typed.label}" drawn (${typed.values.length} frames) — click the plot to seek`
-          : `scatter "${typed.label}" drawn (${typed.x.length} points${typed.frames ? " — click a point to seek" : ""})`,
+          : typed.kind === "figure"
+            ? `figure "${typed.label}" drawn (${typed.width}×${typed.height}, ${typed.axes.length} axes${typed.axes.some((a) => a.x_is_frames) ? " — click a frames axis to seek" : ""})`
+            : `scatter "${typed.label}" drawn (${typed.x.length} points${typed.frames ? " — click a point to seek" : ""})`,
       });
       return true;
     },

@@ -9,14 +9,21 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  FIGURE_PNG_MAX_BYTES,
   PLOT_H,
   PLOT_M,
   PLOT_W,
+  figureAxesYSpan,
+  figureContentRect,
+  figureFrameToPx,
+  figurePxToFrame,
   frameToX,
   pointsFor,
   seriesScale,
+  validateFigure,
   valueToY,
   xToFrame,
+  type FigureAxes,
 } from "../webview/plotmodel.ts";
 import { createPlotHost } from "../webview/plothost.ts";
 
@@ -256,4 +263,135 @@ test("plothost: a static (frames-less) scatter is legitimate", () => {
   }));
   assert.match((posts[2].msg as { message: string }).message,
     /scatter "static" drawn \(2 points\)$/, "no seek hint without frames");
+});
+
+// -- figures: the letterbox + axes mapping (the HEAVY bar's pure core) ------------
+
+const AX = (over: Partial<FigureAxes> = {}): FigureAxes => ({
+  bbox: [0.1, 0.1, 0.8, 0.8], xlim: [0, 99], x_is_frames: true, ...over,
+});
+
+test("figureContentRect: contain-fit — centered, aspect preserved, never stretched", () => {
+  // wide panel, square image: pillarboxed
+  assert.deepEqual(figureContentRect(200, 100, 100, 100), { x: 50, y: 0, w: 100, h: 100 });
+  // tall panel, wide image: letterboxed
+  assert.deepEqual(figureContentRect(200, 200, 400, 100), { x: 0, y: 75, w: 200, h: 50 });
+  // exact aspect: fills
+  assert.deepEqual(figureContentRect(200, 100, 400, 200), { x: 0, y: 0, w: 200, h: 100 });
+  // degenerate inputs collapse instead of dividing by zero
+  assert.deepEqual(figureContentRect(0, 100, 10, 10), { x: 0, y: 0, w: 0, h: 0 });
+});
+
+test("figureFrameToPx: endpoints land on the bbox edges; mid is linear", () => {
+  const rect = { x: 10, y: 5, w: 400, h: 200 };
+  const ax = AX();
+  assert.equal(figureFrameToPx(0, ax, rect), 10 + 0.1 * 400);
+  assert.equal(figureFrameToPx(99, ax, rect), 10 + 0.9 * 400);
+  const mid = figureFrameToPx(49.5, ax, rect);
+  assert.ok(Math.abs(mid - (10 + 0.5 * 400)) < 1e-9);
+});
+
+test("figureAxesYSpan: matplotlib's bottom-left origin flips exactly once", () => {
+  const rect = { x: 0, y: 20, w: 100, h: 100 };
+  // bbox y0=0.1 h=0.8 → top fraction 0.1 → span [20+10, 20+90]
+  assert.deepEqual(figureAxesYSpan(AX(), rect), { y0: 30, y1: 110 });
+  // an axes hugging the BOTTOM of the figure sits at the BOTTOM on screen
+  const low = AX({ bbox: [0, 0, 1, 0.2] });
+  assert.deepEqual(figureAxesYSpan(low, rect), { y0: 20 + 80, y1: 20 + 100 });
+});
+
+test("figurePxToFrame: inverse inside a frames-axes; null outside, on static axes, and in the letterbox bars", () => {
+  const rect = { x: 10, y: 5, w: 400, h: 200 };
+  const ax = AX();
+  for (const f of [0, 1, 42, 98, 99]) {
+    const px = figureFrameToPx(f, ax, rect);
+    const py = 5 + 0.5 * 200; // vertically inside
+    assert.equal(figurePxToFrame(px, py, [ax], rect), f, `frame ${f}`);
+  }
+  assert.equal(figurePxToFrame(0, 105, [ax], rect), null, "left letterbox bar");
+  assert.equal(figurePxToFrame(200, 1, [ax], rect), null, "above the bbox");
+  assert.equal(figurePxToFrame(200, 105, [AX({ x_is_frames: false })], rect), null, "static axes never seek");
+  assert.equal(figurePxToFrame(200, 105, [ax], { x: 0, y: 0, w: 0, h: 0 }), null, "zero rect");
+});
+
+test("figurePxToFrame: overlapping frames-axes (twinned) — FIRST MATCH WINS, the chosen rule", () => {
+  const rect = { x: 0, y: 0, w: 400, h: 200 };
+  const first = AX({ xlim: [0, 99] });
+  const twin = AX({ xlim: [1000, 1099] }); // same bbox, different xlim
+  const px = figureFrameToPx(50, first, rect);
+  assert.equal(figurePxToFrame(px, 100, [first, twin], rect), 50, "the FIRST entry maps the click");
+  assert.equal(figurePxToFrame(px, 100, [twin, first], rect), 1050, "order decides — a rule, not an accident");
+});
+
+test("validateFigure: the rejection matrix, each by name; a good reply passes", () => {
+  const good = {
+    png: "aGVsbG8=", width: 640, height: 480,
+    axes: [{ bbox: [0.1, 0.1, 0.8, 0.8], xlim: [0, 99], x_is_frames: true }],
+  };
+  const ok = validateFigure(good, 150);
+  assert.ok(ok.ok && ok.figure.axes.length === 1);
+  const cases: [unknown, RegExp][] = [
+    [[1, 2], /must return a dict/],
+    [{ ...good, png: "" }, /non-empty base64/],
+    [{ ...good, png: "not base64!!" }, /not valid base64/],
+    [{ ...good, png: "A".repeat(Math.ceil(FIGURE_PNG_MAX_BYTES * 4 / 3) + 8) }, /the cap is 2 MiB; lower the dpi or the figsize/],
+    [{ ...good, width: 4 }, /integers in \[8, 8192\]/],
+    [{ ...good, axes: "nope" }, /axes must be a list/],
+    [{ ...good, axes: [{ bbox: [0, 0, 0, 1], xlim: [0, 1], x_is_frames: false }] }, /positive width\/height/],
+    [{ ...good, axes: [{ bbox: [0.5, 0.5, 0.6, 0.2], xlim: [0, 1], x_is_frames: false }] }, /within \[0,1\]/],
+    [{ ...good, axes: [{ bbox: [0, 0, 1, 1], xlim: [5, 5], x_is_frames: false }] }, /ordered \(lo < hi\)/],
+    [{ ...good, axes: [{ bbox: [0, 0, 1, 1], xlim: [0, 1], x_is_frames: "yes" }] }, /x_is_frames must be a boolean/],
+    [{ ...good, axes: [{ bbox: [0, 0, 1, 1], xlim: [500, 900], x_is_frames: true }] }, /does not overlap frames 0\.\.149/],
+  ];
+  for (const [value, want] of cases) {
+    const r = validateFigure(value, 150);
+    assert.ok(!r.ok, JSON.stringify(value).slice(0, 60));
+    if (!r.ok) assert.match(r.error, want, r.error);
+  }
+});
+
+// -- figures through the plothost rails -------------------------------------------
+
+const figureBind = (over: Record<string, unknown> = {}, callId = "call-f") => ({
+  type: "claude-bind",
+  callId,
+  result: {
+    kind: "figure", label: "example_figure", png: "aGVsbG8=", width: 640, height: 480,
+    axes: [{ bbox: [0.1, 0.1, 0.8, 0.8], xlim: [0, 149], x_is_frames: true }],
+    ...over,
+  },
+});
+
+test("plothost: a VALID figure opens the panel, pushes plotFigure, answers ok; plot-ready re-pushes", () => {
+  const { host, posts, openedCount } = makeHost();
+  host.handleViewerMessage({ type: "viewerInfo", nFrames: 150 });
+  assert.ok(host.handleTerminalMessage(figureBind()));
+  assert.equal(openedCount(), 1);
+  const push = posts[0];
+  assert.equal(push.to, "plot");
+  assert.equal((push.msg as { type?: string }).type, "plotFigure");
+  assert.equal((push.msg as { width?: number }).width, 640);
+  const outcome = posts.find((p) => p.to === "terminal");
+  assert.ok(outcome && /figure "example_figure" drawn \(640×480, 1 axes — click a frames axis to seek\)/.test(
+    (outcome.msg as { message?: string }).message ?? ""));
+  posts.length = 0;
+  assert.ok(host.handlePlotMessage({ type: "plot-ready" }));
+  assert.equal((posts[0].msg as { type?: string }).type, "plotFigure", "reopen restores the figure");
+});
+
+test("plothost: figure validation fails CLOSED — previous item stands, error names the reason", () => {
+  const { host, posts } = makeHost();
+  host.handleViewerMessage({ type: "viewerInfo", nFrames: 150 });
+  assert.ok(host.handleTerminalMessage(seriesBind([1, 2, 3].concat(new Array(147).fill(0)))));
+  posts.length = 0;
+  // frames-axis that cannot describe this trajectory (the deep rule runs HERE too)
+  assert.ok(host.handleTerminalMessage(
+    figureBind({ axes: [{ bbox: [0, 0, 1, 1], xlim: [500, 900], x_is_frames: true }] })));
+  const fail = posts.find((p) => p.to === "terminal");
+  assert.ok(fail && /does not overlap frames 0\.\.149 — not drawn/.test(
+    (fail.msg as { message?: string }).message ?? ""));
+  assert.ok(!posts.some((p) => p.to === "plot"), "nothing pushed on failure");
+  posts.length = 0;
+  assert.ok(host.handlePlotMessage({ type: "plot-ready" }));
+  assert.equal((posts[0].msg as { type?: string }).type, "plotSeries", "the PREVIOUS series still held");
 });

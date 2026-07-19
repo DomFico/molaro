@@ -30,6 +30,9 @@ import sys
 import traceback
 from typing import BinaryIO, Optional
 
+# figure mods render headless — never a display, never a hang on one
+os.environ.setdefault("MPLBACKEND", "Agg")
+
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 from contract.contract import ContractError, encode_frame_chunk, header_to_json  # noqa: E402
@@ -102,8 +105,29 @@ def run_mod(source, code: str, target_indices, timeout_s: float) -> bytes:
                 for v in seq
             )
 
+        if isinstance(values, dict) and isinstance(values.get("png"), str):
+            # a FIGURE reply: {png, width, height, axes} — a light structural
+            # pass keeps the wire well-formed; the client runs THE deep
+            # validator (plotmodel.validateFigure) against the declared
+            # `produces` before anything displays.
+            axes = values.get("axes")
+            if not isinstance(values.get("width"), int) or not isinstance(values.get("height"), int):
+                return json.dumps(
+                    {"error": "a figure return must carry integer width and height"}
+                ).encode("utf-8")
+            if not isinstance(axes, list):
+                return json.dumps(
+                    {"error": "a figure return must carry axes as a list (one entry per subplot)"}
+                ).encode("utf-8")
+            out = {
+                "png": values["png"],
+                "width": values["width"],
+                "height": values["height"],
+                "axes": axes,
+            }
+            return json.dumps({"values": out}).encode("utf-8")
         if isinstance(values, dict):
-            # the ONE widened return shape: a scatter's {x, y, frames?,
+            # the OTHER widened return shape: a scatter's {x, y, frames?,
             # xLabel?, yLabel?}. The client re-validates against the mod's
             # declared `produces`; this pass keeps the wire well-formed.
             if not (finite_floats(values.get("x")) and finite_floats(values.get("y"))):

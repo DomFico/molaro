@@ -28,6 +28,7 @@
  */
 import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 
+import { figureAxesYSpan, figureContentRect, figureFrameToPx } from "../webview/plotmodel.ts";
 import { E2EDriver, sleep } from "./e2e_driver.ts";
 
 const REPORT = "reports/redesign";
@@ -1287,13 +1288,17 @@ async function S9(): Promise<void> {
     await sleep(300);
     const home = await camSettled();
     const rA = await cmd("view alpha.group-0.subgroup-0");
+    // Sample the ENVELOPED states IMMEDIATELY and ONCE (the S3 rule): the
+    // flash flags and the row-flash class live ~900ms, and every CDP hop
+    // eats into the window — this check's own detail string once re-sampled
+    // 0 right after its condition sampled 100 (the envelope expired BETWEEN
+    // two adjacent samples).
+    const pulsed = await flashCount(d);
+    const rowLit = await rowFlashed("/subgroup-0\\b/");
     check("S9: view <path> resolves and reports the point count",
       rA.status === "ok" && rA.message === "focused 100 points", JSON.stringify(rA));
-    await sleep(150);
-    check("S9: command pulses exactly the entry's points", (await flashCount(d)) === 100,
-      `flash=${await flashCount(d)}`);
-    check("S9: command flashes the mounted matching row (same row feedback)",
-      await rowFlashed("/subgroup-0\\b/"));
+    check("S9: command pulses exactly the entry's points", pulsed === 100, `flash=${pulsed}`);
+    check("S9: command flashes the mounted matching row (same row feedback)", rowLit);
     await sleep(500);
     const camCmd = await camSettled();
     check("S9: command moved the camera off home", !closeCam(home, camCmd));
@@ -1697,9 +1702,12 @@ async function S9(): Promise<void> {
     await sleep(700);
     check("S9: (setup) zoomed in", (await dist()) < d0 * 0.8, `${(await dist()).toFixed(1)}`);
     const rHome = await cmd("view");
-    await sleep(700);
+    // pose-settle poll, not a fixed sleep: the tween advances only on
+    // rendered frames (the camSettled rule — a starved loop outlives 700ms)
+    await camSettled();
+    const dHome = await dist();
     check("S9: bare view frames the visible scene", rHome.status === "ok" &&
-      Math.abs((await dist()) - d0) < d0 * 0.1, `dist=${(await dist()).toFixed(1)} vs ${d0.toFixed(1)}`);
+      Math.abs(dHome - d0) < d0 * 0.1, `dist=${dHome.toFixed(1)} vs ${d0.toFixed(1)}`);
     await d.screenshot(`${REPORT}/S9_command_parity.png`);
   });
 }
@@ -4359,7 +4367,12 @@ async function S25(): Promise<void> {
       await d.evaluate<boolean>(`!${el("plot-empty")}.hidden &&
         ${el("plot-svg")}.hasAttribute('hidden')`));
     await typeInto("claude-input", "please series-demo now");
-    await sleep(600);
+    // POLL, never a fixed sleep: the stub streams through relay hops whose
+    // latency scales with machine load — the one-shot-probe family's
+    // standing fix (sample when the state exists; the timeout is the bound)
+    await d.waitFor(
+      `[...document.querySelectorAll('#claude-transcript .cl-bind')]
+        .some(n => /series "example_series" drawn \\(150 frames\\)/.test(n.textContent))`, 15000);
     check("S25: the ⤷ line reports the draw",
       (await bindLines()).some((l) => /series "example_series" drawn \(150 frames\)/.test(l.text)));
     check("S25: the SVG line has one vertex per frame",
@@ -4404,7 +4417,9 @@ async function S25(): Promise<void> {
     // -- the mismatched series: no draw, ⤷ error, previous plot intact ----------
     const pointsBefore = await linePoints();
     await typeInto("claude-input", "please series-mismatch now");
-    await sleep(500);
+    await d.waitFor(
+      `[...document.querySelectorAll('#claude-transcript .cl-bind')]
+        .some(n => /series length mismatch/.test(n.textContent))`, 15000);
     check("S25: a length-mismatched series produces the ⤷ error line",
       (await bindLines()).some((l) =>
         l.text === "⤷ series length mismatch: 7 values for 150 frames — not drawn" &&
@@ -5071,7 +5086,12 @@ async function S30(): Promise<void> {
 
     // -- rg: a per-frame-series → a real curve in the plot, one vertex per frame --
     await typeInto("rg all");
-    await sleep(2500);
+    // POLL for the async hand-off line, never a fixed sleep: this is a REAL
+    // producer round-trip (python + the reference compute) whose latency
+    // scales with machine load — the slowest single wait in the suite
+    await d.waitFor(
+      `[...document.querySelectorAll('#term-log .term-line')]
+        .some(l => /rg → series "rg" \\(98 frames\\)/.test(l.textContent))`, 30000);
     const rgLines = await logLines();
     check("S30: rg acknowledges over all atoms, then reports the plot hand-off",
       rgLines.some((l) => l.text === "running rg on 3341 points…") &&
@@ -7174,9 +7194,179 @@ async function S44(): Promise<void> {
   }
 }
 
+// ====== S45: figures — the letterboxed mapping is the gate (produces: figure) =
+// The HEAVY bar: frame↔pixel through the contain-fitted content rect,
+// asserted NUMERICALLY (marker at the computed x, click seeks the computed
+// frame, resize recomputes — the silent-misalignment class). The LIGHT
+// bar: the hermetic 64×32 PNG patch-samples its known color. All payloads
+// come from the scripted stub (figure-demo / figure-bad) — matplotlib is
+// never involved in this lane.
+async function S45(): Promise<void> {
+  console.log("S45 — figures: letterboxed mapping, click-to-seek, resize, fail-closed");
+  await withDriver(async (d) => {
+    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+    const typeInto = async (id: string, text: string): Promise<void> => {
+      const r = await d.evaluate<{ x: number; y: number }>(`(()=>{
+        const b=${el(id)}.getBoundingClientRect();
+        return {x:b.left+b.width/2, y:b.top+b.height/2};
+      })()`);
+      await d.click(r.x, r.y);
+      await d.insertText(text);
+      await d.key("Enter", "Enter", 13);
+    };
+    const bindLines = () =>
+      d.evaluate<string[]>(
+        `[...document.querySelectorAll('#claude-transcript .cl-bind')].map(n=>n.textContent)`);
+    const seekTo = async (f: number): Promise<void> => {
+      await d.evaluate(`${V}.player.seek(${f})`);
+      await d.waitFor(`${V}.player.frame === ${f}`, 10000);
+      await d.evaluate(`(async () => { for (let i=0;i<2;i++) await new Promise(r=>requestAnimationFrame(r)); })()`);
+      await sleep(120); // the frameChanged → plotFrame relay hop
+    };
+    const N = 150;
+    const FRAMES_AX = { bbox: [0.125, 0.25, 0.75, 0.5] as [number, number, number, number],
+      xlim: [0, N - 1] as [number, number], x_is_frames: true };
+    // page-side geometry, recomputed on demand (rect changes on resize)
+    const geom = () => d.evaluate<{ w: number; h: number; left: number; top: number }>(
+      `(()=>{ const r=${el("plot-svg")}.getBoundingClientRect();
+        return { w: r.width, h: r.height, left: r.left, top: r.top }; })()`);
+    const expectedMarkerVx = async (f: number): Promise<{ vx: number; clickX: number; clickY: number }> => {
+      const g = await geom();
+      const content = figureContentRect(g.w, g.h, 64, 32);
+      const px = figureFrameToPx(f, FRAMES_AX, content);
+      const span = figureAxesYSpan(FRAMES_AX, content);
+      return { vx: (px / g.w) * 800, clickX: g.left + px, clickY: g.top + (span.y0 + span.y1) / 2 };
+    };
+    const markerVx = () => d.evaluate<number>(
+      `(()=>{ const m = ${el("plot-fig-markers")}.children;
+        return m.length === 1 ? Number(m[0].getAttribute('x1')) : (m.length === 0 ? -1 : -2); })()`);
+
+    await d.evaluate(`${V}.setPlaying(false)`);
+    await seekTo(0);
+    // the harness stacks the surfaces: raise the plot ONLY around plot
+    // clicks (raised, it covers the claude input; lowered, clicks type)
+    const plotOnTop = (on: boolean) =>
+      d.evaluate(`document.getElementById('plot-harness').style.zIndex = ${on ? "'200'" : "''"}`);
+    await typeInto("term-input", "/claude");
+    await sleep(150);
+    await typeInto("claude-input", "please figure-demo now");
+    await d.waitFor(
+      `[...document.querySelectorAll('#claude-transcript .cl-bind')]
+        .some(n => /figure "example_figure" drawn/.test(n.textContent))`, 8000);
+    check("S45: the ⤷ line reports the figure",
+      (await bindLines()).some((t) => /figure "example_figure" drawn \(64×32, 2 axes — click a frames axis to seek\)/.test(t)),
+      JSON.stringify(await bindLines()));
+    check("S45: the image displays; the chart furniture yields",
+      await d.evaluate<boolean>(`!${el("plot-img")}.hasAttribute('hidden') &&
+        ${el("plot-img")}.src.startsWith('data:image/png') &&
+        ${el("plot-frame-axis")}.hasAttribute('hidden') &&
+        (${el("plot-line")}.getAttribute('points') ?? '') === ''`));
+    // LIGHT bar: the known solid color, sampled from the img itself
+    const teal = await d.evaluate<boolean>(`(async () => {
+      const img = ${el("plot-img")};
+      await (img.decode ? img.decode() : Promise.resolve());
+      const c = document.createElement('canvas'); c.width = 64; c.height = 32;
+      const g = c.getContext('2d'); g.drawImage(img, 0, 0, 64, 32);
+      const p = g.getImageData(32, 16, 1, 1).data;
+      return Math.abs(p[0] - 32) < 3 && Math.abs(p[1] - 180) < 3 && Math.abs(p[2] - 170) < 3;
+    })()`);
+    check("S45: (content, light bar) the hermetic PNG renders its known color", teal);
+
+    // -- THE MAPPING, numeric: marker at the computed x, one marker only --
+    for (const f of [0, 74, 149]) {
+      await seekTo(f);
+      const want = await expectedMarkerVx(f);
+      const got = await markerVx();
+      check(`S45: MARKER at the computed x for frame ${f} (one marker; the static axes has none)`,
+        got >= 0 && Math.abs(got - want.vx) < 0.75, `got=${got} want=${want.vx.toFixed(2)}`);
+    }
+
+    // -- click → the computed frame; static axes and letterbox bars: no seek
+    await plotOnTop(true);
+    const target = await expectedMarkerVx(100);
+    await d.click(target.clickX, target.clickY);
+    await sleep(250);
+    const landed = await d.evaluate<number>(`${V}.player.frame`);
+    check("S45: CLICK in the frames axes seeks the computed frame", Math.abs(landed - 100) <= 1, `landed=${landed}`);
+    const g0 = await geom();
+    await d.click(g0.left + 2, g0.top + 2); // far corner: letterbox/outside every bbox
+    await sleep(250);
+    check("S45: a click outside every frames-axes seeks NOTHING",
+      Math.abs((await d.evaluate<number>(`${V}.player.frame`)) - landed) <= 1);
+
+    // -- round-trip on screen (seek AWAY first, so the click must act) ----
+    await seekTo(42);
+    const rt = await expectedMarkerVx(42);
+    await seekTo(140);
+    await d.click(rt.clickX, rt.clickY);
+    await sleep(250);
+    check("S45: round-trip frame → marker x → click → frame within ±1",
+      Math.abs((await d.evaluate<number>(`${V}.player.frame`)) - 42) <= 1,
+      `landed=${await d.evaluate<number>(`${V}.player.frame`)}`);
+
+    // -- RESIZE recomputes the content rect (the silent-drift class) ------
+    await seekTo(60);
+    const before = await markerVx();
+    const g1 = await geom();
+    await d.evaluate(`(()=>{ const b = ${el("plot-body")};
+      b.style.flex = 'none'; b.style.width = '420px'; b.style.height = '160px';
+      window.dispatchEvent(new Event('resize')); })()`);
+    await sleep(150);
+    const g2 = await geom();
+    check("S45: (precondition) the resize actually changed the panel rect",
+      Math.abs(g2.w - g1.w) > 10 || Math.abs(g2.h - g1.h) > 10, JSON.stringify({ g1, g2 }));
+    const wantA = await expectedMarkerVx(60);
+    const gotA = await markerVx();
+    check("S45: RESIZE #1 — the marker recomputes to the new content rect",
+      gotA >= 0 && Math.abs(gotA - wantA.vx) < 0.75 && Math.abs(gotA - before) > 0.5,
+      `got=${gotA} want=${wantA.vx.toFixed(2)} before=${before}`);
+    await d.evaluate(`(()=>{ const b = ${el("plot-body")};
+      b.style.flex = 'none'; b.style.width = '640px'; b.style.height = '300px';
+      window.dispatchEvent(new Event('resize')); })()`);
+    await sleep(150);
+    const wantB = await expectedMarkerVx(60);
+    const gotB = await markerVx();
+    check("S45: RESIZE #2 — and again at a second size",
+      gotB >= 0 && Math.abs(gotB - wantB.vx) < 0.75, `got=${gotB} want=${wantB.vx.toFixed(2)}`);
+
+    // -- zero per-frame cost: seeks move the marker, never the image ------
+    const srcBefore = await d.evaluate<string>(`${el("plot-img")}.src.length + ':' + ${el("plot-img")}.src.slice(30, 60)`);
+    await seekTo(20); await seekTo(90);
+    check("S45: seeks never re-request or re-decode the image (src identity)",
+      (await d.evaluate<string>(`${el("plot-img")}.src.length + ':' + ${el("plot-img")}.src.slice(30, 60)`)) === srcBefore);
+
+    // -- fail-closed: the mis-declared figure leaves THIS one standing ----
+    await plotOnTop(false);
+    await typeInto("claude-input", "please figure-bad now");
+    await sleep(700);
+    check("S45: the well-formed-but-wrong axes REJECTS by name",
+      (await bindLines()).some((t) => /does not overlap frames 0\.\.149 — not drawn/.test(t)),
+      JSON.stringify(await bindLines()));
+    check("S45: …and the previous figure still displays (nothing partial, no blank)",
+      await d.evaluate<boolean>(`!${el("plot-img")}.hasAttribute('hidden')`) &&
+        (await markerVx()) >= 0);
+
+    // -- kind-swap hygiene + reopen-restore -------------------------------
+    await typeInto("claude-input", "please series-demo now");
+    await sleep(700);
+    check("S45: a series replaces the figure (img hidden, furniture back)",
+      await d.evaluate<boolean>(`${el("plot-img")}.hasAttribute('hidden') &&
+        !${el("plot-frame-axis")}.hasAttribute('hidden') &&
+        ${el("plot-fig-markers")}.children.length === 0 &&
+        (${el("plot-line")}.getAttribute('points') ?? '').length > 0`));
+    await typeInto("claude-input", "please figure-demo now");
+    await sleep(700);
+    await d.evaluate(`window.dispatchEvent(new MessageEvent('message', { data: { type: 'plot-ready' } }))`);
+    await sleep(200);
+    check("S45: plot-ready re-pushes the held figure (reopen restores)",
+      await d.evaluate<boolean>(`!${el("plot-img")}.hasAttribute('hidden')`) &&
+        (await markerVx()) >= 0);
+  }, 1180, 780, "/terminal");
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 mutates the real repo .molaro/mods (delete + finally-restore) while
  * EVERY scenario's bridge scans that directory at boot. Single-sourced here,
@@ -7200,7 +7390,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S27: "full", S28: "full", S29: "full", S30: "full", S31: "full",
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
-  S42: "fast", S43: "fast", S44: "fast",
+  S42: "fast", S43: "fast", S44: "fast", S45: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

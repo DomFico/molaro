@@ -61,14 +61,32 @@ export interface ApprovalRequiredEvent {
  * non-empty x/y; both axes auto-scale). `frames`, when present, is the
  * sync hook — the frame index each point came from, same length as x/y —
  * enabling the current-frame highlight and click-to-seek; absent, the
- * scatter is a legitimate static picture. THE UNION CLOSES AT FOUR.
+ * scatter is a legitimate static picture.
+ *
+ * figure: a rendered raster image (base64 PNG) plus per-axes metadata —
+ * drawn in the plot tab with the playhead overlaid on every axes that
+ * declares x_is_frames (deep validation is plotmodel.validateFigure, the
+ * ONE validator both entrances share; this gate checks shape only).
+ *
+ * THE UNION'S INVARIANT WAS NEVER THE COUNT — it is: no kind enters
+ * without fail-closed validation and single-sourcing (MOD_PRODUCES ↔ this
+ * union ↔ the write_mod schema, equality-guarded in tests). It closed at
+ * four until `figure` entered through exactly that discipline; a future
+ * kind enters the same way or not at all.
  */
+/** The kinds the PLOT HOST consumes before the viewer relay — the ONE
+ * list every router checks (the host's interception, the harness loopback
+ * viewer filter, and plothost's own gate must agree; this is that list). */
+export const PLOT_RESULT_KINDS = ["per-frame-series", "scatter", "figure"] as const;
+
 export type TypedResult =
   | { kind: "per-point-scalar"; target: string; axis: "color" | "size" | "opacity"; scalars: number[] }
   | { kind: "command"; command: string }
   | { kind: "per-frame-series"; label: string; values: number[] }
   | { kind: "scatter"; label: string; x: number[]; y: number[];
-      xLabel?: string; yLabel?: string; frames?: number[] };
+      xLabel?: string; yLabel?: string; frames?: number[] }
+  | { kind: "figure"; label: string; png: string; width: number; height: number;
+      axes: { bbox: [number, number, number, number]; xlim: [number, number]; x_is_frames: boolean }[] };
 
 export interface ToolResultEvent {
   type: "tool-result";
@@ -158,6 +176,19 @@ export function parseTypedResult(x: unknown): TypedResult | null {
         ...(m.frames !== undefined ? { frames: m.frames as number[] } : {}),
         ...(m.xLabel !== undefined ? { xLabel: m.xLabel } : {}),
         ...(m.yLabel !== undefined ? { yLabel: m.yLabel } : {}),
+      };
+    }
+    case "figure": {
+      // shape gate only — the deep rules (bbox ⊂ [0,1]², ordered xlim,
+      // size cap, frames-overlap) live in plotmodel.validateFigure, which
+      // every display path runs before anything draws
+      if (!isStr(m.label) || !isStr(m.png)) return null;
+      if (!Number.isInteger(m.width) || !Number.isInteger(m.height)) return null;
+      if (!Array.isArray(m.axes)) return null;
+      return {
+        kind: "figure", label: m.label, png: m.png,
+        width: m.width as number, height: m.height as number,
+        axes: m.axes as { bbox: [number, number, number, number]; xlim: [number, number]; x_is_frames: boolean }[],
       };
     }
     default:

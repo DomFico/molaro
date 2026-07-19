@@ -28,6 +28,12 @@
  */
 import type { AuthState, ClaudeCommand, ClaudeEvent, TypedResult } from "./claudemodel.ts";
 
+/** A hermetic, hand-made 64×32 solid-color PNG (148 bytes) — the
+ * figure-demo payload. Generated once (zlib/struct), embedded so the
+ * scripted path never needs a rendering library. */
+export const FIGURE_DEMO_PNG =
+  "iVBORw0KGgoAAAANSUhEUgAAAEAAAAAgCAYAAACinX6EAAAAW0lEQVR4nO3QMREAIBDAsJeCfmb8gYwMdMje66yz789GB2gN0AFaA3SA1gAdoDVAB2gN0AFaA3SA1gAdoDVAB2gN0AFaA3SA1gAdoDVAB2gN0AFaA3SA1gAdoD0QyekeUhFG1AAAAABJRU5ErkJggg==";
+
 export interface ClaudeStubOptions {
   /** The auth-status emitted at creation (display-only; both states must be
    * testable). Defaults to "connected". */
@@ -180,6 +186,36 @@ export function createClaudeStub(
             x: frames.map((i) => 5 + 2 * Math.cos((i / n) * 2 * Math.PI)),
             y: frames.map((i) => 10 + 3 * Math.sin((i / n) * 2 * Math.PI)),
             frames,
+          });
+        return;
+      }
+      if (cmd.text.includes("figure-demo")) {
+        // a VALID figure: a hermetic hand-made 64×32 PNG (solid color — the
+        // harness patch-samples it) + two axes: one frames axis spanning
+        // the trajectory, one static. Every mapping assertion drives off
+        // this crafted metadata; matplotlib is never involved.
+        const n = opts.frameCount?.() || 24;
+        oneToolTurn('{ label: "example_figure" }',
+          "example_tool_a produced a rendered figure",
+          {
+            kind: "figure", label: "example_figure",
+            png: FIGURE_DEMO_PNG, width: 64, height: 32,
+            axes: [
+              { bbox: [0.125, 0.25, 0.75, 0.5], xlim: [0, n - 1], x_is_frames: true },
+              { bbox: [0.125, 0.03125, 0.75, 0.125], xlim: [0, 1], x_is_frames: false },
+            ],
+          });
+        return;
+      }
+      if (cmd.text.includes("figure-bad")) {
+        // a frames-axis whose xlim cannot describe this trajectory — the
+        // well-formed-but-wrong rejection (plothost's no-draw error path)
+        oneToolTurn('{ label: "example_figure" }',
+          "example_tool_a produced a mis-declared figure",
+          {
+            kind: "figure", label: "example_figure",
+            png: FIGURE_DEMO_PNG, width: 64, height: 32,
+            axes: [{ bbox: [0.1, 0.1, 0.8, 0.8], xlim: [5000, 9000], x_is_frames: true }],
           });
         return;
       }

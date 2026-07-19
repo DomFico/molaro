@@ -83,6 +83,7 @@ export function bindTypedResult(
     }
     case "per-frame-series":
     case "scatter":
+    case "figure":
       // The plot panel's kinds: the HOST intercepts them before the viewer
       // relay (plothost.ts) and answers the outcome itself — this branch is
       // defensive only (they should never reach the viewer's binding).

@@ -30,6 +30,8 @@
 
 /** Where a mod came from. Built-ins are code-registered; "workspace" is
  * assigned by the file loader (never trusted from the file itself). */
+import { validateFigure, type FigureAxes } from "./plotmodel.ts";
+
 export type RecipeOrigin = "built-in" | "workspace";
 
 export type ModKind = "representation" | "analysis";
@@ -40,7 +42,7 @@ export type ModKind = "representation" | "analysis";
  * A `write_mod` schema that hardcoded a stale subset (missing `commands`) is the
  * bug this closes: two lists that must agree, only one updated. See
  * tests/recipes.test.ts for the equality guard. */
-export const MOD_PRODUCES = ["per-point-scalar", "per-frame-series", "scatter", "commands"] as const;
+export const MOD_PRODUCES = ["per-point-scalar", "per-frame-series", "scatter", "commands", "figure"] as const;
 export type ModProduces = (typeof MOD_PRODUCES)[number];
 
 /** The point axes a `per-point-scalar` mod binds to — the single source the
@@ -277,7 +279,9 @@ export function validateModValues(
   values: unknown,
   expect: ModRunExpectation,
 ): { ok: true; values: number[] } | { ok: true; scatter: ScatterValues }
-  | { ok: true; commands: string[] } | { ok: false; error: string } {
+  | { ok: true; commands: string[] }
+  | { ok: true; figure: { png: string; width: number; height: number; axes: FigureAxes[] } }
+  | { ok: false; error: string } {
   if (expect.produces === "commands") {
     // The return must be a flat list of NON-EMPTY strings. Anything else →
     // no execution. (Whether each string is a VALID command is checked at the
@@ -294,6 +298,13 @@ export function validateModValues(
       }
     }
     return { ok: true, commands: values as string[] };
+  }
+  if (expect.produces === "figure") {
+    // THE one figure validator (plotmodel.validateFigure) — shared with the
+    // terminal claude-bind path in plothost, so the two entrances cannot
+    // drift. frameCount powers the frames-axis overlap check.
+    const fig = validateFigure(values, expect.frameCount);
+    return fig.ok ? { ok: true, figure: fig.figure } : { ok: false, error: fig.error };
   }
   if (expect.produces === "scatter") {
     if (!values || typeof values !== "object" || Array.isArray(values)) {

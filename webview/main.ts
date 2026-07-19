@@ -47,6 +47,7 @@ import { applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandM
 import { BindingRegistry, type Binding } from "./bindings.ts";
 import { AXIS_DOMAIN, BIND_SIZE_MAX, mapScalar, ORIENTATION_AXIS, SCALAR_AXES, type BindAxis } from "./channelmap.ts";
 import { bindTypedResult } from "./claudebind.ts";
+import { PLOT_RESULT_KINDS } from "./claudemodel.ts";
 import { parseTypedResult } from "./claudemodel.ts";
 import { listRecipes, rainbow, registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
 import {
@@ -1209,12 +1210,12 @@ async function main(): Promise<void> {
       return;
     }
     if (msg?.type === "claude-bind") {
-      // per-frame-series and scatter are the PLOT's kinds — the host routes
-      // them there and answers on the outcome channel itself; the viewer
-      // stays silent. Checked on the RAW kind, so even a malformed plot
-      // payload never reaches this binding (the plot route errors it).
+      // The PLOT's kinds — the host routes them there and answers on the
+      // outcome channel itself; the viewer stays silent. Checked on the RAW
+      // kind against THE one list (claudemodel.PLOT_RESULT_KINDS), so even
+      // a malformed plot payload never reaches this binding.
       const rawKind = (msg.result as { kind?: unknown } | null | undefined)?.kind;
-      if (rawKind === "per-frame-series" || rawKind === "scatter") return;
+      if ((PLOT_RESULT_KINDS as readonly unknown[]).includes(rawKind)) return;
       const outcome = bindResult(msg.result);
       host.postMessage({ type: "claude-bind-result", callId: msg.callId, ...outcome });
       return;
@@ -2258,6 +2259,17 @@ async function main(): Promise<void> {
           });
           asyncLine("ok",
             `${mod.name} → scatter "${mod.name}" (${checked.scatter.x.length} points) → the plot tab`);
+        } else if ("figure" in checked) {
+          // the EXISTING plot route again: the host consumes plot-kind
+          // claude-binds; deep validation already ran (validateFigure via
+          // validateModValues — the ONE validator plothost also runs)
+          host.postMessage({
+            type: "claude-bind",
+            callId: `mod-${++modRunSeq}`,
+            result: { kind: "figure", label: mod.name, ...checked.figure },
+          });
+          asyncLine("ok",
+            `${mod.name} → figure "${mod.name}" (${checked.figure.width}×${checked.figure.height}, ${checked.figure.axes.length} axes) → the plot tab`);
         } else if ("commands" in checked) {
           // a `produces: commands` macro — validated (list of non-empty strings)
           // here; the emitted strings are refused/pre-validated/executed as ONE
