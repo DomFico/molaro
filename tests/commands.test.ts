@@ -333,7 +333,8 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
       const prev = shapeActive[domain];
       shapeActive[domain] = label;
       shapeOps.push({ domain, label });
-      return { prev };
+      // the ribbon mirrors the real generator's declared requirement
+      return { prev, ...(label === "ribbon" ? { requiresAxis: "orientation" as const } : {}) };
     },
     shapesInfo: () =>
       (["point", "edge", "vertex"] as const).map((domain) => ({
@@ -1539,11 +1540,15 @@ test("A-3: shape swaps a domain's active shape; wrong names list the registry; s
   const { registry, shapeOps, shapeActive } = makeRegistry();
   const r = registry.runCommand("shape traces ribbon");
   assert.equal(r.status, "ok");
-  assert.equal(r.message, "traces now draw as ribbon (was tube)");
+  // no orientation binding exists → the vanish-warning rides the message
+  assert.equal(
+    r.message,
+    "traces now draw as ribbon (was tube) — NOTE: ribbon reads the orientation axis and nothing is bound to it, so nothing will draw (bind a vector channel: bind <target> <channel> orientation)",
+  );
   assert.deepEqual(shapeOps, [{ domain: "vertex", label: "ribbon" }]);
   assert.equal(shapeActive.vertex, "ribbon");
   const noop = registry.runCommand("shape traces ribbon");
-  assert.equal(noop.message, "traces already draw as ribbon");
+  assert.match(noop.message, /^traces already draw as ribbon — NOTE:/);
   const badShape = registry.runCommand("shape points cube");
   assert.equal(badShape.status, "error");
   assert.match(badShape.message, /no shape "cube" for points — registered: sphere/);
@@ -1553,6 +1558,14 @@ test("A-3: shape swaps a domain's active shape; wrong names list the registry; s
   assert.equal(bare.status, "error");
   const list = registry.runCommand("shapes");
   assert.equal(list.message, "shapes:\n  points: sphere (active)\n  bonds: tube (active)\n  traces: tube  ribbon (active)");
+});
+
+test("A-3+: the vanish-warning clears once the required axis is bound", () => {
+  const { registry } = makeRegistry(ORI_FIXTURE);
+  registry.runCommand("bind all flow orientation");
+  const r = registry.runCommand("shape traces ribbon");
+  assert.equal(r.status, "ok");
+  assert.equal(r.message, "traces now draw as ribbon (was tube)", "no warning when the axis is bound");
 });
 
 test("bind family: help surfaces all three verbs", () => {

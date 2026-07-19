@@ -225,6 +225,11 @@ interface ShapeGenerator<B extends BuiltPass = BuiltPass> {
   /** Verb-facing shape name (`shape <domain> <label>`); defaults to `name`.
    * Overlays never set one — they are not selectable. */
   shapeLabel?: string;
+  /** A bindable axis this shape READS to have a defined geometry at all
+   * (the ribbon: orientation — unbound means every quad collapses). The
+   * shape verb warns when enabling a shape whose required axis has no
+   * binding, so the honest empty picture never reads as a silent failure. */
+  requiresAxis?: BindAxis;
   /** The element kind the pass draws over; "overlay" marks the two built-in
    * decorations (never pluggable — they exist to shadow the point pass). */
   elementKind: "point" | "edge" | "vertex" | "overlay";
@@ -242,6 +247,7 @@ class ShapeRegistry {
      * carry their generator name and are never selectable. */
     label: string;
     enabled: boolean;
+    requiresAxis?: BindAxis;
   }[] = [];
   private readonly sceneObjects: THREE.Object3D[] = [];
 
@@ -252,7 +258,10 @@ class ShapeRegistry {
   add<B extends BuiltPass>(gen: ShapeGenerator<B>, env: PassEnv, enabled = true): B | null {
     const pass = gen.build(env);
     if (!pass) return null;
-    this.built.push({ pass, domain: gen.elementKind, label: gen.shapeLabel ?? gen.name, enabled });
+    this.built.push({
+      pass, domain: gen.elementKind, label: gen.shapeLabel ?? gen.name, enabled,
+      ...(gen.requiresAxis ? { requiresAxis: gen.requiresAxis } : {}),
+    });
     this.sceneObjects.push(...pass.objects);
     for (const o of pass.objects) o.visible = false; // revealed on first frame, enabled-only
     return pass;
@@ -281,7 +290,10 @@ class ShapeRegistry {
   /** Draw a domain as the named shape: enable it, disable the domain's
    * others, sync visibility. Returns the previous active label, or null if
    * the name isn't registered for the domain. */
-  setActive(domain: ShapeGenerator["elementKind"], label: string): string | null {
+  setActive(
+    domain: ShapeGenerator["elementKind"],
+    label: string,
+  ): { prev: string | null; requiresAxis?: BindAxis } | null {
     const target = this.built.find((b) => b.domain === domain && b.label === label);
     if (!target) return null;
     const prev = this.activeOf(domain);
@@ -289,7 +301,7 @@ class ShapeRegistry {
     for (const b of this.built) if (b.domain === domain) b.enabled = b === target;
     if (!wasEnabled) target.pass.onEnable?.(); // re-fill after the skip gap
     this.reveal();
-    return prev;
+    return { prev, ...(target.requiresAxis ? { requiresAxis: target.requiresAxis } : {}) };
   }
 
   frameFlip(): void {
@@ -906,6 +918,7 @@ interface RibbonPass extends BuiltPass {
 const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
   name: "trace-ribbons",
   shapeLabel: "ribbon",
+  requiresAxis: ORIENTATION_AXIS,
   elementKind: "vertex",
   build(env): RibbonPass | null {
     const header = env.header;
@@ -2365,15 +2378,16 @@ async function main(): Promise<void> {
     // assignment is parked — it needs mixed-shape passes). One undo op:
     // the swap-back rides recordOp like every scene mutation.
     setShape: (domain: "point" | "edge" | "vertex", label: string) => {
-      const prev = registry.setActive(domain, label);
-      if (prev === null) return null;
-      if (prev !== label) {
+      const r = registry.setActive(domain, label);
+      if (r === null) return null;
+      if (r.prev !== null && r.prev !== label) {
+        const prev = r.prev;
         model.recordOp(() => {
           registry.setActive(domain, prev);
           return [];
         });
       }
-      return { prev };
+      return r;
     },
     shapesInfo: () => (
       (["point", "edge", "vertex"] as const).map((domain) => ({

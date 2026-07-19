@@ -219,7 +219,10 @@ export interface CommandContext {
   /** Draw a DOMAIN as a named registered shape (scene-level, per the
    * ruling's fallback — per-target assignment is a parked chapter). One
    * undo op. null = the name isn't registered for the domain. */
-  setShape(domain: "point" | "edge" | "vertex", label: string): { prev: string | null } | null;
+  setShape(
+    domain: "point" | "edge" | "vertex",
+    label: string,
+  ): { prev: string | null; requiresAxis?: BindAxis } | null;
   /** The shape registry's read surface: each domain's names + active. */
   shapesInfo(): { domain: "point" | "edge" | "vertex"; names: string[]; active: string | null }[];
   /** The orientation writer: per-vertex RAW 3-vectors (flat, 3 × ids
@@ -1302,11 +1305,19 @@ export function makeShapeHandler(ctx: CommandContext): CommandHandler {
         message: `no shape "${label}" for ${domWord} — registered: ${info?.names.join(", ") ?? "none"}`,
       };
     }
+    // A shape that READS a bindable axis has no geometry without a binding
+    // there — enabling it then draws NOTHING, which must never read as a
+    // silent failure. Say so, with the fix in hand.
+    const warn =
+      r.requiresAxis !== undefined &&
+      !ctx.listBindings().some((b) => b.axis === r.requiresAxis)
+        ? ` — NOTE: ${label} reads the ${r.requiresAxis} axis and nothing is bound to it, so nothing will draw (bind a vector channel: bind <target> <channel> ${r.requiresAxis})`
+        : "";
     return {
       status: "ok",
-      message: r.prev === label
+      message: (r.prev === label
         ? `${domWord} already draw as ${label}`
-        : `${domWord} now draw as ${label} (was ${r.prev ?? "none"})`,
+        : `${domWord} now draw as ${label} (was ${r.prev ?? "none"})`) + warn,
     };
   };
 }
