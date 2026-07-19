@@ -7016,11 +7016,17 @@ async function S44(): Promise<void> {
       };
       await d.evaluate(`${V}.setPlaying(false)`);
       await seekTo(0);
-      const PROBE = 300;
+      // SEVERAL probes: the matrix needs BOTH halves — crossings where the
+      // sphere is closer AND crossings where the RIBBON is closer (a
+      // ribbon-depth bug that pushes the band BACK would pass every
+      // sphere-wins probe; only ribbon-wins probes catch it).
+      const PROBES = [150, 300, 700, 900, 1200, 1500, 2000, 2500, 3200, 4200];
       await cmd("pointopacity all 0");
-      await cmd(`pointopacity #${PROBE} 1`);
-      await cmd(`colorpoints #${PROBE} blue`);
-      await cmd(`pointsize #${PROBE} 8`);
+      for (const p of PROBES) {
+        await cmd(`pointopacity #${p} 1`);
+        await cmd(`colorpoints #${p} blue`);
+        await cmd(`pointsize #${p} 8`);
+      }
       await cmd("bondopacity all 0");
       await cmd("bondopacityof all 0");
       await cmd("colortrace all red");
@@ -7033,46 +7039,93 @@ async function S44(): Promise<void> {
       // path segment; expected winner computed analytically per crossing
       type Crossing = { f: number; x: number; y: number; winner: "sphere" | "ribbon"; near: boolean };
       const crossings: Crossing[] = [];
-      for (let f = 0; f <= 72 && crossings.length < 4; f += 4) {
+      const kinds = () => ({
+        sphere: crossings.filter((c) => c.winner === "sphere").length,
+        ribbon: crossings.filter((c) => c.winner === "ribbon").length,
+      });
+      let flipped = false;
+      for (let f = 0; f <= 144 && (kinds().sphere < 2 || kinds().ribbon < 2); f += 4) {
+        // half-sweep camera FLIP: viewed from the opposite side, every
+        // sphere-in-front crossing becomes ribbon-in-front — the reliable
+        // way to exercise BOTH halves of the matrix with the same probes
+        if (f >= 76 && !flipped) {
+          flipped = true;
+          await d.evaluate(`(()=>{
+            const cam = ${V}.camera, t = ${V}.controls.target;
+            cam.position.set(2 * t.x - cam.position.x, 2 * t.y - cam.position.y, 2 * t.z - cam.position.z);
+          })()`);
+          await rafs();
+        }
         await seekTo(f);
-        const found = await d.evaluate<Omit<Crossing, "f"> | null>(`(()=>{
+        const wanted = kinds().sphere >= 2 ? "ribbon" : kinds().ribbon >= 2 ? "sphere" : "any";
+        const found = await d.evaluate<Omit<Crossing, "f">[]>(`(()=>{
           const tv = ${V}.traceVertices;
           const pw = ${V}.sizing.pxPerWorld();
           const wps = ${V}.sizing.worldPerSize;
-          const pr = ${V}.debug.projectPoint(${PROBE});
-          if (!pr.front) return null;
           const rWorld = wps * 8;
-          const rPx = rWorld * pw / pr.depth;
-          for (let k = 0; k + 1 < tv.length; k++) {
-            const A = ${V}.debug.projectPoint(tv[k]);
-            const B = ${V}.debug.projectPoint(tv[k + 1]);
-            if (!A.front || !B.front) continue;
-            const dx = B.x - A.x, dy = B.y - A.y;
-            const L2 = dx * dx + dy * dy;
-            if (L2 < 1) continue;
-            let t = ((pr.x - A.x) * dx + (pr.y - A.y) * dy) / L2;
-            t = Math.min(0.9, Math.max(0.1, t));
-            const cx = A.x + t * dx, cy = A.y + t * dy;
-            const distPx = Math.hypot(pr.x - cx, pr.y - cy);
-            if (distPx > rPx * 0.7) continue;
-            const segDepth = A.depth + t * (B.depth - A.depth);
-            const dWorld = distPx * pr.depth / pw;
-            const bulge = Math.sqrt(Math.max(0, rWorld * rWorld - dWorld * dWorld));
-            const sphereSurface = pr.depth - bulge;
-            const sep = Math.abs(segDepth - sphereSurface);
-            if (sep < 0.15 * rWorld) continue; // genuinely ambiguous — skip
-            return {
-              x: cx, y: cy,
-              winner: sphereSurface < segDepth ? "sphere" : "ribbon",
-              near: sep < rWorld,
-            };
+          const out = [];
+          const probes = ${JSON.stringify(PROBES)}.map((p) => ({ p, pr: ${V}.debug.projectPoint(p) }));
+          for (const { p, pr } of probes) {
+            if (!pr.front) continue;
+            const rPx = rWorld * pw / pr.depth;
+            for (let k = 0; k + 1 < tv.length; k++) {
+              const A = ${V}.debug.projectPoint(tv[k]);
+              const B = ${V}.debug.projectPoint(tv[k + 1]);
+              if (!A.front || !B.front) continue;
+              const dx = B.x - A.x, dy = B.y - A.y;
+              const L2 = dx * dx + dy * dy;
+              if (L2 < 1) continue;
+              let t = ((pr.x - A.x) * dx + (pr.y - A.y) * dy) / L2;
+              t = Math.min(0.9, Math.max(0.1, t));
+              const cx = A.x + t * dx, cy = A.y + t * dy;
+              const distPx = Math.hypot(pr.x - cx, pr.y - cy);
+              if (distPx > rPx * 0.7) continue;
+              // a THIRD object over the pixel would break the two-body
+              // winner math — require every OTHER probe's disc to miss it
+              let clear = true;
+              for (const o of probes) {
+                if (o.p === p || !o.pr.front) continue;
+                if (Math.hypot(o.pr.x - cx, o.pr.y - cy) < (rWorld * pw / o.pr.depth) + 3) { clear = false; break; }
+              }
+              if (!clear) continue;
+              const segDepth = A.depth + t * (B.depth - A.depth);
+              const dWorld = distPx * pr.depth / pw;
+              const bulge = Math.sqrt(Math.max(0, rWorld * rWorld - dWorld * dWorld));
+              const sphereSurface = pr.depth - bulge;
+              const sep = Math.abs(segDepth - sphereSurface);
+              if (sep < 0.15 * rWorld) continue; // genuinely ambiguous — skip
+              const winner = sphereSurface < segDepth ? "sphere" : "ribbon";
+              // the 5×5 patch must not straddle the winner-flip BOUNDARY
+              // (pixels past the intersection curve legitimately belong to
+              // the other surface): re-derive the winner at the patch
+              // corners; any disagreement → skip this crossing
+              let uniform = true;
+              for (const [ox, oy] of [[-3, -3], [3, -3], [-3, 3], [3, 3]]) {
+                const qx = cx + ox, qy = cy + oy;
+                let tq = ((qx - A.x) * dx + (qy - A.y) * dy) / L2;
+                tq = Math.min(1, Math.max(0, tq));
+                const segQ = A.depth + tq * (B.depth - A.depth);
+                const dWq = Math.hypot(pr.x - qx, pr.y - qy) * pr.depth / pw;
+                const surfQ = dWq >= rWorld
+                  ? Infinity
+                  : pr.depth - Math.sqrt(rWorld * rWorld - dWq * dWq);
+                if ((surfQ < segQ ? "sphere" : "ribbon") !== winner) { uniform = false; break; }
+              }
+              if (!uniform) continue;
+              out.push({ x: cx, y: cy, winner, near: sep < rWorld });
+            }
           }
-          return null;
+          return out;
         })()`);
-        if (found) crossings.push({ f, ...(found as Omit<Crossing, "f">) });
+        const pick =
+          found.find((c) => c.winner === wanted) ??
+          (wanted === "any" ? found[0] : found.find((c) => kinds()[c.winner] < 2));
+        if (pick) crossings.push({ f, ...pick });
       }
-      check(`S44 v${variant}: (data precondition) crossings found across frames — in motion`,
-        crossings.length >= 2, JSON.stringify(crossings.map((c) => ({ f: c.f, w: c.winner, near: c.near }))));
+      const mix = kinds();
+      check(`S44 v${variant}: (data precondition) BOTH halves of the matrix found — sphere-wins AND ribbon-wins, in motion`,
+        crossings.length >= 3 && mix.sphere >= 1 && mix.ribbon >= 1,
+        JSON.stringify({ mix, crossings: crossings.map((c) => ({ f: c.f, w: c.winner, near: c.near })) }));
       let logLine = "";
       for (const c of crossings) {
         await seekTo(c.f);
@@ -7090,7 +7143,16 @@ async function S44(): Promise<void> {
           }
           return { red, blue };
         })()`);
-        const correct = c.winner === "sphere" ? patch.blue > 0 && patch.red === 0 : patch.red > 0 && patch.blue === 0;
+        // Asymmetric on purpose: the sphere SURFACE is modelled exactly
+        // (analytic bulge), so a sphere-wins patch tolerates ZERO enemy
+        // pixels — any red inside it is a real depth artifact (variant 1's
+        // recorded mis-sorts are exactly that). The RIBBON is modelled at
+        // AXIS depth, but the band TILTS (its plane's depth varies across
+        // the width — both variants render the same few enemy pixels where
+        // the band recedes), so ribbon-wins asserts DOMINANCE, not purity.
+        const correct = c.winner === "sphere"
+          ? patch.blue > 0 && patch.red === 0
+          : patch.red >= 12 && patch.red > 3 * patch.blue;
         if (assertive) {
           check(`S44 v2: CROSSING f${c.f} — the ${c.winner} is closer and OWNS the pixel${c.near ? " (near-depth)" : ""}`,
             correct, `expected ${c.winner}, patch=${JSON.stringify(patch)}`);
