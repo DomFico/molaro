@@ -132,30 +132,42 @@ export class E2EDriver {
 
   private async startChrome(): Promise<void> {
     const o = this.opts;
-    this.chrome = spawn(
-      "google-chrome",
-      [
-        "--headless=new",
-        "--no-sandbox",
-        `--remote-debugging-port=${o.cdpPort}`,
-        `--user-data-dir=/tmp/cdp-${o.cdpPort}`,
-        "--enable-unsafe-swiftshader",
-        "--use-angle=swiftshader",
-        "--hide-scrollbars",
-        `--window-size=${o.width},${o.height}`,
-        "about:blank",
-      ],
-      { env: { ...process.env, DISPLAY: process.env.DISPLAY ?? ":0" }, stdio: "ignore" },
-    );
-    const up = await poll(async () => {
-      try {
-        const r = await fetch(`http://127.0.0.1:${o.cdpPort}/json/version`);
-        return r.ok;
-      } catch {
-        return false;
-      }
-    });
-    if (!up) throw new Error("chrome CDP did not come up");
+    // Under peak parallel load chrome's cold start + SwiftShader init can
+    // exceed one CDP-poll window (a recurring 0/0 scenario failure, twice
+    // seen across the harness-chapter lanes). This is process-startup
+    // jitter, not a test assertion — so recover from it: one respawn with
+    // a FRESH user-data-dir (a stale lock is the other cause). Touches no
+    // check; a genuinely-broken chrome still fails after the retry.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const dataDir = `/tmp/cdp-${o.cdpPort}-${attempt}`;
+      this.chrome = spawn(
+        "google-chrome",
+        [
+          "--headless=new",
+          "--no-sandbox",
+          `--remote-debugging-port=${o.cdpPort}`,
+          `--user-data-dir=${dataDir}`,
+          "--enable-unsafe-swiftshader",
+          "--use-angle=swiftshader",
+          "--hide-scrollbars",
+          `--window-size=${o.width},${o.height}`,
+          "about:blank",
+        ],
+        { env: { ...process.env, DISPLAY: process.env.DISPLAY ?? ":0" }, stdio: "ignore" },
+      );
+      const up = await poll(async () => {
+        try {
+          const r = await fetch(`http://127.0.0.1:${o.cdpPort}/json/version`);
+          return r.ok;
+        } catch {
+          return false;
+        }
+      });
+      if (up) return;
+      this.chrome?.kill("SIGKILL"); // free the port before the next attempt
+      await sleep(500);
+    }
+    throw new Error("chrome CDP did not come up (after one respawn)");
   }
 
   private async connectCdp(): Promise<void> {
