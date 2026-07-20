@@ -403,6 +403,120 @@ export class E2EDriver {
     return r.data;
   }
 
+  /**
+   * THE PROBE PRIMITIVE (harness chapter, item 1) — in-page capture.
+   *
+   * The family defect it removes: A BOUNDED ENVELOPE SAMPLED THROUGH
+   * UNBOUNDED HOPS. A pulse/flash/pose exists for a fixed window (e.g. the
+   * 900ms focus flash); sampling it via captureB64 puts a CDP round-trip +
+   * compositor + PNG encode INSIDE that window, and that latency grows
+   * with bundle size (measured: S32 HEAD 5/5 vs figure-tree 2/5, same
+   * window — FLAKE_LEDGER.md bisect #3). Here the whole confirm-envelope →
+   * locate → read-pixels → classify sequence runs inside ONE Runtime.evaluate,
+   * so the unbounded hop sits AROUND the envelope, never inside it. The
+   * logged fallback for probes whose envelope this cannot reach is
+   * envelope-hold (re-arm until sampled) — rejected as the primitive
+   * because re-arming changes product behavior under test.
+   *
+   * Requires the harness boot flag `screenshotMode: true` (bridge.ts
+   * injects it on every page) → preserveDrawingBuffer on the WebGL
+   * context, so the canvas holds the last rendered frame and is
+   * drawImage-readable at any instant. Zero product change: the flag and
+   * the debug seams predate this primitive.
+   *
+   * Two modes:
+   * - SINGLE (no `sweep`): read the patch NOW — one atomic locate+read+
+   *   classify for steady states (the caller settles frames first).
+   * - SWEEP (`sweep` given): tick with requestAnimationFrame for
+   *   `windowMs`, evaluate `strengthExpr` at each tick, and read the
+   *   patch AT the max-strength tick — synchronously in that tick's
+   *   task. Correctness rests on a consistency invariant, not on tick
+   *   timing: the pulse uniform and the drawing buffer are both written
+   *   in the SAME render task and both persist unchanged between
+   *   renders, so every (strength, patch) pair this reads is mutually
+   *   consistent — the strength describes exactly the frame the pixels
+   *   came from. (In the harness, rAF is bridge.ts's 16ms setTimeout
+   *   shim and the render loop runs on the same shim, so ticks and
+   *   renders share cadence and starve together; in a real webview rAF
+   *   ticks once per presented frame. Either way the invariant holds.)
+   *   A bounded pulse (900ms flash, 1600ms breathing tint) whose frames
+   *   rendered cannot be missed: the old probes sampled a handful of
+   *   uncontrolled instants through CDP hops and hoped; this tracks the
+   *   supremum of what was actually drawn and visible. `strength` (peak
+   *   observed) and `frames` (ticks seen) return with the count — put
+   *   them in the check detail so every run logs its tally. frames === 0
+   *   means the page loop starved the whole window (a 1s no-tick bail
+   *   prevents a hang).
+   *
+   * - `centerExpr`: in-page JS yielding { x, y } in CSS px (client
+   *   coords, e.g. debug.projectPoint) — evaluated in the SAME task as
+   *   each read, so a moving projection cannot drift between locate and
+   *   sample.
+   * - `classify`: a boolean expression over pixel bytes r, g, b, a.
+   * - The drawing buffer may differ from CSS px (DPR / renderer pixel
+   *   ratio); the patch is mapped through canvas.width / boundingRect,
+   *   so counts stay in CSS-px units (the historical thresholds hold).
+   */
+  async samplePatch(opts: {
+    centerExpr: string;
+    half: number;
+    classify: string;
+    sweep?: { strengthExpr: string; windowMs: number; minStrength?: number };
+    canvasSelector?: string;
+  }): Promise<{ count: number; strength: number; frames: number; seen: number }> {
+    const sel = JSON.stringify(opts.canvasSelector ?? "#app canvas");
+    const body = opts.sweep
+      ? `let best = -1, count = -1, frames = 0, seen = -1;
+         const t0 = performance.now();
+         while (performance.now() - t0 < ${opts.sweep.windowMs}) {
+           // the 1s timeout only keeps a dead page from hanging the evaluate;
+           // a single starvation gap must NOT end the sweep — the window
+           // clock is the sole bound
+           const drew = await new Promise(res => {
+             const t = setTimeout(() => res(false), 1000);
+             requestAnimationFrame(() => { clearTimeout(t); res(true); });
+           });
+           if (!drew) continue;
+           frames++;
+           const s = (${opts.sweep.strengthExpr});
+           if (s > seen) seen = s;
+           // readPatch forces a GL readback — under SwiftShader that flush
+           // can stall the page >1s and eat the whole window. Pay it ONLY
+           // for frames that could satisfy the caller's strength gate
+           // (minStrength), so the sweep rides the pulse's rise at full
+           // tick rate instead of stalling on every ascent.
+           if (s > best && s >= ${opts.sweep.minStrength ?? 0}) {
+             best = s; count = readPatch();
+           }
+         }
+         return { count, strength: best, frames, seen };`
+      : `return { count: readPatch(), strength: -1, frames: 0, seen: -1 };`;
+    return this.evaluate<{ count: number; strength: number; frames: number; seen: number }>(`(async () => {
+      const src = document.querySelector(${sel});
+      if (!src) throw new Error("samplePatch: no canvas at " + ${sel});
+      const half = ${opts.half}, side = half * 2;
+      const readPatch = () => {
+        const rect = src.getBoundingClientRect();
+        const kx = src.width / rect.width, ky = src.height / rect.height;
+        const ctr = (${opts.centerExpr});
+        const c = document.createElement('canvas');
+        c.width = side; c.height = side;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(src,
+          (ctr.x - rect.left - half) * kx, (ctr.y - rect.top - half) * ky,
+          side * kx, side * ky, 0, 0, side, side);
+        const px = ctx.getImageData(0, 0, side, side).data;
+        let n = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          const r = px[i], g = px[i + 1], b = px[i + 2], a = px[i + 3];
+          if (${opts.classify}) n++;
+        }
+        return n;
+      };
+      ${body}
+    })()`);
+  }
+
   async dispose(): Promise<void> {
     try {
       this.ws?.close();

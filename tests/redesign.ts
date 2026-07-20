@@ -5390,29 +5390,27 @@ async function S32(): Promise<void> {
         for (let i = 0; i < ${n}; i++) await new Promise(r => requestAnimationFrame(r));
       })()`);
       await settleFrames();
-      const pr = await d.evaluate<{ x: number; y: number }>(`${V}.debug.projectPoint(${probe})`);
-      const greenAt = (b64: string) =>
-        d.evaluate<number>(`(async () => {
-          const img = new Image();
-          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
-          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
-          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
-          const px = g.getImageData(${Math.round(pr.x) - 15}, ${Math.round(pr.y) - 15}, 30, 30).data;
-          let n = 0;
-          for (let i = 0; i < px.length; i += 4) {
-            if (px[i+1] > px[i] + 25 && px[i+1] >= px[i+2]) n++;
-          }
-          return n;
-        })()`);
-      const greenBest = async (tag: string): Promise<number> => {
-        let best = 0;
+      // THE PROBE PRIMITIVE (samplePatch, e2e_driver.ts): the breathing tint
+      // is a bounded envelope — sampling it through captureB64 put unbounded
+      // CDP/compositor/encode hops INSIDE the 1600ms period (the measured
+      // bundle-size race, FLAKE_LEDGER.md). The sweep enumerates every
+      // RENDERED frame across a full period in-page and reads the patch AT
+      // the max-strength frame, so the peak that drew cannot be missed.
+      // strength/frames go into every detail string — the tally logs on
+      // green runs too.
+      const overlayPeak = async (tag: string) => {
         await settleFrames(); // the write must be DRAWN before sampling starts
-        for (let i = 0; i < 6; i++) { // 6 × 280ms straddles the 1600ms period
-          best = Math.max(best, await greenAt(await snap(`${tag}_${i}`)));
-          await sleep(280);
-          await settleFrames(1);
-        }
-        return best;
+        const s = await d.samplePatch({
+          centerExpr: `${V}.debug.projectPoint(${probe})`,
+          half: 15,
+          classify: "g > r + 25 && g >= b",
+          // >1.5 pulse periods: the peak phase recurs identically every
+          // 1600ms, so a longer sweep raises the odds of WITNESSING a peak
+          // under starvation without changing what is asserted about it
+          sweep: { strengthExpr: `${V}.debug.pulse().sel`, windowMs: 2600, minStrength: 0.6 },
+        });
+        await d.screenshot(`${REPORT}/S32_v${variant}_${tag}.png`); // evidence only — the in-page count above is the assertion
+        return s;
       };
       const probeState = () => d.evaluate<string>(`JSON.stringify({
         sel: ${V}.debug.selCount(),
@@ -5421,61 +5419,75 @@ async function S32(): Promise<void> {
         vis: ${V}.rep.state.visible[${probe}],
         pulse: Number(${V}.debug.pulse().sel.toFixed(2)),
       })`);
-      const big = await greenBest("overlay12");
-      check("S32: pending overlay registers on the sphere's own pixels", big > 20,
-        `green@sphere=${big} state=${await probeState()}`);
+      const big = await overlayPeak("overlay12");
+      check("S32: pending overlay registers on the sphere's own pixels",
+        big.count > 20 && big.strength > 0.6,
+        `green@sphere=${big.count} peak=${big.strength.toFixed(2)} seen=${big.seen.toFixed(2)} frames=${big.frames} state=${await probeState()}`);
       await cmd(`pointsize #${probe} 4`);
-      const small = await greenBest("overlay4");
+      const small = await overlayPeak("overlay4");
       check("S32: the overlay SCALES with the stored size (silhouette-matched)",
-        small > 0 && big > 2 * small, `size12=${big} size4=${small} state=${await probeState()}`);
+        small.count > 0 && small.strength > 0.6 && big.count > 2 * small.count,
+        `size12=${big.count} size4=${small.count} peak=${small.strength.toFixed(2)} seen=${small.seen.toFixed(2)} frames=${small.frames} state=${await probeState()}`);
       await cmd(`pointsize #${probe} 0`);
       await sleep(150);
-      const gone = await greenBest("overlay0"); // max over ALL phases must be 0
-      check("S32: a size-0 point shows NO overlay, ever", gone === 0, `green=${gone}`);
+      // alpha is monotone in strength, so zero at the OBSERVED PEAK frame
+      // dominates the old max-over-6-phases form — but only if a peak was
+      // actually witnessed, hence the strength gate on a ZERO assertion too.
+      const gone = await overlayPeak("overlay0");
+      check("S32: a size-0 point shows NO overlay, ever",
+        gone.count === 0 && gone.strength > 0.6,
+        `green=${gone.count} peak=${gone.strength.toFixed(2)} seen=${gone.seen.toFixed(2)} frames=${gone.frames}`);
 
-      // focus flash rides the same silhouette. It is a ONE-SHOT 900ms pulse:
-      // under load the render loop can skip the ENTIRE window (no frame ever
-      // renders with strength > 0), and CDP captures happen at handling
-      // time — so each attempt re-triggers the flash, then waits for PROOF a
-      // flash frame actually rendered (the strength uniform only rises when
-      // one did) and captures immediately. The camera is at the target after
-      // the first tween, so re-focusing only restarts the pulse.
+      // focus flash rides the same silhouette. It is a ONE-SHOT 900ms pulse —
+      // the family's founding member (the chronic yellow@sphere=0, ~9%
+      // rolling and bundle-size-coupled). THE PROBE PRIMITIVE replaces the
+      // confirm-then-capture race entirely: the sweep watches every rendered
+      // frame for 1100ms and reads the patch AT the max-flash frame, in the
+      // same task that observed its uniform. Each attempt still re-triggers
+      // the pulse (the camera is at the target after the first tween, so
+      // re-focusing only restarts it) purely for starved-window retries.
       await cmd(`pointsize #${probe} 12`);
       // deselect the probe first: the flash BLENDS 50% toward the selection
       // mint on selected points, and mint-blend over the gray base fails the
       // yellow classifier by construction — this check asserts silhouette
       // registration, not the blend.
       await d.evaluate(`${V}.refreshPoints(${V}.model.toggleInTarget({level:'point', id:${probe}}))`);
-      let yellowBest = 0;
-      for (let attempt = 0; attempt < 6 && yellowBest <= 10; attempt++) {
-        await d.evaluate(`${V}.focusPoints([${probe}])`);
-        if (attempt === 0) await sleep(420); // the one real camera tween
-        const rendered = await d.evaluate<boolean>(`(async () => {
-          for (let i = 0; i < 20; i++) {
-            if (${V}.debug.pulse().flash > 0.5) return true;
-            await new Promise(r => setTimeout(r, 60));
-          }
-          return false;
-        })()`);
-        if (!rendered) continue; // the whole window starved — fresh attempt
-        const fb64 = await snap("flash");
-        const y = await d.evaluate<number>(`(async () => {
-          const img = new Image();
-          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${fb64}"; });
-          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
-          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
-          const pr2 = ${V}.debug.projectPoint(${probe});
-          const px = g.getImageData(Math.round(pr2.x) - 15, Math.round(pr2.y) - 15, 30, 30).data;
-          let n = 0;
-          for (let i = 0; i < px.length; i += 4) {
-            if (px[i] > 150 && px[i+1] > 130 && px[i] > px[i+2] + 30 && px[i+1] > px[i+2] + 20) n++;
-          }
-          return n;
-        })()`);
-        yellowBest = Math.max(yellowBest, y);
+      // DIFFERENTIAL, not absolute: the deliberate-break proof exposed a
+      // pre-existing specificity gap — under variant 1's flat depth, a warm
+      // trace tube crossing the probe's face contributes ~149 classifier
+      // hits of its own (deterministic; see S32_v1_flash.png), so "yellow
+      // pixels present at crest" was satisfiable WITHOUT the flash. Baseline
+      // the patch at the SAME pose with the flash fully faded, then assert
+      // the crest ADDS yellow over it — the tube subtracts out exactly.
+      const flashClassify = "r > 150 && g > 130 && r > b + 30 && g > b + 20";
+      await d.evaluate(`${V}.focusPoints([${probe}])`);
+      await sleep(420); // the one real camera tween
+      await d.waitFor(`${V}.debug.pulse().flash === 0`, 6000)
+        .catch(() => { /* fade never observed — the baseline read still bounds it */ });
+      const flashBase = await d.samplePatch({
+        centerExpr: `${V}.debug.projectPoint(${probe})`, half: 15, classify: flashClassify,
+      });
+      let flash = { count: -1, strength: -1, frames: 0 };
+      let flashAttempts = 0;
+      for (let attempt = 0; attempt < 6 && flash.count <= flashBase.count + 10; attempt++) {
+        flashAttempts = attempt + 1;
+        await d.evaluate(`${V}.focusPoints([${probe}])`); // camera already at target — re-triggers the pulse only
+        const s = await d.samplePatch({
+          centerExpr: `${V}.debug.projectPoint(${probe})`,
+          half: 15,
+          classify: flashClassify,
+          sweep: { strengthExpr: `${V}.debug.pulse().flash`, windowMs: 1100, minStrength: 0.5 },
+        });
+        if (s.count > flash.count) flash = s;
       }
-      check("S32: focus flash registers on the sphere's pixels", yellowBest > 10,
-        `yellow@sphere=${yellowBest}`);
+      await d.screenshot(`${REPORT}/S32_v${variant}_flash.png`); // evidence only
+      // strength > 0.5 additionally proves the counted frame was a true
+      // flash frame (the uniform only rises when one rendered) — a gate the
+      // old probe implied but never asserted on the counted frame itself.
+      check("S32: focus flash ADDS yellow on the sphere's pixels (over the same-pose baseline)",
+        flash.count > flashBase.count + 10 && flash.strength > 0.5,
+        `yellow@sphere=${flash.count} base=${flashBase.count} peakFlash=${flash.strength.toFixed(2)} ` +
+          `seen=${flash.seen.toFixed(2)} frames=${flash.frames} attempts=${flashAttempts}`);
 
       // undo: byte-exact buffers AND pixel-exact scene (red pixels return to 0)
       const depth = await d.evaluate<number>(`${V}.model.undoDepth`);
