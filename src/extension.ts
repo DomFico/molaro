@@ -18,6 +18,7 @@
  */
 import * as vscode from "vscode";
 import { randomBytes } from "node:crypto";
+import { buildWebviewCsp } from "./webviewcsp.ts";
 import { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -740,13 +741,12 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   const depthVariant =
     vscode.workspace.getConfiguration("molaro").get<number>("viewer.depthVariant", 2) === 1 ? 1 : 2;
 
-  const csp = [
-    "default-src 'none'",
-    `script-src 'nonce-${nonce}' ${webview.cspSource}`,
-    `style-src ${webview.cspSource} 'nonce-${nonce}'`,
-    `img-src ${webview.cspSource} data:`,
-    `connect-src ${webview.cspSource}`,
-  ].join("; ");
+  const csp = buildWebviewCsp({
+    cspSource: webview.cspSource,
+    nonce,
+    allowDataImages: true,
+    allowConnect: true,
+  });
 
   return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -771,11 +771,16 @@ function renderPlotHtml(webview: vscode.Webview, extensionUri: vscode.Uri): stri
     vscode.Uri.joinPath(extensionUri, "dist", "webview", "plot.js"),
   );
 
-  const csp = [
-    "default-src 'none'",
-    `script-src 'nonce-${nonce}' ${webview.cspSource}`,
-    `style-src ${webview.cspSource} 'nonce-${nonce}'`,
-  ].join("; ");
+  // allowDataImages is REQUIRED here: figures (produces: figure) render as a
+  // base64 PNG `data:` <img>, and without img-src the default-src 'none'
+  // fallback blocks it (the broken-image glyph). The E2E harness serves its
+  // own HTML/CSP, so only the real extension exercises this — see
+  // tests/webviewcsp.test.ts, which pins the invariant.
+  const csp = buildWebviewCsp({
+    cspSource: webview.cspSource,
+    nonce,
+    allowDataImages: true,
+  });
 
   return /* html */ `<!DOCTYPE html>
 <html lang="en">
@@ -799,11 +804,7 @@ function renderTerminalHtml(webview: vscode.Webview, extensionUri: vscode.Uri): 
     vscode.Uri.joinPath(extensionUri, "dist", "webview", "terminal.js"),
   );
 
-  const csp = [
-    "default-src 'none'",
-    `script-src 'nonce-${nonce}' ${webview.cspSource}`,
-    `style-src ${webview.cspSource} 'nonce-${nonce}'`,
-  ].join("; ");
+  const csp = buildWebviewCsp({ cspSource: webview.cspSource, nonce });
 
   return /* html */ `<!DOCTYPE html>
 <html lang="en">
