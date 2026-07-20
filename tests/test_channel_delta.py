@@ -66,6 +66,13 @@ def main() -> int:
     )
     check("failed apply left the header untouched", len(header.channels) == before)
     rejects(
+        "a spaced channel name rejects (unbindable — bind tokenizes on whitespace)",
+        lambda: channel_delta_from_obj(
+            {"name": "backbone orientation", "scope": "per_point_per_frame", "dtype": "float32", "components": 3}
+        ),
+        "must be a single token",
+    )
+    rejects(
         "wrong scope rejects (deltas declare streamed channels only)",
         lambda: channel_delta_from_obj({"name": "x", "scope": "per_point", "dtype": "float32"}),
         "scope must be 'per_point_per_frame'",

@@ -122,7 +122,8 @@ a declaration; the values ride the frame stream. Once declared it is bindable im
 no reload. Return EXACTLY this dict (these keys, spelled this way):
 
     return {
-        "name": "<channel name>",   # how you will bind it; must be new (check get_context)
+        "name": "<channel name>",   # how you bind it — a SINGLE TOKEN (letters/digits/_/-,
+                                     # NO SPACES: "bb_dir" not "backbone dir"); new (check get_context)
         "values": [ ... ],          # ONE FLAT list, frame-major: all points of frame 0,
                                      # then all of frame 1, …; length = n_frames * n_points
                                      # * components. NOT a list-of-lists.

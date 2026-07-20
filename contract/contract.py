@@ -7,6 +7,7 @@ renderer code.
 from __future__ import annotations
 
 import json
+import re
 import struct
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
@@ -471,6 +472,16 @@ def channel_delta_from_obj(raw: Any) -> Channel:
     name = raw.get("name")
     if not isinstance(name, str) or not name:
         fail("name must be a non-empty string")
+    # A channel is referenced by name in bind/bake, which tokenize on
+    # whitespace — a name with a space (or other non-token character) declares
+    # fine but can never be bound. Reject it HERE, at declaration (a single
+    # token: a letter, then letters/digits/_/-) instead of leaving an
+    # unaddressable channel.
+    if not re.match(r"^[A-Za-z][A-Za-z0-9_-]*$", name):
+        fail(
+            f"channel name {name!r} must be a single token — a letter followed by "
+            "letters, digits, '_' or '-' (no spaces) — so bind/bake can reference it"
+        )
     if raw.get("scope") != SCOPE_PER_POINT_PER_FRAME:
         fail(
             f"channel {name!r}: scope must be 'per_point_per_frame' "

@@ -467,6 +467,17 @@ export function parseChannelDelta(raw: unknown): Channel {
   if (typeof o.name !== "string" || o.name === "") {
     fail("channel delta: name must be a non-empty string");
   }
+  // A channel is referenced by name in `bind`/`bake`, which tokenize on
+  // whitespace — a name with a space (or other non-token character) declares
+  // fine but can never be bound. Reject it HERE, loudly, at declaration
+  // (a single token: a letter, then letters/digits/_/-) instead of leaving a
+  // channel that exists but is unaddressable.
+  if (!/^[A-Za-z][A-Za-z0-9_-]*$/.test(o.name)) {
+    fail(
+      `channel delta: channel name '${o.name}' must be a single token — a letter ` +
+        `followed by letters, digits, '_' or '-' (no spaces) — so bind/bake can reference it`,
+    );
+  }
   if (o.scope !== "per_point_per_frame") {
     fail(
       `channel delta: channel '${o.name}': scope must be 'per_point_per_frame' ` +

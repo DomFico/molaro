@@ -253,6 +253,12 @@ test("channel deltas: every rejection fires by name and leaves nothing behind", 
   );
   assert.equal(header.channels.length, before, "failed apply left the header untouched");
 
+  // a name with a space declares fine at the string level but can NEVER be
+  // bound (bind/bake tokenize on whitespace) — rejected loudly at declaration
+  assert.throws(
+    () => parseChannelDelta({ name: "backbone orientation", scope: "per_point_per_frame", dtype: "float32", components: 3 }),
+    /must be a single token/,
+  );
   // wrong scope: deltas may only declare streamed channels
   assert.throws(
     () => parseChannelDelta({ name: "x", scope: "per_point", dtype: "float32" }),
