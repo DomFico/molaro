@@ -1805,7 +1805,11 @@ async function S9(): Promise<void> {
 
     // -- `view` with no argument = the empty-space-click framing ---------------
     await cmd("view alpha.group-0.subgroup-0"); // zoom in first
-    await sleep(700);
+    // poll for the zoom-in tween to REACH the target (the S3 camera-settle
+    // pattern; a fixed 700ms samples mid-flight under peak load — this
+    // setup check's first-ever red, in the Half-2 lane)
+    await d.waitFor(`${V}.camera.position.distanceTo(${V}.controls.target) < ${d0 * 0.8}`, 6000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S9: (setup) zoomed in", (await dist()) < d0 * 0.8, `${(await dist()).toFixed(1)}`);
     const rHome = await cmd("view");
     // pose-settle poll, not a fixed sleep: the tween advances only on
