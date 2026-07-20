@@ -173,6 +173,25 @@ export class StreamingPlayer<P> {
     this.inFlight.delete(start >= 0 ? this.chunkOf(start) : -1);
   }
 
+  /**
+   * Drop every cached chunk and re-prefetch (B-3 channel deltas). A produced
+   * channel declared mid-session makes every cached chunk OLD-shape (it lacks
+   * the new block); this converges the cache to the new shape by refetching
+   * on demand. Accounting is reset exactly (each entry's own bytes were
+   * tracked, so the total zeroes cleanly); in-flight requests are left to
+   * complete (their replies drop harmlessly if superseded — onChunk only
+   * caches when the slot is empty and re-validation happens at the call site).
+   * The eager form of the ruled S2/S3 "lazy per-chunk upgrade": simple,
+   * bounded (the working set is the prefetch window), and it converges in one
+   * round-trip. A per-entry shape tag + read-time staleness check would make
+   * it lazier; that machinery is deferred until a cost justifies it.
+   */
+  invalidateAll(): void {
+    this.cache.clear();
+    this.cacheBytesTotal = 0;
+    this.ensurePrefetch();
+  }
+
   /** Cached payload covering `frame` (touches LRU), or null if not cached. */
   getFrame(frame: number): P | null {
     const entry = this.cache.get(this.chunkOf(frame));

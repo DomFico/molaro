@@ -6,6 +6,19 @@
  * simple queue of pending promises correlates responses to requests — no ids
  * on the wire. If the producer dies, every pending and future request rejects
  * with the reason the host reported.
+ *
+ * LOAD-BEARING INVARIANT — the producer is serial and answers strictly FIFO,
+ * ONE reply per request in order (producer/serve.py: a single read-eval-write
+ * loop, run_mod's compute holds the loop so frame requests queue behind it).
+ * B-3 channel deltas depend on this: a delta rides a run_mod reply, and FIFO
+ * ordering is what makes an old-shape FrameChunk unable to arrive AFTER the
+ * delta that obsoletes it (contract/SPEC.md "Channel deltas", note; the S1
+ * seam in reports/B3_PHASE0.md). If this transport is ever made concurrent /
+ * out-of-order (ids on the wire, parallel producer workers), that proof dies
+ * and the request-epoch belt (validateFrameChunkAgainst against the set
+ * captured per request in main.ts) becomes the SOLE guarantee — it must
+ * already be load-bearing before this invariant is relaxed. Do not add
+ * out-of-order correlation here without revisiting that seam.
  */
 
 export type ProducerRequest =

@@ -301,9 +301,9 @@ test("unregisterRecipe removes a mod from the registry (and only that mod)", () 
 });
 
 // -- Brief #10a: MOD_PRODUCES / MOD_AXES as the single source ------------------
-test("MOD_PRODUCES is exactly the five supported kinds, and parseModFile validates against it", () => {
+test("MOD_PRODUCES is exactly the six supported kinds, and parseModFile validates against it", () => {
   assert.deepEqual([...MOD_PRODUCES].sort(),
-    ["commands", "figure", "per-frame-series", "per-point-scalar", "scatter"].sort());
+    ["channel", "commands", "figure", "per-frame-series", "per-point-scalar", "scatter"].sort());
   // EVERY supported produces value parses (with axis where required)
   for (const p of MOD_PRODUCES) {
     const axisLine = p === "per-point-scalar" ? "# axis: color\n" : "";

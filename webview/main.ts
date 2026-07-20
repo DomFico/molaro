@@ -26,10 +26,12 @@ import * as THREE from "three";
 import { TrackballControls } from "three/addons/controls/TrackballControls.js";
 
 import {
+  applyChannelDelta,
   channelComponents,
   decodeFrameChunk,
   parseHeader,
-  validateFrameChunk,
+  validateFrameChunkAgainst,
+  type Channel,
   type FrameChunk,
   type Header,
 } from "../contract/contract.ts";
@@ -2042,12 +2044,23 @@ async function main(): Promise<void> {
    * per-flip cost off the bound path. Static (per_point) channels are
    * skipped: their bind-time apply is already exact at every frame. */
   const channelScopeByName = new Map(header.channels.map((c) => [c.name, c.scope]));
+  // ASSERT-THE-UNREACHABLE (B-3): a BOUND channel's block is always present in
+  // the displayed chunk — a bind can only be created once the channel is
+  // declared (channelmap gate checks the displayed chunk carries it), a
+  // declaration invalidates every old-shape cached chunk, and every chunk
+  // fetched after carries the block (the request-epoch belt). So this arm is
+  // unreachable for a bound channel. It is INSTRUMENTED, not deleted: if a
+  // future change (e.g. lazy per-chunk upgrade replacing eager invalidate)
+  // makes it reachable, this counter goes non-zero and the S2-seam test trips
+  // — forcing the missing-block behavior to be RULED, not silently inherited
+  // as a stale hold. (redesign S-seam asserts debug.missingBoundBlockHits===0.)
+  let missingBoundBlockHits = 0;
   const applyBindings = (chunk: FrameChunk, f: number): void => {
     if (bindingRegistry.count() === 0) return;
     for (const b of bindingRegistry.all()) {
       if (channelScopeByName.get(b.channel) !== "per_point_per_frame") continue;
       const block = chunk.channels.get(b.channel);
-      if (!block) continue; // validated chunks always carry declared channels
+      if (!block) { missingBoundBlockHits++; continue; } // asserted unreachable — see above
       if (b.axis === ORIENTATION_AXIS) {
         // The vector arm: b.points holds polyline-VERTEX ids; each vertex
         // stores ITS point's raw 3-vector at this frame. No normalization
@@ -2202,6 +2215,34 @@ async function main(): Promise<void> {
     asyncLine(hardFail ? "error" : "ok", lines.join("\n"));
   };
   let modRunSeq = 0;
+  /**
+   * Mirror a producer-declared channel into the viewer (B-3). The producer
+   * applied the delta and stored the data; here we (1) append the declaration
+   * to THIS header so the LIVE command-layer reads (ctx.channels /
+   * channelValues, which re-read header.channels per call) see it, (2) refresh
+   * channelScopeByName — the ONE frozen, derived-once mirror of the channel
+   * list the per-flip applier consults (assert_single_channel_mirror in the
+   * tests is the tripwire against a second one appearing), and (3) invalidate
+   * the chunk cache so old-shape chunks are refetched carrying the new block.
+   * A re-declaration (same name, producer already replaced the data) skips
+   * the append but still invalidates so the new values flow.
+   */
+  const declareProducedChannel = (mod: AnalysisMod, delta: Channel, warning?: string): void => {
+    const existing = header.channels.find((c) => c.name === delta.name);
+    if (!existing) {
+      applyChannelDelta(header, delta); // fail-closed; throws → caught below → error line
+      channelScopeByName.set(delta.name, delta.scope);
+    }
+    player.invalidateAll(); // old-shape cached chunks → refetch new-shape (S2/S3)
+    const width = channelComponents(delta) === 3 ? "vector" : "scalar";
+    asyncLine("ok",
+      `${mod.name} → declared ${width} channel "${delta.name}" — bindable now (no reload)`);
+    // the coherence warning is advisory (the channel DID declare), so it
+    // rides an "ok" line with a loud prefix rather than widening the status
+    // enum — it names a DATA problem, not a failure of the pipe
+    if (warning) asyncLine("ok", `⚠ ${warning}`);
+  };
+
   const runAnalysisMod = (mod: AnalysisMod, points: number[], expr: string): void => {
     void (async () => {
       try {
@@ -2275,6 +2316,13 @@ async function main(): Promise<void> {
           // here; the emitted strings are refused/pre-validated/executed as ONE
           // undo stroke at the command-mod boundary below.
           runCommandMod(mod, checked.commands);
+        } else if ("channel" in checked) {
+          // a `produces: channel`: the producer already DECLARED the channel
+          // and stored its data (which rides subsequent FrameChunks). Mirror
+          // the declaration into THIS header so the channel becomes bindable
+          // with no reload — the conversational property. Declaring is not
+          // binding; the user binds it to an axis afterwards.
+          declareProducedChannel(mod, checked.channel, checked.warning);
         }
       } catch (err) {
         asyncLine("error",
@@ -2703,12 +2751,20 @@ async function main(): Promise<void> {
       fps: PLAYBACK_FPS,
     },
     (start, count) => {
+      // THE request-epoch belt (B-3, S1 seam): capture the declared channel
+      // set AS OF THIS REQUEST and validate the reply against that capture,
+      // not against `header` (which a delta may have grown between send and
+      // receive). Under the serial-FIFO producer this can only ever equal
+      // the current set — the belt is the guarantee that survives if that
+      // invariant is ever relaxed. A slice() is a per-request snapshot; the
+      // per-flip applier tolerates a chunk lacking a not-yet-declared block.
+      const requestedChannels = header.channels.slice();
       transport
         .request({ type: "frames", start, count })
         .then((bytes) => {
           rejectIfErrorPayload(bytes);
           const chunk = decodeFrameChunk(bytes);
-          validateFrameChunk(chunk, header);
+          validateFrameChunkAgainst(chunk, nFrames, header.n_points, requestedChannels);
           if (!zeroCopyLogged) {
             zeroCopyLogged = true;
             console.log(
@@ -2967,6 +3023,11 @@ async function main(): Promise<void> {
           sel: pendingPass.material.uniforms.uStrength.value as number,
           flash: flashPass.material.uniforms.uStrength.value as number,
         }),
+        /** Times the per-flip applier hit a BOUND channel with no block in the
+         * displayed chunk — asserted unreachable (B-3). A test pins this at 0;
+         * a non-zero value means a stale-hold path became reachable and its
+         * behavior must be ruled. */
+        missingBoundBlockHits: (): number => missingBoundBlockHits,
         /** project point `idx` (current frame) to client px — for E2E clicks.
          * `depth` = camera-space view depth (positive in front), so pixel
          * tests can reason about impostor sizes and occlusion order. */

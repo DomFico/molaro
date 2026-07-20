@@ -31,6 +31,7 @@
 /** Where a mod came from. Built-ins are code-registered; "workspace" is
  * assigned by the file loader (never trusted from the file itself). */
 import { validateFigure, type FigureAxes } from "./plotmodel.ts";
+import { parseChannelDelta, type Channel } from "../contract/contract.ts";
 
 export type RecipeOrigin = "built-in" | "workspace";
 
@@ -42,7 +43,7 @@ export type ModKind = "representation" | "analysis";
  * A `write_mod` schema that hardcoded a stale subset (missing `commands`) is the
  * bug this closes: two lists that must agree, only one updated. See
  * tests/recipes.test.ts for the equality guard. */
-export const MOD_PRODUCES = ["per-point-scalar", "per-frame-series", "scatter", "commands", "figure"] as const;
+export const MOD_PRODUCES = ["per-point-scalar", "per-frame-series", "scatter", "commands", "figure", "channel"] as const;
 export type ModProduces = (typeof MOD_PRODUCES)[number];
 
 /** The point axes a `per-point-scalar` mod binds to — the single source the
@@ -281,7 +282,27 @@ export function validateModValues(
 ): { ok: true; values: number[] } | { ok: true; scatter: ScatterValues }
   | { ok: true; commands: string[] }
   | { ok: true; figure: { png: string; width: number; height: number; axes: FigureAxes[] } }
+  | { ok: true; channel: Channel; warning?: string }
   | { ok: false; error: string } {
+  if (expect.produces === "channel") {
+    // The producer already DECLARED + stored the channel (its data rides
+    // subsequent FrameChunks); the reply carries only the declaration + any
+    // coherence warning. Re-validate the declaration through THE contract's
+    // own delta parser (single source with the wire) — the viewer applies
+    // it to its header and the channel becomes bindable, no reload.
+    if (!values || typeof values !== "object" || Array.isArray(values)) {
+      return { ok: false, error: "a channel mod's reply must be a dict {channel, warning?}" };
+    }
+    const m = values as Record<string, unknown>;
+    let channel: Channel;
+    try {
+      channel = parseChannelDelta(m.channel);
+    } catch (e) {
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
+    }
+    const warning = typeof m.warning === "string" ? m.warning : undefined;
+    return { ok: true, channel, warning };
+  }
   if (expect.produces === "commands") {
     // The return must be a flat list of NON-EMPTY strings. Anything else →
     // no execution. (Whether each string is a VALID command is checked at the

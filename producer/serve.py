@@ -35,7 +35,16 @@ os.environ.setdefault("MPLBACKEND", "Agg")
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from contract.contract import ContractError, encode_frame_chunk, header_to_json  # noqa: E402
+from contract.contract import (  # noqa: E402
+    Channel,
+    ContractError,
+    apply_channel_delta,
+    channel_components,
+    channel_delta_from_obj,
+    channel_delta_to_obj,
+    encode_frame_chunk,
+    header_to_json,
+)
 from producer.synthetic import SyntheticSource  # noqa: E402
 
 log = logging.getLogger("producer")
@@ -67,7 +76,37 @@ class ModTimeout(Exception):
     pass
 
 
-def run_mod(source, code: str, target_indices, timeout_s: float) -> bytes:
+def _coherence_warning(arr, name: str) -> Optional[str]:
+    """One O(N*T) pass over adjacent frames of a VECTOR channel (arr shape
+    (T, N, 3)): flag elements whose direction INVERTS (dot < 0) or swings
+    hard (dot < 0.5, ~>60°) between adjacent frames. A WARNING, never a
+    refusal — coherence is the producer's responsibility; the contract's
+    job is to make the breach visible, not to guess intent. See the coherence
+    docs sentence / the template's prev-frame seeding pattern."""
+    import numpy as np
+
+    if arr.shape[0] < 2:
+        return None
+    a = arr[:-1]  # (T-1, N, 3)
+    b = arr[1:]
+    dots = (a * b).sum(axis=2)  # (T-1, N)
+    inversions = int((dots < 0.0).sum())
+    swings = int(((dots >= 0.0) & (dots < 0.5)).sum())
+    if inversions == 0 and swings == 0:
+        return None
+    parts = []
+    if inversions:
+        parts.append(f"{inversions} sign inversion(s)")
+    if swings:
+        parts.append(f"{swings} hard swing(s)")
+    return (
+        f"channel {name!r}: {' and '.join(parts)} between adjacent frames — "
+        "a produced direction owns its frame-to-frame coherence "
+        "(seed each frame from the previous; see the mod docs). Drawn as supplied."
+    )
+
+
+def run_mod(source, code: str, target_indices, timeout_s: float, install_channel=None) -> bytes:
     """Execute a mod's `compute(data, target_indices)` against the RESIDENT
     dataset handle and return the response payload (JSON bytes).
 
@@ -126,6 +165,23 @@ def run_mod(source, code: str, target_indices, timeout_s: float) -> bytes:
                 "axes": axes,
             }
             return json.dumps({"values": out}).encode("utf-8")
+        # a `produces: channel` mod returns a dict carrying a channel NAME and
+        # a flat per-point-per-frame `values` list — install it (declare +
+        # store its data) so every SUBSEQUENT frames reply carries the block.
+        # Disambiguated from scatter (x/y) and figure (png) by name+values;
+        # checked BEFORE the scatter dict arm (which claims every other dict).
+        if isinstance(values, dict) and isinstance(values.get("name"), str) \
+                and isinstance(values.get("values"), list):
+            if install_channel is None:
+                return json.dumps(
+                    {"error": "produced channels are not available in this context"}
+                ).encode("utf-8")
+            try:
+                reply = install_channel(values)  # raises ContractError on bad shape/name
+            except ContractError as exc:
+                # a clean validation error (no traceback), like the other arms
+                return json.dumps({"error": str(exc)}).encode("utf-8")
+            return json.dumps({"values": reply}).encode("utf-8")
         if isinstance(values, dict):
             # the OTHER widened return shape: a scatter's {x, y, frames?,
             # xLabel?, yLabel?}. The client re-validates against the mod's
@@ -205,6 +261,81 @@ def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO) -> None:
         "serving %s: N=%d T=%d (%d header bytes)",
         header.name, header.n_points, header.n_frames, len(header_json),
     )
+
+    # Produced channels (B-3): per-point-per-frame blocks a mod DECLARED
+    # mid-session. Held here, augmenting every frames reply from the NEXT
+    # request forward — the source objects stay untouched. name -> (arr, C)
+    # where arr is a (T, N, C) little-endian float32 numpy array.
+    produced: dict = {}
+
+    def install_channel(spec: dict) -> dict:
+        """Atomically DECLARE + STORE a produced channel; returns the reply
+        payload (the declaration + any coherence warning). Fail-closed: any
+        bad shape/name/length raises ContractError and installs NOTHING.
+        Declaration and population are made atomic here because
+        encode_frame_chunk indexes chunk.channels[name] for every declared
+        channel — a header that declares a channel with no data behind it
+        would break every subsequent frames reply."""
+        nonlocal header_json
+        import numpy as np
+
+        # the mod's COMPUTE was what the timeout bounded; the header+data
+        # mutation below must be uninterruptible so the alarm can never fire
+        # between apply_channel_delta and storing the block (which would leave
+        # the header declaring a channel with no data).
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        name = spec.get("name")
+        components = spec.get("components", 1)
+        vals = spec.get("values")
+        if components not in (1, 3):
+            raise ContractError(f"channel {name!r}: components must be 1 or 3, got {components!r}")
+        n, t = header.n_points, header.n_frames
+        expected = n * t * components
+        if not isinstance(vals, list) or len(vals) != expected:
+            raise ContractError(
+                f"channel {name!r}: values must be a flat frame-major list of length "
+                f"n_frames*n_points*components ({t}*{n}*{components} = {expected}), got "
+                f"{len(vals) if isinstance(vals, list) else type(vals).__name__}"
+            )
+        arr = np.asarray(vals, dtype="<f4")
+        if not np.all(np.isfinite(arr)):
+            raise ContractError(f"channel {name!r}: values must all be finite")
+        arr = arr.reshape(t, n, components)
+
+        existing = next((c for c in header.channels if c.name == name), None)
+        if existing is not None:
+            # RE-DECLARATION: same name + same shape REPLACES the data (the
+            # recompute-and-see loop); a different shape is refused by name.
+            if existing.scope != "per_point_per_frame" or channel_components(existing) != components:
+                raise ContractError(
+                    f"channel {name!r}: already declared with a different shape "
+                    f"(cannot change scope/width by re-declaring)"
+                )
+            produced[name] = arr
+            decl = channel_delta_to_obj(existing)
+        else:
+            # NEW: validate the delta, commit it to the header (fail-closed,
+            # rolls the header back on failure), refresh the served header
+            # bytes, THEN store the data — so a rejected delta stores nothing.
+            delta_spec = {"name": name, "scope": "per_point_per_frame", "dtype": "float32"}
+            if components != 1:
+                delta_spec["components"] = components
+            for k in ("min", "max"):
+                if spec.get(k) is not None:
+                    delta_spec[k] = spec[k]
+            delta = channel_delta_from_obj(delta_spec)
+            apply_channel_delta(header, delta)
+            header_json = header_to_json(header).encode("utf-8")
+            produced[name] = arr
+            decl = channel_delta_to_obj(delta)
+
+        reply = {"channel": decl}
+        if components == 3:
+            warning = _coherence_warning(arr, name)
+            if warning is not None:
+                reply["warning"] = warning
+        return reply
+
     while True:
         prefix = read_exact(stdin, 4)
         if prefix is None:
@@ -224,6 +355,11 @@ def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO) -> None:
                 if not isinstance(start, int) or not isinstance(count, int):
                     raise ContractError("frames request: start/count must be integers")
                 chunk = source.give_frames(start, count)
+                # augment with any produced channels' blocks for this range;
+                # the header already declares them, so encode's set-equality
+                # check passes and the block rides the SAME envelope
+                for name, arr in produced.items():
+                    chunk.channels[name] = arr[start : start + count].tobytes()
                 payload = encode_frame_chunk(chunk, header)
                 log.debug("frames [%d, %d) -> %d bytes", start, start + count, len(payload))
             elif rtype == "run_mod":
@@ -231,7 +367,8 @@ def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO) -> None:
                 if not isinstance(timeout_s, (int, float)) or timeout_s <= 0:
                     timeout_s = DEFAULT_MOD_TIMEOUT_S
                 payload = run_mod(
-                    source, request.get("code"), request.get("target_indices"), float(timeout_s)
+                    source, request.get("code"), request.get("target_indices"),
+                    float(timeout_s), install_channel=install_channel,
                 )
                 log.debug("run_mod -> %d bytes", len(payload))
             else:
