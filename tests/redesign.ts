@@ -389,7 +389,8 @@ async function S1(): Promise<void> {
     await d.mouse("mouseMoved", gamma.x, gamma.y, { buttons: 2 });
     await d.mouse("mouseMoved", beta.x, beta.y, { buttons: 2 });
     await d.mouse("mouseReleased", beta.x, beta.y, { button: "right" });
-    await sleep(600);
+    // (review fix) no sleep here — it burned 600ms of the 900ms pulse
+    // before the poll even started watching
     const p3 = await flashPoll(d, "f === 400");
     check("S1: right-drag back SHORTENS the region (only the surviving row focuses)",
       p3.ok, `flash peak=${p3.peak}`);
@@ -558,6 +559,13 @@ async function S3(): Promise<void> {
     // exists — the one-shot-probe family's standard retrofit.
     const pulseCovered = (await flashCount(d)) > 1;
     check("S3: plain click focuses the subgroup (camera orients)", camMoved(camBefore, await camMovedFrom(d, camBefore)));
+    // REVIEW FIX (governing rule): the two NEGATIVE checks below claim
+    // "nothing happened" — they need the original >=600ms post-click window,
+    // not a sample at first camera motion (camMovedFrom returns in ~30ms; a
+    // late selection change or auto-scroll between then and 600ms was
+    // previously caught deterministically). Sampling LATER only widens what
+    // a negative can catch.
+    await sleep(600);
     check("S3: plain click selects nothing", (await pendingEntries(d)) === 0);
     check("S3: focus pulse covers the subgroup", pulseCovered);
     check("S3: no auto-scroll of the panel from 3D actions", (await scrollTop(d)) === scrollBefore);
@@ -618,8 +626,15 @@ async function S3(): Promise<void> {
     if (empty2) {
       await d.click(empty2.x, empty2.y);
       // poll for the frame-to-visible tween to center on the visible centroid
+      // (review fix) the poll mirrors BOTH checks below: centroid AND the
+      // fit-to-visible distance — the dolly can still be converging after
+      // the target centers
       await d.waitFor(`(()=>{ const b=${V}.debug.visibleBounds(); const t=${V}.controls.target;
-        return Math.hypot(t.x-b.center[0], t.y-b.center[1], t.z-b.center[2]) < ${d0 * 0.1}; })()`, 6000)
+        const off=Math.hypot(t.x-b.center[0], t.y-b.center[1], t.z-b.center[2]);
+        const fov=(${V}.camera.fov*Math.PI)/180;
+        const dist=${V}.camera.position.distanceTo(t);
+        const want=b.radius/Math.sin(fov/2)*1.4;
+        return off < ${d0 * 0.1} && Math.abs(dist-want) < want*0.15; })()`, 6000)
         .catch(() => { /* timeout falls through — the check below goes red */ });
       const framed = await d.evaluate<{ off: number; dist: number; want: number }>(`(()=>{
         const b=${V}.debug.visibleBounds();
@@ -1192,13 +1207,23 @@ async function S8(): Promise<void> {
     // whole-selection hide via the header still works (with the same sweep)
     const head = (await selHead(d, "/selection_1/"))!;
     await d.rightClick(head.x, head.y);
-    await sleep(150);
+    // family retrofit (this site's first-ever red, post-chapter lane): the
+    // purple sweep is a bounded ~900ms row flash — watch for it IN-PAGE
+    // from the click and capture the sighting ONCE (the immediate-once
+    // rule; a re-read after a wait could race the same envelope again).
+    // NOT retryable: re-right-clicking the header would TOGGLE the hide.
+    const purpleSwept = await d.evaluate<boolean>(`(async () => {
+      const t0 = performance.now();
+      while (performance.now() - t0 < 5000) {
+        if ([...document.querySelectorAll('#selections .sel-head')]
+          .some(h => h.classList.contains('row-flash-purple'))) return true;
+        await new Promise(r => setTimeout(r, 40));
+      }
+      return false;
+    })()`);
     check("S8: header right-click still hides the whole selection",
       (await committed(d))[1].hidden === true);
-    check("S8: header hide sweeps purple too", await d.evaluate<boolean>(`(()=>{
-      const heads=[...document.querySelectorAll('#selections .sel-head')];
-      return heads.some(h=>h.classList.contains('row-flash-purple'));
-    })()`));
+    check("S8: header hide sweeps purple too", purpleSwept);
 
     // overlap precedence: while selection_1 (alpha+gamma) is hidden, COMMIT a
     // new selection of alpha inside it — the newer selection SHOWS its points
@@ -4107,7 +4132,7 @@ async function S23(): Promise<void> {
     check("S23: (action) clicking approve", await clickBtn(".cl-approve"));
     // the tool result is a relay envelope — poll for it, not a fixed 250ms
     await d.waitFor(`[...document.querySelectorAll('.cl-tool')][1]?.textContent
-      ?.includes('example_tool_b ran create_sele alpha.group-0')`, 15000)
+      ?.includes('example_tool_b ran create_sele alpha.group-0') && !document.getElementById('claude-input').disabled`, 15000)
       .catch(() => { /* timeout falls through — the check below goes red */ });
     blocks = await toolBlocks();
     check("S23: approve → ok-styled result on the gated block",
@@ -4125,7 +4150,7 @@ async function S23(): Promise<void> {
       .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S23: (action) clicking deny", await clickBtn(".cl-deny"));
     await d.waitFor(`[...document.querySelectorAll('.cl-tool')][3]?.textContent
-      ?.includes('denied — example_tool_b did not run')`, 15000)
+      ?.includes('denied — example_tool_b did not run') && !document.getElementById('claude-input').disabled`, 15000)
       .catch(() => { /* timeout falls through — the check below goes red */ });
     blocks = await toolBlocks();
     check("S23: deny → error-styled result on the new gated block",
@@ -4389,7 +4414,11 @@ async function S24(): Promise<void> {
     // the stub streams on its own cadence; the ⤷ bind lines PERSIST once
     // rendered — poll for them instead of gambling fixed sleeps under load
     // (the S25 pattern, ledgered; S24 was its noted sibling)
-    await d.waitFor(`document.querySelectorAll('#claude-transcript .cl-bind').length >= 1 && !document.getElementById('claude-input').disabled`, 8000)
+    // NO turn-complete conjunct here (review fix): this turn HOLDS at the
+    // approval gate by design (the stub waits for the decision), so the
+    // input stays disabled until the approve below — waiting on it burned
+    // the full timeout every run. The bind line alone is this wait's state.
+    await d.waitFor(`document.querySelectorAll('#claude-transcript .cl-bind').length >= 1`, 8000)
       .catch(() => { /* timeout falls through — the check below goes red */ });
     let lines = await bindLines();
     check("S24: the auto tool's color result binds THROUGH THE PIPE (outcome line in its block)",
@@ -4439,7 +4468,12 @@ async function S24(): Promise<void> {
         })()`)), JSON.stringify(lines[3]));
 
     await typeInto("claude-input", "please scalar-size now");
-    await sleep(500);
+    // (review fix) the one wait in this scenario the sweep missed: poll the
+    // size buffer for the sentinel's write, mirroring the check
+    await d.waitFor(`(()=>{ const s=${V}.rep.state.size;
+      for (let i=0;i<50;i++) if (s[100+i] !== Math.fround((i/49)*6)) return false;
+      return true; })()`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S24: the size sentinel binds through the pipe (t*6 at #100-149)",
       await d.evaluate<boolean>(`(()=>{
         const s=${V}.rep.state.size;
@@ -4489,7 +4523,8 @@ async function S25(): Promise<void> {
     // standing fix (sample when the state exists; the timeout is the bound)
     await d.waitFor(
       `[...document.querySelectorAll('#claude-transcript .cl-bind')]
-        .some(n => /series "example_series" drawn \\(150 frames\\)/.test(n.textContent))`, 15000);
+        .some(n => /series "example_series" drawn \\(150 frames\\)/.test(n.textContent))`, 15000)
+      .catch(() => { /* timeout falls through — the checks below go red */ });
     check("S25: the ⤷ line reports the draw",
       (await bindLines()).some((l) => /series "example_series" drawn \(150 frames\)/.test(l.text)));
     check("S25: the SVG line has one vertex per frame",
@@ -4550,7 +4585,8 @@ async function S25(): Promise<void> {
     await typeInto("claude-input", "please series-mismatch now");
     await d.waitFor(
       `[...document.querySelectorAll('#claude-transcript .cl-bind')]
-        .some(n => /series length mismatch/.test(n.textContent))`, 15000);
+        .some(n => /series length mismatch/.test(n.textContent))`, 15000)
+      .catch(() => { /* timeout falls through — the checks below go red */ });
     check("S25: a length-mismatched series produces the ⤷ error line",
       (await bindLines()).some((l) =>
         l.text === "⤷ series length mismatch: 7 values for 150 frames — not drawn" &&
@@ -5084,26 +5120,29 @@ async function S29(): Promise<void> {
       .join("\n");
   const manifestBefore = realManifest();
   const modsDir = mkdtempSync(join(tmpdir(), "molaro-s29-mods-"));
-  for (const f of readdirSync(realDir).filter((x) => x.endsWith(".py"))) {
-    copyFileSync(join(realDir, f), join(modsDir, f));
-  }
-  process.env.E2E_MODS_DIR = modsDir; // the bridge child inherits process.env
   const fixtureFile = join(modsDir, "zz_fixture.py");
-  const shippedFiles = readdirSync(modsDir).filter((f) => f.endsWith(".py")).sort();
-  const examples = shippedFiles.map((f) => join(modsDir, f));
-  const shippedNames = shippedFiles.map((f) => f.replace(/\.py$/, ""));
-  const allWorkspace = [...shippedNames, "broken_ramp"];
-  writeFileSync(fixtureFile, [
-    "# molaro-mod",
-    "# name: zz_fixture",
-    "# kind: analysis",
-    "# produces: per-frame-series",
-    "",
-    "def compute(data, target_indices):",
-    "    return [0.0] * data.give_header().n_frames",
-    "",
-  ].join("\n"), "utf-8");
   try {
+    // (review fix) setup lives INSIDE the try: a failure in the copies or
+    // the fixture write still reaches the finally, so the temp dir can
+    // never be orphaned
+    for (const f of readdirSync(realDir).filter((x) => x.endsWith(".py"))) {
+      copyFileSync(join(realDir, f), join(modsDir, f));
+    }
+    process.env.E2E_MODS_DIR = modsDir; // the bridge child inherits process.env
+    const shippedFiles = readdirSync(modsDir).filter((f) => f.endsWith(".py")).sort();
+    const examples = shippedFiles.map((f) => join(modsDir, f));
+    const shippedNames = shippedFiles.map((f) => f.replace(/\.py$/, ""));
+    const allWorkspace = [...shippedNames, "broken_ramp"];
+    writeFileSync(fixtureFile, [
+      "# molaro-mod",
+      "# name: zz_fixture",
+      "# kind: analysis",
+      "# produces: per-frame-series",
+      "",
+      "def compute(data, target_indices):",
+      "    return [0.0] * data.give_header().n_frames",
+      "",
+    ].join("\n"), "utf-8");
     await withDriver(async (d) => {
       const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
       const cmd = (text: string) =>
@@ -5281,7 +5320,8 @@ async function S30(): Promise<void> {
     // scales with machine load — the slowest single wait in the suite
     await d.waitFor(
       `[...document.querySelectorAll('#term-log .term-line')]
-        .some(l => /rg → series "rg" \\(98 frames\\)/.test(l.textContent))`, 30000);
+        .some(l => /rg → series "rg" \\(98 frames\\)/.test(l.textContent))`, 30000)
+      .catch(() => { /* timeout falls through — the checks below go red */ });
     const rgLines = await logLines();
     check("S30: rg acknowledges over all atoms, then reports the plot hand-off",
       rgLines.some((l) => l.text === "running rg on 3341 points…") &&
@@ -5681,7 +5721,7 @@ async function S32(): Promise<void> {
       const flashBase = await d.samplePatch({
         centerExpr: `${V}.debug.projectPoint(${probe})`, half: 15, classify: flashClassify,
       });
-      let flash = { count: -1, strength: -1, frames: 0 };
+      let flash = { count: -1, strength: -1, frames: 0, seen: -1 };
       let flashAttempts = 0;
       for (let attempt = 0; attempt < 6 && flash.count <= flashBase.count + 10; attempt++) {
         flashAttempts = attempt + 1;
@@ -7445,7 +7485,8 @@ async function S45(): Promise<void> {
         `[...document.querySelectorAll('#claude-transcript .cl-bind')].map(n=>n.textContent)`);
     const seekTo = async (f: number): Promise<void> => {
       await d.evaluate(`${V}.player.seek(${f})`);
-      await d.waitFor(`${V}.player.frame === ${f}`, 10000);
+      await d.waitFor(`${V}.player.frame === ${f}`, 10000)
+        .catch(() => { /* timeout falls through — downstream checks go red */ });
       await d.evaluate(`(async () => { for (let i=0;i<2;i++) await new Promise(r=>requestAnimationFrame(r)); })()`);
       await sleep(120); // the frameChanged → plotFrame relay hop
     };
@@ -7628,6 +7669,11 @@ const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S
  * S30 is reliably green (8/8). Single-sourced here; the runner reads it
  * via --list. */
 const EXCLUSIVE: readonly string[] = ["S30"];
+// (review fix) EXCLUSIVE must name real scenarios — a typo would silently
+// drop the member from BOTH lanes (the runner filters by membership)
+for (const n of EXCLUSIVE) {
+  if (!(n in all)) throw new Error(`EXCLUSIVE names unknown scenario: ${n}`);
+}
 /** Every scenario belongs to EXACTLY ONE lane — single-sourced here, next to
  * the scenario table, and asserted exhaustive in BOTH directions below, so a
  * scenario can never silently fall out of both lanes or into neither.

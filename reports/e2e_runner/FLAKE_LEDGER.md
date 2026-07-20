@@ -10,7 +10,9 @@ every isolated set, not only on reds.
 - O-1 tree: 3 runs, 1 red (s32_o1_iso_*) ← first isolated red → full bisect
 - clean HEAD 1032622: 5 runs, 0 red (s32_head_*)
 - O-1 tree, same window: 5 runs, 0 red (s32_o1b_*)
-- **rolling: 22 runs, 1 red (~4.5%)**
+- C-2b tree (s32_c2b_iso_*, 3 runs, 0 red — omitted in the original
+  tally, restored by the post-chapter review)
+- **rolling: 25 runs, 1 red (~4%)**
 
 ## S23 "sentinel renders an error block" (scripted-stub sampling; 1st seen 2026-07-18)
 - B-2 tree: 3 runs, 0 red (s23_b2_iso_*); in-lane red ×1 under load
@@ -59,7 +61,8 @@ every isolated set, not only on reds.
   this time; with bisect #2's 5/5≡5/5 and S9's 3/5-vs-1/5, the picture is
   now consistently: the race is real on both trees and LARGER BUNDLES
   WORSEN THE ODDS. n stays small; direction is no longer ambiguous.)
-- **rolling: 32 isolated runs, 3 red (~9% and climbing with bundle size)**
+- **rolling: 35 isolated runs, 3 red (~8.6% and climbing with bundle
+  size; corrected by the post-chapter review to include s32_c2b_iso)**
 - CONSEQUENCE: the hold-the-envelope retrofit is no longer next-session
   hygiene — it is the FIRST item, before any further bundle growth.
 
@@ -124,7 +127,7 @@ converted, none weakened; each poll asserts the EXACT predicate its check
 does (a narrower poll would return before the check's other conjuncts
 held — a bug I hit and fixed, so every poll now mirrors its full check).
 - S28 (scatter): fixed sleeps before bind lines, scatter draws, highlight
-  moves, click-seeks → polls. Isolated 17/17.
+  moves, click-seeks → polls. Isolated 16/16.
 - S25/S30 (marker relay): seek → frameChanged → plotFrame → marker was
   sampled once across a fixed sleep; now polled for the marker to REACH
   the target position. STRENGTHENED: S30's live-marker check proves a
@@ -137,7 +140,7 @@ held — a bug I hit and fixed, so every poll now mirrors its full check).
   proven sibling (an under-specified outlier reconciled, not "widen to
   be safe") AND added catch-fall-through so a slow load yields an
   assertable red with detail, never a crash. Plus the marker/relay/swap
-  sleeps → full-predicate polls. Isolated 18/18.
+  sleeps → full-predicate polls. Isolated 17/17.
 - THE UNIFYING ROOT CAUSE (worth recording): in the claude scenarios,
   each `typeInto(claude-input, …)` needs the PREVIOUS turn ENDED (input
   re-enabled) or it types into a disabled input and never fires — the
@@ -210,19 +213,22 @@ held — a bug I hit and fixed, so every poll now mirrors its full check).
   chromes by PID, clear stale /tmp/cdp-* dirs, re-run.
 DECLINED, with reasons (not weakened): S7 sticky rows and S26 layout
 rects sample PERSISTENT states behind settle sleeps — staleness risk,
-not envelope loss; the defect doesn't match. S1/S2/S10 flashCount reads
-are one-hop immediate-and-once (the S3 rule) and stay. Steady-state
-pixel pins (redCount/patchCounts through captureB64 + settle-frames)
-keep their form: nothing bounded expires under them.
+not envelope loss; the defect doesn't match. S10's flash-parity matrix
+reads are immediate-and-once after each command (the S3 rule) and stay.
+(S1/S2 were ALSO originally declined here as "immediate-and-once" — that
+was wrong; they are sleep-then-read and were converted to flashPoll in
+the flash-pulse cluster below. This entry is the corrected record.)
+Steady-state pixel pins (redCount/patchCounts through captureB64 +
+settle-frames) keep their form: nothing bounded expires under them.
 
 ### Tallies (every run, green or red — denominator grows on all)
-- pre-retrofit rolling: 32 isolated runs, 3 red (~9%), bundle-coupled.
+- pre-retrofit rolling: 35 isolated runs, 3 red (~8.6%), bundle-coupled.
 - post-retrofit S32 isolated, SAME tree/condition that gave 2/5 red:
   run 0 (pre-hardening primitive) green; hardened runs 1–5: 5/5 green,
   flash attempts=1 every run, margins 900 vs base+10 (was >10 absolute
   through a race), sweep frames 46–80, witnessed peaks 0.62–1.00.
 - deliberate-break runs: 2 runs, red both (5 and 7 FAILURES) — by design.
-- post-revert singles: S5 13/13, S23 all green, S24 ALL PASS (after the
+- post-revert singles: S5 12/12, S23 all green, S24 ALL PASS (after the
   two precondition polls), S27 all green (pixel pins 4/4 both).
 - **rolling post-retrofit: 6 isolated S32 runs, 0 red**
 
@@ -237,6 +243,15 @@ SIGKILL landed after the rm-all `y` — the leftover temp dir held 0 of
 its 9 files (the deletion really ran; the finally never did), the real
 directory byte-identical, git-clean. S29 leaves the runner's EXCLUSIVE
 set: the reason for exclusivity no longer exists.
+
+## S8 "header hide sweeps purple too" (1st seen 2026-07-20, post-review lane)
+- in-lane: 1 red ×1 — the FIRST S8 red ever (green in all ten chapter
+  lanes). The purple sweep is a bounded ~900ms row flash sampled ONCE
+  after sleep(150) — the family defect in a site the transient scans
+  missed (its sleep sits farther above the read than the scan windows).
+- FIX: watch in-page from the click, capture the sighting ONCE (the
+  immediate-once rule). NOT retryable — re-right-clicking the header
+  would TOGGLE the hide. Post-fix isolated: 35/35.
 
 ## RULED (2026-07-19, owner) — the S32 reclassification and the order it dictates
 S32 is not a bad probe: it is a probe whose margin SHRINKS AS THE PRODUCT

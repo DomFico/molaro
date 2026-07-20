@@ -17,7 +17,7 @@
  * HUD renders.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -140,6 +140,12 @@ export class E2EDriver {
     // check; a genuinely-broken chrome still fails after the retry.
     for (let attempt = 0; attempt < 2; attempt++) {
       const dataDir = `/tmp/cdp-${o.cdpPort}-${attempt}`;
+      // (review fix) the dir path is deterministic per (port, attempt), so a
+      // PRIOR run's leftovers — including a stale SingletonLock — live at
+      // exactly this path. Recreate it fresh every launch: kills the stale-
+      // lock failure cause at the root and caps /tmp accumulation at two
+      // dirs per port instead of growing per run.
+      rmSync(dataDir, { recursive: true, force: true });
       this.chrome = spawn(
         "google-chrome",
         [

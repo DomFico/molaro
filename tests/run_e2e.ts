@@ -13,9 +13,10 @@
  *   node tests/run_e2e.ts S32 S34 S36     # a subset
  *
  * The scenario list and the EXCLUSIVE set come from `redesign.ts --list` —
- * the ONE source, next to the scenario table (never hardcoded here). An
- * exclusive scenario (S29 mutates the shared .molaro/mods on disk) runs
- * ALONE after the pool drains.
+ * the ONE source, next to the scenario table (never hardcoded here); see
+ * that table's comment for WHY a scenario is exclusive (currently S30: the
+ * sole real-mdtraj scenario is too heavy to share the pool). An exclusive
+ * scenario runs ALONE after the pool drains.
  *
  * Output discipline:
  *   - live: one `▶ started` / `✔|✘ finished` line per scenario, plus every

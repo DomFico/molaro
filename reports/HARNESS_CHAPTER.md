@@ -56,7 +56,7 @@ keep rising, pixels never draw). Run twice.
   lanes): each was observed RED under peak parallel load before
   conversion (S28 `[]`, S30 "no series"/"0→0", S45 crash, S25 marker 64
   vs 644, S23 deny-click miss, S9 flash=0) — load-real can-fail evidence,
-  not synthetic. It took seven lanes: the family surfaces one member per
+  not synthetic. It took ten full-lane runs: the family surfaces one member per
   loaded run, so after S30's second appearance I ran a comprehensive scan
   that now finds ZERO fixed-sleep-then-touch-a-transient sites remaining.
 
@@ -87,8 +87,9 @@ full lane byte-identical on the pixel pins.
 
 ## S32 tally at the loaded condition, before / after
 
-- Before: rolling 32 isolated runs, 3 red (~9%, climbing with bundle
-  size) — SAME tree/condition that gave 2/5.
+- Before: rolling 35 isolated runs, 3 red (~8.6%, climbing with bundle
+  size; tally corrected by the post-chapter review) — SAME tree/condition
+  that gave 2/5.
 - After (hardened primitive), same condition: **5/5 isolated runs green**,
   flash `attempts=1` every run, margins 900 vs base+10 (was >10 absolute
   through a race), sweep frames 46–80, witnessed peaks 0.62–1.00. Plus
@@ -106,6 +107,25 @@ anywhere in the window. This CORRECTS a call in an earlier draft of this
 report: I had listed S1/S2 flash reads as "immediate-and-once, already
 correct." They are not — they are sleep-then-read, and therefore family.
 Flagging the reversal rather than quietly fixing it.
+
+## Corrections from the post-chapter review (2026-07-20)
+
+An adversarial multi-agent review of the five commits found and fixed:
+one governing-rule violation (S3's two NEGATIVE checks lost their >=600ms
+post-click window when the settle was deleted — restored); an
+unsatisfiable wait predicate in S24 (the first turn HOLDS at the approval
+gate, so its input-enabled conjunct burned the full timeout every run —
+removed for that wait only); a missing `seen` field on S32's flash
+initializer (a TypeError-instead-of-red on total starvation, and the one
+`npm run typecheck` error in the repo — typecheck is now part of the
+gate); poll predicates widened to mirror their full checks (S3 fit
+distance, S23 approve/deny turn-end); catches added to the four remaining
+bare in-scenario waitFors; the S24 scalar-size sleep the sweep missed;
+the driver now recreates its deterministic chrome user-data-dirs fresh
+per launch (kills the stale-SingletonLock cause at the root and caps /tmp
+accumulation); and the doc corrections in this file. Also for the record:
+commit 6687ce5's message omits S3 from its converted-scenario list — the
+S3 conversions are part of that commit.
 
 ## Two calls at the rule's edge (named, not buried)
 
@@ -169,17 +189,20 @@ submitted (deletion in flight). Result — the leftover temp dir held 0 of
 its 9 files (the deletion really ran; the finally never did), the real
 `.molaro/mods` manifest byte-identical, `git status` clean. The old
 snapshot-and-finally form protected only a clean exit; this protects an
-abort structurally. S29 also LEAVES the runner's EXCLUSIVE set (now
-empty): the shared-disk reason for its exclusivity no longer exists.
+abort structurally. S29 also LEAVES the runner's EXCLUSIVE set — and in
+the same commit S30 takes the vacated slot for its own (scheduling)
+reason, so the set was never empty in committed history.
 
 ## Rolling-baseline numbers
 
 - S32: pre 32/3 red → post 6/0 red at the same loaded condition.
-- Family conversions verified isolated green: S5 13/13, S23, S24 (after
+- Family conversions verified isolated green: S5 12/12, S23, S24 (after
   two real precondition races its sleeps had masked), S25, S27 (pixel
-  pins 4/4), S28 17/17, S30 (real adk, marker 705→728), S45 18/18.
+  pins 4/4), S28 16/16, S30 (real adk, marker 705→728), S45 17/17.
 - Unit suite: 409/409. Full parallel lane: green (see
-  reports/e2e_runner/harness_chapter_lane5.log).
+  reports/e2e_runner/harness_chapter_lane10.log — 956 checks, 0 failed,
+  ALL PASS; note the lane logs are machine-local (reports/ is gitignored;
+  this report and FLAKE_LEDGER.md are the tracked record)).
 
 ## Item 3 housekeeping
 
