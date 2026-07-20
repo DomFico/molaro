@@ -1557,6 +1557,31 @@ export function makeUnbindHandler(ctx: CommandContext): CommandHandler {
 
 /** `bindings` — read-only list of the channel bindings (the `mods`/`ls`
  * precedent). */
+/**
+ * `channels` — read-only listing of the DECLARED channels (bare, no target).
+ * The bindable vocabulary: what `bake`/`bind` can read. Reads ctx.channels()
+ * LIVE (header.channels, which a `produces: channel` mod grows mid-session),
+ * so a produced channel appears here — and in get_context — the instant it
+ * declares. Symmetric with `bindings`/`styles`/`shapes`.
+ */
+export function makeChannelsHandler(ctx: CommandContext): CommandHandler {
+  return (args: string): CommandResult => {
+    if (args.trim() !== "") {
+      return { status: "error", message: "channels takes no arguments — it lists the declared channels" };
+    }
+    const chans = ctx.channels();
+    if (chans.length === 0) return { status: "ok", message: "no channels" };
+    const bound = new Set(ctx.listBindings().map((b) => b.channel));
+    const rows = chans.map((c) => {
+      const width = c.components === 3 ? "vector (3-wide)" : "scalar";
+      const range = c.min !== undefined && c.max !== undefined ? ` [${c.min}, ${c.max}]` : "";
+      const animatable = c.scope === "per_point_per_frame" ? " · per-frame" : ` · ${c.scope} (static)`;
+      return `  ${c.name} — ${width}${range}${animatable}${bound.has(c.name) ? " · bound" : ""}`;
+    });
+    return { status: "ok", message: ["channels (bake/bind read these):", ...rows].join("\n") };
+  };
+}
+
 export function makeBindingsHandler(ctx: CommandContext): CommandHandler {
   return (args: string): CommandResult => {
     if (args.trim() !== "") {
@@ -2305,6 +2330,11 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "unbind",
     makeUnbindHandler(ctx),
     "release binding coverage element-wise, one axis or all — unbind <target> [<axis>] | unbind all [<axis>] (values stay as last applied; one undo op)",
+  );
+  registry.register(
+    "channels",
+    makeChannelsHandler(ctx),
+    "read-only list of the declared channels — the bindable vocabulary bake/bind read (bare — takes no target)",
   );
   registry.register(
     "bindings",

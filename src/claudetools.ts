@@ -117,6 +117,49 @@ export interface SceneContext {
    * defaults from representation.ts, so the model states the true baseline
    * instead of guessing (and knows undo restores it). */
   baseLook: { pointSize: number; opacity: number; color: string };
+  /** LIVE representation state, read from the running viewer (the `channels` /
+   * `bindings` / `shapes` / `styles` verbs) at get_context time — NOT from the
+   * boot-time cached header. This is the whole point: a channel a mod declares
+   * mid-session, a binding just made, a shape just drawn all appear in the
+   * NEXT get_context, so the model never hears that a thing it just created
+   * doesn't exist. Verbatim verb output (already model-legible). */
+  liveState: LiveState;
+}
+
+/** The live representation sections get_context reports — each the verbatim
+ * output of a read-only viewer verb, gathered fresh per call. */
+export interface LiveState {
+  channels: string;
+  bindings: string;
+  shapes: string;
+  styles: string;
+}
+
+/**
+ * Gather the LIVE representation sections by querying the running viewer —
+ * the frozen-peek antidote. `query(verb)` is the SAME id-correlated
+ * viewer round-trip get_context already uses for committed selections; each
+ * verb reads the viewer's current state (header.channels a mod may have
+ * grown, the binding registry, the shape/style registries), so what this
+ * returns is exactly what the user sees. Pure (no vscode) → unit-testable:
+ * feed it a query and its output tracks the query, proving get_context can
+ * never report a stale channel set. A failed query degrades to a marker
+ * string, never throws (get_context must always answer).
+ */
+export async function gatherLiveState(
+  query: (verb: string) => Promise<{ ok: boolean; message: string }>,
+): Promise<LiveState> {
+  const one = async (verb: string): Promise<string> => {
+    try {
+      return (await query(verb)).message;
+    } catch {
+      return "(unavailable)";
+    }
+  };
+  const [channels, bindings, shapes, styles] = await Promise.all([
+    one("channels"), one("bindings"), one("shapes"), one("styles"),
+  ]);
+  return { channels, bindings, shapes, styles };
 }
 
 /** Example targets get_context advertises to the model. The whole-system token
@@ -205,6 +248,9 @@ export function buildToolDefs(deps: ToolDeps) {
         : "";
       const base = `Base look (defaults for any element not written by a command; undo restores these): ` +
         `point size ${c.baseLook.pointSize}, opacity ${c.baseLook.opacity}, color ${c.baseLook.color}\n`;
+      // LIVE representation state — read from the running viewer THIS call, so
+      // a channel/binding/shape created mid-session is visible immediately.
+      const live = c.liveState;
       return ok(
         `System: ${c.system}\nAtoms (N): ${c.nAtoms}\nFrames (T): ${c.nFrames}\n` +
         `Categories: ${c.categories.join(", ") || "(none)"}\n` +
@@ -212,6 +258,10 @@ export function buildToolDefs(deps: ToolDeps) {
         `Subgroups: ${c.subgroupCount}\n` + kinds + types + base +
         `Example targets: ${c.targetExamples.join(", ") || "all"}\n` +
         `Committed selections:\n${c.committedSelections}\n` +
+        `Channels:\n${live.channels}\n` +
+        `Bindings:\n${live.bindings}\n` +
+        `Shapes:\n${live.shapes}\n` +
+        `Styles:\n${live.styles}\n` +
         `Registered mods:\n${modLines}`,
       );
     },

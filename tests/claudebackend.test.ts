@@ -28,6 +28,7 @@ function sampleContext(): SceneContext {
     subgroupKinds: ["ALA", "ARG", "ASP", "GLU", "LYS"], subgroupKindsCapped: false,
     pointTypes: ["C", "N", "O", "S"], pointTypesCapped: false,
     targetExamples: ["all", "polymer"], committedSelections: "(none)",
+    liveState: { channels: "no channels", bindings: "no bindings", shapes: "(shapes)", styles: "styles:\n  standard (default)" },
     mods: [{ name: "myrmsf", produces: "per-point-scalar", axis: "color" }],
     baseLook: { pointSize: 3, opacity: 1, color: "#e6e6e6" },
   };

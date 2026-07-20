@@ -7713,6 +7713,12 @@ async function S46(): Promise<void> {
     check("S46: a coherent channel declares WITHOUT a coherence warning",
       !(await someAsync(`/⚠/`)), JSON.stringify(await lastAsync()));
 
+    // -- the `channels` verb lists it LIVE (the exact source get_context reads,
+    //    proving a mid-session channel is visible to the assistant at once) ---
+    const chans = await cmd("channels");
+    check("S46: `channels` lists the produced channel live (per-frame vector)",
+      /flow_dir — vector \(3-wide\) · per-frame/.test(chans.message), chans.message);
+
     // -- it is bindable IMMEDIATELY, same machinery as a header channel --------
     const bind = await cmd("bind all flow_dir orientation");
     check("S46: the produced channel binds to orientation with no reload",
@@ -7720,6 +7726,9 @@ async function S46(): Promise<void> {
     check("S46: bindings lists the produced channel's row",
       /flow_dir → orientation on "all"/.test((await cmd("bindings")).message),
       (await cmd("bindings")).message);
+    check("S46: `channels` now flags the produced channel as bound",
+      /flow_dir .* · bound/.test((await cmd("channels")).message),
+      (await cmd("channels")).message);
 
     // -- it drives the axis and ANIMATES across a frame flip -------------------
     const oriAt = (f: number) =>

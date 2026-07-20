@@ -91,3 +91,70 @@ test("get_context advertises ONLY categories that have atoms (empty domain categ
   // and every actually-advertised example resolves:
   for (const ex of buildTargetExamples(present)) assert.ok(resolveCount(header, ex) > 0, ex);
 });
+
+// ---------------------------------------------------------------------------
+// LIVE state (B-3 prompt pass, Half 1): get_context reports channels /
+// bindings / shapes / styles from the RUNNING VIEWER, never the cached
+// header — so a thing created mid-session is visible in the NEXT call.
+// ---------------------------------------------------------------------------
+import { gatherLiveState } from "../src/claudetools.ts";
+import { makeChannelsHandler } from "../webview/commands.ts";
+
+test("gatherLiveState reflects the LIVE query — a mid-session channel appears at once", async () => {
+  // a viewer whose `channels` output GROWS between two calls (a mod declared
+  // one); every other verb is stubbed. gatherLiveState must track the query,
+  // proving get_context reads live state, not a boot snapshot.
+  let declared = false;
+  const query = async (verb: string) => {
+    if (verb === "channels") {
+      return { ok: true, message: declared
+        ? "channels (bake/bind read these):\n  energy — scalar · per-frame\n  produced_dir — vector (3-wide) · per-frame"
+        : "channels (bake/bind read these):\n  energy — scalar · per-frame" };
+    }
+    if (verb === "bindings") return { ok: true, message: "no bindings" };
+    if (verb === "shapes") return { ok: true, message: "shapes:\n  points: (none)" };
+    if (verb === "styles") return { ok: true, message: "styles:\n  standard (default)" };
+    return { ok: false, message: `unknown ${verb}` };
+  };
+
+  const before = await gatherLiveState(query);
+  assert.ok(!before.channels.includes("produced_dir"),
+    "the produced channel must not appear before it is declared");
+
+  declared = true; // a `produces: channel` mod ran mid-session
+  const after = await gatherLiveState(query);
+  assert.ok(after.channels.includes("produced_dir"),
+    "the produced channel MUST appear in the very next get_context (live, not cached)");
+  assert.ok(after.bindings.includes("no bindings") && after.styles.includes("standard"),
+    "the other live sections are gathered too");
+});
+
+test("gatherLiveState degrades a failed query to a marker, never throws", async () => {
+  const query = async (verb: string) => {
+    if (verb === "channels") throw new Error("viewer gone");
+    return { ok: true, message: `${verb}-ok` };
+  };
+  const live = await gatherLiveState(query);
+  assert.equal(live.channels, "(unavailable)");
+  assert.equal(live.shapes, "shapes-ok");
+});
+
+test("the `channels` verb lists declared channels live, flags per-frame vs static and bound", () => {
+  // a minimal CommandContext exercising only what makeChannelsHandler reads.
+  const ctxChannels = [
+    { name: "mass", scope: "per_point" as const, components: 1, min: 0.5, max: 5 },
+    { name: "energy", scope: "per_point_per_frame" as const, components: 1 },
+    { name: "produced_dir", scope: "per_point_per_frame" as const, components: 3 },
+  ];
+  const ctx = {
+    channels: () => ctxChannels,
+    listBindings: () => [{ channel: "energy" }],
+  } as unknown as Parameters<typeof makeChannelsHandler>[0];
+  const r = makeChannelsHandler(ctx)("");
+  assert.equal(r.status, "ok");
+  assert.match(r.message, /mass — scalar \[0\.5, 5\] · per_point \(static\)/);
+  assert.match(r.message, /energy — scalar · per-frame · bound/);
+  assert.match(r.message, /produced_dir — vector \(3-wide\) · per-frame/);
+  // no arguments allowed (bare verb)
+  assert.equal(makeChannelsHandler(ctx)("all").status, "error");
+});

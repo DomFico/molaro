@@ -27,7 +27,7 @@ import { parseClaudeCommand, type ClaudeCommand } from "../webview/claudemodel.t
 import { createClaudeStub } from "../webview/claudestub.ts";
 import { DEFAULT_COLOR, DEFAULT_OPACITY, DEFAULT_SIZE } from "../webview/representation.ts";
 import { createClaudeBackend, type ClaudeBackend } from "./claudebackend.ts";
-import { buildTargetExamples, type SceneContext } from "./claudetools.ts";
+import { buildTargetExamples, gatherLiveState, type SceneContext } from "./claudetools.ts";
 import { relaysTerminalMessageToViewer, resolveModDeletion } from "./hostmessages.ts";
 import { clearApiKey, NO_KEY_HINT, promptAndStoreApiKey, resolveApiKey } from "./claudeauth.ts";
 import { createPlotHost } from "../webview/plothost.ts";
@@ -360,6 +360,10 @@ function openPanel(
     const h = cachedHeader;
     if (!h) return null;
     const ls = await runViewerCommand("ls").catch(() => ({ ok: true, message: "(unavailable)" }));
+    // LIVE representation state via the SAME viewer round-trip — NEVER the
+    // cached header, so a mid-session declared channel / new binding / drawn
+    // shape appears in this get_context, not the next reload.
+    const liveState = await gatherLiveState(runViewerCommand);
     const mods = loadWorkspaceMods(producerLog, modPaths).map((m) => ({
       name: m.name, produces: m.produces, axis: m.axis, description: m.description,
     }));
@@ -417,6 +421,7 @@ function openPanel(
       // resolve-every-example guard (tests/get_context.test.ts) enforces it.
       targetExamples: buildTargetExamples(categories),
       committedSelections: ls.message,
+      liveState,
       mods,
     };
   };
