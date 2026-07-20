@@ -271,10 +271,10 @@ export function buildToolDefs(deps: ToolDeps) {
     "write_mod",
     "Write (or overwrite) an analysis mod as a .molaro/mods/<name>.py file. The " +
       "FULL Python source is shown to the human for approval before it is saved. " +
-      "`produces` is one of per-point-scalar (declare axis: color|size|opacity), " +
-      "per-frame-series, scatter, or commands (a macro returning list[str] — no " +
-      "axis). Author it to the mod contract in the system prompt. This does not " +
-      "run it — call run_mod after it is saved.",
+      "`produces` is one of the values in this tool's schema; the system prompt's " +
+      "mod contract gives each kind's return shape (declare axis: color|size|" +
+      "opacity only for per-point-scalar). Author it to that contract. This does " +
+      "not run it — call run_mod after it is saved.",
     {
       name: z.string().describe("mod name: lowercase, [a-z][a-z0-9_-]*"),
       // DERIVED from the mod system's single source (recipes.MOD_PRODUCES /
@@ -307,14 +307,15 @@ export function buildToolDefs(deps: ToolDeps) {
 
   const runMod = tool(
     "run_mod",
-    "Run a registered mod on a target, binding its typed result to the viewer " +
-      "(a per-frame-series draws a plot curve; a per-point-scalar colors/sizes " +
-      "the structure; a scatter draws points). The target is a grammar address " +
-      "like @all, a category (alpha), or alpha.group-0. On failure you get the " +
+    "Run a registered mod on a target; its typed result reaches the viewer per " +
+      "the mod's `produces` (the system prompt's mod contract). The target is a " +
+      "grammar address: the bare keyword `all` for the whole system (NOT `@all`, " +
+      "which is the union of committed selections and is empty when there are " +
+      "none), a category like `polymer`, or `polymer.A`. On failure you get the " +
       "Python traceback back — read it and fix the mod. Gated for approval.",
     {
       name: z.string().describe("the mod's name"),
-      target: z.string().describe("grammar target, e.g. @all, alpha, alpha.group-0"),
+      target: z.string().describe("grammar target: `all` (whole system), a category, or e.g. polymer.A"),
     },
     async (args) => {
       const r = await deps.runMod(String(args.name), String(args.target));

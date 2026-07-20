@@ -187,8 +187,20 @@ def run_mod(source, code: str, target_indices, timeout_s: float, install_channel
             # xLabel?, yLabel?}. The client re-validates against the mod's
             # declared `produces`; this pass keeps the wire well-formed.
             if not (finite_floats(values.get("x")) and finite_floats(values.get("y"))):
+                # A dict that is not a channel (name+values), not a figure
+                # (png), and not a scatter (x+y) lands here. NAME all three
+                # accepted dict shapes — a channel/figure author who got a key
+                # wrong (e.g. returned {"channel", "frames"} for a channel)
+                # otherwise sees only "must carry x and y" and cannot tell what
+                # shape the runner actually wants.
                 return json.dumps(
-                    {"error": "a dict return must carry x and y as flat lists of finite floats"}
+                    {"error": (
+                        "unrecognized dict return. A dict must be one of: a channel "
+                        '{"name": str, "values": [flat frame-major floats], "components": 1 or 3}; '
+                        'a figure {"png": base64, "width": int, "height": int, "axes": [...]}; '
+                        'or a scatter {"x": [...], "y": [...]}. '
+                        "Got keys: " + ", ".join(sorted(str(k) for k in values.keys()))
+                    )}
                 ).encode("utf-8")
             out = {
                 "x": [float(v) for v in values["x"]],

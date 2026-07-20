@@ -194,6 +194,24 @@ def main() -> int:
           sorted(chunk_after_reject.channels.keys()) == ["energy", "flow"])
     validate_frame_chunk(chunk_after_reject, hdr_after_reject)
 
+    # -- a MALFORMED channel dict names all three shapes (the cartoon-test find) -
+    # A model that can't read channel_flow.py reconstructs the return dict from
+    # memory and gets keys wrong (observed live: {"channel","components","frames"}
+    # instead of {"name","values","components"}). Before, that hit the scatter
+    # arm and got only "must carry x and y" — useless for a channel author. The
+    # error must now name the channel/figure/scatter shapes AND the keys it got.
+    src5 = SyntheticSource(n_points=N, n_frames=T, seed=5)
+    wrong_shape = (
+        "def compute(data, target_indices):\n"
+        '    return {"channel": "disp", "components": 1, "frames": [[0.0]]}\n'
+    )
+    r5 = json.loads(_run(src5, [{"type": "run_mod", "code": wrong_shape, "target_indices": [0]}])[0].decode())
+    msg = r5.get("error", "")
+    check("a malformed channel dict's error NAMES the channel shape",
+          '"name"' in msg and '"values"' in msg and "components" in msg, msg[:160])
+    check("...and also names figure + scatter, and the keys it actually got",
+          "figure" in msg and "scatter" in msg and "channel, components, frames" in msg, msg[:220])
+
     print("ALL PASS" if failures == 0 else f"{failures} FAILURES")
     return 0 if failures == 0 else 1
 
