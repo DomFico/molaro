@@ -409,10 +409,26 @@ test("system prompt injects live context AND keeps every correctness rule", () =
 
 test("system prompt teaches the command grammar and the command-vs-mod choice (Part C)", () => {
   const p = buildSystemPrompt(sampleContext());
-  // command-vs-mod guidance (corrected — run_command is primary, mods compute)
-  assert.match(p, /Use `run_command` for anything the viewer can already express/);
-  assert.match(p, /Write a mod only when you must COMPUTE something/);
-  assert.match(p, /do not write a mod for it/);
+  // command-vs-mod guidance — the precedence LADDER (stop at the first that
+  // fits): rung 1 keeps commands ahead of mods; rung 5 is the categorical fence
+  assert.match(p, /stop at the first that fits/);
+  assert.match(p, /Do not write a mod for something a command says directly/);
+  assert.match(p, /A scalar mod cannot express/);
+  assert.match(p, /it has one ramp and writes every point/);
+  // the eight surfaces the pass made reachable: bake/bind, style/shape, and
+  // the two new produces kinds (channel, figure) — guarded so they can't rot
+  assert.match(p, /bake <target> <channel> <axis>/);
+  assert.match(p, /bind <target> <channel> <axis>/);
+  assert.match(p, /produces: channel/);
+  assert.match(p, /produces: figure/);
+  assert.match(p, /channel_flow\.py/);       // points at the template, not a schema
+  assert.match(p, /nothing bound to `orientation` draws \*\*nothing\*\*/); // the shape dependency
+  // NEGATIVE guard (the stale-claim class): the prompt must not tell Claude it
+  // CANNOT produce a visual kind it actually can. `produces: figure` renders
+  // histograms/contact maps; a leftover "only the three result kinds"
+  // prohibition would suppress it. This trips if a stale count/prohibition
+  // returns — the "grep the prompt for what Claude can't do" checklist, codified.
+  assert.doesNotMatch(p, /cannot produce histograms|only the three (result kinds|above)|one of the three result kinds/);
   // the grammar reference: the level model + the bond verbs + residue targeting
   assert.match(p, /category → group → subgroup → point/);
   assert.match(p, /colorbonds/);                 // bond verbs exist
