@@ -19,7 +19,7 @@
  */
 import http from "node:http";
 import { readFileSync, readdirSync, unlinkSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
@@ -31,15 +31,26 @@ import { TERMINAL_BODY, TERMINAL_CSS } from "../webview/terminalhud.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 
-// The harness's workspace mods: the REAL example files from .molaro/mods
+// THE one mods directory this bridge will ever scan OR unlink (the rm-mods
+// handler below uses the same const — one variable, so the scan and the
+// deletion surface cannot disagree). E2E_MODS_DIR points a scenario at a
+// TEMPORARY copy so destructive flows (S29's `rm all`) are structurally
+// incapable of touching the real .molaro/mods: no code path here ever
+// resolves the real directory when the override is set — which is exactly
+// what makes the guarantee hold even when a scenario is SIGKILLed mid-run.
+const modsDir = process.env.E2E_MODS_DIR
+  ? resolve(process.env.E2E_MODS_DIR)
+  : join(root, ".molaro", "mods");
+
+// The harness's workspace mods: the REAL example files from the mods dir
 // (the same pure parser the extension host uses) plus one deliberately
 // broken runtime mod (out-of-range scalars) so the fail-closed no-write
 // path is drivable end-to-end.
 function harnessMods(): AnalysisMod[] {
   const mods: AnalysisMod[] = [];
   try {
-    for (const f of readdirSync(join(root, ".molaro", "mods")).filter((x) => x.endsWith(".py")).sort()) {
-      const parsed = parseModFile(readFileSync(join(root, ".molaro", "mods", f), "utf-8"), "workspace");
+    for (const f of readdirSync(modsDir).filter((x) => x.endsWith(".py")).sort()) {
+      const parsed = parseModFile(readFileSync(join(modsDir, f), "utf-8"), "workspace");
       if (parsed.ok) mods.push(parsed.mod);
       else console.error(`[bridge] skipped mod ${f}: ${parsed.error}`);
     }
@@ -294,8 +305,10 @@ const harnessHtml = (
 const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === "/rm-mods") {
     // the extension host's rm-mods handler, emulated node-side: unlink ONLY
-    // files found by a fresh scan of .molaro/mods (names map to files via
-    // each file's parsed header, exactly like the host's recorded map)
+    // files found by a fresh scan of the ONE modsDir const above (names map
+    // to files via each file's parsed header, exactly like the host's
+    // recorded map) — under E2E_MODS_DIR the deletion surface is the temp
+    // copy, never the real .molaro/mods
     const body: Buffer[] = [];
     req.on("data", (d: Buffer) => body.push(d));
     req.on("end", () => {
@@ -303,12 +316,11 @@ const server = http.createServer((req, res) => {
       try {
         names = (JSON.parse(Buffer.concat(body).toString("utf-8")) as { names?: string[] }).names ?? [];
       } catch { /* fall through to empty */ }
-      const dir = join(root, ".molaro", "mods");
-      const paths = new Map<string, string>();
+            const paths = new Map<string, string>();
       try {
-        for (const f of readdirSync(dir).filter((x) => x.endsWith(".py"))) {
-          const parsed = parseModFile(readFileSync(join(dir, f), "utf-8"), "workspace");
-          if (parsed.ok) paths.set(parsed.mod.name, join(dir, f));
+        for (const f of readdirSync(modsDir).filter((x) => x.endsWith(".py"))) {
+          const parsed = parseModFile(readFileSync(join(modsDir, f), "utf-8"), "workspace");
+          if (parsed.ok) paths.set(parsed.mod.name, join(modsDir, f));
         }
       } catch { /* no dir */ }
       const deleted: string[] = [];

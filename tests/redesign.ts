@@ -26,7 +26,13 @@
  * Screenshots + [PASS]/[FAIL] lines; evidence in reports/redesign/.
  * Run from viewer/ (after npm run build):  node tests/redesign.ts [S0 S1 ...]
  */
-import { existsSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  copyFileSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync,
+  unlinkSync, writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { figureAxesYSpan, figureContentRect, figureFrameToPx } from "../webview/plotmodel.ts";
 import { E2EDriver, sleep } from "./e2e_driver.ts";
@@ -5060,18 +5066,31 @@ async function S28(): Promise<void> {
 
 async function S29(): Promise<void> {
   console.log("S29 — rm: deleting workspace mods, y/n confirmed, fail-safe, not undoable");
-  // node-side fixtures: a throwaway mod file, plus snapshots of the shipped
-  // examples so `rm all` can be exercised for real and then RESTORED
-  const modsDir = ".molaro/mods";
-  const fixtureFile = `${modsDir}/zz_fixture.py`;
-  // Snapshot EVERY shipped workspace mod file (neutral examples + the domain
-  // reference mods) so `rm all` can be exercised for real and then restored.
-  // Derived from a scan, not a fixed list, so adding a mod file never silently
-  // leaves it deleted after this test. Registry order = sorted filenames, then
-  // the fileless `broken_ramp` the harness appends last.
+  // STRUCTURAL SAFETY (harness chapter, item 2): this scenario really deletes
+  // mod files, so the real .molaro/mods must never be a deletion candidate.
+  // The shipped files are COPIED into a temporary directory and the bridge is
+  // pointed there via E2E_MODS_DIR — one const in bridge.ts covers both its
+  // scan and its unlink surface, so no code path in the whole run resolves
+  // the real directory. That is what makes the guarantee hold when the
+  // scenario ABORTS mid-run (SIGKILL between `y` and the outcome line): the
+  // old snapshot-and-finally-restore protected only a clean exit. The
+  // manifest comparison at the end additionally proves non-interference on
+  // every green run. Registry order = sorted filenames, then the fileless
+  // `broken_ramp` the harness appends last.
+  const realDir = ".molaro/mods";
+  const realManifest = (): string =>
+    readdirSync(realDir).filter((f) => f.endsWith(".py")).sort()
+      .map((f) => `${f}:${createHash("sha256").update(readFileSync(join(realDir, f))).digest("hex")}`)
+      .join("\n");
+  const manifestBefore = realManifest();
+  const modsDir = mkdtempSync(join(tmpdir(), "molaro-s29-mods-"));
+  for (const f of readdirSync(realDir).filter((x) => x.endsWith(".py"))) {
+    copyFileSync(join(realDir, f), join(modsDir, f));
+  }
+  process.env.E2E_MODS_DIR = modsDir; // the bridge child inherits process.env
+  const fixtureFile = join(modsDir, "zz_fixture.py");
   const shippedFiles = readdirSync(modsDir).filter((f) => f.endsWith(".py")).sort();
-  const examples = shippedFiles.map((f) => `${modsDir}/${f}`);
-  const snapshots = new Map(examples.map((f) => [f, readFileSync(f, "utf-8")]));
+  const examples = shippedFiles.map((f) => join(modsDir, f));
   const shippedNames = shippedFiles.map((f) => f.replace(/\.py$/, ""));
   const allWorkspace = [...shippedNames, "broken_ramp"];
   writeFileSync(fixtureFile, [
@@ -5187,11 +5206,13 @@ async function S29(): Promise<void> {
         (await cmd("rainbow alpha.group-0.subgroup-0")).status === "ok");
     }, 1180, 780, "/terminal");
   } finally {
-    // restore everything the test touched — the shipped examples come back,
-    // the fixture goes away
-    for (const [file, text] of snapshots) writeFileSync(file, text, "utf-8");
-    if (existsSync(fixtureFile)) unlinkSync(fixtureFile);
+    // serial-mode hygiene: later scenarios in the same process must see the
+    // real mods again; the temp copy is throwaway
+    delete process.env.E2E_MODS_DIR;
+    rmSync(modsDir, { recursive: true, force: true });
   }
+  check("S29: the REAL .molaro/mods was never touched (manifest byte-identical)",
+    realManifest() === manifestBefore);
 }
 
 // ====================== S30: reference mods on the REAL adk system ============
@@ -7595,10 +7616,18 @@ async function S45(): Promise<void> {
 const which = process.argv.slice(2);
 const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
- * S29 mutates the real repo .molaro/mods (delete + finally-restore) while
- * EVERY scenario's bridge scans that directory at boot. Single-sourced here,
- * next to the scenario table; the parallel runner reads it via --list. */
-const EXCLUSIVE: readonly string[] = ["S29"];
+ * S29 VACATED this slot in the harness chapter (it once mutated the real
+ * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
+ * S30 now holds it for a DIFFERENT reason: it is the sole real-mdtraj
+ * scenario (a 3341-atom adk trajectory — the heaviest producer AND the
+ * heaviest chrome, streaming into the 3D viewer while ALSO rendering the
+ * plot). In a width-6 pool that chrome's plot render is starved and the
+ * series never draws (chronic pre-chapter flake; the stub plot scenarios
+ * S25/S28/S45 pass under identical pool load, so the plot PATH is sound —
+ * it is CPU starvation of the heavy scenario, not a product race). Alone,
+ * S30 is reliably green (8/8). Single-sourced here; the runner reads it
+ * via --list. */
+const EXCLUSIVE: readonly string[] = ["S30"];
 /** Every scenario belongs to EXACTLY ONE lane — single-sourced here, next to
  * the scenario table, and asserted exhaustive in BOTH directions below, so a
  * scenario can never silently fall out of both lanes or into neither.
