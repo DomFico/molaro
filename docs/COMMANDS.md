@@ -666,6 +666,33 @@ existing machinery (nothing new renders):
   `produces: commands`; a `commands` mod may be invoked bare (no target),
   since it may ignore `target_indices`.
 
+- `produces: channel` — a **produced channel**: `compute` returns a dict
+  `{"name": str, "values": [flat frame-major floats], "components"?: 1|3,
+  "min"?, "max"?}` declaring ONE `per_point_per_frame` channel the viewer
+  can then **bind to a representation axis** — the same machinery header
+  channels use. `values` is length `n_frames × n_points × components`,
+  frame-major (all points of frame 0, then frame 1, …); `components: 3`
+  declares a **vector** channel (each element three interleaved floats; no
+  `min`/`max`). No `axis` — the user picks the axis at bind time. The
+  producer declares it and stores the data; **every subsequent frame chunk
+  carries the block**, and the channel is **bindable immediately, no
+  reload** (the point of the in-band design). Re-running the same mod
+  **replaces** the channel's data (recompute-and-see); a name already used
+  by a channel of a different shape is refused. The channel's values never
+  ride the reply — only its declaration does — so a big per-frame array is
+  transport-cheap.
+
+  **A producer emitting a per-element direction owns its frame-to-frame
+  coherence** — seed each frame's computation from the previous frame's
+  result (e.g. flip any vector whose dot product with its predecessor is
+  negative), because the renderer faithfully draws exactly what you supply,
+  discontinuities included. The pipe runs a cheap coherence check at
+  declaration and emits a **warning** (never a refusal) naming the channel
+  and the count when adjacent-frame vectors invert or swing hard — a
+  confusing visual twist turned into a named data problem. The shipped
+  `channel_flow` example's `_seed_coherent` helper shows the pattern;
+  copy it.
+
   Every other `produces` keeps the flat `list[float]` return.
 
 **Invocation** is the same own-verb shape: `<modname> <target>`. The verb
