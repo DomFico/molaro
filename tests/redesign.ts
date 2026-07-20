@@ -7653,9 +7653,114 @@ async function S45(): Promise<void> {
   }, 1180, 780, "/terminal");
 }
 
+// ==================== S46: produced channels — the mod→channel pipe ============
+// B-3 end to end on the REAL pipe (synthetic source, real serve.py through the
+// broker): a mod DECLARES a per-point-per-frame vector channel mid-session, it
+// becomes bindable with NO reload, drives an axis, animates across a flip, and
+// one undo removes the binding — plus the two seams the ruling owed: S2 (a
+// cached frame read after the declaration converges to the new block) and the
+// assert-unreachable counter (debug.missingBoundBlockHits stays 0). S39 proves
+// the SAME orientation seam on the FIXTURE's `flow`; S46 proves the channel can
+// instead be PRODUCED by a mod and reach the identical machinery.
+async function S46(): Promise<void> {
+  console.log("S46 — produced channels: a mod declares a bindable channel mid-session");
+  await withDriver(async (d) => {
+    const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const missBlocks = () => d.evaluate<number>(`${V}.debug.missingBoundBlockHits()`);
+    const rafs = () => d.evaluate(`(async () => {
+      for (let i = 0; i < 3; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`);
+    const seekTo = async (f: number): Promise<void> => {
+      await d.evaluate(`${V}.player.seek(${f})`);
+      await d.waitFor(`${V}.player.frame === ${f} && ${V}.player.getFrame(${f}) !== null`, 20000);
+      await rafs();
+    };
+    // async mod outcome lines ride the commandResult id:-1 channel
+    await d.evaluate(`void (window.__lines = [],
+      window.addEventListener('message', (e) => {
+        if (e.data?.type === 'commandResult' && e.data.id === -1) window.__lines.push(e.data);
+      }))`);
+    const lastAsync = () =>
+      d.evaluate<{ status: string; message: string } | null>(`window.__lines.at(-1) ?? null`);
+    const someAsync = (reStr: string) =>
+      d.evaluate<boolean>(`window.__lines.some(l => ${reStr}.test(l.message))`);
+
+    await d.evaluate(`${V}.setPlaying(false)`);
+    await seekTo(0);
+
+    // -- the channel does NOT exist until the mod runs -------------------------
+    const preBind = await cmd("bind all flow_dir orientation");
+    check("S46: binding an undeclared channel is refused (it doesn't exist yet)",
+      preBind.status === "error", JSON.stringify(preBind));
+
+    // cache a chunk that is OLD-shape (no produced block) so the S2 seam has a
+    // pre-declaration cached frame to converge; frame 40 lives in a later chunk
+    await seekTo(40);
+    await seekTo(0);
+
+    // -- run the shipped channel_flow mod → it DECLARES a vector channel -------
+    const run = await cmd("channel_flow all");
+    check("S46: the channel mod acknowledges and hands off",
+      run.status === "ok", JSON.stringify(run));
+    await d.waitFor(`window.__lines.some(l => /declared vector channel "flow_dir"/.test(l.message))`, 20000)
+      .catch(() => { /* timeout → the check below goes red */ });
+    check("S46: the async line reports a DECLARED, bindable channel (no reload)",
+      await someAsync(`/channel_flow → declared vector channel "flow_dir" — bindable now/`),
+      JSON.stringify(await lastAsync()));
+    check("S46: a coherent channel declares WITHOUT a coherence warning",
+      !(await someAsync(`/⚠/`)), JSON.stringify(await lastAsync()));
+
+    // -- it is bindable IMMEDIATELY, same machinery as a header channel --------
+    const bind = await cmd("bind all flow_dir orientation");
+    check("S46: the produced channel binds to orientation with no reload",
+      bind.status === "ok" && /orientation/.test(bind.message), JSON.stringify(bind));
+    check("S46: bindings lists the produced channel's row",
+      /flow_dir → orientation on "all"/.test((await cmd("bindings")).message),
+      (await cmd("bindings")).message);
+
+    // -- it drives the axis and ANIMATES across a frame flip -------------------
+    const oriAt = (f: number) =>
+      d.evaluate<number[]>(`(()=>{ const b=${V}.rep.state.orientation;
+        return [b[0], b[1], b[2], b[3*10], b[3*10+1], b[3*10+2]]; })()`);
+    await seekTo(10);
+    const o10 = await oriAt(10);
+    check("S46: the bound axis re-derives from the produced channel (non-zero)",
+      o10.some((x) => x !== 0), JSON.stringify(o10));
+    await seekTo(40);
+    const o40 = await oriAt(40);
+    check("S46: the produced channel ANIMATES — the buffer differs at another frame",
+      o10.some((x, i) => Math.abs(x - o40[i]) > 1e-6), `f10=${JSON.stringify(o10)} f40=${JSON.stringify(o40)}`);
+
+    // -- the S2 seam: the pre-declaration cached frame converged, and the
+    //    assert-unreachable counter never fired (invalidate-on-declare +
+    //    the request-epoch belt keep the missing-block arm unreachable) ------
+    check("S46: assert-unreachable HOLDS — no bound flip ever hit a missing block",
+      (await missBlocks()) === 0, `missingBoundBlockHits=${await missBlocks()}`);
+
+    // -- one undo removes the binding; the produced channel stays declared -----
+    const depBeforeUndo = await undoDepth();
+    check("S46: the bind recorded exactly one undo stroke", depBeforeUndo >= 1);
+    await d.evaluate(`document.getElementById('term-input')?.blur()`);
+    await d.ctrlZ();
+    await rafs();
+    check("S46: one undo releases the binding",
+      !/flow_dir → orientation/.test((await cmd("bindings")).message),
+      (await cmd("bindings")).message);
+    // re-binding still works — the channel is still declared (data outlives the bind)
+    const rebind = await cmd("bind all flow_dir orientation");
+    check("S46: the channel is still declared after undo (re-bind succeeds)",
+      rebind.status === "ok", JSON.stringify(rebind));
+    check("S46: still no missing-block hit after the whole lifecycle",
+      (await missBlocks()) === 0, `missingBoundBlockHits=${await missBlocks()}`);
+  }, 1180, 780, "/terminal");
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -7692,7 +7797,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S27: "full", S28: "full", S29: "full", S30: "full", S31: "full",
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
-  S42: "fast", S43: "fast", S44: "fast", S45: "fast",
+  S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {
