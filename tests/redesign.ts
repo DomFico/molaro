@@ -45,6 +45,27 @@ const targetEntries = (d: E2EDriver) => d.evaluate<number>(`${V}.model.target.en
 const selCount = (d: E2EDriver) => d.evaluate<number>(`${V}.debug.selCount()`);
 const visibleCount = (d: E2EDriver) => d.evaluate<number>(`${V}.debug.visibleCount()`);
 const flashCount = (d: E2EDriver) => d.evaluate<number>(`${V}.debug.flashCount()`);
+/** THE flash-pulse read (harness chapter): the focus flash is a bounded
+ * ~900ms envelope. A fixed sleep + one flashCount() hop misses it when the
+ * gesture's CDP events arrive late under load (S1/S2/S9's ledgered family).
+ * Poll IN-PAGE until the flash count satisfies `pred` (a boolean expression
+ * over `f`, the live count) — the pulse jumps STRAIGHT to its value and
+ * holds, so it never transits an intermediate count; polling catches it
+ * anywhere in the window instead of at one uncontrolled instant. Returns
+ * `ok` (same claim as the inline comparison) plus the observed `peak` for
+ * the detail. Negatives (asserting NO pulse, f === 0) must NOT use this —
+ * a stable zero is read once after a settle, not polled-until-true. */
+const flashPoll = (d: E2EDriver, pred: string, timeoutMs = 2500) =>
+  d.evaluate<{ ok: boolean; peak: number }>(`(async () => {
+    let peak = 0; const t0 = performance.now();
+    while (performance.now() - t0 < ${timeoutMs}) {
+      const f = ${V}.debug.flashCount();
+      if (f > peak) peak = f;
+      if (${pred}) return { ok: true, peak };
+      await new Promise(r => setTimeout(r, 40));
+    }
+    return { ok: false, peak };
+  })()`);
 const committed = (d: E2EDriver) =>
   d.evaluate<{ name: string; hidden: boolean; pts: number; entries: number; lane: number }[]>(
     `${V}.model.committed().map(c=>({name:c.name,hidden:c.hidden,pts:c.set.pointCount,entries:c.set.entryCount,lane:c.lane}))`,
@@ -53,6 +74,22 @@ const editingName = (d: E2EDriver) => d.evaluate<string | null>(`${V}.model.edit
 const camPos = (d: E2EDriver) => d.evaluate<number[]>(`${V}.camera.position.toArray()`);
 const camMoved = (a: number[], b: number[]) =>
   Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]) > 1e-3;
+/** Poll until the camera has MOVED away from pose `from` (harness chapter):
+ * a focus click starts a tween that finishes on rendered frames, so under
+ * CPU saturation a fixed sleep can sample mid-flight (or before the click
+ * even lands). This waits for the effect — the same claim the camMoved
+ * check makes, caught whenever the tween actually gets there. Returns the
+ * settled pose; times out to the last pose (the check then goes red). */
+const camMovedFrom = async (d: E2EDriver, from: number[], timeoutMs = 6000): Promise<number[]> => {
+  const t0 = Date.now();
+  let last = from;
+  while (Date.now() - t0 < timeoutMs) {
+    last = await camPos(d);
+    if (camMoved(from, last)) return last;
+    await sleep(80);
+  }
+  return last;
+};
 const btnText = (d: E2EDriver) =>
   d.evaluate<string>(`document.getElementById('commit-btn').textContent`);
 const scrollTop = (d: E2EDriver) =>
@@ -320,18 +357,25 @@ async function S1(): Promise<void> {
     const before = await camPos(d);
     await d.rightClick(gamma.x, gamma.y);
     await sleep(600);
-    check("S1: right-click focuses the camera on the entry", camMoved(before, await camPos(d)));
+    check("S1: right-click focuses the camera on the entry", camMoved(before, await camMovedFrom(d, before)));
     check("S1: right-click never changes the selection", (await pendingEntries(d)) === 0);
-    check("S1: focus plays a pulse over the region", (await flashCount(d)) > 0);
+    // family retrofit: poll the bounded pulse (keeps the sleep above for the
+    // camera tween; flashPoll keeps watching past it if the gesture lagged)
+    const p1 = await flashPoll(d, "f > 0");
+    check("S1: focus plays a pulse over the region", p1.ok, `flash peak=${p1.peak}`);
     await d.screenshot(`${REPORT}/S1_focus_flash.png`);
 
     // right-DRAG = view a region: focuses the union of the dragged rows
     const before2 = await camPos(d);
-    await d.drag(beta.x, beta.y, gamma.x, gamma.y, 4, { button: "right" });
-    await sleep(600);
-    check("S1: right-drag focuses the dragged region", camMoved(before2, await camPos(d)));
-    check("S1: region focus pulses BOTH rows' points", (await flashCount(d)) >= 800,
-      `flash=${await flashCount(d)}`);
+    // retry the drag-pick until its pulse registers (gesture may not land
+    // under CPU saturation); re-dragging the same region is idempotent
+    let p2 = { ok: false, peak: 0 };
+    for (let attempt = 0; attempt < 4 && !p2.ok; attempt++) {
+      await d.drag(beta.x, beta.y, gamma.x, gamma.y, 4, { button: "right" });
+      p2 = await flashPoll(d, "f >= 800");
+    }
+    check("S1: right-drag focuses the dragged region", camMoved(before2, await camMovedFrom(d, before2)));
+    check("S1: region focus pulses BOTH rows' points", p2.ok, `flash peak=${p2.peak}`);
     check("S1: right-drag changes no selection", (await pendingEntries(d)) === 0);
 
     // ...and dragging BACK shortens the region (same as the left trail)
@@ -340,8 +384,9 @@ async function S1(): Promise<void> {
     await d.mouse("mouseMoved", beta.x, beta.y, { buttons: 2 });
     await d.mouse("mouseReleased", beta.x, beta.y, { button: "right" });
     await sleep(600);
+    const p3 = await flashPoll(d, "f === 400");
     check("S1: right-drag back SHORTENS the region (only the surviving row focuses)",
-      (await flashCount(d)) === 400, `flash=${await flashCount(d)}`);
+      p3.ok, `flash peak=${p3.peak}`);
   });
 }
 
@@ -380,7 +425,7 @@ async function S2(): Promise<void> {
     const before = await camPos(d);
     await d.click(member!.x, member!.y);
     await sleep(600);
-    check("S2: top left-click focuses the camera (yellow pulse)", camMoved(before, await camPos(d)));
+    check("S2: top left-click focuses the camera (yellow pulse)", camMoved(before, await camMovedFrom(d, before)));
     check("S2: top left-click changes no selection state", (await committed(d))[1].entries === 1);
 
     // right-click the block = hide (purple, invisible); camera does NOT move
@@ -433,7 +478,8 @@ async function S2(): Promise<void> {
     await sleep(600);
     check("S2: focus does not move the camera while editing",
       !camMoved(camEdit, await camPos(d)));
-    check("S2: ...but still pulses the region", (await flashCount(d)) > 0);
+    const p2pulse = await flashPoll(d, "f > 0");
+    check("S2: ...but still pulses the region", p2pulse.ok, `flash peak=${p2pulse.peak}`);
     // member rows grow a remove control in edit mode
     const removed = await d.evaluate<boolean>(`(()=>{
       const rm=document.querySelector('#selections .entry-remove');
@@ -454,7 +500,7 @@ async function S2(): Promise<void> {
     const memberDone = (await topRow(d, "/beta|alpha/"))!;
     await d.click(memberDone.x, memberDone.y);
     await sleep(600);
-    check("S2: focus moves the camera again after Done", camMoved(camDone, await camPos(d)));
+    check("S2: focus moves the camera again after Done", camMoved(camDone, await camMovedFrom(d, camDone)));
 
     // rename inline (unique names); bracket label follows
     await d.evaluate(`(()=>{
@@ -505,11 +551,15 @@ async function S3(): Promise<void> {
     // exposes the race. Same assertion, sampled while the asserted state
     // exists — the one-shot-probe family's standard retrofit.
     const pulseCovered = (await flashCount(d)) > 1;
-    await sleep(600);
-    check("S3: plain click focuses the subgroup (camera orients)", camMoved(camBefore, await camPos(d)));
+    check("S3: plain click focuses the subgroup (camera orients)", camMoved(camBefore, await camMovedFrom(d, camBefore)));
     check("S3: plain click selects nothing", (await pendingEntries(d)) === 0);
     check("S3: focus pulse covers the subgroup", pulseCovered);
     check("S3: no auto-scroll of the panel from 3D actions", (await scrollTop(d)) === scrollBefore);
+    // poll for the zoom-in tween to REACH the target distance (camMovedFrom
+    // returns on first movement; the zoom continues past it) — under load a
+    // fixed sleep samples mid-flight
+    await d.waitFor(`${V}.camera.position.distanceTo(${V}.controls.target) < ${d0 * 0.8}`, 6000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     const d1 = await dist();
     check("S3: focus zoomed in", d1 < d0 * 0.8, `${d1.toFixed(1)} vs home ${d0.toFixed(1)}`);
     await d.screenshot(`${REPORT}/S3_click_focus.png`);
@@ -524,7 +574,9 @@ async function S3(): Promise<void> {
     check("S3: found an empty pixel to click", empty !== null);
     if (empty) {
       await d.click(empty.x, empty.y);
-      await sleep(700);
+      // poll for the zoom-OUT tween to reach home framing, not a fixed 700ms
+      await d.waitFor(`${V}.camera.position.distanceTo(${V}.controls.target) > ${d0 * 0.85}`, 6000)
+        .catch(() => { /* timeout falls through — the check below goes red */ });
       const d2 = await dist();
       check("S3: empty click zooms back out (whole-scene framing)",
         d2 > d0 * 0.85, `${d2.toFixed(1)} vs home ${d0.toFixed(1)}`);
@@ -559,7 +611,10 @@ async function S3(): Promise<void> {
     })()`);
     if (empty2) {
       await d.click(empty2.x, empty2.y);
-      await sleep(700);
+      // poll for the frame-to-visible tween to center on the visible centroid
+      await d.waitFor(`(()=>{ const b=${V}.debug.visibleBounds(); const t=${V}.controls.target;
+        return Math.hypot(t.x-b.center[0], t.y-b.center[1], t.z-b.center[2]) < ${d0 * 0.1}; })()`, 6000)
+        .catch(() => { /* timeout falls through — the check below goes red */ });
       const framed = await d.evaluate<{ off: number; dist: number; want: number }>(`(()=>{
         const b=${V}.debug.visibleBounds();
         const t=${V}.controls.target;
@@ -734,14 +789,26 @@ async function S5(): Promise<void> {
     const gB = await greenCount(d, shotB);
     check("S5: green glow visible in the viewport", Math.max(gA, gB) > 200, `green px ${gA}/${gB}`);
 
-    // yellow focus flash: swells then fades fully
+    // yellow focus flash: swells then fades fully. Family retrofit (harness
+    // chapter item 1): the swell is a bounded envelope — watch it IN-PAGE
+    // instead of gambling a fixed sleep + CDP hop against the 900ms pulse;
+    // the fade is then polled to zero (the old sleep(900) asserted "zero at
+    // an uncontrolled instant after hops" — same eventual claim, reliable).
     const beta = (await bottomRow(d, "/beta/"))!;
     await d.rightClick(beta.x, beta.y);
-    await sleep(300);
-    const f1 = await d.evaluate<{ flash: number }>(`${V}.debug.pulse()`);
-    check("S5: focus flash active mid-pulse", f1.flash > 0.2, `flash=${f1.flash.toFixed(2)}`);
+    const swell = await d.evaluate<number>(`(async () => {
+      let peak = 0; const t0 = performance.now();
+      while (performance.now() - t0 < 2500) {
+        peak = Math.max(peak, ${V}.debug.pulse().flash);
+        if (peak > 0.2) break;
+        await new Promise(r => setTimeout(r, 30));
+      }
+      return peak;
+    })()`);
+    check("S5: focus flash active mid-pulse", swell > 0.2, `flash=${swell.toFixed(2)}`);
     await d.screenshot(`${REPORT}/S5_flash_mid.png`);
-    await sleep(900);
+    await d.waitFor(`${V}.debug.pulse().flash === 0 && ${V}.debug.flashCount() === 0`, 6000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     const f2 = await d.evaluate<{ flash: number }>(`${V}.debug.pulse()`);
     check("S5: focus flash fades out fully", f2.flash === 0 && (await flashCount(d)) === 0,
       `flash=${f2.flash}`);
@@ -1274,6 +1341,9 @@ async function S9(): Promise<void> {
         const el=rows.find(r=>${re}.test(r.textContent));
         return !!el && el.classList.contains('row-flash');
       })()`);
+    // the flash-pulse poll, specialized to an EXACT count (the module-level
+    // flashPoll is the single source; see its doc for the envelope rationale)
+    const flashReached = (n: number) => flashPoll(d, `f === ${n}`);
     const d0 = await dist(); // home framing distance
 
     // -- single-entry parity: `view <subgroup path>` vs right-click on its row --
@@ -1307,9 +1377,8 @@ async function S9(): Promise<void> {
     const subRow = (await bottomRow(d, "/subgroup-0\\b/"))!;
     check("S9: subgroup row still mounted for the gesture half", subRow !== null);
     await d.rightClick(subRow.x, subRow.y);
-    await sleep(150);
-    check("S9: gesture pulses the same points", (await flashCount(d)) === 100,
-      `flash=${await flashCount(d)}`);
+    const _fr1 = await flashReached(100);
+    check("S9: gesture pulses the same points", _fr1.ok, `flash peak=${_fr1.peak} want=100`);
     check("S9: gesture flashes the same row class", await rowFlashed("/subgroup-0\\b/"));
     await sleep(500);
     const camGesture = await camSettled();
@@ -1330,9 +1399,8 @@ async function S9(): Promise<void> {
     const rSpan = await cmd("view alpha.group-0");
     check("S9: bare group path = the row's whole-group entry (like its click)",
       rSpan.status === "ok" && rSpan.message === "focused 400 points", JSON.stringify(rSpan));
-    await sleep(150);
-    check("S9: ...pulsing the whole spanning group", (await flashCount(d)) === 400,
-      `flash=${await flashCount(d)}`);
+    const _fr2 = await flashReached(400);
+    check("S9: ...pulsing the whole spanning group", _fr2.ok, `flash peak=${_fr2.peak} want=400`);
     await sleep(500);
     const camGroupCmd = await camSettled();
     await reset();
@@ -1344,9 +1412,8 @@ async function S9(): Promise<void> {
       return {x:r.left+r.width/2, y:r.top+r.height/2};
     })()`))!;
     await d.rightClick(grpRow.x, grpRow.y);
-    await sleep(150);
-    check("S9: a real click on that category-scoped group row pulses the same 400",
-      (await flashCount(d)) === 400, `flash=${await flashCount(d)}`);
+    const _fr3 = await flashReached(400);
+    check("S9: a real click on that category-scoped group row pulses the same 400", _fr3.ok, `flash peak=${_fr3.peak} want=400`);
     await sleep(500);
     const camGroupClick = await camSettled();
     check("S9: bare-group command ≡ clicking the category-scoped group row",
@@ -1364,10 +1431,12 @@ async function S9(): Promise<void> {
     await reset();
     const s0 = (await bottomRow(d, "/subgroup-0\\b/"))!;
     const s3 = (await bottomRow(d, "/subgroup-3\\b/"))!;
-    await d.drag(s0.x, s0.y, s3.x, s3.y, 4, { button: "right" });
-    await sleep(150);
-    check("S9: right-drag over the SAME rendered rows pulses the same 200",
-      (await flashCount(d)) === 200, `flash=${await flashCount(d)}`);
+    let _fr4 = { ok: false, peak: 0 };
+    for (let attempt = 0; attempt < 4 && !_fr4.ok; attempt++) {
+      await d.drag(s0.x, s0.y, s3.x, s3.y, 4, { button: "right" });
+      _fr4 = await flashReached(200);
+    }
+    check("S9: right-drag over the SAME rendered rows pulses the same 200", _fr4.ok, `flash peak=${_fr4.peak} want=200`);
     await sleep(500);
     const camScopeDrag = await camSettled();
     check("S9: category-scoped descent ≡ dragging the rows the tree shows",
@@ -1400,16 +1469,14 @@ async function S9(): Promise<void> {
     const rIdx = await cmd(`view #${ptRow.id}`);
     check("S9: standalone #index resolves exactly that point",
       rIdx.status === "ok" && rIdx.message === "focused 1 points", JSON.stringify(rIdx));
-    await sleep(150);
-    check("S9: #index pulses one point", (await flashCount(d)) === 1,
-      `flash=${await flashCount(d)}`);
+    const _fr5 = await flashReached(1);
+    check("S9: #index pulses one point", _fr5.ok, `flash peak=${_fr5.peak} want=1`);
     await sleep(500);
     const camIdxCmd = await camSettled();
     await reset();
     await d.rightClick(ptRow.x, ptRow.y);
-    await sleep(150);
-    check("S9: the real point-row click pulses the same single point",
-      (await flashCount(d)) === 1, `flash=${await flashCount(d)}`);
+    const _fr6 = await flashReached(1);
+    check("S9: the real point-row click pulses the same single point", _fr6.ok, `flash peak=${_fr6.peak} want=1`);
     await sleep(500);
     const camIdxClick = await camSettled();
     check("S9: view #N ≡ clicking that point's row (same camera pose)",
@@ -1497,10 +1564,17 @@ async function S9(): Promise<void> {
         const b=el.getBoundingClientRect();
         return {x:b.left+b.width/2, y:b.top+b.height/2};});
     })()`);
-    await d.drag(rows12[0].x, rows12[0].y, rows12[1].x, rows12[1].y, 4, { button: "right" });
-    await sleep(150);
-    check("S9: the manual pick pulses the same 2 points", (await flashCount(d)) === 2,
-      `flash=${await flashCount(d)}`);
+    // the right-drag pick is a GESTURE whose effect (a 2-point pulse) must
+    // actually register — under CPU saturation a single synthetic drag can
+    // land on nothing and fire NO pulse (peak=0, not a sampling miss). Retry
+    // the drag until the pulse appears (the S32 re-trigger discipline);
+    // re-picking the same rows is idempotent for focus.
+    let _fr7 = { ok: false, peak: 0 };
+    for (let attempt = 0; attempt < 4 && !_fr7.ok; attempt++) {
+      await d.drag(rows12[0].x, rows12[0].y, rows12[1].x, rows12[1].y, 4, { button: "right" });
+      _fr7 = await flashReached(2);
+    }
+    check("S9: the manual pick pulses the same 2 points", _fr7.ok, `flash peak=${_fr7.peak} want=2`);
     await sleep(500);
     check("S9: @sel.<glob> ≡ a manual pick of those rows (same camera pose)",
       closeCam(camSelGlob, await camSettled()),
@@ -1566,9 +1640,8 @@ async function S9(): Promise<void> {
     const rG = await cmd("view *a*"); // alpha + beta + gamma (solvent has no 'a')
     check("S9: glob resolves the union across subtrees",
       rG.status === "ok" && rG.message === "focused 1200 points", JSON.stringify(rG));
-    await sleep(150);
-    check("S9: glob command pulses the whole union", (await flashCount(d)) === 1200,
-      `flash=${await flashCount(d)}`);
+    const _fr8 = await flashReached(1200);
+    check("S9: glob command pulses the whole union", _fr8.ok, `flash peak=${_fr8.peak} want=1200`);
     check("S9: glob command flashes every mounted matching row",
       (await rowFlashed("/alpha/")) && (await rowFlashed("/beta/")) && (await rowFlashed("/gamma/")));
     await sleep(500);
@@ -1577,10 +1650,12 @@ async function S9(): Promise<void> {
     await reset();
     const alpha = (await bottomRow(d, "/alpha/"))!;
     const gamma = (await bottomRow(d, "/gamma/"))!;
-    await d.drag(alpha.x, alpha.y, gamma.x, gamma.y, 4, { button: "right" });
-    await sleep(150);
-    check("S9: right-drag over the same rows pulses the same union",
-      (await flashCount(d)) === 1200, `flash=${await flashCount(d)}`);
+    let _fr9 = { ok: false, peak: 0 };
+    for (let attempt = 0; attempt < 4 && !_fr9.ok; attempt++) {
+      await d.drag(alpha.x, alpha.y, gamma.x, gamma.y, 4, { button: "right" });
+      _fr9 = await flashReached(1200);
+    }
+    check("S9: right-drag over the same rows pulses the same union", _fr9.ok, `flash peak=${_fr9.peak} want=1200`);
     await sleep(500);
     const camDrag = await camSettled();
     check("S9: glob command frames the SAME union a right-drag frames",
@@ -3994,10 +4069,15 @@ async function S23(): Promise<void> {
 
     // -- a message: streamed text, the auto-approved tool, the WAITING gate ----
     await typeInto("claude-input", "look at group-0");
-    await sleep(120); // mid-turn: deltas still streaming
+    await d.waitFor(`${el("claude-input")}.disabled && !${el("claude-cancel")}.hidden`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S23: the input locks for the in-flight turn (cancel affordance live)",
       (await inputDisabled()) && (await cancelVisible()));
-    await sleep(600); // the script reaches the approval gate and WAITS
+    // family retrofit: poll for the approval GATE to render (a live approve
+    // button) instead of a fixed 600ms — the gate is a transient element
+    // the stub reaches on its own cadence, later under parallel load
+    await d.waitFor(`[...document.querySelectorAll('.cl-approve')].some(b => !b.disabled)`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     let items = await transcript();
     check("S23: the user turn renders", items[0]?.cls === "cl-user" && items[0]?.text === "look at group-0",
       JSON.stringify(items[0]));
@@ -4019,7 +4099,10 @@ async function S23(): Promise<void> {
 
     // -- approve: ok result, turn completes, input re-enables ------------------
     check("S23: (action) clicking approve", await clickBtn(".cl-approve"));
-    await sleep(250);
+    // the tool result is a relay envelope — poll for it, not a fixed 250ms
+    await d.waitFor(`[...document.querySelectorAll('.cl-tool')][1]?.textContent
+      ?.includes('example_tool_b ran create_sele alpha.group-0')`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     blocks = await toolBlocks();
     check("S23: approve → ok-styled result on the gated block",
       blocks[1]?.result === "example_tool_b ran create_sele alpha.group-0" &&
@@ -4030,9 +4113,14 @@ async function S23(): Promise<void> {
 
     // -- deny path (a fresh turn) ----------------------------------------------
     await typeInto("claude-input", "again");
-    await sleep(700);
+    // poll for the NEW gate's deny button to render before clicking (the
+    // fixed 700ms lost this race under parallel load — the failing member)
+    await d.waitFor(`[...document.querySelectorAll('.cl-deny')].some(b => !b.disabled)`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S23: (action) clicking deny", await clickBtn(".cl-deny"));
-    await sleep(250);
+    await d.waitFor(`[...document.querySelectorAll('.cl-tool')][3]?.textContent
+      ?.includes('denied — example_tool_b did not run')`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     blocks = await toolBlocks();
     check("S23: deny → error-styled result on the new gated block",
       blocks[3]?.result === "denied — example_tool_b did not run" &&
@@ -4043,7 +4131,13 @@ async function S23(): Promise<void> {
 
     // -- the sentinel error path ------------------------------------------------
     await typeInto("claude-input", "please trigger-error now");
-    await sleep(250);
+    // the stub streams on its own cadence and the error block PERSISTS once
+    // rendered — poll for it instead of gambling a fixed 250ms under load
+    // (the ledgered in-lane red); the check then re-asserts the full claim
+    await d.waitFor(
+      `[...document.getElementById('claude-transcript').children]
+         .some(n => n.className === 'cl-error') && !document.getElementById('claude-input').disabled`,
+      8000).catch(() => { /* timeout falls through — the check below goes red */ });
     items = await transcript();
     check("S23: the sentinel renders an error block and the turn ends",
       items.some((i) => i.cls === "cl-error" && i.text === "stub error — triggered by sentinel") &&
@@ -4052,9 +4146,14 @@ async function S23(): Promise<void> {
 
     // -- cancel interrupts the in-flight turn -----------------------------------
     await typeInto("claude-input", "one more");
-    await sleep(60); // mid-stream
+    // wait until the turn is actually in flight (cancel affordance live)
+    // before clicking stop — a fixed 60ms can fire before the turn starts
+    await d.waitFor(`${el("claude-input")}.disabled && !${el("claude-cancel")}.hidden`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S23: (action) clicking stop", await clickBtn("#claude-cancel"));
-    await sleep(250);
+    // cancel ends the turn — poll for the input to return before asserting
+    await d.waitFor(`!${el("claude-input")}.disabled && ${el("claude-cancel")}.hidden`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S23: cancel ends the turn — input back, no gate left hanging",
       !(await inputDisabled()) && !(await cancelVisible()) &&
         (await d.evaluate<number>(`[...document.querySelectorAll('.cl-approve,.cl-deny')]
@@ -4281,7 +4380,11 @@ async function S24(): Promise<void> {
     await typeInto("term-input", "/claude");
     await sleep(150);
     await typeInto("claude-input", "look at the target");
-    await sleep(700); // stream + auto tool + gate
+    // the stub streams on its own cadence; the ⤷ bind lines PERSIST once
+    // rendered — poll for them instead of gambling fixed sleeps under load
+    // (the S25 pattern, ledgered; S24 was its noted sibling)
+    await d.waitFor(`document.querySelectorAll('#claude-transcript .cl-bind').length >= 1 && !document.getElementById('claude-input').disabled`, 8000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     let lines = await bindLines();
     check("S24: the auto tool's color result binds THROUGH THE PIPE (outcome line in its block)",
       lines[0]?.text === `⤷ colored 100 points of "#0-99" from scalars` &&
@@ -4292,8 +4395,14 @@ async function S24(): Promise<void> {
         return (c[0]!==c[3*99]||c[1]!==c[3*99+1]||c[2]!==c[3*99+2]);
       })()`));
     const committedBefore = await d.evaluate<number>(`${V}.model.committed().length`);
-    await d.evaluate(`[...document.querySelectorAll('.cl-approve')].at(-1).click()`);
-    await sleep(350);
+    // the first ⤷ line (the auto tool's) renders BEFORE the gated block's
+    // buttons — the click's own precondition is the approve button, so poll
+    // for it; a missing button falls through to a red check, not a throw
+    await d.waitFor(`document.querySelectorAll('.cl-approve').length >= 1`, 8000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
+    await d.evaluate(`[...document.querySelectorAll('.cl-approve')].at(-1)?.click()`);
+    await d.waitFor(`document.querySelectorAll('#claude-transcript .cl-bind').length >= 2 && !document.getElementById('claude-input').disabled`, 8000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     lines = await bindLines();
     check("S24: the APPROVED command result creates a selection in the viewer",
       (await d.evaluate<number>(`${V}.model.committed().length`)) === committedBefore + 1 &&
@@ -4301,7 +4410,8 @@ async function S24(): Promise<void> {
       JSON.stringify(lines));
 
     await typeInto("claude-input", "please series-demo now");
-    await sleep(500);
+    await d.waitFor(`document.querySelectorAll('#claude-transcript .cl-bind').length >= 3 && !document.getElementById('claude-input').disabled`, 8000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     lines = await bindLines();
     check("S24: the series result routes to the PLOT and reports drawn (deep checks in S25)",
       lines[2]?.text === `⤷ series "example_series" drawn (150 frames) — click the plot to seek` &&
@@ -4310,7 +4420,8 @@ async function S24(): Promise<void> {
     const sizeSnap = await d.evaluate<string>(`JSON.stringify([...${V}.rep.state.size.slice(0, 220)])`);
     await d.evaluate(`void (window.__preMismatch = Float32Array.from(${V}.rep.state.color))`);
     await typeInto("claude-input", "please mismatch-demo now");
-    await sleep(500);
+    await d.waitFor(`document.querySelectorAll('#claude-transcript .cl-bind').length >= 4 && !document.getElementById('claude-input').disabled`, 8000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     lines = await bindLines();
     check("S24: the mismatch result renders an ERROR outcome and writes nothing",
       lines[3]?.text === `⤷ scalar count mismatch: 5 values for 10 points of "#0-9" — nothing written` &&
@@ -4393,7 +4504,14 @@ async function S25(): Promise<void> {
       Math.abs((await markerX()) - frameToX(f0)) < 0.01,
       `marker=${await markerX()} expected=${frameToX(f0)} (frame ${f0})`);
     await d.evaluate(`${V}.player.seek(120)`); // drive a frame change
-    await sleep(800); // (chunk 15 may need fetching) frame flips → frameChanged → marker
+    // family retrofit (harness chapter): seek → frameChanged → plotFrame
+    // relay → marker reposition is a bounded envelope (plus a possible
+    // chunk fetch); poll for the marker to REACH frame 120 instead of
+    // gambling a fixed 800ms against it under load (where this went red in
+    // the chapter's lane, marker still at frame ~1). The check re-asserts.
+    await d.waitFor(
+      `Math.abs(Number(${el("plot-marker")}.getAttribute('x1') ?? -1) - ${frameToX(120)}) < 0.01`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S25: the marker MOVES when the frame changes",
       Math.abs((await markerX()) - frameToX(120)) < 0.01,
       `marker=${await markerX()} expected=${frameToX(120)}`);
@@ -4408,11 +4526,18 @@ async function S25(): Promise<void> {
       const clientX = r.left + (${frameToX(target)} / 800) * r.width;
       svg.dispatchEvent(new MouseEvent('click', { clientX, clientY: r.top + r.height/2, bubbles: true }));
     })()`);
-    await sleep(300);
+    // same relay envelope as the seek above — poll for the viewer to reach
+    // the clicked frame, then the check re-asserts both frame and marker
+    await d.waitFor(`${V}.player.frame === ${target}`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S25: clicking the plot SEEKS the viewer to that frame",
       (await viewerFrame()) === target, `frame=${await viewerFrame()}`);
+    await d.waitFor(
+      `Math.abs(Number(${el("plot-marker")}.getAttribute('x1') ?? -1) - ${frameToX(target)}) < 0.01`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S25: …and the marker follows the seek",
-      Math.abs((await markerX()) - frameToX(target)) < 0.01);
+      Math.abs((await markerX()) - frameToX(target)) < 0.01,
+      `marker=${await markerX()} expected=${frameToX(target)}`);
 
     // -- the mismatched series: no draw, ⤷ error, previous plot intact ----------
     const pointsBefore = await linePoints();
@@ -4694,20 +4819,30 @@ async function S27(): Promise<void> {
     check("S27: pixel probes project on-screen, apart",
       proj.a.front && proj.b.front &&
         Math.hypot(proj.a.x - proj.b.x, proj.a.y - proj.b.y) > 12, JSON.stringify(proj));
-    await sleep(200);
-    const shot = await d.captureB64(`${REPORT}/S27_pixels.png`);
-    const px = await d.evaluate<{ a: number[]; b: number[] }>(`(async () => {
-      const img = new Image();
-      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${shot}"; });
-      const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
-      const g = c.getContext('2d'); g.drawImage(img, 0, 0);
-      const at = (x, y) => [...g.getImageData(Math.round(x), Math.round(y), 1, 1).data.slice(0, 3)];
-      return { a: at(${proj.a.x}, ${proj.a.y}), b: at(${proj.b.x}, ${proj.b.y}) };
+    // THE PROBE PRIMITIVE, single mode (harness chapter item 1): the scene
+    // is PLAYING, so a projection computed over CDP was stale by screenshot
+    // time — the moving-pose flavor of the family defect (S27's recorded
+    // flake). Locate and read now share ONE in-page task, each read
+    // re-projecting its own point; and all 4 pixels of a 2×2 patch at the
+    // center of a size-12 sphere must classify — a stronger pin than the
+    // old single center pixel. The settle guarantees the size-12 writes
+    // DREW before sampling (the load-immunity rule, poll not sleep).
+    await d.evaluate(`(async () => {
+      for (let i = 0; i < 3; i++) await new Promise(r => requestAnimationFrame(r));
     })()`);
+    const redAt = await d.samplePatch({
+      centerExpr: `${V}.debug.projectPoint(${pA})`, half: 1,
+      classify: "r > g + 60 && r > b + 60",
+    });
     check("S27: the Python-computed ramp RENDERS (red-dominant start)",
-      px.a[0] > px.a[1] + 60 && px.a[0] > px.a[2] + 60, JSON.stringify(px));
+      redAt.count === 4, `red@pA=${redAt.count}/4`);
+    const greenMid = await d.samplePatch({
+      centerExpr: `${V}.debug.projectPoint(${pB})`, half: 1,
+      classify: "g > r + 60 && g > b + 40",
+    });
     check("S27: …with a different, green-dominant mid point",
-      px.b[1] > px.b[0] + 60 && px.b[1] > px.b[2] + 40, JSON.stringify(px));
+      greenMid.count === 4, `green@pB=${greenMid.count}/4`);
+    await d.screenshot(`${REPORT}/S27_pixels.png`); // evidence only
   });
 
   // ---- part 2, the "/terminal" route: the per-frame-series mod → the plot.
@@ -4727,12 +4862,22 @@ async function S27(): Promise<void> {
         `[...document.querySelectorAll('#term-log .term-line')].map(l=>({cls:l.className,text:l.textContent}))`);
 
     await typeInto("term-input", "frame_metric all");
-    await sleep(2500); // resolve 6000 pts + the producer walks all 150 frames
+    // family retrofit (harness chapter): a REAL producer round-trip (6000
+    // pts + 150 frames) whose latency scales with load — poll for the
+    // persistent hand-off log line, never a fixed 2500ms (the S30 rg rule)
+    await d.waitFor(
+      `[...document.querySelectorAll('#term-log .term-line')]
+        .some(l => /frame_metric → series "frame_metric" \\(150 frames\\)/.test(l.textContent))`, 30000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     const lines = await logLines();
     check("S27: the series mod acknowledges, then reports the plot hand-off",
       lines.some((l) => l.text === "running frame_metric on 6000 points…") &&
         lines.some((l) => l.text === `frame_metric → series "frame_metric" (150 frames) → the plot tab`),
       JSON.stringify(lines.slice(-3)));
+    await d.waitFor(
+      `(${el("plot-line")}.getAttribute('points') ?? '').split(' ').length === 150 &&
+        ${el("plot-label")}.textContent === 'frame_metric'`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S27: …and the plot DRAWS it — one vertex per frame, labeled by the mod",
       await d.evaluate<boolean>(`(${el("plot-line")}.getAttribute('points') ?? '').split(' ').length === 150 &&
         ${el("plot-label")}.textContent === 'frame_metric'`),
@@ -4783,7 +4928,14 @@ async function S28(): Promise<void> {
     await typeInto("term-input", "/claude");
     await sleep(150);
     await typeInto("claude-input", "please scatter-demo now");
-    await sleep(600);
+    // family retrofit (harness chapter): the ⤷ bind line PERSISTS once
+    // rendered — poll for it (the S24 discipline) instead of gambling a
+    // fixed 600ms against the stub's cadence under peak parallel load,
+    // which is where this member went red in the chapter's own full lane
+    await d.waitFor(
+      `[...document.querySelectorAll('#claude-transcript .cl-bind')]
+        .some(n => /scatter "example_scatter" drawn \\(40 points/.test(n.textContent))`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S28: the ⤷ line reports the scatter draw with the seek hint",
       (await bindLines()).some((l) =>
         l.text === `⤷ scatter "example_scatter" drawn (40 points — click a point to seek)` &&
@@ -4800,30 +4952,38 @@ async function S28(): Promise<void> {
         /quantity_a 3…7 · quantity_b 7…13 · 40 pts/.test(${el("plot-range")}.textContent)`),
       await d.evaluate<string>(`${el("plot-range")}.textContent`));
     await d.evaluate(`${V}.player.seek(5)`);
-    await sleep(400);
+    await d.waitFor(`[...document.querySelectorAll('#plot-dots .plot-dot')].map((c,i)=>c.classList.contains('current')?i:-1).filter(i=>i>=0).join(',') === '5'`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S28: the current-frame point is highlighted (the scatter's playhead)",
       JSON.stringify(await currentDots()) === "[5]", JSON.stringify(await currentDots()));
     await d.evaluate(`${V}.player.seek(20)`);
-    await sleep(400);
+    await d.waitFor(`[...document.querySelectorAll('#plot-dots .plot-dot')].map((c,i)=>c.classList.contains('current')?i:-1).filter(i=>i>=0).join(',') === '20'`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S28: …and the highlight MOVES with the frame",
       JSON.stringify(await currentDots()) === "[20]", JSON.stringify(await currentDots()));
 
     // -- nearest-point click-to-seek ----------------------------------------------
     await clickDot(10);
-    await sleep(300);
+    await d.waitFor(`${V}.player.frame === 10`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S28: clicking a point seeks the viewer to THAT point's frame",
       (await viewerFrame()) === 10, `frame=${await viewerFrame()}`);
+    await d.waitFor(`[...document.querySelectorAll('#plot-dots .plot-dot')].map((c,i)=>c.classList.contains('current')?i:-1).filter(i=>i>=0).join(',') === '10'`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S28: …and the highlight follows the seek",
       JSON.stringify(await currentDots()) === "[10]");
 
     // -- the static (frames-less) scatter: draws, no highlight, no seek ----------
     await typeInto("claude-input", "please scatter-static now");
-    await sleep(600);
+    await d.waitFor(
+      `[...document.querySelectorAll('#claude-transcript .cl-bind')].some(n => /scatter "example_scatter" drawn \\(30 points\\)/.test(n.textContent)) && !document.getElementById('claude-input').disabled`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S28: a frames-less scatter draws (30 dots), ⤷ WITHOUT a seek hint",
       (await dotCount()) === 30 &&
         (await bindLines()).some((l) => l.text === `⤷ scatter "example_scatter" drawn (30 points)`));
     await d.evaluate(`${V}.player.seek(33)`);
-    await sleep(400);
+    await d.waitFor(`${V}.player.frame === 33`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S28: …no highlight on a static scatter", (await currentDots()).length === 0);
     const frameBefore = await viewerFrame();
     await clickDot(3);
@@ -4832,7 +4992,9 @@ async function S28(): Promise<void> {
 
     // -- the malformed scatter: fail-closed on the plot route ---------------------
     await typeInto("claude-input", "please scatter-mismatch now");
-    await sleep(600);
+    await d.waitFor(
+      `[...document.querySelectorAll('#claude-transcript .cl-bind')].some(n => /malformed scatter payload — not drawn/.test(n.textContent)) && !document.getElementById('claude-input').disabled`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S28: unequal x/y → the ⤷ error line, and the previous scatter STANDS",
       (await bindLines()).some((l) =>
         l.text === "⤷ malformed scatter payload — not drawn" && /\berr\b/.test(l.cls)) &&
@@ -4840,13 +5002,15 @@ async function S28(): Promise<void> {
 
     // -- replacement both ways: one active item ------------------------------------
     await typeInto("claude-input", "please series-demo now");
-    await sleep(600);
+    await d.waitFor(`(${el("plot-line")}.getAttribute('points') ?? '') !== '' && document.querySelectorAll('#plot-dots .plot-dot').length === 0 && !${el("plot-marker")}.hasAttribute('hidden') && !document.getElementById('claude-input').disabled`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S28: a series result REPLACES the scatter (line back, dots gone)",
       (await dotCount()) === 0 &&
         (await d.evaluate<string>(`${el("plot-line")}.getAttribute('points')`)) !== "" &&
         !(await d.evaluate<boolean>(`${el("plot-marker")}.hasAttribute('hidden')`)));
     await typeInto("claude-input", "please scatter-demo now");
-    await sleep(600);
+    await d.waitFor(`document.querySelectorAll('#plot-dots .plot-dot').length === 40 && (${el("plot-line")}.getAttribute('points') ?? '') === '' && !document.getElementById('claude-input').disabled`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S28: …and a scatter replaces the series right back",
       (await dotCount()) === 40 &&
         (await d.evaluate<string>(`${el("plot-line")}.getAttribute('points')`)) === "");
@@ -4857,7 +5021,9 @@ async function S28(): Promise<void> {
       listing.message.includes("  xy_metric — analysis · scatter · by Example Author"),
       listing.message);
     await typeInto("term-input", "xy_metric alpha");
-    await sleep(2500); // producer walks all 150 frames for two quantities
+    // family retrofit: producer round-trip → poll for the 150-dot draw
+    await d.waitFor(`document.querySelectorAll('#plot-dots .plot-dot').length === 150 && ${el("plot-label")}.textContent === 'xy_metric'`, 30000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S28: the Python scatter mod computes and draws (150 dots, its labels)",
       (await dotCount()) === 150 &&
         (await d.evaluate<boolean>(`${el("plot-label")}.textContent === 'xy_metric' &&
@@ -4865,7 +5031,10 @@ async function S28(): Promise<void> {
       await d.evaluate<string>(`${el("plot-range")}.textContent`));
     const preClick = await viewerFrame();
     await clickDot(120);
-    await sleep(600); // the target chunk may need fetching
+    // click → seek relay (+ a possible chunk fetch): poll for the seek to
+    // land (frame moved off preClick) instead of a fixed 600ms
+    await d.waitFor(`${V}.player.frame !== ${preClick}`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     // real-data scatters self-overlap, so the NEAREST dot to the click may
     // be a different frame at (nearly) the same (x, y) — the semantic
     // guarantee is that the seeked frame's point IS at the clicked spot
@@ -5097,13 +5266,28 @@ async function S30(): Promise<void> {
       rgLines.some((l) => l.text === "running rg on 3341 points…") &&
         rgLines.some((l) => l.text === 'rg → series "rg" (98 frames) → the plot tab'),
       JSON.stringify(rgLines.slice(-3)));
+    // the hand-off LINE arriving (waited above) and the plot PAGE drawing
+    // the series are two envelopes: the host still has to push it and the
+    // SVG page render it (plot-ready relay). Poll for the draw instead of
+    // sampling once — this is the second envelope that went red under load.
+    await d.waitFor(
+      `(${el("plot-line")}.getAttribute('points') ?? '').trim().split(' ').length === 98 &&
+        ${el("plot-label")}.textContent === 'rg'`, 30000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S30: …the plot draws the Rg curve — one vertex per frame, labeled `rg`",
       await d.evaluate<boolean>(`(${el("plot-line")}.getAttribute('points') ?? '').trim().split(' ').length === 98 &&
         ${el("plot-label")}.textContent === 'rg'`),
       await d.evaluate<string>(`${el("plot-label")}.textContent`));
-    // the playhead is live and moving (the harness autoplays the 98 frames)
+    // the playhead is live and moving (the harness autoplays the 98 frames).
+    // PROVE movement by polling for a second, distinct marker position
+    // rather than sampling twice across a fixed 700ms and hoping the window
+    // caught a step — a strictly stronger claim than the old form.
     const mx1 = await d.evaluate<number>(`Number(${el("plot-marker")}.getAttribute('x1') ?? -1)`);
-    await sleep(700);
+    await d.waitFor(
+      `!${el("plot-marker")}.hasAttribute('hidden') &&
+        Number(${el("plot-marker")}.getAttribute('x1') ?? -1) >= 0 &&
+        Number(${el("plot-marker")}.getAttribute('x1') ?? -1) !== ${mx1}`, 30000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     const mx2 = await d.evaluate<number>(`Number(${el("plot-marker")}.getAttribute('x1') ?? -1)`);
     check("S30: …the playhead marker is live and tracks playback",
       !(await d.evaluate<boolean>(`${el("plot-marker")}.hasAttribute('hidden')`)) && mx1 >= 0 && mx2 !== mx1,
@@ -5113,7 +5297,12 @@ async function S30(): Promise<void> {
     // -- rmsf: a per-point-scalar → color, one undo stroke -----------------------
     await d.evaluate(`void (window.__preRmsf = Float32Array.from(${V}.rep.state.color))`);
     await typeInto("rmsf all");
-    await sleep(2000);
+    // real producer round-trip (the S30 rg rule): poll the color hand-off
+    // line rather than a fixed 2000ms that a loaded machine can outrun
+    await d.waitFor(
+      `[...document.querySelectorAll('#term-log .term-line')]
+        .some(l => /^rmsf → colored 3341 points of .* from scalars$/.test(l.textContent))`, 30000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     const rfLines = await logLines();
     check("S30: rmsf acknowledges, then reports the color hand-off",
       rfLines.some((l) => l.text === "running rmsf on 3341 points…") &&
@@ -5130,7 +5319,11 @@ async function S30(): Promise<void> {
     // undo: the viewer's Ctrl+Z ignores INPUT focus, so blur the terminal first
     await d.evaluate(`document.getElementById('term-input').blur()`);
     await d.ctrlZ();
-    await sleep(400);
+    // the undo is a state write with an async settle — poll for pristine
+    await d.waitFor(`(()=>{ const c=${V}.rep.state.color, s=window.__preRmsf;
+      for(let i=0;i<c.length;i++) if(Math.abs(c[i]-s[i])>1e-4) return false;
+      return true; })()`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     const residual = await d.evaluate<number>(`(()=>{
       const c=${V}.rep.state.color, s=window.__preRmsf; let n=0;
       for(let i=0;i<c.length;i++) if(Math.abs(c[i]-s[i])>1e-4) n++; return n;
@@ -7262,9 +7455,16 @@ async function S45(): Promise<void> {
     await typeInto("term-input", "/claude");
     await sleep(150);
     await typeInto("claude-input", "please figure-demo now");
+    // family retrofit (harness chapter): this bind-line wait is the exact
+    // class as the series/scatter ones (a persistent stub ⤷ line); it was
+    // an 8000ms OUTLIER against the family value 15000 and, with no catch,
+    // a timeout CRASHED the scenario (0/0 checks) instead of failing a
+    // check. Match the sibling bound and fall through on timeout so a slow
+    // load yields an assertable red with detail, never a crash.
     await d.waitFor(
       `[...document.querySelectorAll('#claude-transcript .cl-bind')]
-        .some(n => /figure "example_figure" drawn/.test(n.textContent))`, 8000);
+        .some(n => /figure "example_figure" drawn/.test(n.textContent)) && !document.getElementById('claude-input').disabled`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S45: the ⤷ line reports the figure",
       (await bindLines()).some((t) => /figure "example_figure" drawn \(64×32, 2 axes — click a frames axis to seek\)/.test(t)),
       JSON.stringify(await bindLines()));
@@ -7311,7 +7511,8 @@ async function S45(): Promise<void> {
     const rt = await expectedMarkerVx(42);
     await seekTo(140);
     await d.click(rt.clickX, rt.clickY);
-    await sleep(250);
+    await d.waitFor(`Math.abs(${V}.player.frame - 42) <= 1`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S45: round-trip frame → marker x → click → frame within ±1",
       Math.abs((await d.evaluate<number>(`${V}.player.frame`)) - 42) <= 1,
       `landed=${await d.evaluate<number>(`${V}.player.frame`)}`);
@@ -7350,7 +7551,9 @@ async function S45(): Promise<void> {
     // -- fail-closed: the mis-declared figure leaves THIS one standing ----
     await plotOnTop(false);
     await typeInto("claude-input", "please figure-bad now");
-    await sleep(700);
+    await d.waitFor(
+      `[...document.querySelectorAll('#claude-transcript .cl-bind')].some(n => /does not overlap frames 0\\.\\.149 — not drawn/.test(n.textContent)) && !document.getElementById('claude-input').disabled`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S45: the well-formed-but-wrong axes REJECTS by name",
       (await bindLines()).some((t) => /does not overlap frames 0\.\.149 — not drawn/.test(t)),
       JSON.stringify(await bindLines()));
@@ -7360,16 +7563,28 @@ async function S45(): Promise<void> {
 
     // -- kind-swap hygiene + reopen-restore -------------------------------
     await typeInto("claude-input", "please series-demo now");
-    await sleep(700);
+    await d.waitFor(`${el("plot-img")}.hasAttribute('hidden') && !${el("plot-frame-axis")}.hasAttribute('hidden') && ${el("plot-fig-markers")}.children.length === 0 && (${el("plot-line")}.getAttribute('points') ?? '').length > 0 && !document.getElementById('claude-input').disabled`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S45: a series replaces the figure (img hidden, furniture back)",
       await d.evaluate<boolean>(`${el("plot-img")}.hasAttribute('hidden') &&
         !${el("plot-frame-axis")}.hasAttribute('hidden') &&
         ${el("plot-fig-markers")}.children.length === 0 &&
         (${el("plot-line")}.getAttribute('points') ?? '').length > 0`));
     await typeInto("claude-input", "please figure-demo now");
-    await sleep(700);
+    // wait for the figure to be back AND the turn ended before dispatching
+    // the reopen (plot-ready), so the re-push acts on a settled turn
+    await d.waitFor(
+      `!${el("plot-img")}.hasAttribute('hidden') && !${el("claude-input")}.disabled`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     await d.evaluate(`window.dispatchEvent(new MessageEvent('message', { data: { type: 'plot-ready' } }))`);
-    await sleep(200);
+    // the re-push → render → marker reposition is a relay envelope: poll for
+    // the full asserted state (img shown AND the single figure marker
+    // positioned) instead of a fixed 200ms
+    await d.waitFor(
+      `!${el("plot-img")}.hasAttribute('hidden') &&
+        (()=>{ const m = ${el("plot-fig-markers")}.children;
+          return m.length === 1 && Number(m[0].getAttribute('x1')) >= 0; })()`, 15000)
+      .catch(() => { /* timeout falls through — the check below goes red */ });
     check("S45: plot-ready re-pushes the held figure (reopen restores)",
       await d.evaluate<boolean>(`!${el("plot-img")}.hasAttribute('hidden')`) &&
         (await markerVx()) >= 0);
