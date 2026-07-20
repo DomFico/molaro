@@ -160,8 +160,49 @@ FrameChunk (envelope + against a Header):
 4. The remaining blocks are exactly the Header's declared `per_point_per_frame`
    channels, in declaration order, each with `byte_length == count * n_points * 4`.
 
+## Channel deltas (session extension — wire-format compatible)
+
+A session's declared channel set may **grow** after the Header is served: a
+**channel delta** declares ONE additional `per_point_per_frame` channel. The
+wire format does not change — a delta-extended header is a valid `0.1.0`
+header (just more channels), the envelope is untouched, and a dataset that
+never applies a delta is byte-identical in every message.
+
+Rules (both languages implement all of these):
+
+1. A delta is a JSON object with the Channel fields `name`, `scope`, `dtype`,
+   and optionally `components`, `min`, `max`. `scope` MUST be
+   `per_point_per_frame` (data-carrying scopes belong in the Header);
+   `dtype` MUST be `"float32"`; `data` MUST be absent. `components`, `min`,
+   `max` follow the Header's channel rules (min/max forbidden for vectors).
+2. One delta = one channel. Application is atomic: the name must be unique
+   across the FULL current set (all scopes share one namespace); a rejected
+   delta leaves the header untouched — nothing half-declared.
+3. Application only ever APPENDS. Existing declarations are never mutated,
+   removed, or reordered, so every earlier channel set is a prefix of every
+   later one.
+4. **A FrameChunk is validated against the channel set as of its REQUEST**,
+   with exact set equality (never subset-tolerant). A reply built before a
+   delta is valid against the pre-delta set; every chunk requested after a
+   delta carries the new channel's block. Served chunks are never mutated.
+5. A `HeaderRequest` answered after a delta reflects the current set —
+   producers must not serve a stale cached serialization across a delta.
+6. Deltas do not survive the producer: they are session state. A consumer
+   that must persist a produced channel persists the computation that
+   declared it, not the data.
+
+The transport this repo ships is strictly FIFO request/response with a
+serial producer, so a delta (which rides a reply) is totally ordered
+against every chunk reply — an old-shape chunk can never arrive after the
+delta that obsoletes it is applied. Implementations on a different
+transport must preserve rule 4 by capturing the declared set per request.
+
 ## Versioning
 
 `Header.version` versions the logical schema; the envelope carries its own format
 version integer. Consumers must reject a Header whose major version they do not
-understand. This spec defines `0.1.0` / envelope version `1`.
+understand. This spec defines `0.1.0` / envelope version `1`. Channel deltas
+are a wire-compatible session extension of `0.1.0`, not a schema bump: every
+header and chunk they produce validates under the `0.1.0` rules above (with
+rule 4 of "Channel deltas" governing WHICH channel set a chunk is validated
+against).

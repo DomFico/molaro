@@ -1,0 +1,6 @@
+{
+  "name": "produced_v",
+  "scope": "per_point_per_frame",
+  "dtype": "float32",
+  "components": 3
+}

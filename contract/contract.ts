@@ -391,36 +391,136 @@ export function validateHeader(h: Header): void {
 }
 
 export function validateFrameChunk(chunk: FrameChunk, header: Header): void {
+  validateFrameChunkAgainst(chunk, header.n_frames, header.n_points, header.channels);
+}
+
+/**
+ * Validate a chunk against an EXPLICIT channel list instead of a Header.
+ *
+ * This exists for channel deltas (see SPEC.md "Channel deltas"): once the
+ * declared set can grow mid-session, a chunk must be validated against the
+ * set AS OF ITS REQUEST — the caller captures `channels` when the request
+ * is sent and validates the reply against that capture, so a reply built
+ * before a later delta never races the delta's application. Exact set
+ * equality is preserved per epoch; nothing is subset-tolerant.
+ * `channels` may be a full channel list; only its per_point_per_frame
+ * entries participate.
+ */
+export function validateFrameChunkAgainst(
+  chunk: FrameChunk,
+  nFrames: number,
+  nPoints: number,
+  channels: Channel[],
+): void {
   if (!isInt(chunk.count) || chunk.count < 1) fail("frame chunk: count must be >= 1");
-  if (!isInt(chunk.start) || chunk.start < 0 || chunk.start + chunk.count > header.n_frames) {
+  if (!isInt(chunk.start) || chunk.start < 0 || chunk.start + chunk.count > nFrames) {
     fail(
       `frame chunk: frame range [${chunk.start}, ${chunk.start + chunk.count}) ` +
-        `outside [0, ${header.n_frames})`,
+        `outside [0, ${nFrames})`,
     );
   }
-  const expectedPos = chunk.count * header.n_points * 3;
+  const expectedPos = chunk.count * nPoints * 3;
   if (chunk.positions.length !== expectedPos) {
     fail(
       `frame chunk: positions block has ${chunk.positions.length} floats, expected ${expectedPos}`,
     );
   }
-  const declared = perPointPerFrameChannels(header).map((c) => c.name);
+  const streamed = channels.filter((c) => c.scope === "per_point_per_frame");
   const got = [...chunk.channels.keys()].sort();
-  const want = [...declared].sort();
+  const want = streamed.map((c) => c.name).sort();
   if (got.length !== want.length || got.some((name, i) => name !== want[i])) {
     fail(
       `frame chunk: channel blocks [${got}] do not match declared ` +
         `per_point_per_frame channels [${want}]`,
     );
   }
-  for (const ch of perPointPerFrameChannels(header)) {
+  for (const ch of streamed) {
     const arr = chunk.channels.get(ch.name) as Float32Array;
-    const expectedCh = chunk.count * header.n_points * channelComponents(ch);
+    const expectedCh = chunk.count * nPoints * channelComponents(ch);
     if (arr.length !== expectedCh) {
       fail(
         `frame chunk: channel '${ch.name}' block has ${arr.length} floats, expected ${expectedCh}`,
       );
     }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Channel deltas (SPEC.md "Channel deltas" — session extension, wire-format
+// compatible: a delta-extended header is a valid 0.1.0 header)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse and validate a channel DELTA: the declaration of ONE additional
+ * `per_point_per_frame` channel to append to a header's set mid-session.
+ * One delta = one channel — atomicity is trivial and a rejection leaves
+ * nothing half-declared. Fail-closed on shape: only streamed scope, only
+ * float32, components 1|3, min/max under the header's own channel rules
+ * (forbidden for vectors), and NEVER inline data (streamed channels carry
+ * values only in FrameChunks).
+ */
+export function parseChannelDelta(raw: unknown): Channel {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    fail("channel delta: expected an object");
+  }
+  const o = raw as Record<string, unknown>;
+  if (typeof o.name !== "string" || o.name === "") {
+    fail("channel delta: name must be a non-empty string");
+  }
+  if (o.scope !== "per_point_per_frame") {
+    fail(
+      `channel delta: channel '${o.name}': scope must be 'per_point_per_frame' ` +
+        `(got '${o.scope}') — per_point/per_frame data channels belong in the header`,
+    );
+  }
+  if (o.dtype !== "float32") {
+    fail(`channel delta: channel '${o.name}': unsupported dtype '${o.dtype}'`);
+  }
+  if (o.components !== undefined && o.components !== 1 && o.components !== 3) {
+    fail(`channel delta: channel '${o.name}': components must be 1 or 3, got ${o.components}`);
+  }
+  const components = (o.components as 1 | 3 | undefined) ?? undefined;
+  for (const k of ["min", "max"] as const) {
+    if (o[k] !== undefined && typeof o[k] !== "number") {
+      fail(`channel delta: channel '${o.name}': ${k} must be a number`);
+    }
+  }
+  if (components === 3 && (o.min !== undefined || o.max !== undefined)) {
+    fail(
+      `channel delta: channel '${o.name}': min/max are not defined for vector channels (components: 3)`,
+    );
+  }
+  if (o.min !== undefined && o.max !== undefined && (o.min as number) > (o.max as number)) {
+    fail(`channel delta: channel '${o.name}': min > max`);
+  }
+  if (o.data !== undefined) {
+    fail(`channel delta: channel '${o.name}': a streamed channel never carries inline data`);
+  }
+  const delta: Channel = { name: o.name, scope: "per_point_per_frame", dtype: "float32" };
+  if (components !== undefined) delta.components = components;
+  if (o.min !== undefined) delta.min = o.min as number;
+  if (o.max !== undefined) delta.max = o.max as number;
+  return delta;
+}
+
+/**
+ * Append a validated delta to a header's channel set. Fail-closed: the name
+ * must be unique across ALL scopes (the header's one namespace), and the
+ * post-append header is re-validated as a belt — on ANY failure the header
+ * is left untouched. Application only ever APPENDS; existing declarations
+ * are never mutated, removed, or reordered, so every earlier channel set is
+ * a prefix of every later one.
+ */
+export function applyChannelDelta(header: Header, delta: Channel): void {
+  if (header.channels.some((c) => c.name === delta.name)) {
+    fail(`channel delta: channel name '${delta.name}' is already declared`);
+  }
+  header.channels.push(delta);
+  try {
+    validateHeader(header);
+  } catch (e) {
+    header.channels.pop();
+    throw e;
   }
 }
 

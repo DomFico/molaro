@@ -1,0 +1,17 @@
+{
+  "pre_channels_len": 4,
+  "post_channels_len": 6,
+  "post_envelope_bytes": 53160,
+  "produced_s_f5_p0": 2.5,
+  "produced_s_f8_p123": 34.75,
+  "produced_v_f5_p0": [
+    -1.5,
+    -1.0,
+    -0.5
+  ],
+  "produced_v_f8_p123": [
+    0.5,
+    1.0,
+    -0.25
+  ]
+}

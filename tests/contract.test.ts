@@ -15,11 +15,14 @@ import { fileURLToPath } from "node:url";
 
 import {
   ContractError,
+  applyChannelDelta,
   decodeFrameChunk,
+  parseChannelDelta,
   parseHeader,
   positionIndex,
   channelIndex,
   validateFrameChunk,
+  validateFrameChunkAgainst,
   validateHeader,
   type FrameChunk,
   type Header,
@@ -166,4 +169,116 @@ test("validators reject violations", () => {
   const rangedFlow = parseHeader(headerText);
   (rangedFlow.channels.find((c) => c.name === "flow") as { min?: number }).min = 0;
   assert.throws(() => validateHeader(rangedFlow), /min\/max are not defined for vector channels/);
+});
+
+// ---------------------------------------------------------------------------
+// Channel deltas — the cross-language session-extension proof
+// ---------------------------------------------------------------------------
+
+const deltaScalarRaw = JSON.parse(readFileSync(join(fixturesDir, "delta_scalar.json"), "utf-8"));
+const deltaVectorRaw = JSON.parse(readFileSync(join(fixturesDir, "delta_vector.json"), "utf-8"));
+const headerPostText = readFileSync(join(fixturesDir, "header_post_delta.json"), "utf-8");
+const chunkPostBytes = new Uint8Array(readFileSync(join(fixturesDir, "chunk_post_delta.bin")));
+const expectedDelta = JSON.parse(readFileSync(join(fixturesDir, "expected_delta.json"), "utf-8"));
+
+test("channel deltas: TS applies Python's deltas and agrees with Python's post-delta header", () => {
+  const header = parseHeader(headerText);
+  assert.equal(header.channels.length, expectedDelta.pre_channels_len);
+  applyChannelDelta(header, parseChannelDelta(deltaScalarRaw));
+  applyChannelDelta(header, parseChannelDelta(deltaVectorRaw));
+  assert.equal(header.channels.length, expectedDelta.post_channels_len);
+  // cross-language application agreement: the TS-applied channel list deep-
+  // equals the header Python serialized AFTER applying the same deltas —
+  // and that header parses + validates as a plain 0.1.0 header (the
+  // wire-compatibility claim, proven not asserted)
+  const pyPost = parseHeader(headerPostText);
+  assert.deepEqual(header.channels, pyPost.channels);
+});
+
+test("channel deltas: chunks validate against the channel set AS OF THEIR REQUEST", () => {
+  const header = parseHeader(headerText);
+  // capture the PRE-delta set the way the renderer does at request time
+  const preCapture = header.channels.slice();
+  const preChunk = decodeFrameChunk(chunkBytes);
+  const postChunk = decodeFrameChunk(chunkPostBytes);
+  applyChannelDelta(header, parseChannelDelta(deltaScalarRaw));
+  applyChannelDelta(header, parseChannelDelta(deltaVectorRaw));
+
+  // the request-epoch rule, all four quadrants, exact set equality:
+  validateFrameChunkAgainst(preChunk, header.n_frames, header.n_points, preCapture); // pre vs pre: ok
+  validateFrameChunkAgainst(postChunk, header.n_frames, header.n_points, header.channels); // post vs post: ok
+  assert.throws( // pre vs post: the old-shape chunk fails the NEW set by name
+    () => validateFrameChunkAgainst(preChunk, header.n_frames, header.n_points, header.channels),
+    /channel blocks .* do not match declared/,
+  );
+  assert.throws( // post vs pre: never subset-tolerant in either direction
+    () => validateFrameChunkAgainst(postChunk, header.n_frames, header.n_points, preCapture),
+    /channel blocks .* do not match declared/,
+  );
+  // the delegating form still validates against the header's CURRENT set
+  validateFrameChunk(postChunk, header);
+});
+
+test("channel deltas: produced values pinned at two (frame, element) sites, both widths", () => {
+  const header = parseHeader(headerPostText);
+  const chunk = decodeFrameChunk(chunkPostBytes);
+  validateFrameChunk(chunk, header);
+  assert.equal(chunkPostBytes.byteLength, expectedDelta.post_envelope_bytes);
+  const n = header.n_points;
+  const s = chunk.channels.get("produced_s");
+  if (!s) throw new Error("produced_s block missing");
+  assert.equal(s[channelIndex(chunk, n, 5, 0)], expectedDelta.produced_s_f5_p0);
+  assert.equal(s[channelIndex(chunk, n, 8, 123)], expectedDelta.produced_s_f8_p123);
+  const v = chunk.channels.get("produced_v");
+  if (!v) throw new Error("produced_v block missing");
+  assert.equal(v.length, chunk.count * n * 3, "produced vector block is elements × 3");
+  for (const [key, [f, p]] of [
+    ["produced_v_f5_p0", [5, 0]],
+    ["produced_v_f8_p123", [8, 123]],
+  ] as const) {
+    const base = channelIndex(chunk, n, f, p, 3);
+    assert.deepEqual([v[base], v[base + 1], v[base + 2]], expectedDelta[key], key);
+  }
+});
+
+test("channel deltas: every rejection fires by name and leaves nothing behind", () => {
+  const header = parseHeader(headerText);
+  const before = header.channels.length;
+
+  // name collision — across SCOPES too (one namespace): 'mass' is per_point
+  assert.throws(
+    () => applyChannelDelta(header, parseChannelDelta({
+      name: "mass", scope: "per_point_per_frame", dtype: "float32" })),
+    /already declared/,
+  );
+  assert.equal(header.channels.length, before, "failed apply left the header untouched");
+
+  // wrong scope: deltas may only declare streamed channels
+  assert.throws(
+    () => parseChannelDelta({ name: "x", scope: "per_point", dtype: "float32" }),
+    /scope must be 'per_point_per_frame'/,
+  );
+  // bad width
+  assert.throws(
+    () => parseChannelDelta({ name: "x", scope: "per_point_per_frame", dtype: "float32", components: 2 }),
+    /components must be 1 or 3/,
+  );
+  // min/max on a vector
+  assert.throws(
+    () => parseChannelDelta({
+      name: "x", scope: "per_point_per_frame", dtype: "float32", components: 3, min: 0 }),
+    /min\/max are not defined for vector channels/,
+  );
+  // inline data on a streamed declaration
+  assert.throws(
+    () => parseChannelDelta({
+      name: "x", scope: "per_point_per_frame", dtype: "float32", data: [1] }),
+    /never carries inline data/,
+  );
+  // bad dtype
+  assert.throws(
+    () => parseChannelDelta({ name: "x", scope: "per_point_per_frame", dtype: "float64" }),
+    /unsupported dtype/,
+  );
+  assert.equal(header.channels.length, before, "no rejection half-declared anything");
 });

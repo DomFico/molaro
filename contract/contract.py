@@ -393,27 +393,126 @@ def validate_header(h: Header) -> None:
 
 
 def validate_frame_chunk(chunk: FrameChunk, header: Header) -> None:
+    validate_frame_chunk_against(chunk, header.n_frames, header.n_points, header.channels)
+
+
+def validate_frame_chunk_against(
+    chunk: FrameChunk, n_frames: int, n_points: int, channels: List[Channel]
+) -> None:
+    """Validate a chunk against an EXPLICIT channel list instead of a Header.
+
+    Exists for channel deltas (SPEC.md "Channel deltas"): once the declared
+    set can grow mid-session, a chunk must be validated against the set AS OF
+    ITS REQUEST — the caller captures ``channels`` when the request is sent
+    and validates the reply against that capture, so a reply built before a
+    later delta never races the delta's application. Exact set equality is
+    preserved per epoch; nothing is subset-tolerant. ``channels`` may be a
+    full channel list; only its per_point_per_frame entries participate.
+    """
+
     def fail(msg: str) -> None:
         raise ContractError(f"frame chunk: {msg}")
 
     if chunk.count < 1:
         fail("count must be >= 1")
-    if chunk.start < 0 or chunk.start + chunk.count > header.n_frames:
+    if chunk.start < 0 or chunk.start + chunk.count > n_frames:
         fail(
             f"frame range [{chunk.start}, {chunk.start + chunk.count}) outside "
-            f"[0, {header.n_frames})"
+            f"[0, {n_frames})"
         )
-    expected_pos = chunk.count * header.n_points * 3 * 4
+    expected_pos = chunk.count * n_points * 3 * 4
     if len(chunk.positions) != expected_pos:
         fail(f"positions block is {len(chunk.positions)} bytes, expected {expected_pos}")
-    declared = [c.name for c in header.per_point_per_frame_channels()]
+    streamed = [c for c in channels if c.scope == SCOPE_PER_POINT_PER_FRAME]
+    declared = [c.name for c in streamed]
     if sorted(chunk.channels.keys()) != sorted(declared):
         fail(
             f"channel blocks {sorted(chunk.channels.keys())} do not match declared "
             f"per_point_per_frame channels {sorted(declared)}"
         )
-    for ch in header.per_point_per_frame_channels():
+    for ch in streamed:
         got = len(chunk.channels[ch.name])
-        expected_ch = chunk.count * header.n_points * channel_components(ch) * 4
+        expected_ch = chunk.count * n_points * channel_components(ch) * 4
         if got != expected_ch:
             fail(f"channel {ch.name!r} block is {got} bytes, expected {expected_ch}")
+
+
+# ---------------------------------------------------------------------------
+# Channel deltas (SPEC.md "Channel deltas" — session extension, wire-format
+# compatible: a delta-extended header is a valid 0.1.0 header)
+# ---------------------------------------------------------------------------
+
+def channel_delta_to_obj(c: Channel) -> Dict[str, Any]:
+    """Serialize a delta declaration (never includes data — streamed only)."""
+    obj: Dict[str, Any] = {"name": c.name, "scope": c.scope, "dtype": c.dtype}
+    if c.components is not None:
+        obj["components"] = c.components
+    if c.min is not None:
+        obj["min"] = c.min
+    if c.max is not None:
+        obj["max"] = c.max
+    return obj
+
+
+def channel_delta_from_obj(raw: Any) -> Channel:
+    """Parse and validate a channel DELTA: the declaration of ONE additional
+    per_point_per_frame channel to append to a header's set mid-session.
+    One delta = one channel — atomicity is trivial and a rejection leaves
+    nothing half-declared. Fail-closed on shape: only streamed scope, only
+    float32, components 1|3, min/max under the header's own channel rules
+    (forbidden for vectors), and NEVER inline data (streamed channels carry
+    values only in FrameChunks)."""
+
+    def fail(msg: str) -> None:
+        raise ContractError(f"channel delta: {msg}")
+
+    if not isinstance(raw, dict):
+        fail("expected an object")
+    name = raw.get("name")
+    if not isinstance(name, str) or not name:
+        fail("name must be a non-empty string")
+    if raw.get("scope") != SCOPE_PER_POINT_PER_FRAME:
+        fail(
+            f"channel {name!r}: scope must be 'per_point_per_frame' "
+            f"(got {raw.get('scope')!r}) — per_point/per_frame data channels belong in the header"
+        )
+    if raw.get("dtype") != DTYPE_FLOAT32:
+        fail(f"channel {name!r}: unsupported dtype {raw.get('dtype')!r}")
+    components = raw.get("components")
+    if components is not None and components not in (1, 3):
+        fail(f"channel {name!r}: components must be 1 or 3, got {components!r}")
+    for k in ("min", "max"):
+        v = raw.get(k)
+        if v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))):
+            fail(f"channel {name!r}: {k} must be a number")
+    if components == 3 and (raw.get("min") is not None or raw.get("max") is not None):
+        fail(f"channel {name!r}: min/max are not defined for vector channels (components: 3)")
+    if raw.get("min") is not None and raw.get("max") is not None and raw["min"] > raw["max"]:
+        fail(f"channel {name!r}: min > max")
+    if raw.get("data") is not None:
+        fail(f"channel {name!r}: a streamed channel never carries inline data")
+    return Channel(
+        name=name,
+        scope=SCOPE_PER_POINT_PER_FRAME,
+        dtype=DTYPE_FLOAT32,
+        min=raw.get("min"),
+        max=raw.get("max"),
+        components=components,
+    )
+
+
+def apply_channel_delta(header: Header, delta: Channel) -> None:
+    """Append a validated delta to a header's channel set. Fail-closed: the
+    name must be unique across ALL scopes (the header's one namespace), and
+    the post-append header is re-validated as a belt — on ANY failure the
+    header is left untouched. Application only ever APPENDS; existing
+    declarations are never mutated, removed, or reordered, so every earlier
+    channel set is a prefix of every later one."""
+    if any(c.name == delta.name for c in header.channels):
+        raise ContractError(f"channel delta: channel name {delta.name!r} is already declared")
+    header.channels.append(delta)
+    try:
+        validate_header(header)
+    except ContractError:
+        header.channels.pop()
+        raise

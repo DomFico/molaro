@@ -1,0 +1,7 @@
+{
+  "name": "produced_s",
+  "scope": "per_point_per_frame",
+  "dtype": "float32",
+  "min": 0.0,
+  "max": 160.0
+}
