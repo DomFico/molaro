@@ -2065,8 +2065,10 @@ async function main(): Promise<void> {
         // The vector arm: b.points holds polyline-VERTEX ids; each vertex
         // stores ITS point's raw 3-vector at this frame. No normalization
         // (parked), no range, no colormap — a straight strided copy. The
-        // repWrite dispatch is a no-op today (nothing subscribes — O-2's
-        // generator will) but keeps the cadence contract uniform.
+        // repWrite("orientation") dispatch reaches the RIBBON's fillAcross
+        // (onRepWrite.orientation, the O-2 consumer); with no oriented shape
+        // active it is a harmless no-op, and the cadence contract stays
+        // uniform either way.
         const off3 = (f - chunk.start) * header.n_points * 3;
         const buf = rep.state.orientation;
         for (const v of b.points) {
