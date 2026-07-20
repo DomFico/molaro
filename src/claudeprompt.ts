@@ -119,19 +119,42 @@ specific palette or to touch only some elements, that is \`commands\` (or a plai
 
 **\`produces: channel\`** — for a per-element quantity that varies per frame. The mod returns
 a declaration; the values ride the frame stream. Once declared it is bindable immediately —
-no reload. **Copy the shape from \`.molaro/mods/channel_flow.py\`.** Do not reconstruct the
-reply dict from memory. **A direction channel (\`components: 3\`) owns its frame-to-frame
-coherence.** Computing each frame independently can invert a direction's sign between
-adjacent frames; the renderer draws exactly what you supply, so an oriented shape will
-strobe. Seed each frame from the previous — \`channel_flow.py\`'s \`_seed_coherent\` is the
-pattern. If you miss it a warning names the breach, and the values are still drawn as
-supplied.
+no reload. Return EXACTLY this dict (these keys, spelled this way):
 
-**\`produces: figure\`** — for plots richer than \`per-frame-series\` or \`scatter\`. **Copy
-\`.molaro/mods/figure_metric.py\` and call its \`_figure_reply(fig, frames_axes)\`** — it emits
-the axes metadata mechanically. Hand-computing the bounds produces a playhead that is
-plausibly and silently misaligned. An axis declared \`x_is_frames\` gets a playhead and
-click-to-seek.
+    return {
+        "name": "<channel name>",   # how you will bind it; must be new (check get_context)
+        "values": [ ... ],          # ONE FLAT list, frame-major: all points of frame 0,
+                                     # then all of frame 1, …; length = n_frames * n_points
+                                     # * components. NOT a list-of-lists.
+        "components": 1,             # 1 = scalar; 3 = a vector (x, y, z consecutive per point)
+        "min": 0.0, "max": 1.0,     # optional scalar range hint; OMIT for a vector (components: 3)
+    }
+
+\`.molaro/mods/channel_flow.py\` is the full worked example (you cannot open it — the shape
+above is the source of truth). **A direction channel (\`components: 3\`) owns its
+frame-to-frame coherence.** Computing each frame independently can invert a direction's sign
+between adjacent frames; the renderer draws exactly what you supply, so an oriented shape
+will strobe. Seed each frame from the previous: compute the frame's vectors, then flip any
+whose dot product with the previous frame's is negative. If you miss it a warning names the
+breach, and the values are still drawn as supplied.
+
+**\`produces: figure\`** — for plots richer than \`per-frame-series\` or \`scatter\`. Return
+EXACTLY this dict:
+
+    return {
+        "png": "<base64 PNG>", "width": <int px>, "height": <int px>,
+        "axes": [                      # ONE entry per subplot
+            {"bbox": [x0, y0, w, h],   # ax.get_position().bounds — figure fractions
+             "xlim": [lo, hi],         # ax.get_xlim()
+             "x_is_frames": True},     # True if this axis's x IS the frame index
+        ],
+    }
+
+Emit \`bbox\`/\`xlim\` MECHANICALLY from the matplotlib axes (\`ax.get_position().bounds\`,
+\`ax.get_xlim()\`) — hand-computing them yields a playhead that is plausibly and silently
+misaligned. \`.molaro/mods/figure_metric.py\`'s \`_figure_reply\` does exactly this (again, the
+dict above is the source of truth; you cannot open the file). An axis declared
+\`x_is_frames\` gets a playhead and click-to-seek.
 
 Returns are validated strictly. A wrong length, a non-finite value, an out-of-range
 scalar, an exception, or a timeout means NOTHING is drawn and you get the error back.

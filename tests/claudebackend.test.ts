@@ -421,7 +421,19 @@ test("system prompt teaches the command grammar and the command-vs-mod choice (P
   assert.match(p, /bind <target> <channel> <axis>/);
   assert.match(p, /produces: channel/);
   assert.match(p, /produces: figure/);
-  assert.match(p, /channel_flow\.py/);       // points at the template, not a schema
+  assert.match(p, /channel_flow\.py/);       // the template is still cited as a worked example
+  // the return shapes are stated INLINE (the cartoon-test fix): Claude has no
+  // tool to read the templates, so pointing at them for the mechanical shape
+  // left it reconstructing from memory and getting the keys wrong. These
+  // assertions trip if the shapes ever regress back to template-only.
+  assert.match(p, /"name": "<channel name>"/);   // channel return dict, stated inline
+  assert.match(p, /"values":/);
+  assert.match(p, /ONE FLAT list, frame-major/);  // the flat-list layout named inline
+  assert.match(p, /"components": 1/);
+  assert.match(p, /"png": "<base64 PNG>"/);       // figure return dict, stated inline
+  assert.match(p, /x_is_frames/);
+  assert.match(p, /frame-to-frame coherence/);    // the coherence prose that DID land
+  assert.match(p, /Seed each frame from the previous/);
   assert.match(p, /nothing bound to `orientation` draws \*\*nothing\*\*/); // the shape dependency
   // NEGATIVE guard (the stale-claim class): the prompt must not tell Claude it
   // CANNOT produce a visual kind it actually can. `produces: figure` renders
