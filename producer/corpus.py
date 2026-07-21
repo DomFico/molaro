@@ -46,12 +46,41 @@ def _system_dir(system: str) -> str:
     raise FileNotFoundError(f"corpus system not found: {system!r} (root {corpus_root()})")
 
 
+def _assert_references_agree(sdir: str, sid: str, manifest: Dict[str, Any]) -> None:
+    """Every system stores its reference observables TWICE — in manifest.json
+    (``reference_observables``) and in reference_values.json. ``build.py`` writes
+    both, and the corpus test reads only the manifest.
+
+    That is two lists that must agree, with the read one not being the one a
+    person would naturally edit — the defect class this project has now paid for
+    four times, sitting in the tree whose whole job is to make the correctness
+    claim checkable. Remembering to write both is a person remembering, one
+    refactor away from failing. So it is asserted at load instead: any
+    divergence stops the corpus with both values named, rather than letting a
+    test quietly grade against a stale number.
+    """
+    rv_path = os.path.join(sdir, "reference_values.json")
+    if not os.path.exists(rv_path):
+        return                              # not every system carries the file
+    stored = json.load(open(rv_path))
+    declared = manifest.get("reference_observables", {})
+    for name in sorted(set(declared) & set(stored)):
+        a, b = declared[name].get("value"), stored[name].get("value")
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)) and a != b:
+            raise ValueError(
+                f"{sid}: reference '{name}' disagrees between manifest.json "
+                f"({a!r}) and reference_values.json ({b!r}). These must be written "
+                "together — see scripts/rederive_rg_references.py."
+            )
+
+
 def resolve_system(system: str) -> Dict[str, Any]:
     """Return {name, topology, trajectory, ligand_residues, manifest} for a
     system, resolving the manifest's primary topology + trajectory to abs paths."""
     sdir = _system_dir(system)
     manifest = json.load(open(os.path.join(sdir, "manifest.json")))
     sid = manifest["id"]
+    _assert_references_agree(sdir, sid, manifest)
     topology = os.path.join(sdir, manifest["topology"]["primary"])
     traj_primary = manifest["trajectory"]["primary"]
     trajectory = os.path.join(sdir, traj_primary) if traj_primary else None

@@ -98,7 +98,16 @@ def mda_rmsf_nm(top_path: str, traj_path: str, selection: str,
     MDAnalysis re-read the file and re-apply the transform itself, would put a
     second wrapping implementation in the loop, which is the defect class this
     corpus exists to catch. The ENGINES stay independent (MDAnalysis's own
-    superposition and RMSF); only the input is shared, deliberately."""
+    superposition and RMSF); only the input is shared, deliberately.
+
+    THE COVERAGE THIS COSTS, stated so it is understood precisely: sharing the
+    input gives up the two INDEPENDENT FILE READERS, which could catch a unit or
+    endianness bug in either reader. That loss is confined to systems the
+    producer actually transforms. An UNTRANSFORMED system keeps the property for
+    free — served bytes are the file's own bytes, so the two readers are still
+    independent end to end. Five of the nine corpus systems are untransformed,
+    adk (the hero) among them, so reader-level coverage is "wrapped systems lose
+    it, unwrapped systems retain it" — not "we lost it"."""
     import MDAnalysis as mda
     from MDAnalysis.analysis import align, rms
 
