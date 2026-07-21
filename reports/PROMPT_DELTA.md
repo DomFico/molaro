@@ -112,6 +112,35 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
   it would be wrong if it were allowed.
 - **Point at:** `.molaro/mods/ribbon_dir.py`, which now documents this at the return.
 
+### RMSF is target-driven the way RMSD is — and `all` is the wrong target on a solvated system (found in real use, 2026-07-21)
+
+- **Teach, beside the existing "RMSD is selection-driven — superpose on the same atom
+  set you measure" rule:** the same is true of RMSF, and it bites harder because a
+  second thing fails at the same time. Asking for fluctuation over `all` on a solvated
+  system does two wrong things at once, neither of which reports an error:
+  - **Normalization swamping (the visible failure, and the one nobody names).** The
+    `[0,1]` ramp is min-maxed over whatever is targeted. Water is the most mobile
+    thing in the box, so on the corpus trp cage — 304 protein atoms among 4810 —
+    `rmsf all` maps every protein atom into **0.000–0.106**. The user asked to see
+    floppiness and gets a uniformly flat protein.
+  - **Superposition contamination.** `md.rmsf` superposes over the set it is handed,
+    so `all` fits on 4506 waters and measures the protein against a solvent-dominated
+    frame: **Spearman 0.87** against the solute-targeted answer, not 1.00.
+- **The rule to state:** when a request is about how a MOLECULE moves — floppiness,
+  flexibility, mobility, fluctuation — target the solute (`polymer`, a chain, a
+  residue range), not `all`. `all` is right only when the whole system IS the
+  molecule.
+- **Why this was never caught:** every cold-acceptance run to date used adk, which is
+  100% polymer with no solvent and no unit cell. There `rmsf all` and
+  `rmsf <protein>` agree to **0.0000** — the defect is structurally invisible. R6
+  ("color the atoms by how floppy they are") reached for `run_mod{rmsf, target: all}`
+  2/2 and was scored a pass. On a solvated system that same choice is wrong.
+- **Point at:** `.molaro/mods/rmsf.py`, whose description and header now state this
+  where a mod author or the assistant will read it.
+- **Suite gap this exposes, worth fixing separately:** an entire defect class —
+  solvent, periodic boundaries, multi-molecule fitting — cannot appear in an
+  adk-only acceptance suite. One solvated system (trp cage) covers it.
+
 _(The ribbon bend miter, Item B, is a renderer change — no prompt surface.)_
 
 ---

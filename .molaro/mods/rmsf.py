@@ -5,7 +5,7 @@
 # axis: color
 # author: molaro reference mods
 # source: https://github.com/DomFico/molaro
-# description: per-atom RMS fluctuation, normalized to [0,1] for color — a reference analysis
+# description: per-atom RMS fluctuation, normalized to [0,1] for color — a reference analysis. ON A SOLVATED SYSTEM, TARGET THE SOLUTE, not `all`: both the superposition and the [0,1] normalization are taken over whatever you target, so `all` fits on the solvent and normalizes against water. Measured on a 6%-protein trp cage, `rmsf all` crushes every protein atom into the bottom 0.106 of the ramp (a flat-looking protein) and shifts its ranking (Spearman 0.87 vs the solute-targeted answer).
 #
 # Observable    : per-atom root-mean-square fluctuation (RMSF) about the mean
 #                 position — one value PER TARGET ATOM, in target order.
@@ -15,6 +15,24 @@
 #                 measured (mdtraj's md.rmsf). Alignment set == measured set,
 #                 mirroring the rmsd reference's selection convention, so an RMSF
 #                 over a subset is self-contained and coherent.
+# THE TARGET IS LOAD-BEARING, and adk cannot show you why: it is 100% polymer, so
+#                 `rmsf all` and `rmsf <protein>` agree exactly there (max Δ 0.0000).
+#                 On the solvated trp cage — 304 protein atoms among 4810 — they do
+#                 not. TWO things go wrong at once, and the smaller one is the one
+#                 people name:
+#                   * NORMALIZATION swamping (the visible failure): water is the most
+#                     mobile thing present, so min-max over `all` maps every protein
+#                     atom into 0.000–0.106. The protein renders flat, and nothing
+#                     reports an error.
+#                   * SUPERPOSITION contamination: md.rmsf superposes over the set it
+#                     is given, so `all` fits on 4506 waters and the protein's
+#                     fluctuation is measured against a solvent-dominated frame —
+#                     Spearman 0.87 against the solute-targeted ranking, not 1.00.
+#                 Both dissolve by targeting the solute. This mod does not silently
+#                 "fix" it by fitting on the solute while measuring everything: that
+#                 would break the alignment-set == measured-set invariant below, which
+#                 is what makes a subset RMSF self-contained.
+#
 # Normalization : min-max over the returned atoms → the LEAST mobile target atom
 #                 maps to 0.0 and the MOST mobile to 1.0. This is the mod's own
 #                 choice of what "high" means: relative mobility WITHIN the

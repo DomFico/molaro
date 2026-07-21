@@ -327,6 +327,49 @@ things is either mature or insufficiently varied, and two runs per request canno
 distinguish those. The value of the next requests is highest where they are least
 like the eight already here.
 
+---
+
+# Suite blind spot: every run to date used adk, which cannot show a solvent defect
+
+Found while auditing the shipped `rmsf` mod after a periodic-boundary change
+(2026-07-21). **R6 ("Color the atoms by how floppy they are") reached for
+`run_mod{rmsf, target: all}` 2/2 and was scored a pass. That choice is correct on
+adk and wrong on any solvated system**, and this suite could not have told the
+difference.
+
+The shipped `rmsf` mod is itself correct: it `atom_slice`s to the target FIRST, so
+its alignment set equals its measured set — the same discipline the RMSD reference
+follows. The trap is at the INVOCATION, and it fires twice at once:
+
+| | `rmsf all` → protein values | `rmsf <protein>` | Spearman | max Δ |
+|---|---|---|---|---|
+| **02_trpcage** (6.3% protein) | span **0.000–0.106** | 0.000–1.000 | 0.866 | **0.894** |
+| **03_adk** (100% protein) | span 0.000–1.000 | 0.000–1.000 | 1.000 | **0.000** |
+
+- **Normalization swamping** — the `[0,1]` ramp is min-maxed over the target, water
+  is the most mobile thing present, so every protein atom lands in the bottom 10% of
+  the ramp. The user asked to see floppiness and gets a flat protein. No error.
+- **Superposition contamination** — `md.rmsf` superposes over the set it is given, so
+  `all` fits on 4506 waters. Spearman 0.87, not 1.00.
+
+**adk shows 0.0000.** It is 100% polymer with no solvent and no unit cell, so an
+entire defect class — solvent, periodic boundaries, multi-molecule fitting — is
+structurally invisible here. Eight requests passing tells us nothing about it.
+
+**Done:** the driver is now system-parameterized (`COLD_SYSTEM=trpcage`), and the
+trp-cage boot context is confirmed to build through the real path — 4810 atoms, 150
+frames, `{polymer: 304, solvent: 4497, ion: 9}`, provenance reporting the centering.
+The `rmsf` mod's description now states the rule where `get_context` surfaces it, and
+`PROMPT_DELTA.md` carries the prompt entry.
+
+**NOT done, and it is the part that matters:** no live cold run against trp cage. The
+API key was shredded at the end of the R6–R8 round, as instructed, and no key is
+present in the environment. What is measured above is that the suite's system CANNOT
+exhibit the defect; whether the assistant would still choose `target: all` on a
+solvated system is unmeasured. Given R6 chose it 2/2 on adk from a request that never
+mentions the protein, the expectation is that it would — but that is a prediction, not
+a result, and it should not be recorded as one.
+
 # Appendix — full transcripts
 
 ## R1_runa — simulated run_mod
