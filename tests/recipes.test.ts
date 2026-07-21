@@ -79,6 +79,7 @@ test("registerRecipe: a name → recipe map future recipes register into", () =>
 // -- the mod FILE format + the fail-closed validation gate (brief #3) -------------
 
 import {
+  channelProviders,
   parseModFile,
   parseParamLine,
   resolveModSelector,
@@ -91,6 +92,7 @@ import {
   MOD_PARAM_TYPES,
   MOD_PRODUCES,
   type AnalysisMod,
+  type Mod,
   type ModParam,
 } from "../webview/recipes.ts";
 
@@ -308,10 +310,11 @@ test("unregisterRecipe removes a mod from the registry (and only that mod)", () 
 test("MOD_PRODUCES is exactly the six supported kinds, and parseModFile validates against it", () => {
   assert.deepEqual([...MOD_PRODUCES].sort(),
     ["channel", "commands", "figure", "per-frame-series", "per-point-scalar", "scatter"].sort());
-  // EVERY supported produces value parses (with axis where required)
+  // EVERY supported produces value parses (with axis / channel where required)
   for (const p of MOD_PRODUCES) {
     const axisLine = p === "per-point-scalar" ? "# axis: color\n" : "";
-    const file = `${MOD_FILE_MAGIC}\n# name: m\n# kind: analysis\n# produces: ${p}\n${axisLine}\ndef compute(data, target_indices):\n    return []\n`;
+    const channelLine = p === "channel" ? "# channel: ch\n" : "";
+    const file = `${MOD_FILE_MAGIC}\n# name: m\n# kind: analysis\n# produces: ${p}\n${axisLine}${channelLine}\ndef compute(data, target_indices):\n    return []\n`;
     const r = parseModFile(file, "workspace");
     assert.ok(r.ok, `parseModFile must accept produces: ${p}${r.ok ? "" : " — " + r.error}`);
     if (r.ok) assert.equal(r.mod.produces, p);
@@ -426,6 +429,50 @@ test("mod files: params round-trip through serialize → parse, header order pre
   const back = parseModFile(serializeMod(mod), "workspace");
   assert.ok(back.ok, back.ok ? "" : back.error);
   if (back.ok) assert.deepEqual(back.mod, mod);
+});
+
+// -- P-2: static channel name — header field, round-trip, provider index ----------
+
+test("parseModFile: # channel is required for channel mods, forbidden otherwise, token-validated", () => {
+  const chFile = (produces: string, channelLine: string) =>
+    `${MOD_FILE_MAGIC}\n# name: m\n# kind: analysis\n# produces: ${produces}\n${channelLine}\ndef compute(data, target_indices):\n    return {"values": [], "components": 1}\n`;
+  // a valid channel mod declares its name in the header
+  const ok = parseModFile(chFile("channel", "# channel: flow_dir\n"), "workspace");
+  assert.ok(ok.ok, ok.ok ? "" : ok.error);
+  if (ok.ok) assert.equal(ok.mod.channel, "flow_dir");
+  // missing channel on a channel mod → error naming the field
+  assert.match((parseModFile(chFile("channel", ""), "workspace") as { error: string }).error, /channel mod needs channel:/);
+  // a non-token channel name is rejected
+  assert.match((parseModFile(chFile("channel", "# channel: has space\n"), "workspace") as { error: string }).error, /single token/);
+  // channel on a NON-channel mod is rejected
+  assert.match(
+    (parseModFile(`${MOD_FILE_MAGIC}\n# name: m\n# kind: analysis\n# produces: per-frame-series\n# channel: x\n\ndef compute(d,t): return []\n`, "workspace") as { error: string }).error,
+    /channel is only valid on produces: channel/);
+});
+
+test("mod files: a channel mod round-trips serialize → parse with its declared name", () => {
+  const mod: AnalysisMod = {
+    name: "flow", kind: "analysis", produces: "channel", channel: "flow_dir", origin: "workspace",
+    code: 'def compute(data, target_indices):\n    return {"values": [], "components": 3}',
+  };
+  const back = parseModFile(serializeMod(mod), "workspace");
+  assert.ok(back.ok, back.ok ? "" : back.error);
+  if (back.ok) assert.deepEqual(back.mod, mod);
+});
+
+test("channelProviders: maps channel name → declaring mods; a name with >1 provider is a collision", () => {
+  const ch = (name: string, channel: string): Mod => ({
+    name, kind: "analysis", produces: "channel", channel, origin: "workspace",
+    code: "def compute(d,t,p): return {'values': [], 'components': 1}",
+  });
+  const providers = channelProviders([
+    ch("heat_a", "heat"), ch("heat_b", "heat"), ch("flow", "flow_dir"),
+    rainbow, // a representation mod contributes nothing
+  ]);
+  assert.deepEqual(providers.get("heat"), ["heat_a", "heat_b"], "the collision — two providers");
+  assert.deepEqual(providers.get("flow_dir"), ["flow"], "a unique provider");
+  const collisions = [...providers].filter(([, mods]) => mods.length > 1).map(([c]) => c);
+  assert.deepEqual(collisions, ["heat"]);
 });
 
 test("parseModFile: repeated # param: lines are COLLECTED (not overwritten), duplicates rejected", () => {

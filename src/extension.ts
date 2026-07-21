@@ -382,6 +382,7 @@ function openPanel(
     const liveState = await gatherLiveState(runViewerCommand);
     const mods = loadWorkspaceMods(producerLog, modPaths).map((m) => ({
       name: m.name, produces: m.produces, axis: m.axis, description: m.description,
+      ...(m.channel ? { channel: m.channel } : {}),
       ...(m.params ? { params: m.params } : {}),
     }));
     // Only categories that ACTUALLY have points — the header lists every domain
@@ -466,12 +467,16 @@ function openPanel(
 
   const saveAssistantMod = async (spec: {
     name: string; produces: AnalysisMod["produces"]; axis?: AnalysisMod["axis"];
-    description: string; code: string; params?: AnalysisMod["params"];
+    description: string; code: string; params?: AnalysisMod["params"]; channel?: string;
   }): Promise<{ ok: boolean; name: string; file: string; message: string }> => {
     const mod: AnalysisMod = {
       kind: "analysis", name: spec.name, origin: "workspace",
       author: "Molaro assistant", produces: spec.produces,
       ...(spec.axis ? { axis: spec.axis } : {}),
+      // P-2: the declared channel name becomes a `# channel:` header line. The
+      // written file is re-parsed on registration, so a missing/invalid one on a
+      // channel mod is caught and reported by write_mod, not silently accepted.
+      ...(spec.channel ? { channel: spec.channel } : {}),
       // Declared parameters become `# param:` header lines (serializeMod); the
       // written file is re-parsed on registration, so a malformed param is caught
       // and reported by write_mod, not silently accepted.
@@ -479,6 +484,14 @@ function openPanel(
       description: spec.description, code: spec.code,
     };
     const file = saveWorkspaceMod(mod);
+    // Re-parse the file we just wrote with the SAME parser registration uses, so
+    // a malformed mod (e.g. produces: channel without a # channel: name) reports
+    // its PRECISE reason to the model — the reload path only logs it and the
+    // viewer would otherwise return the generic "not among the mods loaded".
+    const reparsed = parseModFile(readFileSync(file, "utf-8"), "workspace");
+    if (!reparsed.ok) {
+      return { ok: false, name: spec.name, file, message: reparsed.error };
+    }
     // The disk write is NOT the registration. Re-push and wait for the viewer to
     // say whether it took — write_mod reports what THIS answers, never the write.
     const r = await pushWorkspaceMods(spec.name);

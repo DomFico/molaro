@@ -131,7 +131,7 @@ def _accepts_third_positional(fn) -> Optional[bool]:
 
 
 def run_mod(source, code: str, target_indices, timeout_s: float, install_channel=None,
-            parameters=None) -> bytes:
+            parameters=None, channel_name=None) -> bytes:
     """Execute a mod's `compute(data, target_indices)` against the RESIDENT
     dataset handle and return the response payload (JSON bytes).
 
@@ -188,6 +188,34 @@ def run_mod(source, code: str, target_indices, timeout_s: float, install_channel
                 for v in seq
             )
 
+        # a `produces: channel` run is identified by the REQUEST carrying the
+        # channel name (P-2), not by the return's shape — the name is declared in
+        # the mod header (`# channel:`), the SINGLE source, threaded here. The
+        # return carries {values, components, min?, max?} and MUST NOT carry a
+        # `name` (a second source that could silently disagree). This is checked
+        # BEFORE the shape-dispatch so a channel return never looks like a scatter.
+        if channel_name is not None:
+            if install_channel is None:
+                return json.dumps(
+                    {"error": "produced channels are not available in this context"}
+                ).encode("utf-8")
+            if not isinstance(values, dict) or not isinstance(values.get("values"), list):
+                return json.dumps(
+                    {"error": "a channel mod must return a dict carrying a 'values' list {values, components, min?, max?}"}
+                ).encode("utf-8")
+            if "name" in values:
+                return json.dumps({"error": (
+                    "a channel mod's return must NOT carry 'name' — the channel name is "
+                    "declared in the mod header (# channel:), not the return"
+                )}).encode("utf-8")
+            spec = dict(values)
+            spec["name"] = channel_name
+            try:
+                reply = install_channel(spec)  # raises ContractError on bad shape/name
+            except ContractError as exc:
+                # a clean validation error (no traceback), like the other arms
+                return json.dumps({"error": str(exc)}).encode("utf-8")
+            return json.dumps({"values": reply}).encode("utf-8")
         if isinstance(values, dict) and isinstance(values.get("png"), str):
             # a FIGURE reply: {png, width, height, axes} — a light structural
             # pass keeps the wire well-formed; the client runs THE deep
@@ -209,40 +237,24 @@ def run_mod(source, code: str, target_indices, timeout_s: float, install_channel
                 "axes": axes,
             }
             return json.dumps({"values": out}).encode("utf-8")
-        # a `produces: channel` mod returns a dict carrying a channel NAME and
-        # a flat per-point-per-frame `values` list — install it (declare +
-        # store its data) so every SUBSEQUENT frames reply carries the block.
-        # Disambiguated from scatter (x/y) and figure (png) by name+values;
-        # checked BEFORE the scatter dict arm (which claims every other dict).
-        if isinstance(values, dict) and isinstance(values.get("name"), str) \
-                and isinstance(values.get("values"), list):
-            if install_channel is None:
-                return json.dumps(
-                    {"error": "produced channels are not available in this context"}
-                ).encode("utf-8")
-            try:
-                reply = install_channel(values)  # raises ContractError on bad shape/name
-            except ContractError as exc:
-                # a clean validation error (no traceback), like the other arms
-                return json.dumps({"error": str(exc)}).encode("utf-8")
-            return json.dumps({"values": reply}).encode("utf-8")
         if isinstance(values, dict):
             # the OTHER widened return shape: a scatter's {x, y, frames?,
             # xLabel?, yLabel?}. The client re-validates against the mod's
             # declared `produces`; this pass keeps the wire well-formed.
             if not (finite_floats(values.get("x")) and finite_floats(values.get("y"))):
-                # A dict that is not a channel (name+values), not a figure
-                # (png), and not a scatter (x+y) lands here. NAME all three
-                # accepted dict shapes — a channel/figure author who got a key
-                # wrong (e.g. returned {"channel", "frames"} for a channel)
-                # otherwise sees only "must carry x and y" and cannot tell what
-                # shape the runner actually wants.
+                # A dict that is not a figure (png) and not a scatter (x+y) lands
+                # here. NAME both accepted dict shapes — a figure/scatter author
+                # who got a key wrong otherwise sees only "must carry x and y".
+                # (A channel is NOT a return-shape here: it is driven by
+                # produces: channel + the header's `# channel:` name, so a
+                # channel author sees the channel-return error instead.)
                 return json.dumps(
                     {"error": (
-                        "unrecognized dict return. A dict must be one of: a channel "
-                        '{"name": str, "values": [flat frame-major floats], "components": 1 or 3}; '
+                        "unrecognized dict return. A dict must be one of: "
                         'a figure {"png": base64, "width": int, "height": int, "axes": [...]}; '
                         'or a scatter {"x": [...], "y": [...]}. '
+                        "(For a per-frame channel, declare produces: channel with a "
+                        "# channel: name and return {values, components}.) "
                         "Got keys: " + ", ".join(sorted(str(k) for k in values.keys()))
                     )}
                 ).encode("utf-8")
@@ -426,6 +438,7 @@ def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO) -> None:
                     source, request.get("code"), request.get("target_indices"),
                     float(timeout_s), install_channel=install_channel,
                     parameters=request.get("parameters"),
+                    channel_name=request.get("channel_name"),
                 )
                 log.debug("run_mod -> %d bytes", len(payload))
             else:

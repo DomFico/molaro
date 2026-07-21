@@ -112,7 +112,7 @@ export interface SceneContext {
   /** e.g. "alpha.group-0" — a few real, constructible target examples. */
   targetExamples: string[];
   committedSelections: string;
-  mods: { name: string; produces: ModProduces; axis?: ModAxis; description?: string; params?: ModParam[] }[];
+  mods: { name: string; produces: ModProduces; axis?: ModAxis; channel?: string; description?: string; params?: ModParam[] }[];
   /** The viewer's base look for any element not written by a command — the real
    * defaults from representation.ts, so the model states the true baseline
    * instead of guessing (and knows undo restores it). */
@@ -178,6 +178,7 @@ export interface WriteModSpec {
   description: string;
   code: string;
   params?: ModParam[];
+  channel?: string;
 }
 
 /** The host callbacks the tools drive — every one an EXISTING path (the
@@ -265,7 +266,8 @@ export function buildToolDefs(deps: ToolDeps) {
             const params = m.params && m.params.length
               ? ` [params: ${m.params.map((p) => `${p.name}:${p.type}${p.default !== undefined ? `=${p.default}` : " (required)"}`).join(", ")}]`
               : "";
-            return `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""})${params}${m.description ? `: ${m.description}` : ""}`;
+            const chan = m.channel ? ` → ${m.channel}` : "";
+            return `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${chan})${params}${m.description ? `: ${m.description}` : ""}`;
           }).join("\n")
         : "  (none yet)";
       const kinds = c.subgroupKinds.length
@@ -303,7 +305,8 @@ export function buildToolDefs(deps: ToolDeps) {
       "FULL Python source is shown to the human for approval before it is saved. " +
       "`produces` is one of the values in this tool's schema; the system prompt's " +
       "mod contract gives each kind's return shape (declare axis: color|size|" +
-      "opacity only for per-point-scalar). Author it to that contract. This does " +
+      "opacity only for per-point-scalar, and channel: <name> only for produces: " +
+      "channel). Author it to that contract. This does " +
       "not run it — call run_mod after it is saved.",
     {
       name: z.string().describe("mod name: lowercase, [a-z][a-z0-9_-]*"),
@@ -313,6 +316,8 @@ export function buildToolDefs(deps: ToolDeps) {
       produces: z.enum(MOD_PRODUCES),
       axis: z.enum(MOD_AXES).optional()
         .describe("required when produces is per-point-scalar; omit for the others"),
+      channel: z.string().optional()
+        .describe("required when produces is channel: the channel's bindable name (a single token [A-Za-z][A-Za-z0-9_-]*); the return then carries no name"),
       description: z.string().describe("one line: what the mod computes"),
       code: z.string().describe(
         "the complete Python source defining compute(data, target_indices) — or " +

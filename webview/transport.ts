@@ -32,6 +32,10 @@ export type ProducerRequest =
       /** Effective parameters (defaults filled webview-side), name → typed
        * value. Additive — absent when the mod declares no parameters. */
       parameters?: Record<string, number | string | boolean>;
+      /** produces:channel only: the channel's declared name (the header's single
+       * source). Present ⟺ a channel run; the producer installs under it and the
+       * return carries no name. */
+      channel_name?: string;
     };
 
 export type HostMessage =

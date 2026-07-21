@@ -2,6 +2,7 @@
 # name: channel_flow
 # kind: analysis
 # produces: channel
+# channel: flow_dir
 # author: Example Author
 # source: https://github.com/DomFico/molaro
 # description: synthetic example — a produced per-point-per-frame VECTOR channel, coherently seeded frame-to-frame
@@ -9,16 +10,17 @@
 # THE TEMPLATE for `produces: channel`. Two things it is here to demonstrate,
 # both first-class:
 #
-# 1. THE RETURN SHAPE. Return a dict declaring ONE per_point_per_frame channel:
-#      {"name": str,
-#       "values": [flat, frame-major floats],   # len = n_frames*n_points*components
+# 1. THE HEADER + RETURN SHAPE. The channel's NAME is declared once in the header
+#    (`# channel: flow_dir`) — the single source, how the user will `bind` it,
+#    knowable without running the mod. The return then carries only DATA:
+#      {"values": [flat, frame-major floats],   # len = n_frames*n_points*components
 #       "components": 1 | 3,                     # 3 = a VECTOR channel (default 1)
 #       "min"?: float, "max"?: float}            # scalar-only range hint
 #    Frame-major means: all points of frame 0, then all of frame 1, and so on;
 #    within a point, a vector's `components` values are consecutive (x, y, z).
-#    The values never ride the reply — the producer stores them and every
-#    subsequent frame chunk carries the block, so the channel is bindable with
-#    NO reload. Naming the channel names how the user will `bind` it.
+#    Do NOT put a "name" in the return — it is declared in the header. The values
+#    never ride the reply; the producer stores them and every subsequent frame
+#    chunk carries the block, so the channel is bindable with NO reload.
 #
 # 2. FRAME-TO-FRAME COHERENCE — the part that is easy to get wrong. A produced
 #    direction OWNS its coherence: the renderer draws exactly what you supply,
@@ -72,4 +74,4 @@ def compute(data, target_indices):
         for x, y, z in frame:
             values.extend((x, y, z))
 
-    return {"name": "flow_dir", "values": values, "components": 3}
+    return {"values": values, "components": 3}

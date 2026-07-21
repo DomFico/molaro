@@ -110,6 +110,11 @@ export interface AnalysisMod extends ModCommon {
   /** Required iff produces = per-point-scalar: which point axis the scalars
    * bind to (see MOD_AXES). */
   axis?: ModAxis;
+  /** Required iff produces = channel (P-2): the channel's declared NAME — the
+   * SINGLE source (the return no longer carries it). Known WITHOUT running the
+   * mod, so it drives collision detection, the approval preview, and P-3's
+   * provider index; threaded to the producer via the run_mod request. */
+  channel?: string;
   /** Python source defining `compute(data, target_indices)` — or
    * `compute(data, target_indices, params)` when the mod declares parameters.
    * Executed in the producer against the resident dataset handle. Returns a flat
@@ -197,6 +202,10 @@ registerRecipe(rainbow);
 export const MOD_FILE_MAGIC = "# molaro-mod";
 
 const NAME_RE = /^[a-z][a-z0-9_-]*$/;
+/** A channel name must be a single bindable token — MIRRORS the contract's own
+ * channel-name rule (contract.ts parseChannelDelta), which re-validates it
+ * producer-side, so the two can never disagree. */
+const CHANNEL_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
 export type ModParseResult =
   | { ok: true; mod: AnalysisMod }
@@ -243,6 +252,18 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
   } else if (axis !== undefined) {
     return { ok: false, error: "axis is only valid on per-point-scalar mods" };
   }
+  // P-2: a `produces: channel` mod declares its channel NAME in the header — the
+  // SINGLE source (the return no longer carries it). Required for channel mods,
+  // forbidden otherwise; token-validated to the contract's channel-name rule so
+  // the declared name is bindable and the mismatch can never surface at run time.
+  const channel = meta.channel;
+  if (produces === "channel") {
+    if (channel === undefined || !CHANNEL_NAME_RE.test(channel)) {
+      return { ok: false, error: `a channel mod needs channel: <name> (a single token ${CHANNEL_NAME_RE}, got "${channel ?? ""}")` };
+    }
+  } else if (channel !== undefined) {
+    return { ok: false, error: "channel is only valid on produces: channel mods" };
+  }
   if (!/\bdef\s+compute\s*\(/.test(code)) {
     return { ok: false, error: "the code must define compute(data, target_indices)" };
   }
@@ -267,6 +288,7 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
     kind: "analysis",
     produces: produces as ModProduces, // validated against MOD_PRODUCES above
     ...(produces === "per-point-scalar" ? { axis: axis as ModAxis } : {}),
+    ...(produces === "channel" ? { channel } : {}),
     code,
     ...(params.length ? { params } : {}),
     origin,
@@ -290,6 +312,7 @@ export function serializeMod(mod: Mod): string {
     `# kind: analysis`,
     `# produces: ${mod.produces}`,
     ...(mod.axis ? [`# axis: ${mod.axis}`] : []),
+    ...(mod.channel ? [`# channel: ${mod.channel}`] : []),
     ...(mod.params ?? []).map(
       (p) => `# param: ${p.name} ${p.type}${p.default !== undefined ? ` ${p.default}` : ""}`,
     ),
@@ -543,6 +566,26 @@ export function validateModValues(
     }
   }
   return { ok: true, values: values as number[] };
+}
+
+// -- channel providers: the static name → mod(s) index (P-2 collision, P-3 dep) ----
+
+/** Map each DECLARED channel name → the mod names that produce it. Now that the
+ * channel name is static in the header (P-2), this is knowable WITHOUT running
+ * any mod. A name with more than one provider is a COLLISION: both install to the
+ * same channel, so whichever runs last owns the data. P-2 warns on it at
+ * registration; P-3 reads this index to run a `requires-channel`'s provider (and
+ * to refuse an ambiguous one). Pure. */
+export function channelProviders(mods: readonly Mod[]): Map<string, string[]> {
+  const out = new Map<string, string[]>();
+  for (const m of mods) {
+    if (m.kind === "analysis" && m.produces === "channel" && m.channel) {
+      const list = out.get(m.channel) ?? [];
+      list.push(m.name);
+      out.set(m.channel, list);
+    }
+  }
+  return out;
 }
 
 // -- rm: mod-name selector resolution + runtime unregistration --------------------

@@ -117,13 +117,14 @@ reproduces an *exact, named-color, leave-the-rest-untouched* look. If the user w
 specific palette or to touch only some elements, that is \`commands\` (or a plain
 \`run_command\`), never a scalar.
 
-**\`produces: channel\`** — for a per-element quantity that varies per frame. The mod returns
-a declaration; the values ride the frame stream. Once declared it is bindable immediately —
-no reload. Return EXACTLY this dict (these keys, spelled this way):
+**\`produces: channel\`** — for a per-element quantity that varies per frame. The channel's
+NAME is declared in the HEADER — \`# channel: <name>\` (a SINGLE TOKEN, letters/digits/_/-, NO
+SPACES: \`bb_dir\` not \`backbone dir\`) — so it is knowable without running the mod (write it via
+write_mod's \`channel\` field). The mod then returns only DATA; the values ride the frame stream
+and it is bindable immediately, no reload. Return EXACTLY this dict (these keys, spelled this
+way) — do NOT put a \`name\` in the return, it is declared in the header:
 
     return {
-        "name": "<channel name>",   # how you bind it — a SINGLE TOKEN (letters/digits/_/-,
-                                     # NO SPACES: "bb_dir" not "backbone dir"); new (check get_context)
         "values": [ ... ],          # ONE FLAT list, frame-major: all points of frame 0,
                                      # then all of frame 1, …; length = n_frames * n_points
                                      # * components. NOT a list-of-lists.
@@ -374,7 +375,7 @@ Bind first, then swap the shape.`;
 /** Render the live scene into the "loaded system" section. */
 export function renderContext(c: SceneContext): string {
   const mods = c.mods.length
-    ? c.mods.map((m) => `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""})`).join("\n")
+    ? c.mods.map((m) => `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${m.channel ? ` → ${m.channel}` : ""})`).join("\n")
     : "  (none yet — you have not written any)";
   return [
     "## The loaded system",

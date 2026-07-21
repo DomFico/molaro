@@ -1192,7 +1192,7 @@ async function main(): Promise<void> {
   // command registry exists below. Returns WHAT IT DID — the host awaits this
   // outcome before letting write_mod claim a registration.
   let installMods: (raw: unknown) => ModInstallOutcome =
-    () => ({ installed: [], skipped: [] });
+    () => ({ installed: [], skipped: [], channelCollisions: [] });
   // `produces: commands` mods run their emitted strings through the command
   // path; late-bound once the command registry + validation registry exist.
   let runCommandMod: (mod: AnalysisMod, cmds: string[]) => void = () => {};
@@ -1231,6 +1231,13 @@ async function main(): Promise<void> {
     if (msg?.type === "modsLoaded") {
       const push = msg as unknown as { mods?: unknown; id?: number; confirm?: string };
       const outcome = installMods(push.mods);
+      // Surface EVERY detected channel-name collision as a terminal line — boot
+      // pushes and cross-mod collisions too, not only the freshly-written mod's
+      // (which also rides the write_mod tool result via modInstallReport). P-2
+      // detection must be loud wherever it is found, never silently dropped.
+      for (const c of outcome.channelCollisions) {
+        asyncLine("ok", `⚠ channel "${c.channel}" is declared by ${c.mods.join(", ")} — whichever runs last owns the data`);
+      }
       // A push that carries an id is a write_mod save AWAITING confirmation: the
       // host holds the tool's promise open until the viewer — the layer that
       // actually registers — says what happened. Answered on the SAME
@@ -2261,6 +2268,10 @@ async function main(): Promise<void> {
           // resolver filled defaults webview-side, so the producer gets the
           // COMPLETE effective set or none at all).
           ...(params && Object.keys(params).length ? { parameters: params } : {}),
+          // P-2: a produces:channel mod's declared name (the header's # channel:,
+          // the single source) — threaded so the producer installs under it and
+          // the return no longer carries a name.
+          ...(mod.produces === "channel" && mod.channel ? { channel_name: mod.channel } : {}),
         });
         const reply = JSON.parse(new TextDecoder().decode(bytes)) as {
           values?: unknown;

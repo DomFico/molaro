@@ -667,11 +667,15 @@ existing machinery (nothing new renders):
   `produces: commands`; a `commands` mod may be invoked bare (no target),
   since it may ignore `target_indices`.
 
-- `produces: channel` — a **produced channel**: `compute` returns a dict
-  `{"name": str, "values": [flat frame-major floats], "components"?: 1|3,
-  "min"?, "max"?}` declaring ONE `per_point_per_frame` channel the viewer
-  can then **bind to a representation axis** — the same machinery header
-  channels use. `values` is length `n_frames × n_points × components`,
+- `produces: channel` — a **produced channel**. The channel's NAME is
+  declared once in the header, `# channel: <name>` (a single token
+  `[A-Za-z][A-Za-z0-9_-]*`) — the single source, how the user binds it, and
+  knowable without running the mod. `compute` then returns only DATA:
+  `{"values": [flat frame-major floats], "components"?: 1|3, "min"?, "max"?}`
+  (do **not** put a `name` in the return — it is declared in the header, and a
+  `name` in the return is refused). This declares ONE `per_point_per_frame`
+  channel the viewer can then **bind to a representation axis** — the same
+  machinery header channels use. `values` is length `n_frames × n_points × components`,
   frame-major (all points of frame 0, then frame 1, …); `components: 3`
   declares a **vector** channel (each element three interleaved floats; no
   `min`/`max`). No `axis` — the user picks the axis at bind time. The

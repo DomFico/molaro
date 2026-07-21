@@ -42,6 +42,7 @@ import {
   type ChannelDecl,
 } from "./channelmap.ts";
 import {
+  channelProviders,
   getRecipe,
   listRecipes,
   rainbow,
@@ -2504,6 +2505,9 @@ export interface ModInstallDeps {
 export interface ModInstallOutcome {
   installed: string[];
   skipped: { name: string; reason: string }[];
+  /** P-2: channel names declared by MORE THAN ONE installed mod — knowable
+   * without running them now the name is static. Empty when there are none. */
+  channelCollisions: { channel: string; mods: string[] }[];
 }
 
 /**
@@ -2523,8 +2527,9 @@ export interface ModInstallOutcome {
  */
 export function installModList(raw: unknown, deps: ModInstallDeps): ModInstallOutcome {
   const installed: string[] = [];
+  const installedMods: AnalysisMod[] = [];
   const skipped: { name: string; reason: string }[] = [];
-  if (!Array.isArray(raw)) return { installed, skipped };
+  if (!Array.isArray(raw)) return { installed, skipped, channelCollisions: [] };
   for (const entry of raw) {
     const mod = entry as AnalysisMod;
     if (!mod || mod.kind !== "analysis" || typeof mod.name !== "string" ||
@@ -2540,8 +2545,15 @@ export function installModList(raw: unknown, deps: ModInstallDeps): ModInstallOu
     }
     deps.install(mod);
     installed.push(mod.name);
+    installedMods.push(mod);
   }
-  return { installed, skipped };
+  // P-2: two mods declaring the same channel name — detect (warn, not refuse:
+  // both register fine, but the author should know one will overwrite the other).
+  const channelCollisions: { channel: string; mods: string[] }[] = [];
+  for (const [channel, mods] of channelProviders(installedMods)) {
+    if (mods.length > 1) channelCollisions.push({ channel, mods });
+  }
+  return { installed, skipped, channelCollisions };
 }
 
 /**
@@ -2554,7 +2566,13 @@ export function installModList(raw: unknown, deps: ModInstallDeps): ModInstallOu
  */
 export function modInstallReport(outcome: ModInstallOutcome, name: string): CommandResult {
   if (outcome.installed.includes(name)) {
-    return { status: "ok", message: `registered mod "${name}"` };
+    // Surface a channel-name collision the moment the colliding mod registers.
+    const clash = outcome.channelCollisions.find((c) => c.mods.includes(name));
+    const warn = clash
+      ? ` ⚠ channel "${clash.channel}" is also declared by ${clash.mods.filter((m) => m !== name).join(", ")}` +
+        ` — whichever runs last owns the data`
+      : "";
+    return { status: "ok", message: `registered mod "${name}"${warn}` };
   }
   const skip = outcome.skipped.find((s) => s.name === name);
   if (skip) {

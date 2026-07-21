@@ -27,6 +27,9 @@ export interface ProducerRequest {
   /** run_mod: effective parameters (defaults filled), name → typed scalar.
    * Additive — absent when the mod declares no parameters. */
   parameters?: Record<string, number | string | boolean>;
+  /** run_mod: a produces:channel mod's declared channel name (the header single
+   * source). Present ⟺ a channel run; the return then carries no name. */
+  channel_name?: string;
 }
 
 export interface BrokerOptions {

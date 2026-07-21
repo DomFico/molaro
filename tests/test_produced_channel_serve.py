@@ -55,6 +55,9 @@ def _channel_mod(name: str, components: int, expr: str, *, min=None, max=None) -
         extra += f', "min": {min}'
     if max is not None:
         extra += f', "max": {max}'
+    # P-2: the channel NAME is declared in the header and threaded via the
+    # request's channel_name; the return carries only DATA (no name). `name` here
+    # is used by the caller to set channel_name (see _crun).
     return (
         "def compute(data, target_indices):\n"
         "    h = data.give_header(); N, T = h.n_points, h.n_frames\n"
@@ -64,8 +67,15 @@ def _channel_mod(name: str, components: int, expr: str, *, min=None, max=None) -
         "        for p in range(N):\n"
         "            for c in range(C):\n"
         f"                vals.append(float({expr}))\n"
-        f'    return {{"name": "{name}", "components": {components}, "values": vals{extra}}}\n'
+        f'    return {{"components": {components}, "values": vals{extra}}}\n'
     )
+
+
+def _crun(name: str, code: str, target=None) -> dict:
+    """A channel run_mod request: the name rides `channel_name` (the header's
+    single source), not the return."""
+    return {"type": "run_mod", "code": code, "target_indices": target or [0],
+            "channel_name": name}
 
 
 def _run(source, requests: list) -> list:
@@ -98,8 +108,8 @@ def main() -> int:
     resp = _run(src, [
         {"type": "header"},
         {"type": "frames", "start": 0, "count": 4},          # PRE-declaration
-        {"type": "run_mod", "code": scalar_mod, "target_indices": [0]},
-        {"type": "run_mod", "code": vec_ok, "target_indices": [0]},
+        _crun("heat", scalar_mod),
+        _crun("dir_ok", vec_ok),
         {"type": "header"},                                    # POST-declaration
         {"type": "frames", "start": 0, "count": 4},           # POST-declaration
     ])
@@ -140,7 +150,7 @@ def main() -> int:
 
     # -- coherence WARNING on an incoherent vector -----------------------------
     src2 = SyntheticSource(n_points=N, n_frames=T, seed=5)
-    r2 = _run(src2, [{"type": "run_mod", "code": vec_bad, "target_indices": [0]}])
+    r2 = _run(src2, [_crun("dir_bad", vec_bad)])
     bad_reply = json.loads(r2[0].decode("utf-8"))
     check("incoherent vector still DECLARES (warning, never refusal)",
           "channel" in bad_reply.get("values", {}))
@@ -155,11 +165,11 @@ def main() -> int:
     scalar_mod_v2 = _channel_mod("heat", 1, "9.0", min=0.0, max=10.0)   # same name+shape, new data
     scalar_as_vector = _channel_mod("heat", 3, "1.0")                   # same name, DIFFERENT shape
     r3 = _run(src3, [
-        {"type": "run_mod", "code": scalar_mod, "target_indices": [0]},       # declare heat
+        _crun("heat", scalar_mod),       # declare heat
         {"type": "frames", "start": 0, "count": 2},                            # heat = f*.5+p*.25
-        {"type": "run_mod", "code": scalar_mod_v2, "target_indices": [0]},     # re-declare heat = 9
+        _crun("heat", scalar_mod_v2),     # re-declare heat = 9
         {"type": "frames", "start": 0, "count": 2},                            # heat now all 9
-        {"type": "run_mod", "code": scalar_as_vector, "target_indices": [0]},  # wrong shape → refuse
+        _crun("heat", scalar_as_vector),  # wrong shape → refuse
     ])
     import numpy as np
     heat_before = np.frombuffer(decode_frame_chunk(r3[1]).channels["heat"], dtype="<f4")
@@ -176,10 +186,10 @@ def main() -> int:
     src4 = SyntheticSource(n_points=N, n_frames=T, seed=5)
     short_mod = (
         "def compute(data, target_indices):\n"
-        '    return {"name": "bad", "components": 1, "values": [1.0, 2.0]}\n'  # wrong length
+        '    return {"components": 1, "values": [1.0, 2.0]}\n'  # wrong length
     )
     r4 = _run(src4, [
-        {"type": "run_mod", "code": short_mod, "target_indices": [0]},
+        _crun("bad", short_mod),
         {"type": "header"},
         {"type": "frames", "start": 0, "count": 2},
     ])
@@ -194,23 +204,33 @@ def main() -> int:
           sorted(chunk_after_reject.channels.keys()) == ["energy", "flow"])
     validate_frame_chunk(chunk_after_reject, hdr_after_reject)
 
-    # -- a MALFORMED channel dict names all three shapes (the cartoon-test find) -
-    # A model that can't read channel_flow.py reconstructs the return dict from
-    # memory and gets keys wrong (observed live: {"channel","components","frames"}
-    # instead of {"name","values","components"}). Before, that hit the scatter
-    # arm and got only "must carry x and y" — useless for a channel author. The
-    # error must now name the channel/figure/scatter shapes AND the keys it got.
+    # -- a NON-channel malformed dict names figure + scatter (the cartoon-test
+    # find) — a channel is no longer a return SHAPE, so this error no longer
+    # mentions it (it points at produces: channel instead).
     src5 = SyntheticSource(n_points=N, n_frames=T, seed=5)
     wrong_shape = (
         "def compute(data, target_indices):\n"
-        '    return {"channel": "disp", "components": 1, "frames": [[0.0]]}\n'
+        '    return {"foo": "disp", "components": 1, "frames": [[0.0]]}\n'
     )
     r5 = json.loads(_run(src5, [{"type": "run_mod", "code": wrong_shape, "target_indices": [0]}])[0].decode())
     msg = r5.get("error", "")
-    check("a malformed channel dict's error NAMES the channel shape",
-          '"name"' in msg and '"values"' in msg and "components" in msg, msg[:160])
-    check("...and also names figure + scatter, and the keys it actually got",
-          "figure" in msg and "scatter" in msg and "channel, components, frames" in msg, msg[:220])
+    check("a malformed non-channel dict's error names figure + scatter, and the keys it got",
+          "figure" in msg and "scatter" in msg and "components, foo, frames" in msg, msg[:220])
+    check("...and points a channel author at produces: channel (not a return shape)",
+          "produces: channel" in msg, msg[:220])
+
+    # -- P-2 Option A: a channel run's name comes from the header, NOT the return -
+    src6 = SyntheticSource(n_points=N, n_frames=T, seed=5)
+    with_name = _channel_mod("x", 1, "1.0").replace(
+        '"components": 1, "values": vals', '"name": "sneaky", "components": 1, "values": vals')
+    no_values = "def compute(data, target_indices):\n    return {\"components\": 1}\n"
+    r6 = _run(src6, [_crun("heat", with_name), _crun("heat", no_values)])
+    name_err = json.loads(r6[0].decode()).get("error", "")
+    check("a channel return carrying 'name' is REFUSED (name is the header's single source)",
+          "must NOT carry 'name'" in name_err and "# channel:" in name_err, name_err[:160])
+    values_err = json.loads(r6[1].decode()).get("error", "")
+    check("a channel return without 'values' is refused with the channel shape",
+          "{values, components" in values_err, values_err[:160])
 
     print("ALL PASS" if failures == 0 else f"{failures} FAILURES")
     return 0 if failures == 0 else 1
