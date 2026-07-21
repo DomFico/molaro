@@ -1,0 +1,49 @@
+{
+ "system": "adk",
+ "nAtoms": 3341,
+ "nFrames": 98,
+ "categories": [
+  "polymer"
+ ],
+ "groups": [
+  "A"
+ ],
+ "subgroupCount": 214,
+ "subgroupKinds": [
+  "ALA",
+  "ARG",
+  "ASN",
+  "ASP",
+  "CYS",
+  "GLN",
+  "GLU",
+  "GLY",
+  "HIS",
+  "ILE",
+  "LEU",
+  "LYS",
+  "MET",
+  "PHE",
+  "PRO",
+  "SER",
+  "THR",
+  "TYR",
+  "VAL"
+ ],
+ "subgroupKindsCapped": false,
+ "pointTypes": [
+  "C",
+  "H",
+  "N",
+  "O",
+  "S"
+ ],
+ "pointTypesCapped": false,
+ "targetExamples": [
+  "all",
+  "polymer"
+ ],
+ "provenance": [
+  "periodic-image centering: off (no unit-cell information \u2014 not a periodic system)"
+ ]
+}

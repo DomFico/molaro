@@ -1,0 +1,52 @@
+{
+ "system": "trpcage",
+ "nAtoms": 4810,
+ "nFrames": 150,
+ "categories": [
+  "ion",
+  "polymer",
+  "solvent"
+ ],
+ "groups": [
+  "2",
+  "3",
+  "A"
+ ],
+ "subgroupCount": 1528,
+ "subgroupKinds": [
+  "ARG",
+  "ASN",
+  "ASP",
+  "CL",
+  "GLN",
+  "GLY",
+  "HOH",
+  "ILE",
+  "LEU",
+  "LYS",
+  "NA",
+  "PRO",
+  "SER",
+  "TRP",
+  "TYR"
+ ],
+ "subgroupKindsCapped": false,
+ "pointTypes": [
+  "C",
+  "Cl",
+  "H",
+  "N",
+  "Na",
+  "O"
+ ],
+ "pointTypesCapped": false,
+ "targetExamples": [
+  "all",
+  "ion",
+  "polymer",
+  "solvent"
+ ],
+ "provenance": [
+  "periodic-image centering: on (304 solute atoms held still; largest per-frame shift 5.14 nm; solute jump/frame 5.14 \u2192 0.000 nm); 1508 loose molecules re-imaged around it"
+ ]
+}

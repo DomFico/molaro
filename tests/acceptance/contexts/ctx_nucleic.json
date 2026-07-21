@@ -1,0 +1,46 @@
+{
+ "system": "nucleic",
+ "nAtoms": 19393,
+ "nFrames": 120,
+ "categories": [
+  "ion",
+  "polymer",
+  "solvent"
+ ],
+ "groups": [
+  "3",
+  "4",
+  "A",
+  "B"
+ ],
+ "subgroupCount": 6273,
+ "subgroupKinds": [
+  "CL",
+  "DA",
+  "DC",
+  "DG",
+  "DT",
+  "HOH",
+  "NA"
+ ],
+ "subgroupKindsCapped": false,
+ "pointTypes": [
+  "C",
+  "Cl",
+  "H",
+  "N",
+  "Na",
+  "O",
+  "P"
+ ],
+ "pointTypesCapped": false,
+ "targetExamples": [
+  "all",
+  "ion",
+  "polymer",
+  "solvent"
+ ],
+ "provenance": [
+  "periodic-image centering: on (758 solute atoms held still; largest per-frame shift 0.15 nm; solute jump/frame 0.02 \u2192 0.000 nm); 6249 loose molecules re-imaged around it"
+ ]
+}
