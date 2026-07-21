@@ -73,6 +73,7 @@ interface HeaderPeek {
   groups: Record<string, string>;
   subgroups: Record<string, string>;
   points: { category: number[]; type: string[] };
+  provenance?: string[];
 }
 
 interface OpenArgs {
@@ -428,6 +429,10 @@ function openPanel(
       // The real base look (representation.ts is the single source) so the model
       // states the true baseline for "put it back to normal" instead of guessing
       // — though undo is the reliable way back (Part C).
+      // How the coordinates were prepared. Display and mods share ONE set of
+      // coordinates, so a mod's numbers describe exactly what is on screen —
+      // but only if the model can read what preparation was applied.
+      provenance: Array.isArray(h.provenance) ? h.provenance : [],
       baseLook: {
         pointSize: DEFAULT_SIZE,
         opacity: DEFAULT_OPACITY,

@@ -21,7 +21,7 @@ const stubDeps: ToolDeps = {
   getContext: async () => ({
     system: "x", nAtoms: 0, nFrames: 0, categories: [], groups: [],
     subgroupCount: 0, subgroupKinds: [], subgroupKindsCapped: false,
-    pointTypes: [], pointTypesCapped: false,
+    pointTypes: [], pointTypesCapped: false, provenance: [],
     targetExamples: [], committedSelections: "",
     liveState: { channels: "", bindings: "", shapes: "", styles: "" }, mods: [],
     baseLook: { pointSize: 3, opacity: 1, color: "#e6e6e6" },

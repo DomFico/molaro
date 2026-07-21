@@ -65,6 +65,10 @@ export interface Header {
   edges: [number, number][];
   polylines: number[][];
   channels: Channel[];
+  /** How the coordinates were prepared before streaming (empty = the file's
+   * own). Display and mods share one set of coordinates, so this is how that
+   * preparation stays visible rather than implicit. */
+  provenance?: string[];
 }
 
 /**

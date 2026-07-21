@@ -30,7 +30,13 @@ from contract.contract import (
     Header,
     Points,
 )
-from producer.domain_rules import CATEGORIES, classify_atom, trace_anchor_indices
+from producer.domain_rules import (
+    CAT_LIGAND,
+    CAT_POLYMER,
+    CATEGORIES,
+    classify_atom,
+    trace_anchor_indices,
+)
 from producer.source import DataSource
 
 # Bonds longer than this (nm) are treated as periodic-boundary wrap artifacts
@@ -43,6 +49,53 @@ PBC_BOND_CUTOFF_NM = 0.3
 # some frames and not others). Cheap and robust for corpus-scale data.
 PBC_SAMPLE_FRAMES = 8
 
+# Periodic-image centering ----------------------------------------------------
+#
+# A solvated trajectory wraps its solute back into the primary box, so the
+# molecule teleports from one face to the other mid-playback. Measured on the
+# corpus trp cage: the solute's centre jumps up to 5.14 nm between adjacent
+# frames in a 3.648 nm box — a full periodic-image crossing — and its centre
+# visits the entire box. That is unusable for the primary case (most real
+# trajectories are solvated), so this is corrected at load, automatically,
+# whenever the trajectory carries unit-cell information.
+#
+# THE CORRECTION IS A PER-FRAME RIGID TRANSLATION of every atom, chosen so the
+# solute's centroid stays where it was in frame 0. It is emphatically NOT
+# mdtraj's image_molecules(): that re-wraps molecules into different periodic
+# images, which moves absolute positions and inter-molecular distances. On the
+# same trp cage, imaging changed 400 sampled pairwise distances by up to 5.74
+# nm, moved whole-system Rg by 7.3e-2 nm and all-atom RMSF by 2.27 nm — 733x
+# and 22000x the corpus's 1e-4 tolerance. A rigid translation changes NO
+# relative geometry whatsoever, so every observable that depends only on
+# relative geometry is invariant BY CONSTRUCTION rather than by coincidence:
+# the same 400 distances moved by 9.5e-7 nm, which is float32 noise. Both
+# corrections fix the display equally well (jump/frame max 0.0140 nm either
+# way). Only one of them is free.
+#
+# ONE TRUTH: the shift is applied to the trajectory BEFORE `_xyz` is copied out
+# of it, so the bytes give_frames streams and the `trajectory` mods analyse are
+# the same coordinates. There is no displayed-vs-measured split.
+#
+# WHEN IT IS SKIPPED — always loudly, never silently:
+#   - no unit-cell information (not a periodic system; drift may be real);
+#   - no polymer or ligand to anchor on (a pure solvent or membrane box has no
+#     solute to hold still, and pinning an arbitrary molecule would make
+#     everything else swim);
+#   - the anchor is SPLIT across a boundary — a bond inside it stretched past
+#     the covalent cutoff, or an empty band wider than CENTER_GAP_NM through a
+#     cloud that spans more than half the box. A rigid translation cannot make
+#     a broken molecule whole; only re-imaging can, so this reports rather than
+#     pretending. (Note what is NOT used: a bare size test, which would reject
+#     the trp cage at 2.3 nm in a 3.65 nm box, and a molecule-count test, which
+#     would reject the corpus duplex — 26 unbonded residues 4.4 nm apart and
+#     entirely intact. Both were tried and both were wrong.)
+#
+# Superposition is deliberately NOT done here: removing the solute's rotation
+# discards real tumbling, which changes what the data means, and that is a
+# different decision from fixing a display artefact.
+CENTER_SPLIT_TOLERANCE = 0.5  # a cloud smaller than this fraction of the box cannot straddle it
+CENTER_GAP_NM = 1.0           # an empty band this wide inside the anchor means two images
+
 
 class MdtrajSource(DataSource):
     def __init__(
@@ -51,6 +104,7 @@ class MdtrajSource(DataSource):
         trajectory_path: Optional[str] = None,
         name: Optional[str] = None,
         ligand_residues: Sequence[str] = (),
+        center: bool = True,
     ) -> None:
         if not os.path.exists(topology_path):
             raise FileNotFoundError(f"topology not found: {topology_path}")
@@ -75,6 +129,11 @@ class MdtrajSource(DataSource):
             )
 
         self._topology = top
+        # Periodic-image centering, BEFORE _xyz is copied out of the trajectory
+        # — that ordering is what makes the streamed bytes and the mod-facing
+        # `trajectory` the same coordinates (see the note at the top of this
+        # module). `centering` records what happened, either way.
+        self.centering = self._center_on_solute(traj) if center else "off (caller disabled centering)"
         self._xyz = np.ascontiguousarray(traj.xyz, dtype="<f4")  # (T, N, 3) nm, LE
         self.n_points = int(traj.n_atoms)
         self.n_frames = int(traj.n_frames)
@@ -88,6 +147,124 @@ class MdtrajSource(DataSource):
         self._trajectory = traj
 
         self._build_header_fields()
+
+    # -- Periodic-image centering ---------------------------------------------
+
+    def _center_on_solute(self, traj) -> str:
+        """Hold the solute still across periodic-image wraps. Mutates ``traj``.
+
+        Returns a one-line description of what was done or why it was skipped —
+        never None, so the caller always has something to say out loud.
+        """
+        if traj.unitcell_lengths is None:
+            return "off (no unit-cell information — not a periodic system)"
+        if traj.n_frames < 2:
+            return "off (single frame — nothing can wrap)"
+
+        anchor = self._solute_indices()
+        if anchor.size == 0:
+            return "off (no polymer or ligand to anchor on — nothing to hold still)"
+
+        xyz = traj.xyz  # (T, N, 3) float32, nm
+        sub = xyz[:, anchor, :]
+
+        why = self._anchor_is_split(traj, anchor)
+        if why:
+            return f"off ({why}, which a rigid translation cannot repair)"
+
+        centroid = sub.mean(axis=1)                                        # (T, 3)
+        shift = (centroid[0] - centroid).astype(np.float32)                # (T, 3)
+        traj.xyz = xyz + shift[:, None, :]
+
+        moved = float(np.linalg.norm(shift, axis=1).max())
+        jump_before = float(np.linalg.norm(np.diff(centroid, axis=0), axis=1).max())
+        after = traj.xyz[:, anchor, :].mean(axis=1)
+        jump_after = float(np.linalg.norm(np.diff(after, axis=0), axis=1).max())
+        return (
+            f"on ({anchor.size} solute atoms held still; largest per-frame shift "
+            f"{moved:.2f} nm; solute jump/frame {jump_before:.2f} → {jump_after:.3f} nm). "
+            "Rigid translation only — every interatomic distance is unchanged."
+        )
+
+    def _anchor_is_split(self, traj, anchor: np.ndarray) -> Optional[str]:
+        """Is the anchor scattered across periodic images? Reason, or None.
+
+        Two distinct failure modes, and a size test detects NEITHER — a compact
+        protein legitimately spans more than half a tight solvation box (the
+        corpus trp cage is 2.3 nm in a 3.65 nm box and is never broken), and a
+        nucleic duplex is genuinely 4.3 nm long. So test what actually breaks:
+
+        1. A molecule torn across a face shows up as an over-long BOND — the
+           same signal PBC_BOND_CUTOFF_NM already suppresses edges with, reused
+           here rather than given a second definition.
+        2. An anchor whose pieces are not bonded to each other (a duplex, a
+           complex, or any topology missing inter-residue bonds) can sit whole
+           but in different images, stretching no bond at all. What gives THAT
+           away is an empty band: project onto each axis and a split cloud has
+           a large gap in the middle, while an intact one is dense throughout
+           and has its only real gap outside itself. Counting molecules and
+           measuring how far apart they sit does NOT work — the corpus duplex
+           decomposes into 26 unbonded residues 4.4 nm apart in a 5.8 nm box
+           and is nonetheless perfectly intact (largest internal gap 0.13 nm).
+        """
+        members = set(int(i) for i in anchor)
+
+        pairs = [
+            (a.index, b.index)
+            for a, b in traj.topology.bonds
+            if a.index in members and b.index in members
+        ]
+        if pairs:
+            ij = np.asarray(pairs)
+            d = np.linalg.norm(traj.xyz[:, ij[:, 0], :] - traj.xyz[:, ij[:, 1], :], axis=2)
+            worst = float(d.max())
+            if worst > PBC_BOND_CUTOFF_NM:
+                frame = int(np.unravel_index(int(np.argmax(d)), d.shape)[0])
+                return (
+                    f"a bond inside the anchor measures {worst:.2f} nm in frame {frame}, "
+                    f"far beyond the {PBC_BOND_CUTOFF_NM} nm covalent cutoff — the molecule "
+                    "is torn across a periodic boundary"
+                )
+
+        sub = traj.xyz[:, sorted(members), :]
+        for frame in range(traj.n_frames):
+            box = traj.unitcell_lengths[frame]
+            for axis in range(3):
+                v = np.sort(sub[frame, :, axis])
+                extent = float(v[-1] - v[0])
+                if extent <= box[axis] * CENTER_SPLIT_TOLERANCE:
+                    continue                       # too compact to straddle anything
+                gap = float(np.diff(v).max()) if v.size > 1 else 0.0
+                if gap > CENTER_GAP_NM:
+                    return (
+                        f"the anchor has a {gap:.2f} nm empty band along axis {axis} in frame "
+                        f"{frame} while spanning {extent:.2f} nm of a {box[axis]:.2f} nm box — "
+                        "it is sitting in two periodic images"
+                    )
+        return None
+
+    def _solute_indices(self) -> np.ndarray:
+        """Atoms of the polymer, or the ligand when there is no polymer.
+
+        Reuses the producer's own classification rather than inventing a second
+        notion of "the interesting molecule" — `select("protein")` is not enough
+        (it returns nothing on 3 of the 9 corpus systems, nucleic ones included).
+        """
+        for wanted in (CAT_POLYMER, CAT_LIGAND):
+            idx = [
+                atom.index
+                for atom in self._topology.atoms
+                if classify_atom(
+                    atom.residue.name,
+                    bool(atom.residue.is_protein),
+                    bool(atom.residue.is_nucleic),
+                    self.ligand_residues,
+                )
+                == wanted
+            ]
+            if idx:
+                return np.asarray(idx, dtype=int)
+        return np.asarray([], dtype=int)
 
     @property
     def trajectory(self):
@@ -244,6 +421,10 @@ class MdtrajSource(DataSource):
             edges=self.edges,
             polylines=self.polylines,
             channels=[],  # deferred this increment
+            # Say what was done to the coordinates, every time — including when
+            # nothing was. A mod analysing this trajectory sees exactly these
+            # coordinates, so the assistant must be able to read what they are.
+            provenance=[f"periodic-image centering: {self.centering}"],
         )
 
     def give_frames(self, start: int, count: int) -> FrameChunk:

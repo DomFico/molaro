@@ -113,6 +113,11 @@ export interface SceneContext {
   targetExamples: string[];
   committedSelections: string;
   mods: { name: string; produces: ModProduces; axis?: ModAxis; channel?: string; requiresChannel?: string; description?: string; params?: ModParam[] }[];
+  /** How the coordinates were prepared before streaming (e.g. periodic-image
+   * centering), or empty. The viewer and the mods see the SAME coordinates, so
+   * an analysis describes exactly what is displayed; this states what that
+   * preparation was, rather than leaving it implicit. */
+  provenance: string[];
   /** The viewer's base look for any element not written by a command — the real
    * defaults from representation.ts, so the model states the true baseline
    * instead of guessing (and knows undo restores it). */

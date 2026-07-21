@@ -81,6 +81,11 @@ class Header:
     edges: List[Tuple[int, int]] = field(default_factory=list)
     polylines: List[List[int]] = field(default_factory=list)
     channels: List[Channel] = field(default_factory=list)
+    # How the coordinates were PREPARED before streaming — one plain sentence
+    # per transformation, or empty when they are the file's own. The viewer and
+    # the mods see the same coordinates (there is no display-only transform), so
+    # this is what makes that preparation visible instead of implicit.
+    provenance: List[str] = field(default_factory=list)
 
     def per_point_per_frame_channels(self) -> List[Channel]:
         return [c for c in self.channels if c.scope == SCOPE_PER_POINT_PER_FRAME]
@@ -140,6 +145,7 @@ def header_to_json(header: Header) -> str:
         "edges": [list(e) for e in header.edges],
         "polylines": [list(p) for p in header.polylines],
         "channels": [_channel_to_obj(c) for c in header.channels],
+        "provenance": list(header.provenance),
     }
     return json.dumps(obj)
 

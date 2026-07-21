@@ -28,6 +28,7 @@ function sampleContext(): SceneContext {
     categories: ["polymer"], groups: ["A"], subgroupCount: 214,
     subgroupKinds: ["ALA", "ARG", "ASP", "GLU", "LYS"], subgroupKindsCapped: false,
     pointTypes: ["C", "N", "O", "S"], pointTypesCapped: false,
+    provenance: ["periodic-image centering: off (no unit-cell information — not a periodic system)"],
     targetExamples: ["all", "polymer"], committedSelections: "(none)",
     liveState: { channels: "no channels", bindings: "no bindings", shapes: "(shapes)", styles: "styles:\n  standard (default)" },
     mods: [{ name: "myrmsf", produces: "per-point-scalar", axis: "color" }],
