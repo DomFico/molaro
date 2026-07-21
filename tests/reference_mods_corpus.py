@@ -84,11 +84,32 @@ def run_values(source, name: str, target, mods_dir: str = None):
     return reply["values"]
 
 
-def mda_rmsf_nm(top_path: str, traj_path: str, selection: str) -> np.ndarray:
+def mda_rmsf_nm(top_path: str, traj_path: str, selection: str,
+                served_nm: np.ndarray = None) -> np.ndarray:
     """Independent RMSF (nm) via MDAnalysis: superpose the selection to frame 0,
-    then RMSF over that selection — the second engine for the RMSF cross-check."""
+    then RMSF over that selection — the second engine for the RMSF cross-check.
+
+    `served_nm` is the coordinate block the PRODUCER SERVES. When the producer
+    transforms coordinates at load (periodic-image centering, re-imaging the
+    loose molecules), the second engine must read those same coordinates or the
+    cross-check compares two different trajectories and reports a disagreement
+    that is really a difference of input. Feeding it the served array is the
+    rule "both engines read what the viewer gets" — the alternative, letting
+    MDAnalysis re-read the file and re-apply the transform itself, would put a
+    second wrapping implementation in the loop, which is the defect class this
+    corpus exists to catch. The ENGINES stay independent (MDAnalysis's own
+    superposition and RMSF); only the input is shared, deliberately."""
     import MDAnalysis as mda
     from MDAnalysis.analysis import align, rms
+
+    if served_nm is not None:
+        from MDAnalysis.coordinates.memory import MemoryReader
+        served_A = np.asarray(served_nm, dtype=np.float32) * 10.0     # nm → Å
+        u = mda.Universe(top_path, served_A, format=MemoryReader, order="fac")
+        ref = mda.Universe(top_path, served_A, format=MemoryReader, order="fac")
+        ref.trajectory[0]
+        align.AlignTraj(u, ref, select=selection, in_memory=True).run()
+        return rms.RMSF(u.select_atoms(selection)).run().results.rmsf / 10.0
 
     u = mda.Universe(top_path, traj_path)
     ref = mda.Universe(top_path, traj_path)
@@ -148,7 +169,7 @@ def check_system(sid: str):
         contract_ok = len(vals) == nA and float(vals.min()) >= 0.0 and float(vals.max()) <= 1.0
         try:
             mdtraj_raw = np.asarray(md.rmsf(traj, traj, frame=0), dtype=float)  # nm
-            mda_raw = mda_rmsf_nm(spec["topology"], spec["trajectory"], "all")  # nm
+            mda_raw = mda_rmsf_nm(spec["topology"], spec["trajectory"], "all", src._xyz)  # nm
             two_engine = float(np.max(np.abs(mdtraj_raw - mda_raw)))
             norm_delta = float(np.max(np.abs(vals - minmax(mda_raw))))
             ok = contract_ok and two_engine < TOL and norm_delta < TOL
@@ -185,7 +206,7 @@ def check_alignment_and_subset():
     # end to end through run_mod.
     ca = list(traj.topology.select("name CA"))
     vals = np.asarray(run_values(src, "rmsf", ca), dtype=float)
-    mda_ca = mda_rmsf_nm(spec["topology"], spec["trajectory"], "name CA")
+    mda_ca = mda_rmsf_nm(spec["topology"], spec["trajectory"], "name CA", src._xyz)
     subset_ok = (len(vals) == len(ca)
                  and float(vals.min()) >= 0.0 and float(vals.max()) <= 1.0
                  and float(np.max(np.abs(vals - minmax(mda_ca)))) < TOL)

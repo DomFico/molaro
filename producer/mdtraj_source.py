@@ -180,10 +180,105 @@ class MdtrajSource(DataSource):
         jump_before = float(np.linalg.norm(np.diff(centroid, axis=0), axis=1).max())
         after = traj.xyz[:, anchor, :].mean(axis=1)
         jump_after = float(np.linalg.norm(np.diff(after, axis=0), axis=1).max())
+
+        wrapped = self._wrap_loose_molecules(traj, anchor)
         return (
             f"on ({anchor.size} solute atoms held still; largest per-frame shift "
-            f"{moved:.2f} nm; solute jump/frame {jump_before:.2f} → {jump_after:.3f} nm). "
-            "Rigid translation only — every interatomic distance is unchanged."
+            f"{moved:.2f} nm; solute jump/frame {jump_before:.2f} → {jump_after:.3f} nm); "
+            f"{wrapped}"
+        )
+
+    def _wrap_loose_molecules(self, traj, anchor: np.ndarray) -> str:
+        """Wrap everything that is not the anchor into the box around it.
+
+        Holding the solute still is only half the job. The solute and the
+        solvent have DIFFERENT wrap discontinuities, so no single rigid
+        translation removes both: pinning the solute transfers its jump to
+        everything else, and on the corpus trp cage 99.4% of water atoms moved
+        more than 1 nm on exactly the 14 frames where the solute crossed a face.
+        So the loose molecules are re-imaged around the solute afterwards.
+
+        This DOES move absolute positions — that is unavoidable and it is the
+        point. Solute observables are untouched (measured at 1e-8); whole-box
+        ones move, and for all-atom RMSF that movement is an artefact leaving,
+        not a convention changing: a water that hops a periodic image reports
+        enormous fluctuation it does not have.
+
+        GROUPING is by connected components of (bonds ∪ residue membership),
+        not by mdtraj's find_molecules alone. Bonds alone are not enough — a
+        topology missing inter-residue bonds decomposes into loose residues (the
+        corpus duplex becomes 26), and a residue whose bonds are absent entirely
+        would be torn atom from atom. Folding residue membership in makes a
+        residue the smallest indivisible unit, so nothing is ever split.
+        """
+        groups = self._wrappable_groups(anchor)
+        if not groups:
+            return "no loose molecules to wrap"
+
+        xyz = traj.xyz
+        box = traj.unitcell_lengths                                   # (T, 3)
+        centre = xyz[:, anchor, :].mean(axis=1)                       # (T, 3)
+
+        flat = np.concatenate(groups)
+        owner = np.concatenate([np.full(len(g), i) for i, g in enumerate(groups)])
+        cents = np.empty((traj.n_frames, len(groups), 3), dtype=np.float32)
+        for i, g in enumerate(groups):
+            cents[:, i, :] = xyz[:, g, :].mean(axis=1)
+
+        before = self._max_bond_length(traj)
+        image = np.round((cents - centre[:, None, :]) / box[:, None, :])
+        xyz[:, flat, :] -= (image[:, owner, :] * box[:, None, :]).astype(np.float32)
+        traj.xyz = xyz
+        after = self._max_bond_length(traj)
+
+        # Wrapping whole groups cannot stretch a bond — every bond lies inside
+        # one group by construction. Assert it rather than trust it: if this
+        # ever fires, the grouping is wrong and the geometry is being damaged.
+        if after > max(before, PBC_BOND_CUTOFF_NM) + 1e-4:
+            raise RuntimeError(
+                f"wrapping loose molecules stretched a bond to {after:.3f} nm "
+                f"(was {before:.3f} nm) — the grouping tore a molecule apart"
+            )
+        return f"{len(groups)} loose molecules re-imaged around it"
+
+    def _wrappable_groups(self, anchor: np.ndarray) -> List[np.ndarray]:
+        """Connected components of (bonds ∪ residues) that hold no anchor atom."""
+        top = self._topology
+        parent = list(range(top.n_residues))
+
+        def find(x: int) -> int:
+            while parent[x] != x:
+                parent[x] = parent[parent[x]]
+                x = parent[x]
+            return x
+
+        for a, b in top.bonds:
+            ra, rb = find(a.residue.index), find(b.residue.index)
+            if ra != rb:
+                parent[ra] = rb
+
+        held = {top.atom(int(i)).residue.index for i in anchor}
+        by_root: Dict[int, List[int]] = {}
+        for res in top.residues:
+            by_root.setdefault(find(res.index), []).append(res.index)
+
+        groups: List[np.ndarray] = []
+        for members in by_root.values():
+            if any(r in held for r in members):
+                continue                                   # part of the anchor
+            idx = [a.index for r in members for a in top.residue(r).atoms]
+            if idx:
+                groups.append(np.asarray(idx, dtype=int))
+        return groups
+
+    @staticmethod
+    def _max_bond_length(traj) -> float:
+        pairs = [(a.index, b.index) for a, b in traj.topology.bonds]
+        if not pairs:
+            return 0.0
+        ij = np.asarray(pairs)
+        return float(
+            np.linalg.norm(traj.xyz[:, ij[:, 0], :] - traj.xyz[:, ij[:, 1], :], axis=2).max()
         )
 
     def _anchor_is_split(self, traj, anchor: np.ndarray) -> Optional[str]:
