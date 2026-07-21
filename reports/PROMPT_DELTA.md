@@ -91,6 +91,27 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
 - **Point at:** the workspace mod `.molaro/mods/ribbon_dir.py`, which documents both
   traps at the point of composition.
 
+### A channel is WHOLE-SYSTEM — `target_indices` does not shrink it (found in real use, 2026-07-21)
+
+- **The conflict to resolve in the prompt, not leave to inference.** Rule #6 tells a
+  mod author to respect `target_indices`. The channel length check requires
+  `n_frames * n_points * components` over **every point in the system**. Those two
+  rules point opposite ways for a `produces: channel` mod, and the author who obeys
+  Rule #6 gets refused: running the hand-written `ribbon_dir` on a 296-point
+  selection returned `98*296*3 = 87024` where `98*3341*3 = 982254` was required.
+  Note this is a DIFFERENT refusal from the per-residue one the cold test found —
+  same error message, wrong axis. Teach the distinction: a channel is a **column of
+  data over the whole system**; *where it applies* is decided later by the `bind`
+  target, not by the mod. So a channel mod emits full length and may use
+  `target_indices` only to choose what to spend effort computing (filling the rest
+  with a neutral value).
+- **The second-order reason, worth one line:** shape swaps are scene-level. If an
+  orientation channel existed only over the selection, `shape traces ribbon` would
+  still turn EVERY trace into a ribbon, and the unselected ones would have a zero
+  facing vector and collapse out of sight. A partial channel is not just refused —
+  it would be wrong if it were allowed.
+- **Point at:** `.molaro/mods/ribbon_dir.py`, which now documents this at the return.
+
 _(The ribbon bend miter, Item B, is a renderer change — no prompt surface.)_
 
 ---
