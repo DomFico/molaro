@@ -112,7 +112,7 @@ export interface SceneContext {
   /** e.g. "alpha.group-0" — a few real, constructible target examples. */
   targetExamples: string[];
   committedSelections: string;
-  mods: { name: string; produces: ModProduces; axis?: ModAxis; channel?: string; description?: string; params?: ModParam[] }[];
+  mods: { name: string; produces: ModProduces; axis?: ModAxis; channel?: string; requiresChannel?: string; description?: string; params?: ModParam[] }[];
   /** The viewer's base look for any element not written by a command — the real
    * defaults from representation.ts, so the model states the true baseline
    * instead of guessing (and knows undo restores it). */
@@ -179,6 +179,7 @@ export interface WriteModSpec {
   code: string;
   params?: ModParam[];
   channel?: string;
+  requiresChannel?: string;
 }
 
 /** The host callbacks the tools drive — every one an EXISTING path (the
@@ -267,7 +268,8 @@ export function buildToolDefs(deps: ToolDeps) {
               ? ` [params: ${m.params.map((p) => `${p.name}:${p.type}${p.default !== undefined ? `=${p.default}` : " (required)"}`).join(", ")}]`
               : "";
             const chan = m.channel ? ` → ${m.channel}` : "";
-            return `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${chan})${params}${m.description ? `: ${m.description}` : ""}`;
+            const needs = m.requiresChannel ? ` [requires channel: ${m.requiresChannel}]` : "";
+            return `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${chan})${needs}${params}${m.description ? `: ${m.description}` : ""}`;
           }).join("\n")
         : "  (none yet)";
       const kinds = c.subgroupKinds.length
@@ -318,6 +320,8 @@ export function buildToolDefs(deps: ToolDeps) {
         .describe("required when produces is per-point-scalar; omit for the others"),
       channel: z.string().optional()
         .describe("required when produces is channel: the channel's bindable name (a single token [A-Za-z][A-Za-z0-9_-]*); the return then carries no name"),
+      requiresChannel: z.string().optional()
+        .describe("optional: a channel this mod needs present — its provider (the mod declaring that channel) runs first, one level only"),
       description: z.string().describe("one line: what the mod computes"),
       code: z.string().describe(
         "the complete Python source defining compute(data, target_indices) — or " +

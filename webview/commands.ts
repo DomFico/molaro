@@ -46,6 +46,7 @@ import {
   getRecipe,
   listRecipes,
   rainbow,
+  resolveChannelDependency,
   resolveModSelector,
   resolveParameters,
   type AnalysisMod,
@@ -2500,6 +2501,10 @@ export interface ModInstallDeps {
   isBuiltin(name: string): boolean;
   /** Register or REPLACE the mod: its recipe entry AND its command handler. */
   install(mod: AnalysisMod): void;
+  /** P-3: currently-live channel names (header + produced), so registration's
+   * requires-channel check agrees with the runtime — a requirement satisfied by
+   * a LIVE dataset channel (not a mod provider) is not a dependency issue. */
+  liveChannels?(): readonly string[];
 }
 
 export interface ModInstallOutcome {
@@ -2508,6 +2513,10 @@ export interface ModInstallOutcome {
   /** P-2: channel names declared by MORE THAN ONE installed mod — knowable
    * without running them now the name is static. Empty when there are none. */
   channelCollisions: { channel: string; mods: string[] }[];
+  /** P-3: `# requires-channel` dependencies that are unsatisfiable STATICALLY
+   * (missing/ambiguous/too-deep provider) — detected at registration (parse
+   * time), before any invocation. `mod` is the requiring mod; `issue` the reason. */
+  dependencyIssues: { mod: string; issue: string }[];
 }
 
 /**
@@ -2529,7 +2538,7 @@ export function installModList(raw: unknown, deps: ModInstallDeps): ModInstallOu
   const installed: string[] = [];
   const installedMods: AnalysisMod[] = [];
   const skipped: { name: string; reason: string }[] = [];
-  if (!Array.isArray(raw)) return { installed, skipped, channelCollisions: [] };
+  if (!Array.isArray(raw)) return { installed, skipped, channelCollisions: [], dependencyIssues: [] };
   for (const entry of raw) {
     const mod = entry as AnalysisMod;
     if (!mod || mod.kind !== "analysis" || typeof mod.name !== "string" ||
@@ -2553,7 +2562,23 @@ export function installModList(raw: unknown, deps: ModInstallDeps): ModInstallOu
   for (const [channel, mods] of channelProviders(installedMods)) {
     if (mods.length > 1) channelCollisions.push({ channel, mods });
   }
-  return { installed, skipped, channelCollisions };
+  // P-3: STATIC (parse-time) detection of unsatisfiable `# requires-channel`
+  // dependencies — missing/ambiguous provider, self-requirement, or a chain
+  // deeper than one level (cycles included). Resolved against the full pushed
+  // set (which is the whole workspace). Warned, so a bad dependency is loud at
+  // registration, not only when the mod is finally invoked.
+  const dependencyIssues: { mod: string; issue: string }[] = [];
+  const live = new Set(deps.liveChannels?.() ?? []);
+  for (const m of installedMods) {
+    if (!m.requiresChannel) continue;
+    // A requirement already satisfied by a LIVE channel (a base dataset channel,
+    // or one produced earlier) is not an issue — mirror the runtime, which runs
+    // the consumer directly when its channel is present.
+    if (live.has(m.requiresChannel)) continue;
+    const dep = resolveChannelDependency(m, installedMods);
+    if ("error" in dep) dependencyIssues.push({ mod: m.name, issue: dep.error });
+  }
+  return { installed, skipped, channelCollisions, dependencyIssues };
 }
 
 /**
@@ -2568,11 +2593,16 @@ export function modInstallReport(outcome: ModInstallOutcome, name: string): Comm
   if (outcome.installed.includes(name)) {
     // Surface a channel-name collision the moment the colliding mod registers.
     const clash = outcome.channelCollisions.find((c) => c.mods.includes(name));
-    const warn = clash
+    const collide = clash
       ? ` ⚠ channel "${clash.channel}" is also declared by ${clash.mods.filter((m) => m !== name).join(", ")}` +
         ` — whichever runs last owns the data`
       : "";
-    return { status: "ok", message: `registered mod "${name}"${warn}` };
+    // P-3: surface an unsatisfiable required-channel dependency at registration —
+    // the mod registered, but it can't auto-sequence its provider (it works once
+    // the channel is made live by hand).
+    const dep = outcome.dependencyIssues.find((d) => d.mod === name);
+    const depWarn = dep ? ` ⚠ can't auto-run its provider: ${dep.issue}` : "";
+    return { status: "ok", message: `registered mod "${name}"${collide}${depWarn}` };
   }
   const skip = outcome.skipped.find((s) => s.name === name);
   if (skip) {

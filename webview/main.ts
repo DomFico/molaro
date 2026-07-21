@@ -51,7 +51,7 @@ import { AXIS_DOMAIN, BIND_SIZE_MAX, mapScalar, ORIENTATION_AXIS, SCALAR_AXES, t
 import { bindTypedResult } from "./claudebind.ts";
 import { PLOT_RESULT_KINDS } from "./claudemodel.ts";
 import { parseTypedResult } from "./claudemodel.ts";
-import { listRecipes, rainbow, registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod, type ParamValue } from "./recipes.ts";
+import { getRecipe, listRecipes, rainbow, registerRecipe, resolveChannelDependency, resolveParameters, unregisterRecipe, validateModValues, type AnalysisMod, type ParamValue } from "./recipes.ts";
 import {
   installModList,
   isFileAlreadyGone,
@@ -1192,10 +1192,10 @@ async function main(): Promise<void> {
   // command registry exists below. Returns WHAT IT DID — the host awaits this
   // outcome before letting write_mod claim a registration.
   let installMods: (raw: unknown) => ModInstallOutcome =
-    () => ({ installed: [], skipped: [], channelCollisions: [] });
+    () => ({ installed: [], skipped: [], channelCollisions: [], dependencyIssues: [] });
   // `produces: commands` mods run their emitted strings through the command
   // path; late-bound once the command registry + validation registry exist.
-  let runCommandMod: (mod: AnalysisMod, cmds: string[]) => void = () => {};
+  let runCommandMod: (mod: AnalysisMod, cmds: string[]) => boolean = () => false;
   window.addEventListener("message", (e: MessageEvent) => {
     const msg = e.data as {
       type?: string; id?: number; text?: string; cursor?: number;
@@ -1237,6 +1237,12 @@ async function main(): Promise<void> {
       // detection must be loud wherever it is found, never silently dropped.
       for (const c of outcome.channelCollisions) {
         asyncLine("ok", `⚠ channel "${c.channel}" is declared by ${c.mods.join(", ")} — whichever runs last owns the data`);
+      }
+      // P-3: surface unsatisfiable required-channel dependencies too (parse-time).
+      // The mod DID register — the warning is that it can't auto-sequence its
+      // provider, so it works only once its channel is made live by hand.
+      for (const d of outcome.dependencyIssues) {
+        asyncLine("ok", `⚠ mod "${d.mod}" registered, but it can't auto-run its provider: ${d.issue}`);
       }
       // A push that carries an id is a write_mod save AWAITING confirmation: the
       // host holds the tool's promise open until the viewer — the layer that
@@ -2252,13 +2258,17 @@ async function main(): Promise<void> {
     if (warning) asyncLine("ok", `⚠ ${warning}`);
   };
 
-  const runAnalysisMod = (
+  // ONE awaitable run of a mod through the producer round-trip — returns true if
+  // it produced its result (a bind landed, a plot pushed, a macro launched, a
+  // channel declared), false on any failure (it has already reported the error).
+  // runAnalysisMod fires it forget-style; the P-3 sequence AWAITS it so a
+  // provider's channel is declared before the consumer runs.
+  const runModOnce = async (
     mod: AnalysisMod,
     points: number[],
     expr: string,
     params?: Record<string, ParamValue>,
-  ): void => {
-    void (async () => {
+  ): Promise<boolean> => {
       try {
         const bytes = await transport.request({
           type: "run_mod",
@@ -2281,7 +2291,7 @@ async function main(): Promise<void> {
         if (typeof reply.error === "string") {
           const tb = reply.traceback ? `\n${reply.traceback.trimEnd()}` : "";
           asyncLine("error", `${mod.name} failed: ${reply.error}${tb}`);
-          return;
+          return false;
         }
         // THE fail-closed gate: exact length for the declared kind, finite,
         // in [0,1] for per-point scalars. Any violation binds NOTHING.
@@ -2292,7 +2302,7 @@ async function main(): Promise<void> {
         });
         if (!checked.ok) {
           asyncLine("error", `${mod.name} failed: ${checked.error} — nothing bound`);
-          return;
+          return false;
         }
         if (mod.produces === "per-point-scalar" && "values" in checked) {
           // the EXISTING binding entry, verbatim — resolution, mapping,
@@ -2304,6 +2314,7 @@ async function main(): Promise<void> {
             scalars: checked.values,
           });
           asyncLine(outcome.ok ? "ok" : "error", `${mod.name} → ${outcome.message}`);
+          return outcome.ok;
         } else if (mod.produces === "per-frame-series" && "values" in checked) {
           // the EXISTING plot route: the host consumes plot-kind claude-binds
           // (plothost) exactly as it does for tool results
@@ -2314,6 +2325,7 @@ async function main(): Promise<void> {
           });
           asyncLine("ok",
             `${mod.name} → series "${mod.name}" (${checked.values.length} frames) → the plot tab`);
+          return true;
         } else if ("scatter" in checked) {
           host.postMessage({
             type: "claude-bind",
@@ -2322,6 +2334,7 @@ async function main(): Promise<void> {
           });
           asyncLine("ok",
             `${mod.name} → scatter "${mod.name}" (${checked.scatter.x.length} points) → the plot tab`);
+          return true;
         } else if ("figure" in checked) {
           // the EXISTING plot route again: the host consumes plot-kind
           // claude-binds; deep validation already ran (validateFigure via
@@ -2333,11 +2346,13 @@ async function main(): Promise<void> {
           });
           asyncLine("ok",
             `${mod.name} → figure "${mod.name}" (${checked.figure.width}×${checked.figure.height}, ${checked.figure.axes.length} axes) → the plot tab`);
+          return true;
         } else if ("commands" in checked) {
           // a `produces: commands` macro — validated (list of non-empty strings)
           // here; the emitted strings are refused/pre-validated/executed as ONE
-          // undo stroke at the command-mod boundary below.
-          runCommandMod(mod, checked.commands);
+          // undo stroke at the command-mod boundary below. Its success flows out
+          // so a failed macro after a sequenced provider still fires the note.
+          return runCommandMod(mod, checked.commands);
         } else if ("channel" in checked) {
           // a `produces: channel`: the producer already DECLARED the channel
           // and stored its data (which rides subsequent FrameChunks). Mirror
@@ -2345,10 +2360,68 @@ async function main(): Promise<void> {
           // with no reload — the conversational property. Declaring is not
           // binding; the user binds it to an axis afterwards.
           declareProducedChannel(mod, checked.channel, checked.warning);
+          return true;
         }
+        return true;
       } catch (err) {
         asyncLine("error",
           `${mod.name} failed: ${err instanceof Error ? err.message : String(err)}`);
+        return false;
+      }
+  };
+
+  const runAnalysisMod = (
+    mod: AnalysisMod,
+    points: number[],
+    expr: string,
+    params?: Record<string, ParamValue>,
+  ): void => {
+    void (async () => {
+      // P-3: if this mod REQUIRES a channel that isn't live yet, run its provider
+      // first (ONE level, resolved statically — a missing/ambiguous/too-deep
+      // provider fails HERE, before anything runs, naming the channel).
+      let sequencedProvider: string | null = null;
+      if (mod.requiresChannel && !header.channels.some((c) => c.name === mod.requiresChannel)) {
+        const dep = resolveChannelDependency(mod, listRecipes());
+        if ("error" in dep) {
+          asyncLine("error", `${mod.name}: ${dep.error}`);
+          return;
+        }
+        if ("provider" in dep) {
+          const provider = getRecipe(dep.provider);
+          if (!provider || provider.kind !== "analysis") {
+            asyncLine("error", `${mod.name}: provider "${dep.provider}" is not runnable`);
+            return;
+          }
+          // A provider that itself REQUIRES a parameter can't be auto-run — say so
+          // instead of surfacing a cryptic producer arity error.
+          const pp = resolveParameters(provider.params ?? [], new Map());
+          if (!pp.ok) {
+            asyncLine("error",
+              `${mod.name}: its channel "${mod.requiresChannel}"'s provider "${dep.provider}" needs parameters (${pp.error}) — run it yourself first`);
+            return;
+          }
+          asyncLine("ok", `${mod.name} needs channel "${mod.requiresChannel}" — running provider "${dep.provider}" first…`);
+          const provOk = await runModOnce(provider, points, "all",
+            Object.keys(pp.values).length ? pp.values : undefined);
+          if (!provOk) {
+            asyncLine("error",
+              `${mod.name}: provider "${dep.provider}" failed — "${mod.name}" NOT run (channel "${mod.requiresChannel}" not declared)`);
+            return;
+          }
+          sequencedProvider = dep.provider;
+        }
+      }
+      const ok = await runModOnce(mod, points, expr, params);
+      // The honest limit: sequencing is NOT atomicity. If the provider ran and
+      // the consumer then failed, the channel STAYS declared (append-only, not
+      // undoable). Say so plainly rather than leaving the partial state a mystery.
+      if (!ok && sequencedProvider) {
+        asyncLine("ok",
+          `note: channel "${mod.requiresChannel}" was declared by "${sequencedProvider}" and REMAINS declared — ` +
+          `sequencing is not atomicity (channels are append-only; a declaration is not undoable). ` +
+          `"${mod.name}" itself failed and wrote nothing, so nothing there is undone — the provider's ` +
+          `declaration stands.`);
       }
     })();
   };
@@ -2576,7 +2649,7 @@ async function main(): Promise<void> {
   };
   const validationCommands = createCommandRegistry(validationContext);
 
-  runCommandMod = (mod: AnalysisMod, cmds: string[]): void => {
+  runCommandMod = (mod: AnalysisMod, cmds: string[]): boolean => {
     const outcome = runCommandMacro(mod.name, cmds, {
       modNames: new Set(listRecipes().map((r) => r.name)),
       validate: (c) => validationCommands.runCommand(c), // no-op-write ctx → no side effects
@@ -2585,6 +2658,9 @@ async function main(): Promise<void> {
       endStroke: () => model.endStroke(),
     });
     asyncLine(outcome.status, outcome.message);
+    // A nomatch or error wrote nothing — NOT success. runModOnce returns this so
+    // the P-3 partial-state note fires for a failed commands consumer too.
+    return outcome.status === "ok";
   };
   // Workspace mod files (parsed host-side): register each in the mod registry
   // AND as its own verb — at boot, and again after every write_mod save. A
@@ -2603,6 +2679,8 @@ async function main(): Promise<void> {
             `${mod.description ? `: ${mod.description}` : ""} — ${mod.name} <target>`,
         );
       },
+      // so registration's requires-channel check agrees with the runtime
+      liveChannels: () => header.channels.map((c) => c.name),
     });
     for (const s of outcome.skipped) {
       asyncLine("error", `mod "${s.name}" skipped — ${s.reason}`);

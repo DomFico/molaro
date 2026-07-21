@@ -383,6 +383,7 @@ function openPanel(
     const mods = loadWorkspaceMods(producerLog, modPaths).map((m) => ({
       name: m.name, produces: m.produces, axis: m.axis, description: m.description,
       ...(m.channel ? { channel: m.channel } : {}),
+      ...(m.requiresChannel ? { requiresChannel: m.requiresChannel } : {}),
       ...(m.params ? { params: m.params } : {}),
     }));
     // Only categories that ACTUALLY have points — the header lists every domain
@@ -468,6 +469,7 @@ function openPanel(
   const saveAssistantMod = async (spec: {
     name: string; produces: AnalysisMod["produces"]; axis?: AnalysisMod["axis"];
     description: string; code: string; params?: AnalysisMod["params"]; channel?: string;
+    requiresChannel?: string;
   }): Promise<{ ok: boolean; name: string; file: string; message: string }> => {
     const mod: AnalysisMod = {
       kind: "analysis", name: spec.name, origin: "workspace",
@@ -477,6 +479,8 @@ function openPanel(
       // written file is re-parsed on registration, so a missing/invalid one on a
       // channel mod is caught and reported by write_mod, not silently accepted.
       ...(spec.channel ? { channel: spec.channel } : {}),
+      // P-3: a required channel becomes a `# requires-channel:` header line.
+      ...(spec.requiresChannel ? { requiresChannel: spec.requiresChannel } : {}),
       // Declared parameters become `# param:` header lines (serializeMod); the
       // written file is re-parsed on registration, so a malformed param is caught
       // and reported by write_mod, not silently accepted.

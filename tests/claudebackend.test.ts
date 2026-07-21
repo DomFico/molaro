@@ -222,12 +222,12 @@ test("run_mod approval preview appends the effective-parameters suffix", () => {
 
 test("P-2: write_mod approval preview names the declared channel; authoring threads it", async () => {
   // the preview states what the mod will declare (so the human approves it)
-  const prev = approvalPreview("write_mod", { name: "flow", produces: "channel", channel: "flow_dir", code: "def compute(d,t): return {}" });
+  const prev = approvalPreview("write_mod", { name: "flow", produces: "channel", channel: "flow_dir", requiresChannel: undefined, code: "def compute(d,t): return {}" });
   assert.match(prev, /produces: channel, declares channel: flow_dir/);
   // …and the channel name reaches saveAssistantMod (→ the # channel: header line)
   const deps = mockDeps();
   const res = await buildToolDefs(deps).write_mod.handler({
-    name: "flow", produces: "channel", axis: undefined, channel: "flow_dir",
+    name: "flow", produces: "channel", axis: undefined, channel: "flow_dir", requiresChannel: undefined,
     description: "a per-frame vector", code: "def compute(data, target_indices):\n    return {'values': [], 'components': 3}",
     params: undefined,
   }, {});
@@ -238,7 +238,7 @@ test("P-2: write_mod approval preview names the declared channel; authoring thre
 test("write_mod can author a PARAMETERIZED mod — params thread through to the save spec", async () => {
   const deps = mockDeps();
   const res = await buildToolDefs(deps).write_mod.handler({
-    name: "gated", produces: "commands", axis: undefined, channel: undefined, description: "a parameterized look",
+    name: "gated", produces: "commands", axis: undefined, channel: undefined, requiresChannel: undefined, description: "a parameterized look",
     code: "def compute(data, target_indices, params):\n    return []",
     params: [{ name: "floor", type: "number", default: 0.5 }, { name: "label", type: "string", default: undefined }],
   }, {});
@@ -262,7 +262,7 @@ test("run_mod returns the failure TRACEBACK verbatim, not a generic message", as
 test("write_mod saves through the host path and reports registration", async () => {
   const deps = mockDeps();
   const res = await buildToolDefs(deps).write_mod.handler(
-    { name: "rg", produces: "per-frame-series", axis: undefined, channel: undefined, description: "radius of gyration", code: "def compute(d,t): return []", params: undefined }, {},
+    { name: "rg", produces: "per-frame-series", axis: undefined, channel: undefined, requiresChannel: undefined, description: "radius of gyration", code: "def compute(d,t): return []", params: undefined }, {},
   );
   assert.equal(res.isError, false);
   assert.equal(deps.calls.writeMod.length, 1);
@@ -285,7 +285,7 @@ test("write_mod does NOT report success when the viewer declined to register it"
     }),
   });
   const res = await buildToolDefs(deps).write_mod.handler(
-    { name: "rainbow", produces: "commands", axis: undefined, channel: undefined, description: "x", code: "def compute(d,t): return []", params: undefined }, {},
+    { name: "rainbow", produces: "commands", axis: undefined, channel: undefined, requiresChannel: undefined, description: "x", code: "def compute(d,t): return []", params: undefined }, {},
   );
   assert.equal(res.isError, true, "a declined registration is an ERROR the model can see, not a success");
   assert.doesNotMatch(text(res), /it is now registered/, "it must never claim the registration it was denied");
@@ -321,7 +321,7 @@ test("write_mod schema accepts every real produces (incl. commands) and rejects 
 test("write_mod accepts a commands mod through the save path (no axis required)", async () => {
   const deps = mockDeps();
   const res = await buildToolDefs(deps).write_mod.handler(
-    { name: "ab_look", produces: "commands", axis: undefined, channel: undefined, description: "the a/b look", code: 'def compute(d,t): return ["colorbonds alpha red"]', params: undefined }, {},
+    { name: "ab_look", produces: "commands", axis: undefined, channel: undefined, requiresChannel: undefined, description: "the a/b look", code: 'def compute(d,t): return ["colorbonds alpha red"]', params: undefined }, {},
   );
   assert.equal(res.isError, false, text(res));
   assert.equal(deps.calls.writeMod.length, 1);

@@ -700,6 +700,18 @@ existing machinery (nothing new renders):
 
   Every other `produces` keeps the flat `list[float]` return.
 
+- `# requires-channel: <name>` — any mod may declare that it NEEDS a channel
+  present before it runs. On invocation, if that channel is not already live,
+  the mod that DECLARES it (its `# channel:` provider) runs FIRST, then this mod
+  — **one invocation instead of two** (e.g. `setup_flow`, which requires
+  `flow_dir` and then binds it, runs `channel_flow` first). **One level only**: a
+  missing provider, an ambiguous one (two mods declare the same channel), or a
+  provider that itself requires a channel (deeper chains, cycles included) is
+  refused before anything runs, naming the channel. **Sequencing is not
+  atomicity**: if the provider runs and the consumer then fails, the channel
+  stays declared (channels are append-only, not undoable) — one undo covers the
+  consumer's commands, not the provider's declaration.
+
 **Invocation** is the same own-verb shape: `<modname> <target>`. The verb
 acknowledges immediately (`running <mod> on N points…`) and the outcome
 prints as a follow-up line when the producer answers — computation may

@@ -70,7 +70,8 @@ export function approvalPreview(
   if (bareTool === "write_mod") {
     const header = `write_mod → .molaro/mods/${String(input.name ?? "?")}.py` +
       ` (produces: ${String(input.produces ?? "?")}${input.axis ? `, axis: ${String(input.axis)}` : ""}` +
-      `${input.produces === "channel" && input.channel ? `, declares channel: ${String(input.channel)}` : ""})`;
+      `${input.produces === "channel" && input.channel ? `, declares channel: ${String(input.channel)}` : ""}` +
+      `${input.requiresChannel ? `, requires channel: ${String(input.requiresChannel)}` : ""})`;
     return `${header}\n\n${String(input.code ?? "")}`;
   }
   if (bareTool === "run_mod") {

@@ -187,6 +187,28 @@ value); omit a parameter to take its default. \`get_context\` lists each mod's p
 their types, and defaults — read them there, never guess a name. The approval preview shows
 the EFFECTIVE values (defaults included), so the human approves exactly what will run.
 
+## Requiring a channel — one invocation instead of two
+
+A mod may declare that it NEEDS a channel present before it runs, with a header
+line:
+
+    # requires-channel: <name>
+
+On invocation, if that channel is not already live, the mod that DECLARES it (its
+\`# channel:\` provider, from get_context) runs FIRST, then this mod — so the user
+runs one thing, not two. Author a \`requires-channel\` mod when it only makes sense
+after some channel exists (e.g. a \`commands\` mod that binds a produced channel:
+require it, then \`bind\` it).
+
+Two hard rules, both enforced (a violation fails LOUDLY before anything runs):
+- **One level only.** The provider itself may not require a channel; a missing
+  provider, an ambiguous one (two mods declare the same channel), or a chain
+  deeper than one level (cycles included) is refused, naming the channel.
+- **Sequencing is not atomicity.** If the provider runs and this mod then fails,
+  the channel STAYS declared — channels are append-only and a declaration is not
+  undoable. One undo covers this mod's commands, not the provider's declaration.
+  (\`get_context\` shows which mods declare and which require each channel.)
+
 ## Correctness rules — these are not stylistic
 
 These were established against a two-engine (mdtraj + MDAnalysis) reference corpus.
@@ -375,7 +397,7 @@ Bind first, then swap the shape.`;
 /** Render the live scene into the "loaded system" section. */
 export function renderContext(c: SceneContext): string {
   const mods = c.mods.length
-    ? c.mods.map((m) => `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${m.channel ? ` → ${m.channel}` : ""})`).join("\n")
+    ? c.mods.map((m) => `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${m.channel ? ` → ${m.channel}` : ""})${m.requiresChannel ? ` [requires ${m.requiresChannel}]` : ""}`).join("\n")
     : "  (none yet — you have not written any)";
   return [
     "## The loaded system",

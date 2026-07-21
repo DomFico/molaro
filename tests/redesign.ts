@@ -7841,9 +7841,146 @@ async function S47(): Promise<void> {
   }, 1180, 780, "/terminal");
 }
 
+// ==================== S48: requires-channel sequencing (P-3) ==================
+// A consumer that declares `# requires-channel: flow_dir` runs the shipped
+// channel_flow provider FIRST (one invocation instead of two), on the REAL wire.
+// The HEAVY assertion is the partial-state: provider succeeds → consumer FAILS →
+// the channel STAYS declared (append-only, not undoable), the message says so,
+// and the undo stack reflects it (zero — nothing undoable was written). Plus the
+// direct path (channel already live → no re-run) and a missing provider (refused
+// before anything executes). Fixtures live in a TEMP mods dir (E2E_MODS_DIR), so
+// nothing here touches the real .molaro/mods (same discipline as S29).
+async function S48(): Promise<void> {
+  console.log("S48 — requires-channel: provider-then-consumer, the partial-state limit, missing provider");
+  const modsDir = mkdtempSync(join(tmpdir(), "molaro-s48-mods-"));
+  try {
+    copyFileSync(join(".molaro/mods", "channel_flow.py"), join(modsDir, "channel_flow.py"));
+    // a consumer that REQUIRES flow_dir; `?bad=true` returns out-of-[0,1] values
+    // so its per-point-scalar bind FAILS (the partial-state trigger).
+    writeFileSync(join(modsDir, "flow_probe.py"), [
+      "# molaro-mod", "# name: flow_probe", "# kind: analysis",
+      "# produces: per-point-scalar", "# axis: color", "# requires-channel: flow_dir",
+      "# param: bad boolean false", "",
+      "def compute(data, target_indices, params):",
+      "    if params['bad']:",
+      "        return [2.0] * len(target_indices)  # out of [0,1] -> validation FAILS",
+      "    return [0.5] * len(target_indices)", "",
+    ].join("\n"));
+    // a consumer whose required channel has NO provider — refused before running.
+    writeFileSync(join(modsDir, "orphan.py"), [
+      "# molaro-mod", "# name: orphan", "# kind: analysis",
+      "# produces: per-frame-series", "# requires-channel: nonexistent", "",
+      "def compute(data, target_indices):", "    return [1.0]", "",
+    ].join("\n"));
+    // a SECOND provider (scalar channel `heat`) + a COMMANDS consumer that
+    // requires it and whose macro FAILS — proves the partial-state note fires on
+    // the commands path too (its own fresh channel, so the provider sequences).
+    writeFileSync(join(modsDir, "heat_provider.py"), [
+      "# molaro-mod", "# name: heat_provider", "# kind: analysis",
+      "# produces: channel", "# channel: heat", "",
+      "def compute(data, target_indices):",
+      "    h = data.give_header(); n, t = h.n_points, h.n_frames",
+      "    return {'values': [0.5] * (n * t), 'components': 1}", "",
+    ].join("\n"));
+    writeFileSync(join(modsDir, "heat_cmd.py"), [
+      "# molaro-mod", "# name: heat_cmd", "# kind: analysis",
+      "# produces: commands", "# requires-channel: heat", "",
+      "def compute(data, target_indices):",
+      "    return ['not_a_real_verb all']  # macro pre-validation FAILS", "",
+    ].join("\n"));
+    process.env.E2E_MODS_DIR = modsDir;
+
+    await withDriver(async (d) => {
+      const cmd = (text: string) =>
+        d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+      const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+      const rafs = () => d.evaluate(`(async () => { for (let i=0;i<3;i++) await new Promise(r=>requestAnimationFrame(r)); })()`);
+      await d.evaluate(`void (window.__lines = [],
+        window.addEventListener('message', (e) => {
+          if (e.data?.type === 'commandResult' && e.data.id === -1) window.__lines.push(e.data);
+        }))`);
+      const someLine = (reStr: string) => d.evaluate<boolean>(`window.__lines.some(l => ${reStr}.test(l.message))`);
+      const asyncCount = () => d.evaluate<number>(`window.__lines.length`);
+      const runWait = async (text: string, minNew = 1): Promise<{ status: string; message: string }> => {
+        const before = await asyncCount();
+        const r = await cmd(text);
+        await d.waitFor(`window.__lines.length >= ${before + minNew}`, 20000).catch(() => {});
+        await rafs();
+        return r;
+      };
+
+      await d.evaluate(`${V}.setPlaying(false)`);
+
+      // -- STEP A (HEAVY): flow_dir is NOT live → the provider runs FIRST, then
+      //    the consumer FAILS → partial state: the channel STAYS declared. ------
+      const notLive = await cmd("channels");
+      check("S48: flow_dir is not live before the requiring mod runs",
+        !/flow_dir/.test(notLive.message), notLive.message);
+      const depth0 = await undoDepth();
+      await cmd("flow_probe all ?bad=true");
+      // the async chain ends with the partial-state note — wait for THAT so all
+      // four lines (provider-first, provider-declared, consumer-error, note) exist
+      await d.waitFor(`window.__lines.some(l => /REMAINS declared/.test(l.message))`, 20000).catch(() => {});
+      await rafs();
+      check("S48: the provider ran FIRST (one invocation, not two)",
+        await someLine(`/flow_probe needs channel "flow_dir" — running provider "channel_flow" first/`),
+        JSON.stringify(await d.evaluate(`window.__lines.map(l=>l.message)`)));
+      check("S48: the required channel WAS declared by the provider",
+        /flow_dir — vector/.test((await cmd("channels")).message), (await cmd("channels")).message);
+      check("S48: the consumer FAILED (out-of-[0,1] values, nothing bound)",
+        await someLine(`/flow_probe failed:.*\\[0,1\\]/`), "no consumer-failure line");
+      check("S48: the PARTIAL-STATE note fired — channel remains declared, sequencing is not atomicity",
+        await someLine(`/channel "flow_dir".*REMAINS declared.*sequencing is not atomicity/`),
+        "no partial-state note");
+      check("S48: the channel declaration is NOT undoable — the undo stack is unchanged (nothing to undo)",
+        (await undoDepth()) === depth0, `depth ${depth0} → ${await undoDepth()}`);
+
+      // -- STEP B: flow_dir is now LIVE → the consumer runs DIRECTLY (no re-run),
+      //    and with valid values it SUCCEEDS. --------------------------------------
+      const before = await asyncCount();
+      const rB = await runWait("flow_probe all ?bad=false", 1);
+      check("S48: the second invocation is accepted (target resolves, params valid)", rB.status === "ok", JSON.stringify(rB));
+      const newLines = await d.evaluate<string[]>(`window.__lines.slice(${before}).map(l=>l.message)`);
+      check("S48: no provider-first line the second time (channel was already live)",
+        !newLines.some((m) => /running provider/.test(m)), JSON.stringify(newLines));
+      check("S48: the consumer succeeded (a bind landed)",
+        newLines.some((m) => /flow_probe → colored/.test(m)), JSON.stringify(newLines));
+
+      // -- STEP C: a required channel with NO provider is refused BEFORE running. --
+      const cBefore = await asyncCount();
+      const rC = await cmd("orphan all");
+      // the refusal rides the async outcome (id:-1); wait for it
+      await d.waitFor(`window.__lines.length > ${cBefore}`, 20000).catch(() => {});
+      check("S48: a missing provider is refused, naming the channel, nothing run",
+        await someLine(`/orphan:.*channel "nonexistent".*no registered mod declares it/`),
+        JSON.stringify(rC));
+
+      // -- STEP D: the partial-state note ALSO fires for a COMMANDS consumer whose
+      //    macro fails after a provider was sequenced (the fresh `heat` channel). -
+      const notLiveHeat = await cmd("channels");
+      check("S48: heat is not live before heat_cmd runs", !/^heat /m.test(notLiveHeat.message) && !/\bheat —/.test(notLiveHeat.message), notLiveHeat.message);
+      await cmd("heat_cmd all");
+      await d.waitFor(`window.__lines.some(l => /REMAINS declared/.test(l.message) && /heat/.test(l.message))`, 20000).catch(() => {});
+      await rafs();
+      check("S48: the commands consumer sequenced its provider first",
+        await someLine(`/heat_cmd needs channel "heat" — running provider "heat_provider" first/`), "no provider-first line for heat_cmd");
+      check("S48: heat WAS declared by its provider",
+        /heat — scalar/.test((await cmd("channels")).message), (await cmd("channels")).message);
+      check("S48: the commands macro FAILED (an invalid command, nothing written)",
+        await someLine(`/heat_cmd → .*(not_a_real_verb|invalid|Nothing ran)/`), "no macro-failure line");
+      check("S48: PARTIAL-STATE note fires for the FAILED COMMANDS consumer too (the review fix)",
+        await someLine(`/channel "heat" was declared by "heat_provider" and REMAINS declared/`),
+        "the commands-consumer partial-state note did not fire");
+    }, 1180, 780, "/terminal");
+  } finally {
+    delete process.env.E2E_MODS_DIR;
+    rmSync(modsDir, { recursive: true, force: true });
+  }
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -7881,6 +8018,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
+  S48: "full",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

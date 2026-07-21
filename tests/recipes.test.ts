@@ -80,6 +80,7 @@ test("registerRecipe: a name → recipe map future recipes register into", () =>
 
 import {
   channelProviders,
+  resolveChannelDependency,
   parseModFile,
   parseParamLine,
   resolveModSelector,
@@ -473,6 +474,64 @@ test("channelProviders: maps channel name → declaring mods; a name with >1 pro
   assert.deepEqual(providers.get("flow_dir"), ["flow"], "a unique provider");
   const collisions = [...providers].filter(([, mods]) => mods.length > 1).map(([c]) => c);
   assert.deepEqual(collisions, ["heat"]);
+});
+
+// -- P-3: requires-channel — header field + the static dependency resolver --------
+
+test("parseModFile: # requires-channel parses (any produces), token-validated; round-trips", () => {
+  const file = (line: string) =>
+    `${MOD_FILE_MAGIC}\n# name: c\n# kind: analysis\n# produces: commands\n${line}\ndef compute(data, target_indices):\n    return []\n`;
+  const ok = parseModFile(file("# requires-channel: flow_dir\n"), "workspace");
+  assert.ok(ok.ok, ok.ok ? "" : ok.error);
+  if (ok.ok) assert.equal(ok.mod.requiresChannel, "flow_dir");
+  assert.match((parseModFile(file("# requires-channel: has space\n"), "workspace") as { error: string }).error, /single token/);
+  // round-trip
+  const mod: AnalysisMod = {
+    name: "c", kind: "analysis", produces: "commands", requiresChannel: "flow_dir",
+    origin: "workspace", code: "def compute(data, target_indices):\n    return []",
+  };
+  const back = parseModFile(serializeMod(mod), "workspace");
+  assert.ok(back.ok, back.ok ? "" : back.error);
+  if (back.ok) assert.deepEqual(back.mod, mod);
+});
+
+test("resolveChannelDependency: direct / provider / missing / ambiguous / self / one-level", () => {
+  const provider = (name: string, channel: string, requires?: string): AnalysisMod => ({
+    name, kind: "analysis", produces: "channel", channel, origin: "workspace",
+    ...(requires ? { requiresChannel: requires } : {}),
+    code: "def compute(d,t): return {'values': [], 'components': 1}",
+  });
+  const consumer = (name: string, requires?: string): AnalysisMod => ({
+    name, kind: "analysis", produces: "commands", origin: "workspace",
+    ...(requires ? { requiresChannel: requires } : {}),
+    code: "def compute(d,t): return []",
+  });
+  const flow = provider("flow", "flow_dir");
+  // no requirement → direct
+  assert.deepEqual(resolveChannelDependency(consumer("plain"), [flow]), { direct: true });
+  // one provider → run it first
+  assert.deepEqual(resolveChannelDependency(consumer("needs", "flow_dir"), [flow, consumer("needs", "flow_dir")]), { provider: "flow" });
+  // no provider → error naming the channel
+  assert.match((resolveChannelDependency(consumer("needs", "ghost"), [flow]) as { error: string }).error, /no registered mod declares it/);
+  // two providers → ambiguous
+  assert.match((resolveChannelDependency(consumer("needs", "flow_dir"), [flow, provider("flow2", "flow_dir")]) as { error: string }).error, /ambiguous provider/);
+  // a channel mod requiring its OWN channel → refused
+  const selfch = provider("selfch", "s", "s");
+  assert.match((resolveChannelDependency(selfch, [selfch]) as { error: string }).error, /cannot require its own channel/);
+  // provider that ITSELF requires a channel → one level only
+  const deepProvider = provider("deep", "d", "flow_dir");
+  assert.match((resolveChannelDependency(consumer("needs", "d"), [flow, deepProvider]) as { error: string }).error, /one level only/);
+  // a self-requirement WITH a co-provider → self error, NOT "ambiguous" (order-independent)
+  const selfco = provider("selfco", "s", "s");
+  const other = provider("other", "s");
+  assert.match((resolveChannelDependency(selfco, [selfco, other]) as { error: string }).error, /cannot require its own channel/);
+  assert.match((resolveChannelDependency(selfco, [other, selfco]) as { error: string }).error, /cannot require its own channel/);
+  // a provider that needs a REQUIRED parameter can't be auto-run → refused
+  const paramProvider: AnalysisMod = { ...provider("pp", "p"), params: [{ name: "k", type: "number" }] };
+  assert.match((resolveChannelDependency(consumer("needs", "p"), [paramProvider, consumer("needs", "p")]) as { error: string }).error, /needs required parameters/);
+  // …but a provider whose params all have DEFAULTS is fine (auto-runnable)
+  const okProvider: AnalysisMod = { ...provider("okp", "q"), params: [{ name: "k", type: "number", default: 1 }] };
+  assert.deepEqual(resolveChannelDependency(consumer("needs", "q"), [okProvider, consumer("needs", "q")]), { provider: "okp" });
 });
 
 test("parseModFile: repeated # param: lines are COLLECTED (not overwritten), duplicates rejected", () => {

@@ -2049,13 +2049,13 @@ test("§3.1 a re-pushed mod RUNS ITS NEW CODE — not the version it was first r
   const A = modV("zz_over", "def compute(d,t): return ['A']");
   const B = modV("zz_over", "def compute(d,t): return ['B']");
   try {
-    assert.deepEqual(install([A]), { installed: ["zz_over"], skipped: [] , channelCollisions: [] });
+    assert.deepEqual(install([A]), { installed: ["zz_over"], skipped: [] , channelCollisions: [], dependencyIssues: [] });
     registry.runCommand("zz_over c0");
     assert.deepEqual(modRunCode, [A.code], "version A runs first — the baseline");
 
     // The overwrite: same name, new code, NO delete in between. This is exactly
     // what write_mod does, and it is where the gate used to break.
-    assert.deepEqual(install([B]), { installed: ["zz_over"], skipped: [] , channelCollisions: [] },
+    assert.deepEqual(install([B]), { installed: ["zz_over"], skipped: [] , channelCollisions: [], dependencyIssues: [] },
       "a re-push is an INSTALL, not a self-collision to skip");
     registry.runCommand("zz_over c0");
     assert.deepEqual(modRunCode, [A.code, B.code],
@@ -2100,25 +2100,25 @@ test("a mod's own verb is NOT a built-in — sealing draws the line where the fa
 });
 
 test("§3.2 modInstallReport is TRUTHFUL — it never reports a registration that did not happen", () => {
-  const skipped = { installed: [], skipped: [{ name: "rainbow", reason: '"rainbow" is a built-in command' }] , channelCollisions: [] };
+  const skipped = { installed: [], skipped: [{ name: "rainbow", reason: '"rainbow" is a built-in command' }] , channelCollisions: [], dependencyIssues: [] };
   const refused = modInstallReport(skipped, "rainbow");
   assert.equal(refused.status, "error", "a skip is an ERROR the tool can surface, not a silent line");
   assert.match(refused.message, /did NOT register/);
   assert.match(refused.message, /built-in command/, "the reason travels with it");
 
-  const good = modInstallReport({ installed: ["rg"], skipped: [] , channelCollisions: [] }, "rg");
+  const good = modInstallReport({ installed: ["rg"], skipped: [] , channelCollisions: [], dependencyIssues: [] }, "rg");
   assert.equal(good.status, "ok");
   assert.match(good.message, /registered mod "rg"/);
 
   // the file was written but never reached the registry at all (malformed on
   // re-parse, or the viewer was not ready): still not a success.
-  const absent = modInstallReport({ installed: ["other"], skipped: [] , channelCollisions: [] }, "rg");
+  const absent = modInstallReport({ installed: ["other"], skipped: [] , channelCollisions: [], dependencyIssues: [] }, "rg");
   assert.equal(absent.status, "error");
   assert.match(absent.message, /not among the mods loaded from disk/);
 
   // P-2: a channel-name collision surfaces on the ok line for the colliding mod
   const clash = modInstallReport(
-    { installed: ["heat_b", "heat_a"], skipped: [], channelCollisions: [{ channel: "heat", mods: ["heat_a", "heat_b"] }] },
+    { installed: ["heat_b", "heat_a"], skipped: [], channelCollisions: [{ channel: "heat", mods: ["heat_a", "heat_b"] }], dependencyIssues: [] },
     "heat_b");
   assert.equal(clash.status, "ok", "both mods still register — a warning, not a refusal");
   assert.match(clash.message, /registered mod "heat_b"/);
@@ -2134,6 +2134,44 @@ test("P-2: installModList detects a channel-name collision across the pushed set
   const outcome = install([chMod("heat_a", "heat"), chMod("heat_b", "heat"), chMod("flow", "flow_dir")]);
   assert.deepEqual([...outcome.installed].sort(), ["flow", "heat_a", "heat_b"], "all three register");
   assert.deepEqual(outcome.channelCollisions, [{ channel: "heat", mods: ["heat_a", "heat_b"] }]);
+});
+
+test("P-3: installModList detects unsatisfiable requires-channel at registration; report warns", () => {
+  const { install } = makeInstaller();
+  const provider = (name: string, channel: string) => ({
+    name, kind: "analysis" as const, produces: "channel" as const, channel,
+    origin: "workspace" as const, code: "def compute(d,t): return {'values': [], 'components': 1}",
+  });
+  const consumer = (name: string, requiresChannel: string) => ({
+    name, kind: "analysis" as const, produces: "commands" as const, requiresChannel,
+    origin: "workspace" as const, code: "def compute(d,t): return []",
+  });
+  // a satisfied dependency → no issue; an orphan → a named issue
+  const outcome = install([provider("flow", "flow_dir"), consumer("ok", "flow_dir"), consumer("orphan", "ghost")]);
+  assert.deepEqual(outcome.dependencyIssues.map((d) => d.mod), ["orphan"], "only the orphan is an issue");
+  assert.match(outcome.dependencyIssues[0].issue, /no registered mod declares it/);
+  // the report warns on the ok line for the requiring mod, still registered
+  const rep = modInstallReport(outcome, "orphan");
+  assert.equal(rep.status, "ok", "the orphan still registers — a warning, not a refusal");
+  assert.match(rep.message, /registered mod "orphan".*can't auto-run its provider.*no registered mod declares it/);
+});
+
+test("P-3: a requirement satisfied by a LIVE dataset channel is NOT a dependency issue", () => {
+  const consumer = (name: string, requiresChannel: string): AnalysisMod => ({
+    name, kind: "analysis", produces: "commands", requiresChannel, origin: "workspace",
+    code: "def compute(d,t): return []",
+  });
+  const registered: AnalysisMod[] = [];
+  const deps: import("../webview/commands.ts").ModInstallDeps = {
+    isBuiltin: () => false,
+    install: (m) => { registerRecipe(m); registered.push(m); },
+    liveChannels: () => ["energy", "mass"], // a base dataset channel, no mod provider
+  };
+  // "energy" is a live channel (not a mod) → no issue; "ghost" has no provider → issue
+  const outcome = installModList([consumer("uses_live", "energy"), consumer("uses_ghost", "ghost")], deps);
+  assert.deepEqual(outcome.dependencyIssues.map((d) => d.mod), ["uses_ghost"],
+    "a requirement met by a live channel is fine; only the true orphan is flagged");
+  for (const m of registered) unregisterRecipe(m.name);
 });
 
 test("a malformed entry in a push is skipped WITH a reason, never silently dropped", () => {

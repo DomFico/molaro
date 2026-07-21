@@ -115,6 +115,11 @@ export interface AnalysisMod extends ModCommon {
    * mod, so it drives collision detection, the approval preview, and P-3's
    * provider index; threaded to the producer via the run_mod request. */
   channel?: string;
+  /** P-3: a channel this mod REQUIRES to be present before it runs (any produces
+   * kind may require). On invocation, if the channel isn't live, its provider
+   * (the mod that declares `# channel:` this name) runs first — ONE level only.
+   * Resolved statically against the registry (resolveChannelDependency). */
+  requiresChannel?: string;
   /** Python source defining `compute(data, target_indices)` — or
    * `compute(data, target_indices, params)` when the mod declares parameters.
    * Executed in the producer against the resident dataset handle. Returns a flat
@@ -264,6 +269,13 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
   } else if (channel !== undefined) {
     return { ok: false, error: "channel is only valid on produces: channel mods" };
   }
+  // P-3: an optional required channel (any produces kind may require one). Just
+  // token-validated here; whether a PROVIDER exists (and is one level deep) is a
+  // property of the whole registry, resolved by resolveChannelDependency.
+  const requiresChannel = meta["requires-channel"];
+  if (requiresChannel !== undefined && !CHANNEL_NAME_RE.test(requiresChannel)) {
+    return { ok: false, error: `requires-channel must be a single token ${CHANNEL_NAME_RE} (got "${requiresChannel}")` };
+  }
   if (!/\bdef\s+compute\s*\(/.test(code)) {
     return { ok: false, error: "the code must define compute(data, target_indices)" };
   }
@@ -289,6 +301,7 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
     produces: produces as ModProduces, // validated against MOD_PRODUCES above
     ...(produces === "per-point-scalar" ? { axis: axis as ModAxis } : {}),
     ...(produces === "channel" ? { channel } : {}),
+    ...(requiresChannel !== undefined ? { requiresChannel } : {}),
     code,
     ...(params.length ? { params } : {}),
     origin,
@@ -313,6 +326,7 @@ export function serializeMod(mod: Mod): string {
     `# produces: ${mod.produces}`,
     ...(mod.axis ? [`# axis: ${mod.axis}`] : []),
     ...(mod.channel ? [`# channel: ${mod.channel}`] : []),
+    ...(mod.requiresChannel ? [`# requires-channel: ${mod.requiresChannel}`] : []),
     ...(mod.params ?? []).map(
       (p) => `# param: ${p.name} ${p.type}${p.default !== undefined ? ` ${p.default}` : ""}`,
     ),
@@ -586,6 +600,55 @@ export function channelProviders(mods: readonly Mod[]): Map<string, string[]> {
     }
   }
   return out;
+}
+
+/** P-3: resolve a consumer's `# requires-channel` against the registry — a STATIC
+ * analysis (no mod runs), so a missing/ambiguous/too-deep dependency is known
+ * before anything executes, not discovered by running into it. Returns:
+ *  - {direct}   — no requirement; run the consumer as-is.
+ *  - {provider} — the ONE mod that declares the required channel; run it first.
+ *  - {error}    — refuse loudly: no provider, an ambiguous provider (a channel
+ *                 collision), a self-requirement, or a provider that ITSELF
+ *                 requires a channel (deeper than one level — cycles included,
+ *                 since a cycle needs the provider to require). */
+export function resolveChannelDependency(
+  consumer: AnalysisMod,
+  mods: readonly Mod[],
+): { direct: true } | { provider: string } | { error: string } {
+  const need = consumer.requiresChannel;
+  if (!need) return { direct: true };
+  const providers = channelProviders(mods).get(need) ?? [];
+  if (providers.length === 0) {
+    return { error: `requires channel "${need}", but no registered mod declares it` };
+  }
+  // Self-requirement BEFORE ambiguity: a mod that declares AND requires the same
+  // channel is a self error even if another mod also declares it (providers order
+  // is non-deterministic, so test membership, not providers[0]).
+  if (providers.includes(consumer.name)) {
+    return { error: `requires channel "${need}" which it declares itself — a mod cannot require its own channel` };
+  }
+  if (providers.length > 1) {
+    return { error: `requires channel "${need}", but ${providers.length} mods declare it (${providers.join(", ")}) — ambiguous provider` };
+  }
+  const provider = providers[0];
+  const providerMod = mods.find((m) => m.name === provider);
+  if (providerMod && providerMod.kind === "analysis") {
+    if (providerMod.requiresChannel) {
+      return {
+        error: `requires channel "${need}" from "${provider}", but "${provider}" itself requires a channel — ` +
+          `one level only (deeper chains, cycles included, are refused)`,
+      };
+    }
+    // A provider that needs a REQUIRED parameter can't be auto-run (we have no
+    // value for it) — refuse statically, matching the runtime.
+    if ((providerMod.params ?? []).some((p) => p.default === undefined)) {
+      return {
+        error: `requires channel "${need}" from "${provider}", but "${provider}" needs required parameters — ` +
+          `run it yourself first, then invoke this mod`,
+      };
+    }
+  }
+  return { provider };
 }
 
 // -- rm: mod-name selector resolution + runtime unregistration --------------------
