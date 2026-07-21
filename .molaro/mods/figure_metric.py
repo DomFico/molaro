@@ -2,24 +2,28 @@
 # name: figure_metric
 # kind: analysis
 # produces: figure
+# param: dpi number 100
+# param: bins number 24
 # author: Example Author
 # source: https://github.com/DomFico/molaro
-# description: synthetic example — a rendered two-panel figure with a live playhead on the frames panel
+# description: synthetic example — a rendered two-panel figure with a live playhead on the frames panel; dpi + bins are tunable
 
-def _figure_reply(fig, frames_axes):
+def _figure_reply(fig, frames_axes, dpi=100):
     """THE TEMPLATE: emit the figure reply MECHANICALLY from the figure
     object — never hand-compute the metadata (a wrong bbox or xlim means a
     plausible-looking, silently misaligned playhead).
 
     fig          the matplotlib Figure, fully laid out (call it LAST)
     frames_axes  the set of Axes whose x IS the frame index
+    dpi          render resolution — the SAME value drives savefig AND the
+                 reported width/height, so they can never disagree
     """
     import io
     import base64
     buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=100)
-    w = int(round(fig.get_size_inches()[0] * fig.dpi))
-    h = int(round(fig.get_size_inches()[1] * fig.dpi))
+    fig.savefig(buf, format="png", dpi=dpi)
+    w = int(round(fig.get_size_inches()[0] * dpi))
+    h = int(round(fig.get_size_inches()[1] * dpi))
     return {
         "png": base64.b64encode(buf.getvalue()).decode("ascii"),
         "width": w,
@@ -35,12 +39,21 @@ def _figure_reply(fig, frames_axes):
     }
 
 
-def compute(data, target_indices):
+def compute(data, target_indices, params=None):
     """A two-panel figure: TOP = a per-frame quantity (mean |position| of
     the target) — its x is frames, so the playhead rides it and clicking
     seeks; BOTTOM = a histogram of the same values — a static panel, no
     playhead. Any matplotlib figure works; only _figure_reply matters.
+
+    Parameters (P-1): `dpi` (render resolution, default 100) and `bins` (the
+    histogram's bucket count, default 24). `params=None` is the back-compatible
+    default — a paramless call (e.g. the direct producer round-trip in
+    test_figure_roundtrip / the corpus, which do NOT fill defaults webview-side)
+    behaves exactly as before.
     """
+    p = params or {}
+    dpi = p.get("dpi", 100)
+    bins = int(p.get("bins", 24))
     import struct
     import matplotlib
     matplotlib.use("Agg")  # never a display; the producer renders headless
@@ -68,10 +81,10 @@ def compute(data, target_indices):
     top.set_xlim(0, n_frames - 1)
     top.set_xlabel("frame")
     top.set_ylabel("mean |position|")
-    bottom.hist(values, bins=24)
+    bottom.hist(values, bins=bins)
     bottom.set_xlabel("mean |position|")
     bottom.set_ylabel("count")
     fig.tight_layout()
-    reply = _figure_reply(fig, frames_axes={top})
+    reply = _figure_reply(fig, frames_axes={top}, dpi=dpi)
     plt.close(fig)
     return reply
