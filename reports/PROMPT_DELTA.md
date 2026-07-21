@@ -66,3 +66,40 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
   reports/PARKED.md Item C); revisit when the extraction path is decided.
 
 _(The ribbon bend miter, Item B, is a renderer change — no prompt surface.)_
+
+---
+
+## From the cold acceptance test (reports/ACCEPTANCE_COLD.md, 2026-07-21)
+
+Eight cold sessions (3 requests, no hints). R1 (commands) and R2 (channel+bind)
+passed 2/2 and R2's mods were ACCEPTED by the real producer on real adk. R3 (the
+full cartoon path) reached the right rung 3/4 but its first mod was refused every
+time. What the prompt would need, in priority order:
+
+1. **A per-point granularity warning for channel mods — the top finding.** Every
+   mod-writing R3 run produced a per-RESIDUE array (214) for a per-POINT channel
+   (3341 atoms) and was refused: `values must be a flat frame-major list of length
+   n_frames*n_points*components (98*3341*3 = 982254), got 62916`. The length
+   formula IS already in the prompt and did not prevent it — the domain framing
+   ("backbone direction") invites a per-residue answer. Teach the BROADCAST where
+   the channel return shape is taught: *a channel is per-POINT; a quantity that is
+   naturally per-residue/per-chain must be broadcast to every atom of it.* Point at
+   the corrected shape (each atom inherits its residue's vector), not the formula.
+2. **Connect the user-word "cartoon" to the ribbon shape.** One run in four
+   approximated a cartoon by fattening and colouring the TUBE trace and never
+   reached for `ribbon`, though get_context's Shapes section lists it. Name the
+   mapping in the ladder: a cartoon/ribbon backbone is `shape traces ribbon`, which
+   needs a vector channel bound to `orientation` FIRST.
+3. **Soften "call get_context before anything" to "re-read it when you need
+   CURRENT state."** It is correctly skipped when the boot context already answers
+   the question (R1, 2/2), so the absolute phrasing is routinely not followed; what
+   matters is re-reading after something has been declared.
+4. **Parameters need no change from this test** — taught, but none of the three
+   requests implied a tunable, so they went unexercised. Re-measure on a request
+   that does.
+
+What already lands and should NOT be disturbed: the inline channel return shape
+(P-2 `{values, components}`, no `name` — correct in every mod), the frame-to-frame
+coherence pattern (present in every vector channel mod), the float64 and
+`trajectory is None` correctness rules, `bind` vs `bake` for motion, and the
+dependency order (bind orientation before the ribbon swap).
