@@ -278,6 +278,55 @@ the simulated arm, not the real producer — only channel mods route to the real
 producer. That params actually reach `compute` end-to-end was proven separately
 (A1: `dpi=200` → 1280×800 through the real producer on the real mod).
 
+---
+
+# Suite extension round 2: R6–R8 (reuse-vs-rewrite, and the commands rung)
+
+Three more requests, 2 runs each, cold, real producer, real shipped inventory.
+These probe surfaces R1–R5 never touched.
+
+**R6 — "Color the atoms by how floppy they are."** 2/2 identical:
+
+    get_context → run_mod{name: rmsf, target: all}
+
+**R7 — "Show me how compact it gets over time."** 2/2 identical:
+
+    get_context → run_mod{name: rg, target: all}
+
+**Reuse-vs-rewrite: 4/4 REUSED.** Both requests describe a computation that a
+SHIPPED mod already performs (`rmsf` = per-atom RMS fluctuation; `rg` = radius of
+gyration per frame). In every run it read the inventory, recognised the existing
+mod from its advertised description, and ran it — instead of writing a duplicate.
+Two turns each. This is the cheapest possible correct behaviour and it was not
+previously observed; R2/R3 only ever showed it WRITING mods, because nothing
+existing fit those requests.
+
+**R8 — "Save the charged-residue coloring so I can apply it again later."** 2/2:
+
+    get_context → write_mod{produces: commands}
+
+Right rung: a durable, re-runnable look is a `produces: commands` mod, not a
+one-off `run_command`. And the hardest rule for that kind LANDED — **both mods read
+`data.labels` at run time** rather than hardcoding a chain label:
+
+    category, group, _ = data.labels[idx]
+    return [f"colorbonds {category}.{group}.ASP*,GLU* red", ...]
+
+with no `chr(65 + i)`-style guess and no `@all`, both commenting the reason
+("works on any chain name"). That is the mod-outlives-the-system rule (the defect
+that silently nomatched on any system whose chain isn't "A"), verified
+conversationally for the first time.
+
+**Observation, not a defect:** R8 wrote the mod and stopped without running it. The
+request was to *save* it for later, so stopping is defensible — but a follow-up
+("now apply it") would exercise the run path and is worth adding.
+
+**What this round found: no new gaps.** Eight requests now pass. That is a real
+result but weaker evidence than a failure would be — a suite that stops finding
+things is either mature or insufficiently varied, and two runs per request cannot
+distinguish those. The value of the next requests is highest where they are least
+like the eight already here.
+
 # Appendix — full transcripts
 
 ## R1_runa — simulated run_mod
@@ -2027,3 +2076,445 @@ Done. The two-panel figure has been rendered at **300 dpi** (print resolution) w
 TOOL SEQUENCE: get_context → run_mod
 get_context calls: 1 · turns: 3
 used mod parameters: YES```
+
+## SUITE-EXT2 R6_runa
+
+```
+==============================================================================
+R6_runa — COLD, no hints
+USER: "Color the atoms by how floppy they are."
+==============================================================================
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  - channel_flow (channel → flow_dir): synthetic example — a produced per-point-per-frame VECTOR channel, coherently seeded frame-to-frame
+  - color_ab (commands): synthetic example — a saved two-color look via colorbonds (one undo stroke)
+  - figure_metric (figure) [params: dpi:number=100, bins:number=24]: synthetic example — a rendered two-panel figure with a live playhead on the frames panel; dpi + bins are tunable
+  - frame_metric (per-frame-series): synthetic example — the first target point's distance from the origin, per frame
+  - index_ramp (per-point-scalar → color): synthetic example — a normalized index ramp over the target
+  - param_scale (per-point-scalar → color) [params: gamma:number=1]: synthetic example — an even 0→1 ramp shaped by a `gamma` parameter (one file, reusable)
+  - rg (per-frame-series): radius of gyration per frame (mass-weighted, nm) — a reference analysis
+  - rmsd (per-frame-series): RMSD to the first frame (with superposition, nm) — a reference analysis
+  - rmsf (per-point-scalar → color): per-atom RMS fluctuation, normalized to [0,1] for color — a reference analysis
+  - setup_flow (commands) [requires channel: flow_dir]: one invocation instead of two — needs the flow_dir channel, then binds it to orientation
+  - xy_metric (scatter) [params: x_label:string=dist_a, y_label:string=dist_b]: synthetic example — two per-frame quantities plotted against each other; axis labels are tunable
+
+[assistant turn 2]
+The `rmsf` mod is exactly right — it computes per-atom RMS fluctuation (how much each atom moves around its mean position across all frames), normalizes to [0, 1], and maps it onto the color ramp (red = floppy, towards magenta = rigid). Running it now on the whole system.
+
+>>> TOOL run_mod({"name":"rmsf","target":"all"})
+<<< rmsf → color bound from scalars on "all"
+
+[assistant turn 3]
+Done! The atoms are now colored by **per-atom RMSF** (root-mean-square fluctuation) computed across all 98 frames:
+
+- **Red** → high fluctuation = floppy atoms (typically loop tips, termini, or exposed side chains)
+- **Magenta/dark** → low fluctuation = rigid atoms (typically the structured core)
+
+The color is a static snapshot (baked to the current frame). Let me know if you'd like a plot of RMSF along the chain, or want to isolate the floppiest regions into a selection.
+
+TOOL SEQUENCE: get_context → run_mod
+get_context calls: 1 · turns: 3
+used mod parameters: no```
+
+## SUITE-EXT2 R6_runb
+
+```
+==============================================================================
+R6_runb — COLD, no hints
+USER: "Color the atoms by how floppy they are."
+==============================================================================
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  - channel_flow (channel → flow_dir): synthetic example — a produced per-point-per-frame VECTOR channel, coherently seeded frame-to-frame
+  - color_ab (commands): synthetic example — a saved two-color look via colorbonds (one undo stroke)
+  - figure_metric (figure) [params: dpi:number=100, bins:number=24]: synthetic example — a rendered two-panel figure with a live playhead on the frames panel; dpi + bins are tunable
+  - frame_metric (per-frame-series): synthetic example — the first target point's distance from the origin, per frame
+  - index_ramp (per-point-scalar → color): synthetic example — a normalized index ramp over the target
+  - param_scale (per-point-scalar → color) [params: gamma:number=1]: synthetic example — an even 0→1 ramp shaped by a `gamma` parameter (one file, reusable)
+  - rg (per-frame-series): radius of gyration per frame (mass-weighted, nm) — a reference analysis
+  - rmsd (per-frame-series): RMSD to the first frame (with superposition, nm) — a reference analysis
+  - rmsf (per-point-scalar → color): per-atom RMS fluctuation, normalized to [0,1] for color — a reference analysis
+  - setup_flow (commands) [requires channel: flow_dir]: one invocation instead of two — needs the flow_dir channel, then binds it to orientation
+  - xy_metric (scatter) [params: x_label:string=dist_a, y_label:string=dist_b]: synthetic example — two per-frame quantities plotted against each other; axis labels are tunable
+
+[assistant turn 2]
+The `rmsf` mod is exactly right — it computes per-atom RMS fluctuation (the "floppiness" of each atom) across all 98 frames and maps it onto the color axis. Running it now on the whole system.
+
+>>> TOOL run_mod({"name":"rmsf","target":"all"})
+<<< rmsf → color bound from scalars on "all"
+
+[assistant turn 3]
+Done! Every atom is now colored by its **per-atom RMSF** (root-mean-square fluctuation) computed over all 98 frames:
+
+- **Red/magenta** → high fluctuation (floppy regions, typically loop ends and termini)
+- **Dark/cool end of the ramp** → low fluctuation (rigid regions, typically the core secondary structure)
+
+The normalization maps the min RMSF atom to 0 and the max to 1 across the whole structure, so the full color range is used. Let me know if you'd like to explore specific floppy regions or plot the fluctuation as a curve!
+
+TOOL SEQUENCE: get_context → run_mod
+get_context calls: 1 · turns: 3
+used mod parameters: no```
+
+## SUITE-EXT2 R7_runa
+
+```
+==============================================================================
+R7_runa — COLD, no hints
+USER: "Show me how compact it gets over time."
+==============================================================================
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  - channel_flow (channel → flow_dir): synthetic example — a produced per-point-per-frame VECTOR channel, coherently seeded frame-to-frame
+  - color_ab (commands): synthetic example — a saved two-color look via colorbonds (one undo stroke)
+  - figure_metric (figure) [params: dpi:number=100, bins:number=24]: synthetic example — a rendered two-panel figure with a live playhead on the frames panel; dpi + bins are tunable
+  - frame_metric (per-frame-series): synthetic example — the first target point's distance from the origin, per frame
+  - index_ramp (per-point-scalar → color): synthetic example — a normalized index ramp over the target
+  - param_scale (per-point-scalar → color) [params: gamma:number=1]: synthetic example — an even 0→1 ramp shaped by a `gamma` parameter (one file, reusable)
+  - rg (per-frame-series): radius of gyration per frame (mass-weighted, nm) — a reference analysis
+  - rmsd (per-frame-series): RMSD to the first frame (with superposition, nm) — a reference analysis
+  - rmsf (per-point-scalar → color): per-atom RMS fluctuation, normalized to [0,1] for color — a reference analysis
+  - setup_flow (commands) [requires channel: flow_dir]: one invocation instead of two — needs the flow_dir channel, then binds it to orientation
+  - xy_metric (scatter) [params: x_label:string=dist_a, y_label:string=dist_b]: synthetic example — two per-frame quantities plotted against each other; axis labels are tunable
+
+[assistant turn 2]
+The `rg` mod is exactly right for this — radius of gyration per frame, which directly measures compactness over time. I'll run it now.
+
+>>> TOOL run_mod({"name":"rg","target":"all"})
+<<< rg → ran on all
+
+[assistant turn 3]
+The plot tab now shows the **radius of gyration (Rg) over all 98 frames**, in nanometers. A few things to look for:
+
+- **Lower Rg = more compact** — the protein is pulling its mass closer to its center.
+- **Higher Rg = more extended** — the structure is opening up or partially unfolding.
+- The **playhead tracks the current frame**, so you can scrub the trajectory and see exactly where on the Rg curve you are.
+
+If you'd like, I can also color the atoms by their **per-atom fluctuation (RMSF)** to see *which parts* of the structure are most mobile during those compact vs. extended states.
+
+TOOL SEQUENCE: get_context → run_mod
+get_context calls: 1 · turns: 3
+used mod parameters: no```
+
+## SUITE-EXT2 R7_runb
+
+```
+==============================================================================
+R7_runb — COLD, no hints
+USER: "Show me how compact it gets over time."
+==============================================================================
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  - channel_flow (channel → flow_dir): synthetic example — a produced per-point-per-frame VECTOR channel, coherently seeded frame-to-frame
+  - color_ab (commands): synthetic example — a saved two-color look via colorbonds (one undo stroke)
+  - figure_metric (figure) [params: dpi:number=100, bins:number=24]: synthetic example — a rendered two-panel figure with a live playhead on the frames panel; dpi + bins are tunable
+  - frame_metric (per-frame-series): synthetic example — the first target point's distance from the origin, per frame
+  - index_ramp (per-point-scalar → color): synthetic example — a normalized index ramp over the target
+  - param_scale (per-point-scalar → color) [params: gamma:number=1]: synthetic example — an even 0→1 ramp shaped by a `gamma` parameter (one file, reusable)
+  - rg (per-frame-series): radius of gyration per frame (mass-weighted, nm) — a reference analysis
+  - rmsd (per-frame-series): RMSD to the first frame (with superposition, nm) — a reference analysis
+  - rmsf (per-point-scalar → color): per-atom RMS fluctuation, normalized to [0,1] for color — a reference analysis
+  - setup_flow (commands) [requires channel: flow_dir]: one invocation instead of two — needs the flow_dir channel, then binds it to orientation
+  - xy_metric (scatter) [params: x_label:string=dist_a, y_label:string=dist_b]: synthetic example — two per-frame quantities plotted against each other; axis labels are tunable
+
+[assistant turn 2]
+The `rg` mod already does exactly this — radius of gyration per frame, mass-weighted in nm, which is the standard measure of compactness. I'll run it now.
+
+>>> TOOL run_mod({"name":"rg","target":"all"})
+<<< rg → ran on all
+
+[assistant turn 3]
+The **radius of gyration (Rg)** is now plotted as a curve over all 98 frames — check the plot tab. The playhead tracks the trajectory as you scrub through it.
+
+**What you're seeing:** Rg is the mass-weighted RMS distance of all atoms from the center of mass. A lower value means the structure is more compact; a higher value means it's more extended. The curve shows you how compactness evolves frame by frame throughout the simulation.
+
+TOOL SEQUENCE: get_context → run_mod
+get_context calls: 1 · turns: 3
+used mod parameters: no```
+
+## SUITE-EXT2 R8_runa
+
+```
+==============================================================================
+R8_runa — COLD, no hints
+USER: "Save the charged-residue coloring so I can apply it again later."
+==============================================================================
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  - channel_flow (channel → flow_dir): synthetic example — a produced per-point-per-frame VECTOR channel, coherently seeded frame-to-frame
+  - color_ab (commands): synthetic example — a saved two-color look via colorbonds (one undo stroke)
+  - figure_metric (figure) [params: dpi:number=100, bins:number=24]: synthetic example — a rendered two-panel figure with a live playhead on the frames panel; dpi + bins are tunable
+  - frame_metric (per-frame-series): synthetic example — the first target point's distance from the origin, per frame
+  - index_ramp (per-point-scalar → color): synthetic example — a normalized index ramp over the target
+  - param_scale (per-point-scalar → color) [params: gamma:number=1]: synthetic example — an even 0→1 ramp shaped by a `gamma` parameter (one file, reusable)
+  - rg (per-frame-series): radius of gyration per frame (mass-weighted, nm) — a reference analysis
+  - rmsd (per-frame-series): RMSD to the first frame (with superposition, nm) — a reference analysis
+  - rmsf (per-point-scalar → color): per-atom RMS fluctuation, normalized to [0,1] for color — a reference analysis
+  - setup_flow (commands) [requires channel: flow_dir]: one invocation instead of two — needs the flow_dir channel, then binds it to orientation
+  - xy_metric (scatter) [params: x_label:string=dist_a, y_label:string=dist_b]: synthetic example — two per-frame quantities plotted against each other; axis labels are tunable
+
+[assistant turn 2]
+This is a `commands` mod — a named, durable, re-runnable look that colors specific residue classes while leaving everything else untouched. I'll write it to derive the group label at runtime from `data.labels` so it works on any system.
+
+>>> TOOL write_mod({"name":"color_charged","produces":"commands"})
+<<< wrote mod "color_charged" to .molaro/mods/color_charged.py — it is now registered; run it with run_mod.
+--- mod source (color_charged) ---
+
+# Charged-residue coloring
+#   Acidic  (ASP, GLU)       → red
+#   Basic   (ARG, LYS, HIS)  → blue
+# Everything else is left untouched.
+# Group label is read from data.labels at runtime — works on any chain name.
+
+def compute(data, target_indices):
+    # Resolve the category and group label from whatever the viewer calls them.
+    # Fall back to the first atom in the whole system if target_indices is empty.
+    idx = (target_indices or [0])[0]
+    category, group, _ = data.labels[idx]
+
+    return [
+        f"colorbonds {category}.{group}.ASP*,GLU* red",
+        f"colorbonds {category}.{group}.ARG*,LYS*,HIS* blue",
+    ]
+
+--- end ---
+
+[assistant turn 3]
+Saved as **`color_charged`**. Here's what it does:
+
+| Residues | Color |
+|---|---|
+| ASP, GLU (acidic) | red |
+| ARG, LYS, HIS (basic) | blue |
+| Everything else | untouched |
+
+To apply it at any time, just run the `color_charged` mod on `polymer` (or any target). Want me to apply it now?
+
+TOOL SEQUENCE: get_context → write_mod:commands
+get_context calls: 1 · turns: 3
+used mod parameters: no```
+
+## SUITE-EXT2 R8_runb
+
+```
+==============================================================================
+R8_runb — COLD, no hints
+USER: "Save the charged-residue coloring so I can apply it again later."
+==============================================================================
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  - channel_flow (channel → flow_dir): synthetic example — a produced per-point-per-frame VECTOR channel, coherently seeded frame-to-frame
+  - color_ab (commands): synthetic example — a saved two-color look via colorbonds (one undo stroke)
+  - figure_metric (figure) [params: dpi:number=100, bins:number=24]: synthetic example — a rendered two-panel figure with a live playhead on the frames panel; dpi + bins are tunable
+  - frame_metric (per-frame-series): synthetic example — the first target point's distance from the origin, per frame
+  - index_ramp (per-point-scalar → color): synthetic example — a normalized index ramp over the target
+  - param_scale (per-point-scalar → color) [params: gamma:number=1]: synthetic example — an even 0→1 ramp shaped by a `gamma` parameter (one file, reusable)
+  - rg (per-frame-series): radius of gyration per frame (mass-weighted, nm) — a reference analysis
+  - rmsd (per-frame-series): RMSD to the first frame (with superposition, nm) — a reference analysis
+  - rmsf (per-point-scalar → color): per-atom RMS fluctuation, normalized to [0,1] for color — a reference analysis
+  - setup_flow (commands) [requires channel: flow_dir]: one invocation instead of two — needs the flow_dir channel, then binds it to orientation
+  - xy_metric (scatter) [params: x_label:string=dist_a, y_label:string=dist_b]: synthetic example — two per-frame quantities plotted against each other; axis labels are tunable
+
+[assistant turn 2]
+I'll write a `commands` mod that derives the charged residues at runtime and colors their bonds — acidic (ASP, GLU) red and basic (ARG, LYS, HIS) blue. It reads group labels from `data.labels` so it works on any loaded chain.
+
+>>> TOOL write_mod({"name":"charged_residues","produces":"commands"})
+<<< wrote mod "charged_residues" to .molaro/mods/charged_residues.py — it is now registered; run it with run_mod.
+--- mod source (charged_residues) ---
+
+# Charged-residue coloring
+# Acidic: ASP, GLU → red
+# Basic:  ARG, LYS, HIS → blue
+# Everything else is left untouched (one undo stroke for both commands).
+# Group (chain) label is derived from data.labels — never hardcoded.
+
+def compute(data, target_indices):
+    # Collect the unique (category, group) pairs present in the target.
+    pairs = set()
+    indices = target_indices if target_indices else range(len(data.labels))
+    for i in indices:
+        cat, grp, _ = data.labels[i]
+        pairs.add((cat, grp))
+
+    cmds = []
+    for cat, grp in sorted(pairs):
+        cmds.append(f"colorbonds {cat}.{grp}.ASP*,GLU* red")
+        cmds.append(f"colorbonds {cat}.{grp}.ARG*,LYS*,HIS* blue")
+    return cmds
+
+--- end ---
+
+[assistant turn 3]
+Saved as **`charged_residues`**. Here's what it does:
+
+- **ASP\*, GLU\*** bonds → **red** (acidic)
+- **ARG\*, LYS\*, HIS\*** bonds → **blue** (basic)
+- Everything else stays untouched
+- Runs as one undo stroke
+
+To apply it any time:
+
+```
+run_mod charged_residues on all
+```
+
+Or target a specific chain with `polymer.A`. The group label is read dynamically from the data, so it'll work on any future system too.
+
+TOOL SEQUENCE: get_context → write_mod:commands
+get_context calls: 1 · turns: 3
+used mod parameters: no```
