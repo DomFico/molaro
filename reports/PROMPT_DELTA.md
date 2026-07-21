@@ -65,6 +65,32 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
 - **Not yet teachable:** how to SAVE the figure to disk — parked (see
   reports/PARKED.md Item C); revisit when the extraction path is decided.
 
+### Vector channels should be returned as UNIT vectors (found in real use, 2026-07-21)
+
+- **Teach (where the vector-channel return shape is taught):** normalize a
+  direction channel before returning it. The producer's frame-to-frame coherence
+  check compares adjacent frames with a **raw dot product** — `< 0` is reported as a
+  sign inversion, `< 0.5` as a hard swing (`producer/serve.py:91-95`). Those
+  thresholds assume unit-ish vectors. A carbonyl C=O vector in mdtraj's native nm is
+  ~0.123 long, so two frames that agree *perfectly* dot to ~0.015 and trip the swing
+  threshold on magnitude alone: authoring `ribbon_dir` against real adk produced
+  `176699 hard swing(s)` covering literally every adjacent-frame pair, which makes
+  the warning unable to distinguish a stable ribbon from a strobing one. Normalizing
+  is free — the renderer normalizes anyway — and turns the dot into a true cosine.
+  Same run: 176699 swings -> 88.
+- **Teach alongside it — how to hold a direction's sign steady across frames.** The
+  intuitive method is wrong in a way that looks right: re-walking the chain each
+  frame (flipping residue i against residue i-1, seeded at the chain head from the
+  previous frame) makes each sign decision depend on a *neighbour in that frame*, so
+  wherever two neighbours are near perpendicular the decision is a coin flip that
+  thermal motion re-rolls, and one flipped decision inverts the whole rest of the
+  chain. Measured on adk: sign inversions on **45%** of adjacent-frame pairs
+  (147378 / 324077). The fix is to resolve each element against **its own previous
+  frame** — local, independent decisions — using the along-chain walk only on frame
+  0 to establish the convention once. Same run: 147378 inversions -> **0**.
+- **Point at:** the workspace mod `.molaro/mods/ribbon_dir.py`, which documents both
+  traps at the point of composition.
+
 _(The ribbon bend miter, Item B, is a renderer change — no prompt surface.)_
 
 ---
