@@ -1,0 +1,38 @@
+#!/usr/bin/env sh
+# Retire the backtick-substitution class.
+#
+# `git commit -m "... `code` ..."` lets the SHELL run the backticked span as a
+# command and splices its (empty) output in — the span is DELETED from the message
+# before git ever sees it, leaving a gap like:  the word "cartoon" to , which needs
+#
+# This has bitten this repo twice, and it was already written down after the first
+# time. A trap that survives its own ledger entry needs a mechanism, not another
+# note. This is the mechanism.
+#
+# THE RULE: any commit message containing backticks goes through a file —
+#     git commit -F <file>
+#
+# Install (per clone, not committed by git itself):
+#     git config core.hooksPath scripts/hooks
+msg="$1"
+[ -n "$ALLOW_MSG_GAPS" ] && exit 0
+
+# Ignore git's own comment lines and anything below the scissors line.
+body=$(sed '/^# ------------------------ >8 ------------------------$/,$d' "$msg" | grep -v '^#')
+
+# The tell of a vanished inline span: whitespace immediately before punctuation.
+# A period only counts when it ENDS a clause (space/end after it) — otherwise a
+# legitimate leading-dot path like ".molaro/mods" or ".py" trips it.
+hits=$(printf '%s\n' "$body" | grep -nE ' ,| \.([[:space:]]|$)| \)| ;')
+if [ -n "$hits" ]; then
+  echo "commit-msg: REFUSED — space before punctuation in the message:" >&2
+  printf '%s\n' "$hits" >&2
+  echo >&2
+  echo "That is the signature of shell backtick substitution eating an inline code" >&2
+  echo "span out of a -m message. Write the message to a file and commit with:" >&2
+  echo "    git commit -F <file>" >&2
+  echo >&2
+  echo "If the spacing is genuinely intended:  ALLOW_MSG_GAPS=1 git commit ..." >&2
+  exit 1
+fi
+exit 0

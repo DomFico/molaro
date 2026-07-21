@@ -100,9 +100,13 @@ time. What the prompt would need, in priority order:
    CURRENT state."** It is correctly skipped when the boot context already answers
    the question (R1, 2/2), so the absolute phrasing is routinely not followed; what
    matters is re-reading after something has been declared.
-4. **Parameters need no change from this test** — taught, but none of the three
-   requests implied a tunable, so they went unexercised. Re-measure on a request
-   that does.
+4. **Parameters need no change — and are now VERIFIED reachable.** None of R1–R4
+   implied a tunable, so they went unexercised. R5 ("Give me that two-panel figure
+   at print resolution", 2/2) is the direct probe and passes: it read the advertised
+   `figure_metric [params: dpi:number=100, bins:number=24]`, reached for the
+   EXISTING mod rather than writing one, and mapped "print resolution" onto
+   `parameters: {dpi: 300}` without being told the parameter's name. The P-1
+   teaching works when a request actually needs it.
 
 What already lands and should NOT be disturbed: the inline channel return shape
 (P-2 `{values, components}`, no `name` — correct in every mod), the frame-to-frame

@@ -198,7 +198,12 @@ Re-run: all three requests, twice each, six fresh sessions, **real producer for
 | R2 channel+bind | 2/2 right rung, read live Channels | **2/2 identical, still reads live Channels and branches** |
 | R3 cartoon | 3/4 right rung; **first mod refused every time**; 1/4 tube approximation | **2/2 right rung, 2/2 accepted FIRST attempt, 0 refusals, 0 tube** |
 
-**Change 1 — the measure: 0/2 recurrence.** Both R3 runs declared the vector
+**Change 1 — VALIDATED (a hypothesis tested, not an edit that coincided with
+improvement).** The mechanism was understood first (the length formula was true
+but irrelevant at the moment of composition, and lost to the request's framing),
+the fix targeted that mechanism (name the mistaken inference, at the point of
+composition), and the predicted outcome occurred: **3/3 refused → 0/2, accepted on
+the first attempt.** Both R3 runs declared the vector
 channel on the *first* attempt against the real producer. Both wrote the exact
 idiom the prompt now shows:
 
@@ -208,21 +213,70 @@ idiom the prompt now shows:
 The coherence pass and float64 survived the change (present in both). Zero
 refusals, zero retries, where previously *every* first mod was refused.
 
-**Change 2 — 2/2 reached the ribbon**, no tube approximation. Thin evidence (the
-tube path was 1/4 before, so 2/2 clean is consistent with the fix but does not
-prove it); one clause was the right dose for n=1.
+**Change 2 — UNMEASURED, not validated.** Both runs reached the ribbon and neither
+approximated with a tube. That is *not* evidence the clause worked: if the
+tube-approximation rate were still 25%, two trials would show zero tube runs
+**~56% of the time** (0.75² = 0.5625). This result is roughly a coin flip away from
+meaning nothing. The clause is one harmless line, so shipping it unmeasured is
+fine — but "2/2 to the ribbon" must not harden into a claim. To actually measure
+it would take on the order of 10+ trials.
 
-**Change 3 — no regression, in either direction.** R1 still (correctly) skips
-`get_context` 2/2 — the rule is no longer routinely violated because it no longer
-demands the useless read. R2 still calls it and *branches on the live Channels
-section* 2/2, which was the specific risk of this edit: the relaxation and the
-strengthening pulled in opposite directions in one sentence and both held.
+**Change 3 — HARMLESS, not helpful.** Nothing behavioural moved: R1 skipped
+`get_context` before *and* after (2/2 each), R2 branched on the live Channels
+section before *and* after (2/2 each). The specific risk of the edit — that
+relaxing "before anything" would also suppress R2's live read, since the two
+clauses pull in opposite directions in one sentence — did not materialise. But no
+observed behaviour improved either. What it bought is a **maintenance** benefit:
+the prompt now says something true instead of something that was routinely and
+correctly ignored, and a rule that is routinely violated teaches that rules are
+advisory. That is real, and it is different in kind from change 1's result. A
+future reader should not count change 3 as a validated improvement.
 
 **Caveats, attached to the numbers.** Model `claude-sonnet-4-6`, not the
 `claude-sonnet-5` the extension defaults to. Two runs per request is thin. A clean
 0/2 on the per-residue defect is **encouraging, not conclusive** — the honest read
 is "the trap removed the observed failure in every trial we ran," not "the failure
 is gone."
+
+---
+
+# Suite extension: R4 + R5 (the parameters surface)
+
+**Harness fidelity change:** the workspace mod inventory is now seeded from the
+REAL `.molaro/mods` via the real parser, so `get_context` advertises the shipped
+mods with their params/channels exactly as live. (R1–R3's earlier runs ran with an
+EMPTY inventory — fine for those requests, none of which could use an existing
+mod, but noted.) All runs below: cold, real producer, 2 runs each.
+
+**R4 — "Make the backbone thicker and use a warmer color."** 2/2 identical:
+
+    get_context → run_command: tracesize polymer 4 → colortrace polymer coral
+
+Right rung: commands suffice, and it used them. The useful negative: with a
+parameterized mod inventory now advertised in front of it, it did **not**
+over-reach into writing or running a mod for something two commands do. But R4
+does **not** probe parameter reachability — the request is command-satisfiable, so
+params went unexercised again, exactly as they did in R1–R3.
+
+**R5 — "Give me that two-panel figure at print resolution."** 2/2 identical:
+
+    get_context → run_mod{name: figure_metric, target: all, parameters: {dpi: 300}}
+
+This is the direct probe, and it passes. It read the advertised
+`figure_metric (figure) [params: dpi:number=100, bins:number=24]`, reached for the
+**existing** mod instead of writing a new one, mapped the user's "print
+resolution" onto `dpi: 300` without being told the parameter's name, and left
+`bins` at its default. Two turns.
+
+**So the parameters surface is reachable** — the P-1 teaching works when a request
+actually implies a tunable. R1–R4 didn't exercise it because none of them needed
+it, which was a property of the requests, not a gap in the prompt.
+
+**Caveat on R5's depth:** the harness validated the parameters against the real
+declared schema (unknown/missing/type fail closed) but rendered the figure through
+the simulated arm, not the real producer — only channel mods route to the real
+producer. That params actually reach `compute` end-to-end was proven separately
+(A1: `dpi=200` → 1280×800 through the real producer on the real mod).
 
 # Appendix — full transcripts
 
@@ -1717,3 +1771,259 @@ To restore the original look, a few Ctrl+Z undos will walk it back step by step.
 TOOL SEQUENCE: get_context → write_mod:channel → run_mod → run_command:bind → run_command:shape → run_command:pointopacity → run_command:bondopacity
 get_context calls: 1 · turns: 8
 used mod parameters: no```
+
+## SUITE-EXT R4_runa — real shipped inventory, faithful run_mod
+
+```
+==============================================================================
+R4_runa — COLD, no hints
+USER: "Make the backbone thicker and use a warmer color."
+==============================================================================
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  - channel_flow (channel → flow_dir): synthetic example — a produced per-point-per-frame VECTOR channel, coherently seeded frame-to-frame
+  - color_ab (commands): synthetic example — a saved two-color look via colorbonds (one undo stroke)
+  - figure_metric (figure) [params: dpi:number=100, bins:number=24]: synthetic example — a rendered two-panel figure with a live playhead on the frames panel; dpi + bins are tunable
+  - frame_metric (per-frame-series): synthetic example — the first target point's distance from the origin, per frame
+  - index_ramp (per-point-scalar → color): synthetic example — a normalized index ramp over the target
+  - param_scale (per-point-scalar → color) [params: gamma:number=1]: synthetic example — an even 0→1 ramp shaped by a `gamma` parameter (one file, reusable)
+  - rg (per-frame-series): radius of gyration per frame (mass-weighted, nm) — a reference analysis
+  - rmsd (per-frame-series): RMSD to the first frame (with superposition, nm) — a reference analysis
+  - rmsf (per-point-scalar → color): per-atom RMS fluctuation, normalized to [0,1] for color — a reference analysis
+  - setup_flow (commands) [requires channel: flow_dir]: one invocation instead of two — needs the flow_dir channel, then binds it to orientation
+  - xy_metric (scatter) [params: x_label:string=dist_a, y_label:string=dist_b]: synthetic example — two per-frame quantities plotted against each other; axis labels are tunable
+
+[assistant turn 2]
+The trace shape is currently `tube`. I'll make it thicker with `tracesize` and color it warm orange in two commands.
+
+>>> TOOL run_command({"command":"tracesize polymer 4"})
+<<< ok: tracesize polymer 4
+
+>>> TOOL run_command({"command":"colortrace polymer coral"})
+<<< ok: colortrace polymer coral
+
+[assistant turn 4]
+Done! The backbone trace is now:
+- **Thicker** — size bumped from the default 3 → **4**
+- **Warmer color** — set to **coral** (a warm salmon-orange)
+
+Let me know if you'd like to adjust the size further or try a different warm hue (e.g. `tomato`, `orange`, `goldenrod`).
+
+TOOL SEQUENCE: get_context → run_command:tracesize → run_command:colortrace
+get_context calls: 1 · turns: 4
+used mod parameters: no```
+
+## SUITE-EXT R4_runb — real shipped inventory, faithful run_mod
+
+```
+==============================================================================
+R4_runb — COLD, no hints
+USER: "Make the backbone thicker and use a warmer color."
+==============================================================================
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  - channel_flow (channel → flow_dir): synthetic example — a produced per-point-per-frame VECTOR channel, coherently seeded frame-to-frame
+  - color_ab (commands): synthetic example — a saved two-color look via colorbonds (one undo stroke)
+  - figure_metric (figure) [params: dpi:number=100, bins:number=24]: synthetic example — a rendered two-panel figure with a live playhead on the frames panel; dpi + bins are tunable
+  - frame_metric (per-frame-series): synthetic example — the first target point's distance from the origin, per frame
+  - index_ramp (per-point-scalar → color): synthetic example — a normalized index ramp over the target
+  - param_scale (per-point-scalar → color) [params: gamma:number=1]: synthetic example — an even 0→1 ramp shaped by a `gamma` parameter (one file, reusable)
+  - rg (per-frame-series): radius of gyration per frame (mass-weighted, nm) — a reference analysis
+  - rmsd (per-frame-series): RMSD to the first frame (with superposition, nm) — a reference analysis
+  - rmsf (per-point-scalar → color): per-atom RMS fluctuation, normalized to [0,1] for color — a reference analysis
+  - setup_flow (commands) [requires channel: flow_dir]: one invocation instead of two — needs the flow_dir channel, then binds it to orientation
+  - xy_metric (scatter) [params: x_label:string=dist_a, y_label:string=dist_b]: synthetic example — two per-frame quantities plotted against each other; axis labels are tunable
+
+[assistant turn 2]
+Two commands — thicken the trace and warm its color:
+
+>>> TOOL run_command({"command":"tracesize polymer 4"})
+<<< ok: tracesize polymer 4
+
+>>> TOOL run_command({"command":"colortrace polymer coral"})
+<<< ok: colortrace polymer coral
+
+[assistant turn 4]
+Done! The backbone trace is now thicker (size 4, up from 3) and colored **coral** — a warm orange-red. Let me know if you'd like a different size or a different warm shade (e.g. `tomato`, `orange`, `goldenrod`).
+
+TOOL SEQUENCE: get_context → run_command:tracesize → run_command:colortrace
+get_context calls: 1 · turns: 4
+used mod parameters: no```
+
+## SUITE-EXT R5_runa — real shipped inventory, faithful run_mod
+
+```
+==============================================================================
+R5_runa — COLD, no hints
+USER: "Give me that two-panel figure at print resolution."
+==============================================================================
+
+[assistant turn 1]
+Let me check the current context to see what's available before writing anything.
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  - channel_flow (channel → flow_dir): synthetic example — a produced per-point-per-frame VECTOR channel, coherently seeded frame-to-frame
+  - color_ab (commands): synthetic example — a saved two-color look via colorbonds (one undo stroke)
+  - figure_metric (figure) [params: dpi:number=100, bins:number=24]: synthetic example — a rendered two-panel figure with a live playhead on the frames panel; dpi + bins are tunable
+  - frame_metric (per-frame-series): synthetic example — the first target point's distance from the origin, per frame
+  - index_ramp (per-point-scalar → color): synthetic example — a normalized index ramp over the target
+  - param_scale (per-point-scalar → color) [params: gamma:number=1]: synthetic example — an even 0→1 ramp shaped by a `gamma` parameter (one file, reusable)
+  - rg (per-frame-series): radius of gyration per frame (mass-weighted, nm) — a reference analysis
+  - rmsd (per-frame-series): RMSD to the first frame (with superposition, nm) — a reference analysis
+  - rmsf (per-point-scalar → color): per-atom RMS fluctuation, normalized to [0,1] for color — a reference analysis
+  - setup_flow (commands) [requires channel: flow_dir]: one invocation instead of two — needs the flow_dir channel, then binds it to orientation
+  - xy_metric (scatter) [params: x_label:string=dist_a, y_label:string=dist_b]: synthetic example — two per-frame quantities plotted against each other; axis labels are tunable
+
+[assistant turn 2]
+`figure_metric` is the two-panel figure mod. It takes `dpi` and `bins` parameters — print resolution typically means 300 dpi. I'll run it now with `dpi=300`.
+
+>>> TOOL run_mod({"name":"figure_metric","target":"all","parameters":{"dpi":300}})
+<<< figure_metric → ran on all
+
+[assistant turn 3]
+Done. The figure has been rendered at **300 dpi** (print resolution) with the default 24 histogram bins. Both panels — the per-frame curve (with playhead) and the distribution — are now displayed at full print quality. If you'd like to adjust the bin count or anything else, just say the word.
+
+TOOL SEQUENCE: get_context → run_mod
+get_context calls: 1 · turns: 3
+used mod parameters: YES```
+
+## SUITE-EXT R5_runb — real shipped inventory, faithful run_mod
+
+```
+==============================================================================
+R5_runb — COLD, no hints
+USER: "Give me that two-panel figure at print resolution."
+==============================================================================
+
+[assistant turn 1]
+Let me check the current state to see what's available before acting.
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  - channel_flow (channel → flow_dir): synthetic example — a produced per-point-per-frame VECTOR channel, coherently seeded frame-to-frame
+  - color_ab (commands): synthetic example — a saved two-color look via colorbonds (one undo stroke)
+  - figure_metric (figure) [params: dpi:number=100, bins:number=24]: synthetic example — a rendered two-panel figure with a live playhead on the frames panel; dpi + bins are tunable
+  - frame_metric (per-frame-series): synthetic example — the first target point's distance from the origin, per frame
+  - index_ramp (per-point-scalar → color): synthetic example — a normalized index ramp over the target
+  - param_scale (per-point-scalar → color) [params: gamma:number=1]: synthetic example — an even 0→1 ramp shaped by a `gamma` parameter (one file, reusable)
+  - rg (per-frame-series): radius of gyration per frame (mass-weighted, nm) — a reference analysis
+  - rmsd (per-frame-series): RMSD to the first frame (with superposition, nm) — a reference analysis
+  - rmsf (per-point-scalar → color): per-atom RMS fluctuation, normalized to [0,1] for color — a reference analysis
+  - setup_flow (commands) [requires channel: flow_dir]: one invocation instead of two — needs the flow_dir channel, then binds it to orientation
+  - xy_metric (scatter) [params: x_label:string=dist_a, y_label:string=dist_b]: synthetic example — two per-frame quantities plotted against each other; axis labels are tunable
+
+[assistant turn 2]
+The `figure_metric` mod does exactly this — a two-panel figure with a live playhead — and it already supports a `dpi` parameter. I'll run it at print resolution (300 dpi) with default bins.
+
+>>> TOOL run_mod({"name":"figure_metric","target":"all","parameters":{"dpi":300}})
+<<< figure_metric → ran on all
+
+[assistant turn 3]
+Done. The two-panel figure has been rendered at **300 dpi** (print resolution) with the default 24 histogram bins. The left panel shows the per-frame metric as a time series with the live playhead synced to the trajectory; the right panel shows the histogram distribution. Let me know if you'd like to adjust the bin count, the target, or anything else.
+
+TOOL SEQUENCE: get_context → run_mod
+get_context calls: 1 · turns: 3
+used mod parameters: YES```
