@@ -2,20 +2,30 @@
 # name: xy_metric
 # kind: analysis
 # produces: scatter
+# param: x_label string dist_a
+# param: y_label string dist_b
 # author: Example Author
 # source: https://github.com/DomFico/molaro
-# description: synthetic example — two per-frame quantities plotted against each other
+# description: synthetic example — two per-frame quantities plotted against each other; axis labels are tunable
 
 import struct
 
 
-def compute(data, target_indices):
+def compute(data, target_indices, params=None):
     """A scatter with the frame sync hook: x = |position| of the first
     target point, y = |position| of the second, one (x, y) per frame.
 
     Returns the scatter dict {x, y, frames, xLabel, yLabel} — raw values,
     the plot auto-scales both axes.
+
+    Parameters (P-1): `x_label` / `y_label` (STRING) name the two axes — the
+    thing a user re-labels for their own plot; values may contain spaces
+    (`?x_label=distance to origin`). `params=None` keeps the raw 2-arg producer
+    path (the corpus) behaving exactly as before.
     """
+    p = params or {}
+    x_label = p.get("x_label", "dist_a")
+    y_label = p.get("y_label", "dist_b")
     header = data.give_header()
     n_frames = header.n_frames
     n_points = header.n_points
@@ -41,6 +51,6 @@ def compute(data, target_indices):
         "x": xs,
         "y": ys,
         "frames": list(range(n_frames)),
-        "xLabel": "dist_a",
-        "yLabel": "dist_b",
+        "xLabel": x_label,
+        "yLabel": y_label,
     }
