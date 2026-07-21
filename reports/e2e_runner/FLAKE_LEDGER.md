@@ -267,3 +267,13 @@ with the thing being built. Therefore, MEASURED-URGENT, not preference:
    prompt teaches all six surfaces and points at the figure TEMPLATE
    (.molaro/mods/figure_metric.py), not the schema;
 3. then B-3, the mod→channel pipe (P-7's in-band-announce lean).
+
+## 2026-07-20 overnight (miter session)
+- ROOT CAUSE found: stray chrome processes accumulate across many E2E runs and
+  starve CPU → the recurring S38 (upload count 2→2), S32/S42 (0/0-checks startup
+  timeout) failures. Fix: `pkill -f "chrome.*--remote-debugging"` between suites.
+- Tally, isolated re-runs after the miter E2E:
+  - S38 ×2 isolated → PASS (46/46; uploads 2→17, 2→12). Known upload-starvation flake.
+  - S32 ×1 isolated (strays killed) → PASS (ALL). ×1 (strays present) → hung 200s.
+  - S42 (prior P-3 run) isolated → PASS (5/5).
+  - Ribbon scenarios S43/S44 (the miter's own) → PASS in-pool AND isolated.
