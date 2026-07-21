@@ -10,10 +10,11 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  buildAgentOptions, buildToolDefs, configuredToolSurface, createToolServer,
+  buildAgentOptions, buildToolDefs, configuredToolSurface, createToolServer, describeRunModParams,
   blockedCommandReason, toolPolicy, TOOL_NAMES, GATED_TOOLS, DISALLOWED_TOOLS, EXPECTED_TOOL_SURFACE, qualified,
   type ToolDeps, type SceneContext,
 } from "../src/claudetools.ts";
+import type { ModParam } from "../webview/recipes.ts";
 import { mapSdkMessage, approvalPreview, argsPreview, isRuntimeUnavailable, errorMessage, RUNTIME_UNAVAILABLE_HINT } from "../src/claudebackend.ts";
 import { MOD_AXES, MOD_PRODUCES } from "../webview/recipes.ts";
 import { commandMacroRefusal } from "../webview/commands.ts";
@@ -190,11 +191,54 @@ test("argsPreview never leaks the code body into the tool-proposed line", () => 
   assert.ok(!p.includes("def compute"));
 });
 
+// -- P-1: the run_mod approval preview shows EFFECTIVE parameters (defaults filled) --
+
+test("describeRunModParams: effective values including defaults; error surfaced; none → ''", () => {
+  const schema: ModParam[] = [
+    { name: "floor", type: "number", default: 0.5 },
+    { name: "label", type: "string" },
+  ];
+  // an omitted parameter shows its DEFAULT — the human approves what runs, not the passed subset
+  assert.equal(describeRunModParams(schema, { label: "x" }), " with floor=0.5, label=x");
+  assert.equal(describeRunModParams(schema, { floor: 0.8, label: "y" }), " with floor=0.8, label=y");
+  // an invalid set surfaces the reason (so the preview is honest, not silently empty)
+  assert.match(describeRunModParams(schema, {}), /parameter error: missing required parameter "label"/);
+  // a non-scalar native value is REFUSED in the preview exactly as execution refuses
+  // it (both call resolveParameters) — no "preview says error, run succeeds" divergence
+  assert.match(describeRunModParams(schema, { label: null }), /parameter error: parameter "label" expects a string/);
+  assert.match(describeRunModParams(schema, { label: 'a"b' }), /parameter error: .*double-quote/);
+  // a paramless mod contributes nothing
+  assert.equal(describeRunModParams(undefined, { x: 1 }), "");
+  assert.equal(describeRunModParams([], undefined), "");
+});
+
+test("run_mod approval preview appends the effective-parameters suffix", () => {
+  const prev = approvalPreview("run_mod", { name: "gated", target: "all" }, " with floor=0.5, label=x");
+  assert.match(prev, /run "gated" on target "all" with floor=0.5, label=x/);
+  // no suffix → the bare preview, unchanged
+  assert.equal(approvalPreview("run_mod", { name: "gated", target: "all" }),
+    `run_mod → run "gated" on target "all"`);
+});
+
+test("write_mod can author a PARAMETERIZED mod — params thread through to the save spec", async () => {
+  const deps = mockDeps();
+  const res = await buildToolDefs(deps).write_mod.handler({
+    name: "gated", produces: "commands", axis: undefined, description: "a parameterized look",
+    code: "def compute(data, target_indices, params):\n    return []",
+    params: [{ name: "floor", type: "number", default: 0.5 }, { name: "label", type: "string", default: undefined }],
+  }, {});
+  assert.equal(res.isError, false);
+  assert.equal(deps.calls.writeMod.length, 1);
+  assert.deepEqual((deps.calls.writeMod[0] as { params?: unknown }).params,
+    [{ name: "floor", type: "number", default: 0.5 }, { name: "label", type: "string", default: undefined }],
+    "the declared parameters reach saveAssistantMod (→ # param: header lines)");
+});
+
 // ---- self-correction (traceback passthrough) -------------------------------
 test("run_mod returns the failure TRACEBACK verbatim, not a generic message", async () => {
   const tb = 'Traceback (most recent call last):\n  File "<mod>", line 3\nValueError: could not broadcast';
   const deps = mockDeps({ runMod: async () => ({ ok: false, message: `rmsf failed: ${tb}` }) });
-  const res = await buildToolDefs(deps).run_mod.handler({ name: "rmsf", target: "@all" }, {});
+  const res = await buildToolDefs(deps).run_mod.handler({ name: "rmsf", target: "@all", parameters: undefined }, {});
   assert.equal(res.isError, true);
   assert.ok(text(res).includes("Traceback"), "traceback header present");
   assert.ok(text(res).includes("ValueError: could not broadcast"), "the specific error line is present");
@@ -203,7 +247,7 @@ test("run_mod returns the failure TRACEBACK verbatim, not a generic message", as
 test("write_mod saves through the host path and reports registration", async () => {
   const deps = mockDeps();
   const res = await buildToolDefs(deps).write_mod.handler(
-    { name: "rg", produces: "per-frame-series", axis: undefined, description: "radius of gyration", code: "def compute(d,t): return []" }, {},
+    { name: "rg", produces: "per-frame-series", axis: undefined, description: "radius of gyration", code: "def compute(d,t): return []", params: undefined }, {},
   );
   assert.equal(res.isError, false);
   assert.equal(deps.calls.writeMod.length, 1);
@@ -226,7 +270,7 @@ test("write_mod does NOT report success when the viewer declined to register it"
     }),
   });
   const res = await buildToolDefs(deps).write_mod.handler(
-    { name: "rainbow", produces: "commands", axis: undefined, description: "x", code: "def compute(d,t): return []" }, {},
+    { name: "rainbow", produces: "commands", axis: undefined, description: "x", code: "def compute(d,t): return []", params: undefined }, {},
   );
   assert.equal(res.isError, true, "a declined registration is an ERROR the model can see, not a success");
   assert.doesNotMatch(text(res), /it is now registered/, "it must never claim the registration it was denied");
@@ -262,7 +306,7 @@ test("write_mod schema accepts every real produces (incl. commands) and rejects 
 test("write_mod accepts a commands mod through the save path (no axis required)", async () => {
   const deps = mockDeps();
   const res = await buildToolDefs(deps).write_mod.handler(
-    { name: "ab_look", produces: "commands", axis: undefined, description: "the a/b look", code: 'def compute(d,t): return ["colorbonds alpha red"]' }, {},
+    { name: "ab_look", produces: "commands", axis: undefined, description: "the a/b look", code: 'def compute(d,t): return ["colorbonds alpha red"]', params: undefined }, {},
   );
   assert.equal(res.isError, false, text(res));
   assert.equal(deps.calls.writeMod.length, 1);

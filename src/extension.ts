@@ -23,7 +23,7 @@ import { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from 
 import { join } from "node:path";
 
 import { ProducerBroker } from "./broker.ts";
-import { parseModFile, serializeMod, type AnalysisMod, type Mod } from "../webview/recipes.ts";
+import { parseModFile, resolveParameters, serializeMod, type AnalysisMod, type Mod } from "../webview/recipes.ts";
 import { parseClaudeCommand, type ClaudeCommand } from "../webview/claudemodel.ts";
 import { createClaudeStub } from "../webview/claudestub.ts";
 import { DEFAULT_COLOR, DEFAULT_OPACITY, DEFAULT_SIZE } from "../webview/representation.ts";
@@ -220,6 +220,21 @@ function loadWorkspaceMods(
   return mods;
 }
 
+/** Format assistant-passed parameters as the invocation string's `?key=value`
+ * block. A value holding a `?` (a false segment boundary) or with significant
+ * leading/trailing space is double-quoted so the invocation parser's quote-aware
+ * split keeps it intact; the parser unwraps it. "" when there are no parameters. */
+function formatModParams(parameters?: Record<string, unknown>): string {
+  if (!parameters) return "";
+  return Object.entries(parameters)
+    .map(([k, v]) => {
+      let s = typeof v === "string" ? v : String(v);
+      if (s.includes("?") || s !== s.trim()) s = `"${s.replace(/"/g, "")}"`;
+      return `?${k}=${s}`;
+    })
+    .join(" ");
+}
+
 /** Render a 0..1 RGB triple as `#rrggbb` for display (the base color the model
  * is told about — representation.ts holds the numeric source of truth). */
 function rgbToHex([r, g, b]: readonly [number, number, number]): string {
@@ -367,6 +382,7 @@ function openPanel(
     const liveState = await gatherLiveState(runViewerCommand);
     const mods = loadWorkspaceMods(producerLog, modPaths).map((m) => ({
       name: m.name, produces: m.produces, axis: m.axis, description: m.description,
+      ...(m.params ? { params: m.params } : {}),
     }));
     // Only categories that ACTUALLY have points — the header lists every domain
     // category (list(CATEGORIES)), most empty on any given system; advertising an
@@ -450,12 +466,16 @@ function openPanel(
 
   const saveAssistantMod = async (spec: {
     name: string; produces: AnalysisMod["produces"]; axis?: AnalysisMod["axis"];
-    description: string; code: string;
+    description: string; code: string; params?: AnalysisMod["params"];
   }): Promise<{ ok: boolean; name: string; file: string; message: string }> => {
     const mod: AnalysisMod = {
       kind: "analysis", name: spec.name, origin: "workspace",
       author: "Molaro assistant", produces: spec.produces,
       ...(spec.axis ? { axis: spec.axis } : {}),
+      // Declared parameters become `# param:` header lines (serializeMod); the
+      // written file is re-parsed on registration, so a malformed param is caught
+      // and reported by write_mod, not silently accepted.
+      ...(spec.params && spec.params.length ? { params: spec.params } : {}),
       description: spec.description, code: spec.code,
     };
     const file = saveWorkspaceMod(mod);
@@ -509,9 +529,29 @@ function openPanel(
         },
         writeMod: async (spec) => saveAssistantMod(spec),
         deleteMod: async (name) => deleteAssistantMod(name),
-        runMod: (name, target) => runViewerCommand(`${name} ${target}`.trim()),
+        // Resolve the assistant's NATIVE parameters once with the SHARED resolver
+        // (the same one the approval preview and the viewer use) so preview and
+        // execution can never disagree, and refuse anything that won't survive the
+        // invocation string (a bad type, or a value we can't round-trip). Only
+        // then build the `<name> <target> ?k=v …` string the terminal also parses,
+        // from the RESOLVED typed values (defaults filled). An unknown mod has no
+        // schema — relay raw and let the viewer report it.
+        runMod: (name, target, parameters) => {
+          const mod = loadWorkspaceMods(producerLog, modPaths).find((m) => m.name === name);
+          let paramStr = "";
+          if (mod) {
+            const resolved = resolveParameters(mod.params ?? [], new Map(Object.entries(parameters ?? {})));
+            if (!resolved.ok) return Promise.resolve({ ok: false, message: `${name}: ${resolved.error}` });
+            paramStr = formatModParams(resolved.values);
+          } else if (parameters && Object.keys(parameters).length) {
+            paramStr = formatModParams(parameters);
+          }
+          return runViewerCommand([name, target, paramStr].filter((s) => s !== "").join(" "));
+        },
         runCommand: (text) => runViewerCommand(text),
         analysisModNames,
+        runModParams: (name) =>
+          loadWorkspaceMods(producerLog, modPaths).find((m) => m.name === name)?.params,
       },
     );
     claudeBackend = backend;

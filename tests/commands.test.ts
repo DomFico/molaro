@@ -18,6 +18,7 @@ import {
   makeAnalysisModHandler,
   modInstallReport,
   parseColor,
+  parseModParams,
   parseOpacity,
   parseSize,
   runCommandMacro,
@@ -374,8 +375,10 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
       opacityOps.push({ kind: "trace", ids: [...vertexIds], opacity });
       return vertexIds.length;
     },
-    runAnalysisMod: (mod, points, expr) => {
-      modRuns.push({ name: mod.name, points: [...points], expr });
+    runAnalysisMod: (mod, points, expr, params) => {
+      // params only appears on the pushed object when present, so existing
+      // deepEqual assertions (which never pass params) stay unchanged.
+      modRuns.push({ name: mod.name, points: [...points], expr, ...(params ? { params } : {}) });
       // The CODE the handler would ship to the producer — the only thing that
       // separates one version of a mod from another (kept out of modRuns, which
       // is deepEqual-asserted elsewhere).
@@ -1745,6 +1748,70 @@ test("an analysis mod verb resolves like every verb and hands off the EXACT indi
   assert.equal(registry.runCommand("index_ramp nothere").status, "nomatch");
   assert.equal(registry.runCommand("index_ramp").status, "error");
   assert.equal(registry.runCommand("index_ramp c0.[x]").status, "error");
+  assert.equal(modRuns.length, 1, "only the valid invocation ran");
+});
+
+// -- P-1: parameters — the ?-delimited invocation split + validation --------------
+
+const PARAMIZED: AnalysisMod = {
+  name: "gated", kind: "analysis", produces: "commands", origin: "workspace",
+  params: [
+    { name: "floor", type: "number", default: 0.5 },
+    { name: "label", type: "string" }, // required
+  ],
+  code: "def compute(data, target_indices, params):\n    return []",
+};
+
+test("parseModParams: splits target from ?params, coerces, fills defaults", () => {
+  const r = parseModParams(PARAMIZED, 'alpha.A ?floor=0.8 ?label=some words');
+  assert.deepEqual(r, { expr: "alpha.A", params: { floor: 0.8, label: "some words" } },
+    "target keeps its shape; a value may hold spaces (delimited by the next ?)");
+  // a default fills when the parameter is omitted
+  assert.deepEqual(parseModParams(PARAMIZED, "alpha ?label=x"),
+    { expr: "alpha", params: { floor: 0.5, label: "x" } });
+  // a `?` inside a quoted VALUE is not a boundary
+  assert.deepEqual(parseModParams(PARAMIZED, 'alpha ?label="a?b"'),
+    { expr: "alpha", params: { floor: 0.5, label: "a?b" } });
+  // a `?` inside a quoted TARGET label stays in the target
+  const q = parseModParams(PARAMIZED, '"a?b" ?label=x');
+  assert.ok(!("status" in q) && q.expr === '"a?b"', "the quoted label with ? stays the target");
+});
+
+test("parseModParams: fail-closed by name — unknown, missing required, wrong type, malformed", () => {
+  assert.match((parseModParams(PARAMIZED, "alpha ?label=x ?nope=1") as CommandResult).message, /unknown parameter "nope"/);
+  assert.match((parseModParams(PARAMIZED, "alpha ?floor=0.8") as CommandResult).message, /missing required parameter "label"/);
+  assert.match((parseModParams(PARAMIZED, "alpha ?floor=big ?label=x") as CommandResult).message, /parameter "floor" expects a number/);
+  assert.match((parseModParams(PARAMIZED, "alpha ?floor") as CommandResult).message, /must be key=value/);
+  assert.match((parseModParams(PARAMIZED, "alpha ?label=x ?label=y") as CommandResult).message, /"label" given twice/);
+  // a paramless mod: passing a parameter is "unknown", none is fine
+  const noneMod: AnalysisMod = { ...PARAMIZED, params: undefined };
+  assert.match((parseModParams(noneMod, "alpha ?x=1") as CommandResult).message, /this mod declares no parameters/);
+  assert.deepEqual(parseModParams(noneMod, "alpha"), { expr: "alpha" }, "no params → no params key");
+});
+
+test("parseModParams: unbalanced/interior quotes fail LOUD, never a silent swallow", () => {
+  // an unbalanced quote in a value would otherwise swallow the next ?param — reject it
+  assert.match((parseModParams(PARAMIZED, 'alpha ?label=x" ?floor=0.8') as CommandResult).message, /unbalanced '"'/);
+  // a value that starts+ends with " but has an interior quote is NOT unwrapped to
+  // mangled text; the interior " then trips the double-quote refusal
+  assert.match((parseModParams(PARAMIZED, 'alpha ?label="a" "b"') as CommandResult).message, /cannot contain a double-quote/);
+  // the legitimate single-quoted-region case still unwraps
+  assert.deepEqual(parseModParams(PARAMIZED, 'alpha ?label="a?b"'), { expr: "alpha", params: { floor: 0.5, label: "a?b" } });
+});
+
+test("an analysis mod hands the resolved parameters to the producer round-trip", () => {
+  const { registry, ctx, modRuns } = makeRegistry();
+  const mod: AnalysisMod = {
+    name: "gated", kind: "analysis", produces: "per-point-scalar", axis: "color",
+    origin: "workspace", params: [{ name: "floor", type: "number", default: 0.5 }],
+    code: "def compute(data, target_indices, params):\n    return []",
+  };
+  registry.register("gated", makeAnalysisModHandler(ctx, mod), "test mod");
+  assert.equal(registry.runCommand("gated c0 ?floor=0.9").status, "ok");
+  assert.deepEqual(modRuns, [{ name: "gated", points: [0, 1], expr: "c0", params: { floor: 0.9 } }]);
+  // a bad parameter never reaches the producer
+  assert.equal(registry.runCommand("gated c0 ?floor=nope").status, "error");
+  assert.equal(registry.runCommand("gated c0 ?bogus=1").status, "error");
   assert.equal(modRuns.length, 1, "only the valid invocation ran");
 });
 

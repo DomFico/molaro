@@ -20,7 +20,7 @@ import { query, type Options, type Query, type SDKMessage, type SDKUserMessage }
 
 import type { ClaudeCommand, ClaudeEvent } from "../webview/claudemodel.ts";
 import {
-  buildAgentOptions, createToolServer, toolPolicy, MCP_SERVER_NAME,
+  buildAgentOptions, createToolServer, describeRunModParams, toolPolicy, MCP_SERVER_NAME,
   type SceneContext, type ToolDeps,
 } from "./claudetools.ts";
 import { buildSystemPrompt } from "./claudeprompt.ts";
@@ -59,14 +59,21 @@ export function argsPreview(input: Record<string, unknown>): string {
 
 /** The human-facing approval preview for a gated tool. write_mod shows the FULL
  * Python source (the "nothing runs unseen" beat); run_mod shows what will run. */
-export function approvalPreview(bareTool: string, input: Record<string, unknown>): string {
+export function approvalPreview(
+  bareTool: string,
+  input: Record<string, unknown>,
+  /** run_mod only: the effective-parameters suffix (defaults filled) so the
+   * human approves what will actually happen — computed host-side from the mod's
+   * schema (describeRunModParams), "" when the mod declares no parameters. */
+  paramsSuffix = "",
+): string {
   if (bareTool === "write_mod") {
     const header = `write_mod → .molaro/mods/${String(input.name ?? "?")}.py` +
       ` (produces: ${String(input.produces ?? "?")}${input.axis ? `, axis: ${String(input.axis)}` : ""})`;
     return `${header}\n\n${String(input.code ?? "")}`;
   }
   if (bareTool === "run_mod") {
-    return `run_mod → run "${String(input.name ?? "?")}" on target "${String(input.target ?? "?")}"`;
+    return `run_mod → run "${String(input.name ?? "?")}" on target "${String(input.target ?? "?")}"${paramsSuffix}`;
   }
   if (bareTool === "delete_mod") {
     const name = String(input.name ?? "?");
@@ -258,7 +265,12 @@ export function createClaudeBackend(
         return { behavior: "deny", message: `"${bare}" is not one of Molaro's tools.` };
       }
       emit({ type: "tool-proposed", callId, toolName: bare, argsPreview: argsPreview(input) });
-      post({ type: "approval-required", callId, toolName: bare, preview: approvalPreview(bare, input) });
+      // run_mod's preview shows the EFFECTIVE parameters (defaults filled) so the
+      // human approves what will actually run, not just the passed subset.
+      const paramsSuffix = bare === "run_mod" && deps.runModParams
+        ? describeRunModParams(deps.runModParams(String(input.name ?? "")), input.parameters as Record<string, unknown> | undefined)
+        : "";
+      post({ type: "approval-required", callId, toolName: bare, preview: approvalPreview(bare, input, paramsSuffix) });
       const decision = await new Promise<"approve" | "deny">((resolve) => {
         pendingApprovals.set(callId, resolve);
       });

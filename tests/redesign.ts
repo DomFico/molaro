@@ -7771,9 +7771,79 @@ async function S46(): Promise<void> {
   }, 1180, 780, "/terminal");
 }
 
+// ==================== S47: mod parameters end to end ==========================
+// P-1 on the REAL wire (synthetic source through serve.py, no stub): a
+// per-point-scalar mod DECLARES a `gamma` parameter; `?gamma=` reaches compute
+// (a different gamma yields a different color buffer — the parameter genuinely
+// crossed the wire and the producer called a THREE-arg compute), an omitted
+// parameter takes its default, and a wrong-typed / unknown / duplicate parameter
+// fails closed in the invocation parser BEFORE the producer runs. This is the
+// ?-split → wire → producer arity gate → bind chain, end to end.
+async function S47(): Promise<void> {
+  console.log("S47 — mod parameters: ?gamma reaches compute through the real wire");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const readColor = () => d.evaluate<number[]>(`Array.from(${V}.rep.state.color)`);
+    const rafs = () => d.evaluate(`(async () => {
+      for (let i = 0; i < 3; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`);
+    await d.evaluate(`void (window.__lines = [],
+      window.addEventListener('message', (e) => {
+        if (e.data?.type === 'commandResult' && e.data.id === -1) window.__lines.push(e.data);
+      }))`);
+    const asyncCount = () => d.evaluate<number>(`window.__lines.length`);
+    const lastAsync = () =>
+      d.evaluate<{ status: string; message: string } | null>(`window.__lines.at(-1) ?? null`);
+    // run a parameterized mod and WAIT for its async outcome line (a new one, so
+    // the second/third runs don't read a stale buffer) + a few frames.
+    const runAndWait = async (text: string): Promise<{ status: string; message: string }> => {
+      const before = await asyncCount();
+      const r = await cmd(text);
+      await d.waitFor(`window.__lines.length > ${before}`, 20000).catch(() => {});
+      await rafs();
+      return r;
+    };
+
+    await d.evaluate(`${V}.setPlaying(false)`);
+
+    // gamma = 1 (linear ramp)
+    const r1 = await runAndWait("param_scale all ?gamma=1");
+    check("S47: a parameterized mod acknowledges and hands off", r1.status === "ok", JSON.stringify(r1));
+    check("S47: the async outcome reports a successful bind",
+      (await lastAsync())?.status === "ok", JSON.stringify(await lastAsync()));
+    const c1 = await readColor();
+
+    // gamma = 2 (quadratic) — the SAME target, ONLY the parameter changed
+    await runAndWait("param_scale all ?gamma=2");
+    const c2 = await readColor();
+    check("S47: a different gamma yields a different buffer — the parameter reached compute",
+      c1.length === c2.length && c1.some((x, i) => Math.abs(x - c2[i]) > 1e-6),
+      "gamma=1 and gamma=2 produced identical buffers");
+
+    // omitted → the header default (gamma 1.0) reproduces the gamma=1 buffer
+    await runAndWait("param_scale all");
+    const cDef = await readColor();
+    check("S47: an omitted parameter takes its default (reproduces gamma=1)",
+      cDef.length === c1.length && cDef.every((x, i) => Math.abs(x - c1[i]) < 1e-6),
+      "the default did not reproduce gamma=1");
+
+    // fail closed BEFORE the producer — a bad type, an unknown name, a duplicate
+    const badType = await cmd("param_scale all ?gamma=abc");
+    check("S47: a wrong-typed parameter fails closed by name (never reaches the producer)",
+      badType.status === "error" && /gamma.*number/.test(badType.message), JSON.stringify(badType));
+    const unknown = await cmd("param_scale all ?bogus=1");
+    check("S47: an unknown parameter fails closed",
+      unknown.status === "error" && /unknown parameter "bogus"/.test(unknown.message), JSON.stringify(unknown));
+    const dup = await cmd("param_scale all ?gamma=1 ?gamma=2");
+    check("S47: a duplicate parameter fails closed",
+      dup.status === "error" && /given twice/.test(dup.message), JSON.stringify(dup));
+  }, 1180, 780, "/terminal");
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -7810,7 +7880,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S27: "full", S28: "full", S29: "full", S30: "full", S31: "full",
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
-  S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full",
+  S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

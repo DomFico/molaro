@@ -24,7 +24,7 @@
  */
 import { tool, createSdkMcpServer, type Options } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { MOD_AXES, MOD_PRODUCES, type ModAxis, type ModProduces } from "../webview/recipes.ts";
+import { MOD_AXES, MOD_PARAM_TYPES, MOD_PRODUCES, resolveParameters, type ModAxis, type ModParam, type ModProduces } from "../webview/recipes.ts";
 
 export const MCP_SERVER_NAME = "molaro";
 
@@ -112,7 +112,7 @@ export interface SceneContext {
   /** e.g. "alpha.group-0" — a few real, constructible target examples. */
   targetExamples: string[];
   committedSelections: string;
-  mods: { name: string; produces: ModProduces; axis?: ModAxis; description?: string }[];
+  mods: { name: string; produces: ModProduces; axis?: ModAxis; description?: string; params?: ModParam[] }[];
   /** The viewer's base look for any element not written by a command — the real
    * defaults from representation.ts, so the model states the true baseline
    * instead of guessing (and knows undo restores it). */
@@ -177,6 +177,7 @@ export interface WriteModSpec {
   axis?: ModAxis;
   description: string;
   code: string;
+  params?: ModParam[];
 }
 
 /** The host callbacks the tools drive — every one an EXISTING path (the
@@ -196,11 +197,35 @@ export interface ToolDeps {
    * traversal — by construction (it deletes only paths the mod scan recorded,
    * never a path derived from `name`). Reached only after the approval gate. */
   deleteMod(name: string): Promise<{ ok: boolean; message: string }>;
-  runMod(name: string, target: string): Promise<{ ok: boolean; message: string }>;
+  runMod(
+    name: string,
+    target: string,
+    parameters?: Record<string, unknown>,
+  ): Promise<{ ok: boolean; message: string }>;
   runCommand(text: string): Promise<{ ok: boolean; message: string }>;
   /** Analysis-mod names, so run_command can refuse Python-executing verbs and
    * force them through the gated run_mod. Re-read each call (mods change). */
   analysisModNames(): string[];
+  /** A mod's declared parameters — for the run_mod approval preview, so it shows
+   * the EFFECTIVE values (defaults filled), not just the passed subset. undefined
+   * = unknown mod or none declared. */
+  runModParams?(name: string): ModParam[] | undefined;
+}
+
+/** The run_mod approval-preview suffix: the EFFECTIVE parameter values the mod
+ * will run with, defaults included, so the human approves what actually happens —
+ * not just the explicitly-passed subset (the brief's requirement). Uses the SAME
+ * resolveParameters the invocation does, so preview and execution never diverge.
+ * "" when the mod declares no parameters. Pure — unit-tested. */
+export function describeRunModParams(
+  schema: ModParam[] | undefined,
+  passed: Record<string, unknown> | undefined,
+): string {
+  if (!schema || schema.length === 0) return "";
+  const r = resolveParameters(schema, new Map(Object.entries(passed ?? {})));
+  if (!r.ok) return ` (parameter error: ${r.error})`;
+  const parts = Object.entries(r.values).map(([k, v]) => `${k}=${v}`);
+  return parts.length ? ` with ${parts.join(", ")}` : "";
 }
 
 /** THE deny-list at the run_command boundary. Returns a refusal reason, or null
@@ -236,7 +261,12 @@ export function buildToolDefs(deps: ToolDeps) {
     async () => {
       const c = await deps.getContext();
       const modLines = c.mods.length
-        ? c.mods.map((m) => `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""})${m.description ? `: ${m.description}` : ""}`).join("\n")
+        ? c.mods.map((m) => {
+            const params = m.params && m.params.length
+              ? ` [params: ${m.params.map((p) => `${p.name}:${p.type}${p.default !== undefined ? `=${p.default}` : " (required)"}`).join(", ")}]`
+              : "";
+            return `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""})${params}${m.description ? `: ${m.description}` : ""}`;
+          }).join("\n")
         : "  (none yet)";
       const kinds = c.subgroupKinds.length
         ? `Subgroup kinds (residue names — target as <group>.<kind>*, e.g. ${c.groups[0] ?? "A"}.${c.subgroupKinds[0]}*): ` +
@@ -284,7 +314,19 @@ export function buildToolDefs(deps: ToolDeps) {
       axis: z.enum(MOD_AXES).optional()
         .describe("required when produces is per-point-scalar; omit for the others"),
       description: z.string().describe("one line: what the mod computes"),
-      code: z.string().describe("the complete Python source defining compute(data, target_indices)"),
+      code: z.string().describe(
+        "the complete Python source defining compute(data, target_indices) — or " +
+        "compute(data, target_indices, params) when params are declared"),
+      // The type is DERIVED from the mod system's single source (MOD_PARAM_TYPES),
+      // exactly like `produces`, so this schema cannot drift. Each entry becomes a
+      // `# param:` header line; omit for a paramless mod.
+      params: z.array(z.object({
+        name: z.string().describe("parameter name: lowercase, [a-z][a-z0-9_-]*"),
+        type: z.enum(MOD_PARAM_TYPES),
+        default: z.union([z.number(), z.string(), z.boolean()]).optional()
+          .describe("optional default; omit to make the parameter required"),
+      })).optional().describe(
+        "parameters this mod declares (compute then takes a third `params` arg); omit for none"),
     },
     async (args) => {
       try {
@@ -316,9 +358,23 @@ export function buildToolDefs(deps: ToolDeps) {
     {
       name: z.string().describe("the mod's name"),
       target: z.string().describe("grammar target: `all` (whole system), a category, or e.g. polymer.A"),
+      // Loosely typed on PURPOSE (Phase-0 Q3 ruling): a scalar-type union here
+      // would be a SECOND enumeration of the type set with zero checking power —
+      // "is one of three scalars" is already true of every JSON scalar. The real
+      // checks (declared for THIS mod? right type for THIS parameter? required one
+      // missing?) can only run against the mod's header-derived schema, downstream.
+      // Loose at the boundary, authoritative downstream.
+      parameters: z.record(z.string(), z.unknown()).optional().describe(
+        "values for a mod that declares parameters (get_context lists each mod's " +
+        "params, types, and defaults): a map of name → value. Omit for a paramless mod.",
+      ),
     },
     async (args) => {
-      const r = await deps.runMod(String(args.name), String(args.target));
+      const r = await deps.runMod(
+        String(args.name),
+        String(args.target),
+        args.parameters as Record<string, unknown> | undefined,
+      );
       return r.ok ? ok(r.message) : err(r.message);
     },
   );

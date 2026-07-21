@@ -80,14 +80,18 @@ test("registerRecipe: a name → recipe map future recipes register into", () =>
 
 import {
   parseModFile,
+  parseParamLine,
   resolveModSelector,
+  resolveParameters,
   serializeMod,
   unregisterRecipe,
   validateModValues,
   MOD_AXES,
   MOD_FILE_MAGIC,
+  MOD_PARAM_TYPES,
   MOD_PRODUCES,
   type AnalysisMod,
+  type ModParam,
 } from "../webview/recipes.ts";
 
 const GOOD_FILE = `# molaro-mod
@@ -330,4 +334,107 @@ test("a commands mod round-trips through serialize → parse (the write_mod file
     assert.equal(parsed.mod.produces, "commands");
     assert.equal(parsed.mod.axis, undefined, "a commands mod has no axis");
   }
+});
+
+// -- P-1: parameters — MOD_PARAM_TYPES single source, parse, resolve, round-trip --
+
+test("MOD_PARAM_TYPES is exactly the three scalar types, and parseParamLine validates against it", () => {
+  assert.deepEqual([...MOD_PARAM_TYPES].sort(), ["boolean", "number", "string"].sort());
+  for (const t of MOD_PARAM_TYPES) {
+    const r = parseParamLine(`p ${t}`);
+    assert.ok(r.ok, `type ${t} must parse${r.ok ? "" : " — " + r.error}`);
+    if (r.ok) assert.equal(r.param.type, t);
+  }
+  // a type NOT in the set is rejected and the message names the real set
+  const bad = parseParamLine("p complex");
+  assert.ok(!bad.ok);
+  if (!bad.ok) for (const t of MOD_PARAM_TYPES) assert.ok(bad.error.includes(t), `error should list ${t}`);
+});
+
+test("parseParamLine: name/type/default, required vs optional, malformed, default coercion", () => {
+  assert.deepEqual(parseParamLine("radius number 0.8"), { ok: true, param: { name: "radius", type: "number", default: 0.8 } });
+  assert.deepEqual(parseParamLine("invert boolean false"), { ok: true, param: { name: "invert", type: "boolean", default: false } });
+  assert.deepEqual(parseParamLine("label string a few words"), { ok: true, param: { name: "label", type: "string", default: "a few words" } },
+    "a string default keeps its spaces (rest of line)");
+  assert.deepEqual(parseParamLine("floor number"), { ok: true, param: { name: "floor", type: "number" } },
+    "no default → required (no default key)");
+  // malformed / bad name / bad default
+  assert.ok(!parseParamLine("onlyname").ok, "a lone token is malformed (no type)");
+  assert.match((parseParamLine("Bad number") as { error: string }).error, /invalid parameter name/);
+  assert.match((parseParamLine("x number abc") as { error: string }).error, /default expects a number/);
+  assert.match((parseParamLine("b boolean maybe") as { error: string }).error, /default expects true or false/);
+});
+
+test("resolveParameters: fill defaults, coerce strings and natives, reject unknown/missing/wrong-type", () => {
+  const schema: ModParam[] = [
+    { name: "floor", type: "number", default: 0.5 },
+    { name: "label", type: "string" }, // required
+    { name: "invert", type: "boolean", default: false },
+  ];
+  // string inputs (terminal path) coerce to the declared types; defaults fill
+  const a = resolveParameters(schema, new Map<string, unknown>([["floor", "0.8"], ["label", "hi there"]]));
+  assert.deepEqual(a, { ok: true, values: { floor: 0.8, label: "hi there", invert: false } });
+  // native inputs (assistant path) validate as-is
+  const b = resolveParameters(schema, new Map<string, unknown>([["floor", 2], ["label", "x"], ["invert", true]]));
+  assert.deepEqual(b, { ok: true, values: { floor: 2, label: "x", invert: true } });
+  // a required parameter with no default and none passed → error by name
+  assert.match((resolveParameters(schema, new Map()) as { error: string }).error, /missing required parameter "label"/);
+  // an unknown parameter → error naming the declared set
+  assert.match((resolveParameters(schema, new Map<string, unknown>([["label", "x"], ["nope", "1"]])) as { error: string }).error,
+    /unknown parameter "nope"/);
+  // a wrong-typed value → error by name
+  assert.match((resolveParameters(schema, new Map<string, unknown>([["floor", "big"], ["label", "x"]])) as { error: string }).error,
+    /parameter "floor" expects a number/);
+  // a paramless mod: passing anything is "unknown"; passing nothing is ok/empty
+  assert.deepEqual(resolveParameters([], new Map()), { ok: true, values: {} });
+  assert.match((resolveParameters([], new Map<string, unknown>([["x", "1"]])) as { error: string }).error, /this mod declares no parameters/);
+});
+
+test("resolveParameters: number coercion is decimal/scientific only; a double-quote is refused", () => {
+  const num: ModParam[] = [{ name: "n", type: "number" }];
+  const str: ModParam[] = [{ name: "s", type: "string" }];
+  const okNum = (v: string) => resolveParameters(num, new Map<string, unknown>([["n", v]]));
+  const badNum = (v: string) => resolveParameters(num, new Map<string, unknown>([["n", v]]));
+  // accepted decimal / signed / scientific forms
+  for (const v of ["5", "  5  ", "-2.5", "+3", ".5", "1e3", "2.5e-2"]) {
+    const r = okNum(v);
+    assert.ok(r.ok, `"${v}" should parse as a number${r.ok ? "" : " — " + r.error}`);
+  }
+  // rejected: hex / infinity / thousands-comma / empty / non-numeric
+  for (const v of ["0x1f", "Infinity", "NaN", "5,000", "1,2", "", "  ", "abc"]) {
+    assert.ok(!badNum(v).ok, `"${v}" must NOT parse as a number`);
+  }
+  // a double-quote in a string value is refused uniformly (it can't round-trip
+  // through the invocation grammar) — the same rule preview and execution share
+  assert.match((resolveParameters(str, new Map<string, unknown>([["s", 'a"b']])) as { error: string }).error,
+    /cannot contain a double-quote/);
+  // a non-scalar native for a string slot is refused (not stringified to garbage)
+  assert.match((resolveParameters(str, new Map<string, unknown>([["s", null]])) as { error: string }).error,
+    /parameter "s" expects a string/);
+});
+
+test("mod files: params round-trip through serialize → parse, header order preserved", () => {
+  const mod: AnalysisMod = {
+    name: "paramized", kind: "analysis", produces: "per-frame-series", origin: "workspace",
+    params: [
+      { name: "floor", type: "number", default: 0.5 },
+      { name: "label", type: "string" },
+      { name: "invert", type: "boolean", default: true },
+    ],
+    code: "def compute(data, target_indices, params):\n    return [1.0]",
+  };
+  const back = parseModFile(serializeMod(mod), "workspace");
+  assert.ok(back.ok, back.ok ? "" : back.error);
+  if (back.ok) assert.deepEqual(back.mod, mod);
+});
+
+test("parseModFile: repeated # param: lines are COLLECTED (not overwritten), duplicates rejected", () => {
+  const file = `${MOD_FILE_MAGIC}\n# name: m\n# kind: analysis\n# produces: per-frame-series\n` +
+    `# param: a number 1\n# param: b string\n# param: c boolean false\n\ndef compute(data, target_indices, params):\n    return []\n`;
+  const r = parseModFile(file, "workspace");
+  assert.ok(r.ok, r.ok ? "" : r.error);
+  if (r.ok) assert.deepEqual(r.mod.params?.map((p) => p.name), ["a", "b", "c"], "all three survive, in order");
+  const dup = parseModFile(`${MOD_FILE_MAGIC}\n# name: m\n# kind: analysis\n# produces: per-frame-series\n# param: a number\n# param: a string\n\ndef compute(d,t,p): return []\n`, "workspace");
+  assert.ok(!dup.ok);
+  if (!dup.ok) assert.match(dup.error, /duplicate parameter "a"/);
 });

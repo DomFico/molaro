@@ -51,6 +51,30 @@ export type ModProduces = (typeof MOD_PRODUCES)[number];
 export const MOD_AXES = ["color", "size", "opacity"] as const;
 export type ModAxis = (typeof MOD_AXES)[number];
 
+/** THE single source of truth for a mod parameter's scalar type. This is the
+ * ONLY enumerated thing a parameter schema carries — a param's name and default
+ * are per-mod DATA, not an enumerated set. Kept closed and small (three scalars,
+ * nothing speculative) exactly like MOD_PRODUCES / MOD_AXES, and guarded the same
+ * way (tests/recipes.test.ts). Every surface derives from this: the header parser
+ * validates against it; the header IS the schema's single source. The wire and
+ * the producer carry VALUES, not the type set — so it is a one-language enum, not
+ * a cross-language twin (the producer never authors a parameter declaration, it
+ * only consumes already-typed values). See reports/MOD_PARAMS_PHASE0.md. */
+export const MOD_PARAM_TYPES = ["number", "string", "boolean"] as const;
+export type ModParamType = (typeof MOD_PARAM_TYPES)[number];
+
+/** A parameter value once coerced to its declared type. */
+export type ParamValue = number | string | boolean;
+
+/** One declared parameter of an analysis mod (a `# param: <name> <type>
+ * [<default>]` header line). `default` present ⟺ the header declared one;
+ * absent = the parameter is REQUIRED at invocation. */
+export interface ModParam {
+  name: string;
+  type: ModParamType;
+  default?: ParamValue;
+}
+
 /** Metadata every mod carries regardless of kind. */
 interface ModCommon {
   name: string;
@@ -86,11 +110,16 @@ export interface AnalysisMod extends ModCommon {
   /** Required iff produces = per-point-scalar: which point axis the scalars
    * bind to (see MOD_AXES). */
   axis?: ModAxis;
-  /** Python source defining `compute(data, target_indices)`, executed in
-   * the producer against the resident dataset handle. Returns a flat
+  /** Python source defining `compute(data, target_indices)` — or
+   * `compute(data, target_indices, params)` when the mod declares parameters.
+   * Executed in the producer against the resident dataset handle. Returns a flat
    * `list[float]` — EXCEPT `produces: scatter`, which returns a dict
    * `{x, y, frames?, xLabel?, yLabel?}` (the one deliberate widening). */
   code: string;
+  /** Declared parameters (the `# param:` header lines), in header order. Present
+   * ⟺ the mod declared at least one; a paramless mod omits it and is invoked and
+   * called exactly as before (two-arg `compute`). */
+  params?: ModParam[];
 }
 
 export type Mod = Recipe | AnalysisMod;
@@ -183,11 +212,16 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
     return { ok: false, error: `missing "${MOD_FILE_MAGIC}" magic first line` };
   }
   const meta: Record<string, string> = {};
+  // `# param:` lines are COLLECTED, not folded into `meta` — a mod declares many
+  // and the flat meta map would silently overwrite all but the last (the Q2
+  // sleeper: three declared, one survives). They keep header order.
+  const paramLines: string[] = [];
   let i = 1;
   for (; i < lines.length; i++) {
     const m = /^#\s*([a-z][a-z-]*)\s*:\s*(.*)$/.exec(lines[i]);
     if (!m) break; // first non-header line starts the code
-    meta[m[1]] = m[2].trim();
+    if (m[1] === "param") paramLines.push(m[2].trim());
+    else meta[m[1]] = m[2].trim();
   }
   const code = lines.slice(i).join("\n").trim();
   const name = meta.name ?? "";
@@ -212,12 +246,29 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
   if (!/\bdef\s+compute\s*\(/.test(code)) {
     return { ok: false, error: "the code must define compute(data, target_indices)" };
   }
+  // Parameters: parse each `# param:` line, reject duplicates by name. We do NOT
+  // check compute's arity here — the parser sees only source text, and a regex
+  // that counts Python parameters is unsound (annotations, defaults, *args,
+  // comments, multi-line). The producer's inspect.signature check is the sole
+  // authoritative gate (an unsound belt is worse than none — someone trusts it).
+  const params: ModParam[] = [];
+  const seenParam = new Set<string>();
+  for (const line of paramLines) {
+    const pr = parseParamLine(line);
+    if (!pr.ok) return { ok: false, error: pr.error };
+    if (seenParam.has(pr.param.name)) {
+      return { ok: false, error: `duplicate parameter "${pr.param.name}"` };
+    }
+    seenParam.add(pr.param.name);
+    params.push(pr.param);
+  }
   const mod: AnalysisMod = {
     name,
     kind: "analysis",
     produces: produces as ModProduces, // validated against MOD_PRODUCES above
     ...(produces === "per-point-scalar" ? { axis: axis as ModAxis } : {}),
     code,
+    ...(params.length ? { params } : {}),
     origin,
     ...(meta.author ? { author: meta.author } : {}),
     ...(meta.source ? { source: meta.source } : {}),
@@ -239,11 +290,118 @@ export function serializeMod(mod: Mod): string {
     `# kind: analysis`,
     `# produces: ${mod.produces}`,
     ...(mod.axis ? [`# axis: ${mod.axis}`] : []),
+    ...(mod.params ?? []).map(
+      (p) => `# param: ${p.name} ${p.type}${p.default !== undefined ? ` ${p.default}` : ""}`,
+    ),
     ...(mod.author ? [`# author: ${mod.author}`] : []),
     ...(mod.source ? [`# source: ${mod.source}`] : []),
     ...(mod.description ? [`# description: ${mod.description}`] : []),
   ];
   return `${head.join("\n")}\n\n${mod.code}\n`;
+}
+
+// -- parameters: the header schema, coercion, and the shared resolver --------------
+
+/** A decimal or scientific-notation number literal — the ONLY string forms a
+ * `number` parameter accepts. Excludes hex/binary/octal, leading-`+`-only, and
+ * `Infinity`/`NaN` (all of which `Number()` would silently swallow). */
+const NUMBER_LITERAL_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
+
+/** Coerce a raw value to a declared type. Accepts BOTH a native JSON scalar
+ * (the assistant passes typed values) and a string (the terminal passes
+ * `?key=value` text), so ONE resolver serves both entrances — which is what
+ * keeps the approval preview and execution from ever disagreeing. A string is
+ * the most permissive target (number/boolean fold into it), but a `"` is
+ * REFUSED uniformly: parameter values pass through the invocation string, which
+ * has no escape, so a `"` cannot round-trip and is rejected loudly on every
+ * path rather than silently mangled. `reason` is context-free — callers prefix
+ * it with the parameter name. */
+function coerceValue(
+  type: ModParamType,
+  raw: unknown,
+): { ok: true; value: ParamValue } | { ok: false; reason: string } {
+  if (type === "number") {
+    if (typeof raw === "number" && Number.isFinite(raw)) return { ok: true, value: raw };
+    if (typeof raw === "string" && NUMBER_LITERAL_RE.test(raw.trim()) && Number.isFinite(Number(raw.trim()))) {
+      return { ok: true, value: Number(raw.trim()) };
+    }
+    return { ok: false, reason: `expects a number, got "${String(raw)}"` };
+  }
+  if (type === "boolean") {
+    if (typeof raw === "boolean") return { ok: true, value: raw };
+    if (raw === "true") return { ok: true, value: true };
+    if (raw === "false") return { ok: true, value: false };
+    return { ok: false, reason: `expects true or false, got "${String(raw)}"` };
+  }
+  if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean") {
+    const s = String(raw);
+    if (s.includes('"')) return { ok: false, reason: `cannot contain a double-quote, got "${s}"` };
+    return { ok: true, value: s };
+  }
+  return { ok: false, reason: `expects a string, got "${String(raw)}"` };
+}
+
+const PARAM_NAME_RE = /^[a-z][a-z0-9_-]*$/;
+
+/** Parse one `# param:` header line: `<name> <type> [<default…>]`. The default
+ * is the REST of the line (so a string default may hold spaces) and is coerced
+ * against the declared type, so a malformed default fails at parse/registration
+ * time — loud, before any run. Total: never throws. */
+export function parseParamLine(
+  line: string,
+): { ok: true; param: ModParam } | { ok: false; error: string } {
+  const m = /^(\S+)\s+(\S+)(?:\s+(.*))?$/.exec(line.trim());
+  if (!m) {
+    return { ok: false, error: `malformed param "${line}" — want: # param: <name> <type> [<default>]` };
+  }
+  const [, name, typeTok, defRaw] = m;
+  if (!PARAM_NAME_RE.test(name)) {
+    return { ok: false, error: `invalid parameter name "${name}" (want ${PARAM_NAME_RE})` };
+  }
+  if (!(MOD_PARAM_TYPES as readonly string[]).includes(typeTok)) {
+    return { ok: false, error: `parameter "${name}": type must be ${MOD_PARAM_TYPES.join(" | ")} (got "${typeTok}")` };
+  }
+  const type = typeTok as ModParamType;
+  if (defRaw !== undefined && defRaw.trim() !== "") {
+    const c = coerceValue(type, defRaw.trim());
+    if (!c.ok) return { ok: false, error: `parameter "${name}" default ${c.reason}` };
+    return { ok: true, param: { name, type, default: c.value } };
+  }
+  return { ok: true, param: { name, type } };
+}
+
+/** THE resolver: validate the passed parameters against a mod's declared schema
+ * and fill defaults. Single-sourced — the terminal invocation parser AND the
+ * host's approval preview both call it, so what the user approves and what the
+ * producer runs are computed the same way. Fail-closed by name: an unknown
+ * parameter, a wrong-typed value, or a missing required one → error, nothing
+ * runs. Returns the EFFECTIVE typed values (defaults included) — the complete
+ * set the producer receives. `passed` values may be strings (terminal) or native
+ * scalars (assistant); coerceValue handles both. */
+export function resolveParameters(
+  params: readonly ModParam[],
+  passed: ReadonlyMap<string, unknown>,
+): { ok: true; values: Record<string, ParamValue> } | { ok: false; error: string } {
+  const byName = new Map(params.map((p) => [p.name, p]));
+  for (const key of passed.keys()) {
+    if (!byName.has(key)) {
+      const known = params.length ? params.map((p) => p.name).join(", ") : "this mod declares no parameters";
+      return { ok: false, error: `unknown parameter "${key}" (declared: ${known})` };
+    }
+  }
+  const values: Record<string, ParamValue> = {};
+  for (const p of params) {
+    if (passed.has(p.name)) {
+      const c = coerceValue(p.type, passed.get(p.name));
+      if (!c.ok) return { ok: false, error: `parameter "${p.name}" ${c.reason}` };
+      values[p.name] = c.value;
+    } else if (p.default !== undefined) {
+      values[p.name] = p.default;
+    } else {
+      return { ok: false, error: `missing required parameter "${p.name}" (${p.type})` };
+    }
+  }
+  return { ok: true, values };
 }
 
 // -- fail-closed validation of an analysis mod's returned floats -------------------

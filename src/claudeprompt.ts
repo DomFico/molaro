@@ -161,6 +161,31 @@ Returns are validated strictly. A wrong length, a non-finite value, an out-of-ra
 scalar, an exception, or a timeout means NOTHING is drawn and you get the error back.
 Read the traceback and fix the mod.
 
+## Parameters — one mod, reused with different settings
+
+A mod may declare parameters so one file is reusable without editing it. Declare each in a
+header line:
+
+    # param: <name> <type> [<default>]
+
+\`<type>\` is \`number\`, \`string\`, or \`boolean\`. A default makes the parameter optional; a
+parameter with **no default is REQUIRED** at invocation. When a mod declares parameters,
+\`compute\` takes a THIRD argument — a dict of the resolved, already-typed values:
+
+    # param: floor number 0.5
+    def compute(data, target_indices, params):
+        cutoff = params["floor"]          # a number (Python int or float), not a string:
+                                          # a whole value like 2 arrives as int, 0.5 as float
+        ...
+
+A mod that declares **no** parameters keeps the two-argument \`compute(data, target_indices)\`
+and is invoked and called exactly as before.
+
+To RUN a mod that declares parameters, pass \`run_mod\`'s \`parameters\` field (a map of name →
+value); omit a parameter to take its default. \`get_context\` lists each mod's parameters,
+their types, and defaults — read them there, never guess a name. The approval preview shows
+the EFFECTIVE values (defaults included), so the human approves exactly what will run.
+
 ## Correctness rules — these are not stylistic
 
 These were established against a two-engine (mdtraj + MDAnalysis) reference corpus.

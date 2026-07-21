@@ -176,6 +176,34 @@ export function splitLeadingRef(args: string): LeadingRef {
   return { kind: "ref", name: t.name, filtered: t.filter !== undefined, rest: s.slice(i).trim() };
 }
 
+/** Split `s` on every TOP-LEVEL (unquoted) occurrence of a single-character
+ * separator, respecting `"…"` regions exactly as the grammar's `quoted()` does:
+ * a `"` toggles quote state, there is no escape, so `"` is the only delimiter. A
+ * `sep` inside quotes is NOT a split point. Parts are returned untrimmed.
+ *
+ * The mod-invocation parameter split leans on this with sep `?`: `?` is a
+ * RESERVED grammar char (`RESERVED`, `token()` throws on it, `parseTarget`
+ * rejects it between terms and after `@`/`#`), so it can NEVER appear unquoted in
+ * a legal target. The first unquoted `?` is therefore a collision-proof boundary
+ * between the target expression and the parameter block — no heuristic, no
+ * guessing where the target ends. An unbalanced quote leaves the tail in-quote so
+ * a `?` inside it is (correctly) not a split; the malformed target then fails
+ * loudly in `parseTarget`, never mis-split here. See reports/MOD_PARAMS_PHASE0.md. */
+export function splitOnUnquoted(s: string, sep: string): string[] {
+  const parts: string[] = [];
+  let inQuote = false;
+  let start = 0;
+  for (let i = 0; i < s.length; i++) {
+    if (s[i] === '"') inQuote = !inQuote;
+    else if (!inQuote && s[i] === sep) {
+      parts.push(s.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(s.slice(start));
+  return parts;
+}
+
 /** Parse a target expression. Total — malformed input returns a ParseError,
  * never throws. */
 export function parseTarget(expr: string): TargetAst | ParseError {

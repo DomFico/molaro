@@ -51,7 +51,7 @@ import { AXIS_DOMAIN, BIND_SIZE_MAX, mapScalar, ORIENTATION_AXIS, SCALAR_AXES, t
 import { bindTypedResult } from "./claudebind.ts";
 import { PLOT_RESULT_KINDS } from "./claudemodel.ts";
 import { parseTypedResult } from "./claudemodel.ts";
-import { listRecipes, rainbow, registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod } from "./recipes.ts";
+import { listRecipes, rainbow, registerRecipe, unregisterRecipe, validateModValues, type AnalysisMod, type ParamValue } from "./recipes.ts";
 import {
   installModList,
   isFileAlreadyGone,
@@ -2245,13 +2245,22 @@ async function main(): Promise<void> {
     if (warning) asyncLine("ok", `⚠ ${warning}`);
   };
 
-  const runAnalysisMod = (mod: AnalysisMod, points: number[], expr: string): void => {
+  const runAnalysisMod = (
+    mod: AnalysisMod,
+    points: number[],
+    expr: string,
+    params?: Record<string, ParamValue>,
+  ): void => {
     void (async () => {
       try {
         const bytes = await transport.request({
           type: "run_mod",
           code: mod.code,
           target_indices: points,
+          // Additive: only present when the mod declared parameters (the
+          // resolver filled defaults webview-side, so the producer gets the
+          // COMPLETE effective set or none at all).
+          ...(params && Object.keys(params).length ? { parameters: params } : {}),
         });
         const reply = JSON.parse(new TextDecoder().decode(bytes)) as {
           values?: unknown;

@@ -19,6 +19,7 @@ import {
   parseTarget,
   resolveTarget,
   splitLeadingRef,
+  splitOnUnquoted,
   splitTrailingName,
   splitTrailingWord,
   type Completion,
@@ -45,8 +46,10 @@ import {
   listRecipes,
   rainbow,
   resolveModSelector,
+  resolveParameters,
   type AnalysisMod,
   type Mod,
+  type ParamValue,
   type RecipeOrigin,
 } from "./recipes.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
@@ -277,7 +280,12 @@ export interface CommandContext {
    * return is the "running…" line; the outcome arrives asynchronously
    * (validated FAIL-CLOSED, bound through the EXISTING rails per the mod's
    * declared `produces`, reported as a follow-up terminal line). */
-  runAnalysisMod(mod: AnalysisMod, points: number[], expr: string): void;
+  runAnalysisMod(
+    mod: AnalysisMod,
+    points: number[],
+    expr: string,
+    params?: Record<string, ParamValue>,
+  ): void;
   /** rm: stash the workspace mod names awaiting the terminal's y answer
    * (a single slot — a newer rm replaces it). On confirmation the wiring
    * deletes files HOST-side FIRST, then unregisters only what succeeded,
@@ -1619,13 +1627,20 @@ export function makeBindingsHandler(ctx: CommandContext): CommandHandler {
  */
 export function makeAnalysisModHandler(ctx: CommandContext, mod: AnalysisMod): CommandHandler {
   return (args: string): CommandResult => {
-    const expr = args.trim();
+    // Split the target from the parameter block at the first UNQUOTED `?` — a
+    // reserved grammar char, so this boundary is collision-proof (a `?` in a
+    // quoted label stays in the target). The target keeps its whitespace and
+    // unions; parameters are `?key=value`, values may hold spaces (delimited by
+    // the next `?`, not whitespace).
+    const parsed = parseModParams(mod, args);
+    if ("status" in parsed) return parsed;
+    const { expr, params } = parsed;
     if (expr === "") {
       // A commands mod MAY ignore target_indices, so bare invocation is allowed
       // (empty target_indices = the whole system per the mod contract). The
       // per-point/per-frame kinds need a target to bind their result to.
       if (mod.produces === "commands") {
-        ctx.runAnalysisMod(mod, [], "");
+        ctx.runAnalysisMod(mod, [], "", params);
         return { status: "ok", message: `running ${mod.name}…` };
       }
       return {
@@ -1635,11 +1650,61 @@ export function makeAnalysisModHandler(ctx: CommandContext, mod: AnalysisMod): C
     }
     const r = resolveTargetPoints(ctx, expr);
     if ("status" in r) return r;
-    ctx.runAnalysisMod(mod, r.points, expr);
+    ctx.runAnalysisMod(mod, r.points, expr, params);
     return {
       status: "ok",
       message: `running ${mod.name} on ${r.points.length} points…`,
     };
+  };
+}
+
+/** Split a mod invocation `<target> ?k=v ?k2=v2` into its target expression and
+ * its resolved parameter set (defaults filled, types coerced, all validated
+ * against the mod's declared schema — the SHARED resolveParameters). Fail-closed:
+ * an unknown/malformed/wrong-typed/missing parameter is a CommandResult error and
+ * nothing runs. `params` is undefined when the mod declares none and none were
+ * passed (the two-arg call path). Exported for the invocation test. */
+export function parseModParams(
+  mod: AnalysisMod,
+  args: string,
+): { expr: string; params?: Record<string, ParamValue> } | CommandResult {
+  // An unbalanced `"` would silently let an unclosed quote in a value swallow the
+  // following `?param` (there is no escape). Reject it loudly instead — a legal
+  // invocation always has balanced quotes (paired label / value delimiters).
+  if (((args.match(/"/g) ?? []).length) % 2 !== 0) {
+    return { status: "error", message: `${mod.name}: unbalanced '"' in the invocation` };
+  }
+  const segs = splitOnUnquoted(args, "?");
+  const expr = segs[0].trim();
+  const passed = new Map<string, unknown>();
+  for (let i = 1; i < segs.length; i++) {
+    const seg = segs[i].trim();
+    if (seg === "") {
+      return { status: "error", message: `${mod.name}: empty parameter — each is ?key=value` };
+    }
+    const eq = seg.indexOf("=");
+    if (eq < 0) {
+      return { status: "error", message: `${mod.name}: parameter "${seg}" must be key=value` };
+    }
+    const key = seg.slice(0, eq).trim();
+    let value = seg.slice(eq + 1).trim();
+    // Unwrap ONLY a single fully-quoted region (no interior quote), so a value
+    // may hold a `?` or edge spaces when quoted, while `"a" "b"` is NOT mangled
+    // to `a" "b`. A stray interior `"` survives to coerceValue, which refuses it.
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"') &&
+        value.indexOf('"', 1) === value.length - 1) {
+      value = value.slice(1, -1);
+    }
+    if (passed.has(key)) {
+      return { status: "error", message: `${mod.name}: parameter "${key}" given twice` };
+    }
+    passed.set(key, value);
+  }
+  const resolved = resolveParameters(mod.params ?? [], passed);
+  if (!resolved.ok) return { status: "error", message: `${mod.name}: ${resolved.error}` };
+  return {
+    expr,
+    ...(Object.keys(resolved.values).length ? { params: resolved.values } : {}),
   };
 }
 

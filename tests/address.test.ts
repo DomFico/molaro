@@ -15,6 +15,7 @@ import {
   parseTarget,
   resolveTarget,
   splitLeadingRef,
+  splitOnUnquoted,
   splitTrailingName,
   splitTrailingWord,
   type ParseError,
@@ -855,4 +856,21 @@ test("globMatch edge cases", () => {
   assert.ok(!globMatch("a*b*c", "acb"));
   assert.ok(globMatch("*", ""));
   assert.ok(!globMatch("ab", "abc")); // no-star pattern = exact equality
+});
+
+// -- P-1: splitOnUnquoted — the collision-proof target/parameter boundary ---------
+
+test("splitOnUnquoted: splits on every top-level separator; none → one part", () => {
+  assert.deepEqual(splitOnUnquoted("alpha ?k=v ?j=w", "?"), ["alpha ", "k=v ", "j=w"]);
+  assert.deepEqual(splitOnUnquoted("alpha.A", "?"), ["alpha.A"], "no separator → the whole string");
+  assert.deepEqual(splitOnUnquoted("", "?"), [""], "empty stays one empty part");
+});
+
+test('splitOnUnquoted: a "?" inside quotes is NOT a boundary; unbalanced quote holds the tail', () => {
+  // a quoted label containing '?' stays in the FIRST part (the target)
+  assert.deepEqual(splitOnUnquoted('"a?b" ?k=v', "?"), ['"a?b" ', "k=v"]);
+  // a value may itself be quoted to hold a '?'
+  assert.deepEqual(splitOnUnquoted('t ?k="a?b"', "?"), ["t ", 'k="a?b"']);
+  // an unbalanced quote leaves the rest in-quote → the '?' is not split (fails loudly downstream)
+  assert.deepEqual(splitOnUnquoted('"a ?b', "?"), ['"a ?b'], "unbalanced quote: no split");
 });

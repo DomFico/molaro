@@ -20,6 +20,7 @@ Run from anywhere:  python3 producer/serve.py --n-points 20000 --n-frames 600
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import logging
 import math
@@ -106,7 +107,31 @@ def _coherence_warning(arr, name: str) -> Optional[str]:
     )
 
 
-def run_mod(source, code: str, target_indices, timeout_s: float, install_channel=None) -> bytes:
+def _accepts_third_positional(fn) -> Optional[bool]:
+    """Does `fn` accept a THIRD positional argument (the parameters dict)?
+
+    True if there are ≥3 positional(-or-keyword) parameters OR a `*args`; False
+    if not (a keyword-only third is deliberately rejected — a positional contract
+    keeps the calling convention uniform and unbound to the parameter's spelling).
+    None if the signature can't be read (a non-introspectable callable) — the
+    caller fails closed on None. `follow_wrapped=False` is REQUIRED: the default
+    follows __wrapped__ and would read a decorated compute's INNER signature,
+    which can disagree with the wrapper's real arity."""
+    try:
+        sig = inspect.signature(fn, follow_wrapped=False)
+    except (ValueError, TypeError):
+        return None
+    positional = 0
+    for p in sig.parameters.values():
+        if p.kind in (p.POSITIONAL_ONLY, p.POSITIONAL_OR_KEYWORD):
+            positional += 1
+        elif p.kind is p.VAR_POSITIONAL:
+            return True
+    return positional >= 3
+
+
+def run_mod(source, code: str, target_indices, timeout_s: float, install_channel=None,
+            parameters=None) -> bytes:
     """Execute a mod's `compute(data, target_indices)` against the RESIDENT
     dataset handle and return the response payload (JSON bytes).
 
@@ -136,7 +161,26 @@ def run_mod(source, code: str, target_indices, timeout_s: float, install_channel
         fn = namespace.get("compute")
         if not callable(fn):
             return json.dumps({"error": "the code must define compute(data, target_indices)"}).encode("utf-8")
-        values = fn(source, target_indices)
+        # Parameters (P-1): a mod that declared parameters receives them as a
+        # third positional arg; a paramless call is byte-identical to before.
+        # The producer is the AUTHORITATIVE arity gate (the webview parser can't
+        # soundly count Python parameters) — fail closed, naming the fix.
+        params = parameters if isinstance(parameters, dict) and parameters else None
+        if params is None:
+            values = fn(source, target_indices)
+        else:
+            accepts = _accepts_third_positional(fn)
+            if accepts is None:
+                return json.dumps({"error": (
+                    "this mod declares parameters but its compute() signature can't be "
+                    "read; declare def compute(data, target_indices, params)"
+                )}).encode("utf-8")
+            if not accepts:
+                return json.dumps({"error": (
+                    "this mod declares parameters but compute() does not accept a third "
+                    "positional argument; make it def compute(data, target_indices, params)"
+                )}).encode("utf-8")
+            values = fn(source, target_indices, params)
 
         def finite_floats(seq):
             return isinstance(seq, list) and all(
@@ -381,6 +425,7 @@ def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO) -> None:
                 payload = run_mod(
                     source, request.get("code"), request.get("target_indices"),
                     float(timeout_s), install_channel=install_channel,
+                    parameters=request.get("parameters"),
                 )
                 log.debug("run_mod -> %d bytes", len(payload))
             else:

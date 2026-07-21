@@ -24,7 +24,15 @@
 export type ProducerRequest =
   | { type: "header" }
   | { type: "frames"; start: number; count: number }
-  | { type: "run_mod"; code: string; target_indices: number[]; timeout_s?: number };
+  | {
+      type: "run_mod";
+      code: string;
+      target_indices: number[];
+      timeout_s?: number;
+      /** Effective parameters (defaults filled webview-side), name → typed
+       * value. Additive — absent when the mod declares no parameters. */
+      parameters?: Record<string, number | string | boolean>;
+    };
 
 export type HostMessage =
   | { type: "fromProducer"; payload: Uint8Array | ArrayBuffer }

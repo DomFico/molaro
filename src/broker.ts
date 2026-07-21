@@ -24,6 +24,9 @@ export interface ProducerRequest {
   code?: string;
   target_indices?: number[];
   timeout_s?: number;
+  /** run_mod: effective parameters (defaults filled), name → typed scalar.
+   * Additive — absent when the mod declares no parameters. */
+  parameters?: Record<string, number | string | boolean>;
 }
 
 export interface BrokerOptions {
