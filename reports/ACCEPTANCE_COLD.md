@@ -179,6 +179,51 @@ the verification scripts, and this report: **0 matches**).
 
 ---
 
+---
+
+# Re-test after the attended prompt pass (2026-07-21)
+
+Three prompt changes were made — (1) a per-point **broadcast trap** placed where the
+channel return is composed, showing the atom→residue idiom; (2) one clause mapping
+**"cartoon" → `shape traces ribbon`**; (3) `get_context` softened from "before
+anything" to conditional, while *strengthening* the after-declaration case. All
+three are guarded in `tests/claudebackend.test.ts` Part C (446/446 green).
+
+Re-run: all three requests, twice each, six fresh sessions, **real producer for
+`run_mod` throughout** (the simulated one is known to mask length errors).
+
+| request | before | after |
+|---|---|---|
+| R1 commands | 2/2 right rung, get_context 0 | **2/2 identical — no regression** |
+| R2 channel+bind | 2/2 right rung, read live Channels | **2/2 identical, still reads live Channels and branches** |
+| R3 cartoon | 3/4 right rung; **first mod refused every time**; 1/4 tube approximation | **2/2 right rung, 2/2 accepted FIRST attempt, 0 refusals, 0 tube** |
+
+**Change 1 — the measure: 0/2 recurrence.** Both R3 runs declared the vector
+channel on the *first* attempt against the real producer. Both wrote the exact
+idiom the prompt now shows:
+
+    res_of_atom = np.array([a.residue.index for a in top.atoms])
+    ... per_res[:, res_of_atom, :]
+
+The coherence pass and float64 survived the change (present in both). Zero
+refusals, zero retries, where previously *every* first mod was refused.
+
+**Change 2 — 2/2 reached the ribbon**, no tube approximation. Thin evidence (the
+tube path was 1/4 before, so 2/2 clean is consistent with the fix but does not
+prove it); one clause was the right dose for n=1.
+
+**Change 3 — no regression, in either direction.** R1 still (correctly) skips
+`get_context` 2/2 — the rule is no longer routinely violated because it no longer
+demands the useless read. R2 still calls it and *branches on the live Channels
+section* 2/2, which was the specific risk of this edit: the relaxation and the
+strengthening pulled in opposite directions in one sentence and both held.
+
+**Caveats, attached to the numbers.** Model `claude-sonnet-4-6`, not the
+`claude-sonnet-5` the extension defaults to. Two runs per request is thin. A clean
+0/2 on the per-residue defect is **encouraging, not conclusive** — the honest read
+is "the trap removed the observed failure in every trial we ran," not "the failure
+is gone."
+
 # Appendix — full transcripts
 
 ## R1_runa — simulated run_mod
@@ -1117,4 +1162,558 @@ You can adjust the fade level with e.g. `pointopacity all 0.05` or restore with 
 
 TOOL SEQUENCE: get_context → write_mod:channel → run_mod → run_command:pointopacity → write_mod:channel → run_mod → run_command:bind → run_command:shape → run_command:bondopacity
 get_context calls: 1 · turns: 9
+used mod parameters: no```
+
+## POST-PASS R1_runa — faithful run_mod (real producer, real adk)
+
+```
+==============================================================================
+R1_runa — COLD, no hints
+USER: "Color the acidic residues red and the basic ones blue."
+==============================================================================
+
+>>> TOOL run_command({"command":"colorbonds polymer.A.ASP*,GLU* red"})
+<<< ok: colorbonds polymer.A.ASP*,GLU* red
+
+>>> TOOL run_command({"command":"colorbonds polymer.A.LYS*,ARG*,HIS* blue"})
+<<< ok: colorbonds polymer.A.LYS*,ARG*,HIS* blue
+
+[assistant turn 3]
+Done! Here's what was applied:
+
+- **Red** — acidic residues: **ASP** and **GLU** (negatively charged at physiological pH)
+- **Blue** — basic residues: **LYS**, **ARG**, and **HIS** (positively charged / basic)
+
+All other residues keep their default grey look. Undo (Ctrl+Z) twice to revert both changes.
+
+TOOL SEQUENCE: run_command:colorbonds → run_command:colorbonds
+get_context calls: 0 · turns: 3
+used mod parameters: no```
+
+## POST-PASS R1_runb — faithful run_mod (real producer, real adk)
+
+```
+==============================================================================
+R1_runb — COLD, no hints
+USER: "Color the acidic residues red and the basic ones blue."
+==============================================================================
+
+>>> TOOL run_command({"command":"colorbonds polymer.A.ASP*,GLU* red"})
+<<< ok: colorbonds polymer.A.ASP*,GLU* red
+
+>>> TOOL run_command({"command":"colorbonds polymer.A.LYS*,ARG*,HIS* blue"})
+<<< ok: colorbonds polymer.A.LYS*,ARG*,HIS* blue
+
+[assistant turn 3]
+Done! Here's what was applied:
+
+- **Red** — acidic residues: **ASP** (Aspartate) and **GLU** (Glutamate)
+- **Blue** — basic residues: **LYS** (Lysine), **ARG** (Arginine), and **HIS** (Histidine)
+
+All other residues remain at their default color. Each command colored the bonds whose **both endpoints** fall within the target residues. You can undo either command with Ctrl+Z to revert.
+
+TOOL SEQUENCE: run_command:colorbonds → run_command:colorbonds
+get_context calls: 0 · turns: 3
+used mod parameters: no```
+
+## POST-PASS R2_runa — faithful run_mod (real producer, real adk)
+
+```
+==============================================================================
+R2_runa — COLD, no hints
+USER: "Color it by how much each atom moves, as it plays."
+==============================================================================
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  (none yet)
+
+[assistant turn 2]
+No channel exists yet. I need to compute per-atom, per-frame displacement (how far each atom is from its mean position each frame) and stream it as a channel, then bind it to color. Let me write that mod.
+
+>>> TOOL write_mod({"name":"atom_displacement","produces":"channel","channel":"displacement"})
+<<< wrote mod "atom_displacement" to .molaro/mods/atom_displacement.py — it is now registered; run it with run_mod.
+--- mod source (atom_displacement) ---
+
+# channel: displacement
+# Per-atom displacement from each atom's time-averaged position, in nm.
+# Normalized to [0, 1] over the global min/max so the full color ramp is used.
+# components: 1 (scalar)
+
+import numpy as np
+
+def compute(data, target_indices):
+    if data.trajectory is None:
+        raise RuntimeError("No trajectory loaded — cannot compute displacement.")
+
+    traj = data.trajectory
+    xyz = traj.xyz.astype(np.float64)          # (n_frames, n_atoms, 3)
+
+    # Restrict to target atoms
+    if target_indices:
+        idx = np.array(target_indices, dtype=int)
+    else:
+        idx = np.arange(traj.n_atoms)
+
+    xyz_t = xyz[:, idx, :]                     # (n_frames, n_points, 3)
+    mean_pos = xyz_t.mean(axis=0)              # (n_points, 3)
+
+    # Displacement: Euclidean distance from mean, per atom per frame
+    diff = xyz_t - mean_pos[np.newaxis, :, :]  # (n_frames, n_points, 3)
+    disp = np.linalg.norm(diff, axis=-1)       # (n_frames, n_points)  — float64
+
+    d_min = float(disp.min())
+    d_max = float(disp.max())
+    rng = d_max - d_min if d_max > d_min else 1.0
+
+    disp_norm = (disp - d_min) / rng           # [0, 1]
+
+    return {
+        "values": disp_norm.reshape(-1).tolist(),   # frame-major flat list
+        "components": 1,
+        "min": 0.0,
+        "max": 1.0,
+    }
+
+--- end ---
+
+>>> TOOL run_mod({"name":"atom_displacement","target":"all","parameters":{}})
+<<< atom_displacement → declared scalar channel "displacement" — bindable now (no reload)
+
+>>> TOOL run_command({"command":"bind all displacement color 0 1"})
+<<< bound "displacement" → color on "all" — live: re-derives as the displayed frame changes
+
+[assistant turn 5]
+Done! The structure is now colored by **per-atom displacement from each atom's mean position**, updating every frame as it plays.
+
+- **Blue/cool** → atoms close to their average position (low mobility)
+- **Red/magenta** → atoms far from their average (high mobility)
+- Units are **nm**, normalized across the full range of all atoms and all frames so the color ramp spans the actual variation in your trajectory.
+
+TOOL SEQUENCE: get_context → write_mod:channel → run_mod → run_command:bind
+get_context calls: 1 · turns: 5
+used mod parameters: YES```
+
+## POST-PASS R2_runb — faithful run_mod (real producer, real adk)
+
+```
+==============================================================================
+R2_runb — COLD, no hints
+USER: "Color it by how much each atom moves, as it plays."
+==============================================================================
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  (none yet)
+
+[assistant turn 2]
+No channels yet. I need to write a `channel` mod that computes per-atom displacement from the mean position (frame by frame), then bind it to color. That gives a live, per-frame "how much is each atom moving" view.
+
+>>> TOOL write_mod({"name":"mobility","produces":"channel","channel":"mobility"})
+<<< wrote mod "mobility" to .molaro/mods/mobility.py — it is now registered; run it with run_mod.
+--- mod source (mobility) ---
+
+# channel: mobility
+# Computes per-atom displacement from the time-averaged position, frame by frame.
+# Units: nm (mdtraj native). Normalised to [0, 1] across all atoms × frames.
+# The normalization is global so colors are comparable across frames.
+
+import numpy as np
+
+def compute(data, target_indices):
+    if data.trajectory is None:
+        raise RuntimeError("mobility requires a trajectory with coordinates.")
+
+    traj = data.trajectory
+    xyz = traj.xyz.astype(np.float64)          # (n_frames, n_atoms, 3)
+
+    # Work only on the target atoms
+    idx = np.array(target_indices) if target_indices else np.arange(xyz.shape[1])
+    xyz_t = xyz[:, idx, :]                     # (T, N, 3)
+
+    # Mean position of each atom over all frames
+    mean_pos = xyz_t.mean(axis=0, keepdims=True)   # (1, N, 3)
+
+    # Displacement from mean at each frame
+    disp = np.sqrt(((xyz_t - mean_pos) ** 2).sum(axis=2))  # (T, N)
+
+    # Normalise globally to [0, 1]
+    lo, hi = disp.min(), disp.max()
+    if hi > lo:
+        disp_norm = (disp - lo) / (hi - lo)
+    else:
+        disp_norm = np.zeros_like(disp)
+
+    # Frame-major flat list: all atoms of frame 0, then frame 1, …
+    values = disp_norm.reshape(-1).tolist()
+
+    return {
+        "values": values,
+        "components": 1,
+        "min": 0.0,
+        "max": 1.0,
+    }
+
+--- end ---
+
+>>> TOOL run_mod({"name":"mobility","target":"all"})
+<<< mobility → declared scalar channel "mobility" — bindable now (no reload)
+
+>>> TOOL run_command({"command":"bind all mobility color 0 1"})
+<<< bound "mobility" → color on "all" — live: re-derives as the displayed frame changes
+
+[assistant turn 5]
+Done! Every atom is now colored by how far it sits from its **time-averaged position** at each frame, updating live as the trajectory plays:
+
+- **Red end** → atoms moving a lot (high displacement from their mean)
+- **Magenta/low end** → atoms that barely budge
+
+The scale is global (0 = least mobile atom across all frames, 1 = most mobile), so the colors are consistent as you scrub through. Flexible loop regions and termini typically light up brightest, while the rigid core stays dark.
+
+TOOL SEQUENCE: get_context → write_mod:channel → run_mod → run_command:bind
+get_context calls: 1 · turns: 5
+used mod parameters: no```
+
+## POST-PASS R3_runa — faithful run_mod (real producer, real adk)
+
+```
+==============================================================================
+R3_runa — COLD, no hints
+USER: "Make a cartoon of the backbone with everything else faded."
+==============================================================================
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  (none yet)
+
+[assistant turn 2]
+I need to:
+1. Compute a **backbone orientation channel** so the ribbon shape works.
+2. **Bind** it to `orientation` on the trace.
+3. **Swap traces to ribbon** shape.
+4. **Fade everything** (points + bonds to near-zero opacity).
+
+Let me write the backbone direction channel mod first.
+
+>>> TOOL write_mod({"name":"backbone_orientation","produces":"channel","channel":"bb_orientation"})
+<<< wrote mod "backbone_orientation" to .molaro/mods/backbone_orientation.py — it is now registered; run it with run_mod.
+--- mod source (backbone_orientation) ---
+
+# channel: bb_orientation
+# Computes a backbone direction vector per residue per frame (Cα→next Cα),
+# then broadcasts each residue's vector to all its atoms.
+# components: 3 (x, y, z in nm)
+# Consecutive-frame sign is corrected to avoid strobing.
+
+import numpy as np
+
+def compute(data, target_indices):
+    if data.trajectory is None:
+        raise ValueError("No trajectory loaded — cannot compute backbone orientation.")
+
+    traj = data.trajectory
+    top  = traj.topology
+    xyz  = traj.xyz.astype(np.float64)   # (n_frames, n_atoms, 3)
+
+    n_frames = traj.n_frames
+    n_atoms  = top.n_atoms
+    n_res    = top.n_residues
+
+    # --- find CA atoms per residue ------------------------------------
+    ca_idx   = np.full(n_res, -1, dtype=int)
+    for atom in top.atoms:
+        if atom.name == "CA":
+            ca_idx[atom.residue.index] = atom.index
+
+    # --- atom → residue index map ------------------------------------
+    res_of_atom = np.array([a.residue.index for a in top.atoms], dtype=int)  # (n_atoms,)
+
+    # --- per-residue direction: Cα[i] → Cα[i+1] ---------------------
+    # Shape: (n_frames, n_res, 3)
+    per_res = np.zeros((n_frames, n_res, 3), dtype=np.float64)
+
+    for f in range(n_frames):
+        for ri in range(n_res):
+            ca_i  = ca_idx[ri]
+            # look for next residue with a CA
+            ca_j  = -1
+            for rj in range(ri + 1, min(ri + 5, n_res)):
+                if ca_idx[rj] != -1:
+                    ca_j = ca_idx[rj]
+                    break
+
+            if ca_i == -1 or ca_j == -1:
+                # fallback: use previous direction or zero
+                if ri > 0:
+                    per_res[f, ri] = per_res[f, ri - 1]
+                continue
+
+            vec = xyz[f, ca_j] - xyz[f, ca_i]
+            norm = np.linalg.norm(vec)
+            per_res[f, ri] = vec / norm if norm > 1e-9 else per_res[f, ri - 1] if ri > 0 else np.array([1.0, 0.0, 0.0])
+
+    # --- sign coherence across frames --------------------------------
+    for f in range(1, n_frames):
+        dots = np.einsum('ri,ri->r', per_res[f], per_res[f - 1])
+        flip = dots < 0                           # (n_res,)
+        per_res[f, flip] *= -1
+
+    # --- broadcast residue → atom ------------------------------------
+    per_atom = per_res[:, res_of_atom, :]         # (n_frames, n_atoms, 3)
+
+    return {
+        "values":     per_atom.reshape(-1).tolist(),
+        "components": 3,
+    }
+
+--- end ---
+
+>>> TOOL run_mod({"name":"backbone_orientation","target":"all"})
+<<< backbone_orientation → declared vector channel "bb_orientation" — bindable now (no reload)
+
+[assistant turn 4]
+Channel is live. Now bind it to orientation, swap the trace shape to ribbon, and fade points + bonds — all at once.
+
+>>> TOOL run_command({"command":"bind all bb_orientation orientation"})
+<<< bound "bb_orientation" → orientation on "all" — live: re-derives as the displayed frame changes
+
+>>> TOOL run_command({"command":"shape traces ribbon"})
+<<< traces now draw as ribbon
+
+>>> TOOL run_command({"command":"pointopacity all 0.05"})
+<<< ok: pointopacity all 0.05
+
+>>> TOOL run_command({"command":"bondopacity all 0.05"})
+<<< ok: bondopacity all 0.05
+
+[assistant turn 8]
+Here's what was done:
+
+1. **Backbone orientation channel** — computed Cα→Cα direction vectors per residue, broadcast to every atom, with frame-to-frame sign correction to prevent ribbon strobing. Bound to `orientation` so it updates as you scrub through frames.
+2. **Ribbon shape** — swapped the trace domain to `ribbon`, which uses that orientation channel to lay out the cartoon.
+3. **Everything else faded** — points and bonds set to 5% opacity so the ribbon reads clearly without hiding the underlying structure entirely.
+
+Scrub through the 98 frames and the ribbon will animate with the trajectory. To restore the normal look, Ctrl+Z a few times (or undo the opacity, shape, and binding steps individually).
+
+TOOL SEQUENCE: get_context → write_mod:channel → run_mod → run_command:bind → run_command:shape → run_command:pointopacity → run_command:bondopacity
+get_context calls: 1 · turns: 8
+used mod parameters: no```
+
+## POST-PASS R3_runb — faithful run_mod (real producer, real adk)
+
+```
+==============================================================================
+R3_runb — COLD, no hints
+USER: "Make a cartoon of the backbone with everything else faded."
+==============================================================================
+
+>>> TOOL get_context({})
+<<< System: adk
+Atoms (N): 3341
+Frames (T): 98
+Categories: polymer
+Groups (1): A
+Subgroups: 214
+Subgroup kinds (residue names — target as <group>.<kind>*, e.g. A.ALA*): ALA, ARG, ASN, ASP, CYS, GLN, GLU, GLY, HIS, ILE, LEU, LYS, MET, PHE, PRO, SER, THR, TRP, TYR, VAL
+Point types (atom elements — target a whole class across the system as *.*.*.<type>, e.g. *.*.*.C): C, N, O, S
+Base look (defaults for any element not written by a command; undo restores these): point size 3, opacity 1, color #e6e6e6
+Example targets: all, polymer
+Committed selections:
+(none)
+Channels:
+no channels
+Bindings:
+no bindings
+Shapes:
+  points: sphere (active)
+  bonds: tube (active)
+  traces: tube (active), ribbon
+Styles:
+styles:
+  standard (default)
+  matte
+  glossy
+Registered mods:
+  (none yet)
+
+[assistant turn 2]
+Good — no channels yet. I need to:
+1. Write and run a `channel` mod to compute backbone orientation (so the ribbon shape has something to bind).
+2. Bind it to `orientation`.
+3. Switch traces to `ribbon`.
+4. Fade everything else (atoms + bonds) to near-transparent.
+
+Let me write the orientation channel mod first.
+
+>>> TOOL write_mod({"name":"backbone_orientation","produces":"channel","channel":"bb_orientation"})
+<<< wrote mod "backbone_orientation" to .molaro/mods/backbone_orientation.py — it is now registered; run it with run_mod.
+--- mod source (backbone_orientation) ---
+
+# channel: bb_orientation
+# Backbone orientation for ribbon rendering.
+# Per-atom, per-frame 3-vector (components: 3).
+# Direction: CA-to-next-CA unit vector, broadcast to all atoms of each residue.
+# Frame-to-frame sign coherence enforced to prevent strobing.
+# Units: dimensionless (unit vectors).
+
+import numpy as np
+
+def compute(data, target_indices):
+    if data.trajectory is None:
+        raise RuntimeError("No trajectory loaded — backbone_orientation requires coordinates.")
+
+    traj = data.trajectory
+    top  = traj.topology
+    n_frames = traj.n_frames
+    n_atoms  = top.n_atoms
+
+    # --- find CA atoms, one per residue (in residue order) ---
+    residues = list(top.residues)
+    n_res    = len(residues)
+
+    ca_indices = []          # trajectory atom index of each residue's CA (or first atom)
+    for res in residues:
+        ca = next((a.index for a in res.atoms if a.name == "CA"), None)
+        if ca is None:
+            ca = next(a.index for a in res.atoms)   # fallback: first atom
+        ca_indices.append(ca)
+    ca_indices = np.array(ca_indices)                # (n_res,)
+
+    # coords of every CA, all frames — float64 for precision
+    ca_xyz = traj.xyz[:, ca_indices, :].astype(np.float64)  # (n_frames, n_res, 3)
+
+    # --- per-residue direction: CA_i → CA_{i+1} ---
+    # shape (n_frames, n_res, 3)
+    dirs = np.empty((n_frames, n_res, 3), dtype=np.float64)
+    dirs[:, :-1, :] = ca_xyz[:, 1:, :] - ca_xyz[:, :-1, :]   # forward difference
+    dirs[:, -1,  :] = dirs[:, -2, :]                           # last residue: repeat previous
+
+    # normalise
+    norms = np.linalg.norm(dirs, axis=2, keepdims=True)
+    norms = np.where(norms < 1e-8, 1.0, norms)
+    dirs /= norms                                               # (n_frames, n_res, 3)
+
+    # --- sign coherence across frames ---
+    for f in range(1, n_frames):
+        dot = np.einsum('ri,ri->r', dirs[f], dirs[f - 1])      # (n_res,)
+        flip = (dot < 0).astype(np.float64)                    # 1 where we must flip
+        dirs[f] *= (1.0 - 2.0 * flip)[:, np.newaxis]
+
+    # --- broadcast residue → atom ---
+    res_of_atom = np.array([a.residue.index for a in top.atoms])  # (n_atoms,)
+    # (n_frames, n_atoms, 3)
+    per_atom = dirs[:, res_of_atom, :]
+
+    return {
+        "values":     per_atom.reshape(-1).tolist(),
+        "components": 3,
+    }
+
+--- end ---
+
+>>> TOOL run_mod({"name":"backbone_orientation","target":"all"})
+<<< backbone_orientation → declared vector channel "bb_orientation" — bindable now (no reload)
+
+[assistant turn 4]
+Channel is live. Now bind it to orientation, switch the trace shape to ribbon, then fade points and bonds.
+
+>>> TOOL run_command({"command":"bind all bb_orientation orientation"})
+<<< bound "bb_orientation" → orientation on "all" — live: re-derives as the displayed frame changes
+
+>>> TOOL run_command({"command":"shape traces ribbon"})
+<<< traces now draw as ribbon
+
+>>> TOOL run_command({"command":"pointopacity all 0.08"})
+<<< ok: pointopacity all 0.08
+
+>>> TOOL run_command({"command":"bondopacity all 0.08"})
+<<< ok: bondopacity all 0.08
+
+[assistant turn 8]
+Here's what was done:
+
+1. **`backbone_orientation` mod** — computed a CA→CA unit vector per residue, broadcast to every atom, with frame-to-frame sign coherence so the ribbon doesn't strobe during playback. Declared as the `bb_orientation` channel.
+2. **Bound** `bb_orientation` → `orientation` (animates every frame).
+3. **Switched** traces to `ribbon` shape — the oriented backbone ribbon is now drawn.
+4. **Faded** points and bonds to 8% opacity so the structure is ghosted in the background without disappearing entirely.
+
+To restore the original look, a few Ctrl+Z undos will walk it back step by step.
+
+TOOL SEQUENCE: get_context → write_mod:channel → run_mod → run_command:bind → run_command:shape → run_command:pointopacity → run_command:bondopacity
+get_context calls: 1 · turns: 8
 used mod parameters: no```

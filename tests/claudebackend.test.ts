@@ -495,7 +495,26 @@ test("system prompt teaches the command grammar and the command-vs-mod choice (P
   assert.match(p, /x_is_frames/);
   assert.match(p, /frame-to-frame coherence/);    // the coherence prose that DID land
   assert.match(p, /Seed each frame from the previous/);
-  assert.match(p, /nothing bound to `orientation` draws \*\*nothing\*\*/); // the shape dependency
+  assert.match(p, /nothing bound to\s+`orientation` draws \*\*nothing\*\*/); // the shape dependency
+
+  // -- the three attended prompt-pass changes (cold acceptance test findings) --
+  // Each guards a SPECIFIC observed failure; see reports/ACCEPTANCE_COLD.md.
+  // (1) the per-point BROADCAST trap — every cold R3 mod produced a per-residue
+  // array for a per-point channel and was refused on length. The correction must
+  // sit where the return is composed, and must SHOW the idiom, not restate the
+  // formula (prompt_examples.test guards example TARGETS; this has none).
+  assert.match(p, /a channel is PER-POINT/);
+  assert.match(p, /BROADCAST it: every atom inherits its residue's value/);
+  assert.match(p, /res_of_atom/);                 // the atom→residue index idiom
+  assert.match(p, /per_res\[:, res_of_atom, :\]/); // the corrected shape, shown
+  // (2) the vocabulary clause: "cartoon" → ribbon (one run approximated with a tube)
+  assert.match(p, /\*\*cartoon\*\* \(or ribbon\) rendering of a\s+backbone is `shape traces ribbon`/);
+  // (3) get_context is CONDITIONAL, not absolute — but the after-declaration case
+  // is strengthened, because R2's whole success was reading live Channels first.
+  assert.doesNotMatch(p, /Before anything, call/);            // the old absolute is gone
+  assert.match(p, /before you write or bind a channel, or swap a shape/);
+  assert.match(p, /again after anything is declared/);
+  assert.match(p, /Never guess a channel, shape, or selection name/);
   // NEGATIVE guard (the stale-claim class): the prompt must not tell Claude it
   // CANNOT produce a visual kind it actually can. `produces: figure` renders
   // histograms/contact maps; a leftover "only the three result kinds"

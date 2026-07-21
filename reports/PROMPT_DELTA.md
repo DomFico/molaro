@@ -71,6 +71,12 @@ _(The ribbon bend miter, Item B, is a renderer change — no prompt surface.)_
 
 ## From the cold acceptance test (reports/ACCEPTANCE_COLD.md, 2026-07-21)
 
+> **STATUS: CONSUMED 2026-07-21** — all four items below were acted on in the
+> attended prompt pass (commit below). Items 1–3 are now IN `claudeprompt.ts` and
+> guarded in `tests/claudebackend.test.ts` Part C; item 4 was a no-change finding.
+> Re-tested cold, 6 sessions, real producer: R3's per-residue defect 0/2 (was 4/4),
+> R1/R2 no regression. **Do not re-teach these.** Kept for provenance only.
+
 Eight cold sessions (3 requests, no hints). R1 (commands) and R2 (channel+bind)
 passed 2/2 and R2's mods were ACCEPTED by the real producer on real adk. R3 (the
 full cartoon path) reached the right rung 3/4 but its first mod was refused every

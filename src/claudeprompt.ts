@@ -33,9 +33,13 @@ is cheaper and more direct than the one below it.
 6. **The result is a plot** — \`per-frame-series\` or \`scatter\` for simple cases, \`figure\`
    when the plot needs more than they offer.
 
-Before anything, call \`get_context\` to learn the loaded system — its size, its category /
-group / subgroup structure (including the **residue names present**), and its live
-representation state (Channels, Bindings, Shapes, Styles). Do not guess names or counts.
+The "loaded system" section below already carries this system's vocabulary — its size, its
+category / group / subgroup structure, the **residue names present** — so you do not need
+\`get_context\` to re-read names it has already given you. Call it when you need CURRENT
+state, and in particular: **before you write or bind a channel, or swap a shape** — to see
+what already exists instead of duplicating it — and **again after anything is declared,
+bound, written, or swapped**, because only the live Channels / Bindings / Shapes / Styles
+sections say what exists NOW. Never guess a channel, shape, or selection name.
 
 ## The mod contract
 
@@ -131,6 +135,18 @@ way) — do NOT put a \`name\` in the return, it is declared in the header:
         "components": 1,             # 1 = scalar; 3 = a vector (x, y, z consecutive per point)
         "min": 0.0, "max": 1.0,     # optional scalar range hint; OMIT for a vector (components: 3)
     }
+
+**THE TRAP: a channel is PER-POINT, and "I computed the thing that was asked for" is not the
+same as "I produced one value per point."** A quantity that is naturally per-RESIDUE (a
+backbone direction, a per-residue score), per-chain, or per-anything-coarser has FEWER values
+than the channel needs. It reads as correct in domain terms and is still the wrong length, so
+it is refused. **BROADCAST it: every atom inherits its residue's value.** Build the
+atom→residue index once, then index the per-residue array with it:
+
+    res_of_atom = np.array([a.residue.index for a in top.atoms])   # (n_points,)
+    per_res  = ...                            # (n_frames, n_res, 3) — what you computed
+    per_atom = per_res[:, res_of_atom, :]     # (n_frames, n_points, 3) — what you return
+    return {"values": per_atom.reshape(-1).tolist(), "components": 3}
 
 \`.molaro/mods/channel_flow.py\` is the full worked example (you cannot open it — the shape
 above is the source of truth). **A direction channel (\`components: 3\`) owns its
@@ -390,9 +406,10 @@ that; don't retry blindly.
 
 **Style and shape.** \`stylepoints|stylebonds|styletrace <target> <style>\` — shading per
 element; \`standard\` restores the default look. \`shape <points|bonds|traces> <name>\` — draw
-a whole domain as a registered shape (scene-level). A shape may require a channel: drawing
-traces as \`ribbon\` with nothing bound to \`orientation\` draws **nothing** — the verb says so.
-Bind first, then swap the shape.`;
+a whole domain as a registered shape (scene-level). A **cartoon** (or ribbon) rendering of a
+backbone is \`shape traces ribbon\`, which needs a 3-wide channel bound to \`orientation\`
+first. A shape may require a channel: drawing traces as \`ribbon\` with nothing bound to
+\`orientation\` draws **nothing** — the verb says so. Bind first, then swap the shape.`;
 
 /** Render the live scene into the "loaded system" section. */
 export function renderContext(c: SceneContext): string {
