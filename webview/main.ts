@@ -913,8 +913,11 @@ const traceTubesGenerator: ShapeGenerator<TraceTubePass> = {
  * recommendation executed at draw). Registers DISABLED behind the shape
  * verb; with orientation unbound the buffer is zero and every quad
  * collapses (the ruled degeneracy: no data, no plane, no pixels). No joint
- * pass: ribbon ends are naive (logged) — the tube's joint-sphere identity
- * is rotational symmetry's trick and dies with it. */
+ * pass: the tube's joint-sphere identity is rotational symmetry's trick and
+ * dies with it. Instead, a BEND MITER (shader) slides each junction corner
+ * along its segment onto the bend's bisector plane, closing the wedge gap
+ * while leaving the plane orientation (across) untouched — see ribbonShaders
+ * + iPrevPoint/iNextPoint. Chain ends stay naive by construction. */
 interface RibbonPass extends BuiltPass {
   attrVersions(): { start: number; across: number; width: number; color: number };
 }
@@ -942,8 +945,14 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
     const iColorB = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 4), 4);
     const iAcrossA = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
     const iAcrossB = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
+    // Bend miter: the FAR point of each end's neighbour segment (the point
+    // before A, the point after B), so the shader can slide the junction edge
+    // onto the bend bisector plane. Filled per-frame at the iStart/iEnd cadence;
+    // per-instance from neighbour data, slot ≡ header order, no compaction.
+    const iPrevPoint = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
+    const iNextPoint = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
     const iStyle = new THREE.InstancedBufferAttribute(new Float32Array(seg.count), 1);
-    for (const a of [iStart, iEnd, iVisible, iWidthA, iWidthB, iColorA, iColorB, iAcrossA, iAcrossB, iStyle]) {
+    for (const a of [iStart, iEnd, iVisible, iWidthA, iWidthB, iColorA, iColorB, iAcrossA, iAcrossB, iPrevPoint, iNextPoint, iStyle]) {
       a.setUsage(THREE.DynamicDrawUsage);
     }
     geo.setAttribute("iStart", iStart);
@@ -955,6 +964,8 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
     geo.setAttribute("iColorB", iColorB);
     geo.setAttribute("iAcrossA", iAcrossA);
     geo.setAttribute("iAcrossB", iAcrossB);
+    geo.setAttribute("iPrevPoint", iPrevPoint);
+    geo.setAttribute("iNextPoint", iNextPoint);
     geo.setAttribute("iStyle", iStyle);
     const endsOfVertex: { k: number; b: boolean }[][] =
       Array.from({ length: env.traceVertices.length }, () => []);
@@ -962,20 +973,40 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
       endsOfVertex[seg.vertexA[k]].push({ k, b: false });
       endsOfVertex[seg.vertexB[k]].push({ k, b: true });
     }
+    // Per-segment neighbour FAR points (miter): the point before A and after B.
+    // A chain end (no neighbour) points at its OWN endpoint → the shader sees a
+    // zero neighbour direction → no miter (the naive, clean end). Computed once;
+    // the topology is fixed, only the positions move per frame.
+    const prevPointId = new Int32Array(seg.count);
+    const nextPointId = new Int32Array(seg.count);
+    for (let k = 0; k < seg.count; k++) {
+      const nbrA = endsOfVertex[seg.vertexA[k]].find((e) => e.k !== k);
+      prevPointId[k] = nbrA ? (nbrA.b ? seg.pointA[nbrA.k] : seg.pointB[nbrA.k]) : seg.pointA[k];
+      const nbrB = endsOfVertex[seg.vertexB[k]].find((e) => e.k !== k);
+      nextPointId[k] = nbrB ? (nbrB.b ? seg.pointA[nbrB.k] : seg.pointB[nbrB.k]) : seg.pointB[k];
+    }
     const visible = rep.state.visible;
     const fillEnds = (): void => {
       const pos = env.positionAttr.array as Float32Array;
       const s = iStart.array as Float32Array;
       const t = iEnd.array as Float32Array;
+      const pv = iPrevPoint.array as Float32Array;
+      const nx = iNextPoint.array as Float32Array;
       for (let k = 0; k < seg.count; k++) {
         const a3 = seg.pointA[k] * 3;
         const b3 = seg.pointB[k] * 3;
+        const p3 = prevPointId[k] * 3;
+        const q3 = nextPointId[k] * 3;
         const k3 = k * 3;
         s[k3] = pos[a3]; s[k3 + 1] = pos[a3 + 1]; s[k3 + 2] = pos[a3 + 2];
         t[k3] = pos[b3]; t[k3 + 1] = pos[b3 + 1]; t[k3 + 2] = pos[b3 + 2];
+        pv[k3] = pos[p3]; pv[k3 + 1] = pos[p3 + 1]; pv[k3 + 2] = pos[p3 + 2];
+        nx[k3] = pos[q3]; nx[k3 + 1] = pos[q3 + 1]; nx[k3 + 2] = pos[q3 + 2];
       }
       iStart.needsUpdate = true;
       iEnd.needsUpdate = true;
+      iPrevPoint.needsUpdate = true;
+      iNextPoint.needsUpdate = true;
     };
     const fillColors = (ids?: readonly number[]): void => {
       const tc = rep.state.traceColor;

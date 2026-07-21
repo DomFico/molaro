@@ -434,6 +434,7 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
       attribute float iWidthA; attribute float iWidthB;
       attribute vec4 iColorA; attribute vec4 iColorB;
       attribute vec3 iAcrossA; attribute vec3 iAcrossB;
+      attribute vec3 iPrevPoint; attribute vec3 iNextPoint;
       attribute float iStyle;
       uniform float uWorldPerSize;
       ${STYLE_VERTEX_CHUNK}
@@ -463,7 +464,24 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // DEGENERACY: no defined plane at this end → zero width (collapse)
         float w = (atB ? wB : wA) * (alen < 1e-6 ? 0.0 : 1.0);
         vec3 across = alen < 1e-6 ? vec3(0.0) : aperp / alen;
-        vec3 pos = (atB ? mvB : mvA) + across * (aCorner.x * w);
+        // BEND MITER: slide the junction corner along the segment onto the
+        // bend's bisector plane, so adjacent segments' end edges become COPLANAR
+        // and the wedge gap closes. across (hence the plane normal cross(along,
+        // across)) is UNCHANGED — only the position moves along the segment, so
+        // drawn-equals-supplied survives. A chain end / straight run gives a zero
+        // neighbour direction, so m = along, across is perpendicular to along,
+        // dot(across,m)=0, the shift is zero (the naive, clean end). A degenerate
+        // end has w=0, so no shift.
+        vec3 endpoint = atB ? mvB : mvA;
+        vec3 mvPrev = (modelViewMatrix * vec4(iPrevPoint, 1.0)).xyz;
+        vec3 mvNext = (modelViewMatrix * vec4(iNextPoint, 1.0)).xyz;
+        vec3 nbr = atB ? (mvNext - mvB) : (mvA - mvPrev); // neighbour flow through the junction
+        float nlen = length(nbr);
+        vec3 alongNbr = nlen < 1e-6 ? along : nbr / nlen;
+        vec3 m = normalize(along + alongNbr);             // bisector tangent
+        float denom = max(dot(along, m), 0.25);           // cos(θ/2), clamped = miter limit 4
+        float shift = (-aCorner.x * w) * dot(across, m) / denom;
+        vec3 pos = endpoint + across * (aCorner.x * w) + along * shift;
         vColor = atB ? iColorB : iColorA;
         vNormal = cross(along, across);
         gl_Position = projectionMatrix * vec4(pos, 1.0);
