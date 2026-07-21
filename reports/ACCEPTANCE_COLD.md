@@ -329,6 +329,17 @@ like the eight already here.
 
 ---
 
+# An acceptance suite inherits its fixture's blind spots
+
+**The methodological line, stated where the next person will look:** adding requests
+does not add coverage of anything the fixture cannot express. Eight requests passing
+on adk said nothing about solvent, periodic boundaries, or multi-molecule fitting,
+because adk has none of them — it is 100% polymer, single-chain, no unit cell. The
+instinct on finding a gap is to write more requests; the cheaper and larger win is
+usually another SYSTEM. The suite is now parameterized (`COLD_SYSTEM`) over adk,
+trpcage (solvated, 6.3% polymer) and nucleic (multi-chain, non-protein), with each
+system's context derived from its own real header.
+
 # Suite blind spot: every run to date used adk, which cannot show a solvent defect
 
 Found while auditing the shipped `rmsf` mod after a periodic-boundary change
@@ -362,13 +373,34 @@ frames, `{polymer: 304, solvent: 4497, ion: 9}`, provenance reporting the center
 The `rmsf` mod's description now states the rule where `get_context` surfaces it, and
 `PROMPT_DELTA.md` carries the prompt entry.
 
-**NOT done, and it is the part that matters:** no live cold run against trp cage. The
-API key was shredded at the end of the R6–R8 round, as instructed, and no key is
-present in the environment. What is measured above is that the suite's system CANNOT
-exhibit the defect; whether the assistant would still choose `target: all` on a
-solvated system is unmeasured. Given R6 chose it 2/2 on adk from a request that never
-mentions the protein, the expectation is that it would — but that is a prediction, not
-a result, and it should not be recorded as one.
+**RESOLVED — the prediction was correct, and the fix is now MEASURED.** Run cold on
+02_trpcage_atomistic (4810 atoms, 6.3% polymer), with every system-shaped context
+field derived from that system's real header rather than adk's:
+
+| `rmsf` description | R6 target chosen | |
+|---|---|---|
+| **pre-edit** (as shipped before 6779bf4) | `target: all` | **3/3** — the trap fires |
+| **post-edit** (states the rule) | `target: polymer` | **3/3** — avoided |
+
+That is a clean A/B on one variable. It confirms two things at once: the assistant
+DOES default to `all` on a solvated system when nothing warns it, exactly as
+predicted from R6's adk behaviour; and the description edit is what changes it. This
+is a *validated* change, not the plausible-but-unmeasured category the previous
+prompt pass's change 2 fell into — the distinction being that this one had a
+prediction, a control, and a measurement.
+
+**Third fixture — 09_nucleic_duplex (19393 atoms, 4 chains, non-protein):**
+
+- **R6** → `run_mod{rmsf, target: polymer}` 2/2. Correct on a multi-chain,
+  non-protein system.
+- **R8** → a `produces: commands` mod 2/2, by two DIFFERENT correct routes: one read
+  `data.labels` (3 reads) to build the target, the other addressed the phosphate
+  backbone by element as `*.*.*.P`, which is chain-agnostic by construction. Neither
+  hardcoded a chain letter; neither used `@all`. The mod-outlives-the-system rule
+  holds by two independent strategies, and it recognised DA/DT/DG/DC rather than
+  reaching for protein residue names.
+
+
 
 # Appendix — full transcripts
 

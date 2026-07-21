@@ -112,12 +112,23 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
   it would be wrong if it were allowed.
 - **Point at:** `.molaro/mods/ribbon_dir.py`, which now documents this at the return.
 
-### RMSF is target-driven the way RMSD is — and `all` is the wrong target on a solvated system (found in real use, 2026-07-21)
+### A per-point-scalar's ramp is normalized over the TARGET — so `all` spends the range on solvent (found in real use, 2026-07-21)
 
-- **Teach, beside the existing "RMSD is selection-driven — superpose on the same atom
-  set you measure" rule:** the same is true of RMSF, and it bites harder because a
-  second thing fails at the same time. Asking for fluctuation over `all` on a solvated
-  system does two wrong things at once, neither of which reports an error:
+- **THE GENERAL RULE, and it is not about RMSF.** A `per-point-scalar` mod returns
+  values in `[0,1]`, min-maxed **over whatever was targeted** — that is the CONTRACT,
+  not any one mod's choice. So *any* colour-by-computed-quantity invoked with
+  `target: all` on a solvated box spends its entire dynamic range on whichever
+  component holds the extremes, and in a water box that is almost always the water.
+  Displacement, velocity, exposure, fluctuation, anything: **the molecule comes out
+  flat, every time, silently, with no error.** The existing "RMSD is selection-driven
+  — superpose on the same atom set you measure" rule is a SPECIAL CASE of this, not
+  the general statement.
+- **The rule to state:** when the request is about the MOLECULE — how it moves, how
+  exposed it is, how anything varies across it — target the molecule (`polymer`, a
+  chain, a residue range), not `all`. `all` is right only when the whole system IS
+  the molecule.
+- **RMSF is the worked example, because two things fail there at once** and the
+  measurement separates them:
   - **Normalization swamping (the visible failure, and the one nobody names).** The
     `[0,1]` ramp is min-maxed over whatever is targeted. Water is the most mobile
     thing in the box, so on the corpus trp cage — 304 protein atoms among 4810 —
@@ -126,10 +137,6 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
   - **Superposition contamination.** `md.rmsf` superposes over the set it is handed,
     so `all` fits on 4506 waters and measures the protein against a solvent-dominated
     frame: **Spearman 0.87** against the solute-targeted answer, not 1.00.
-- **The rule to state:** when a request is about how a MOLECULE moves — floppiness,
-  flexibility, mobility, fluctuation — target the solute (`polymer`, a chain, a
-  residue range), not `all`. `all` is right only when the whole system IS the
-  molecule.
 - **Why this was never caught:** every cold-acceptance run to date used adk, which is
   100% polymer with no solvent and no unit cell. There `rmsf all` and
   `rmsf <protein>` agree to **0.0000** — the defect is structurally invisible. R6
@@ -137,6 +144,13 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
   2/2 and was scored a pass. On a solvated system that same choice is wrong.
 - **Point at:** `.molaro/mods/rmsf.py`, whose description and header now state this
   where a mod author or the assistant will read it.
+- **MEASURED, not merely reasoned.** Cold A/B on the solvated trp cage, one variable:
+  with the pre-edit description the assistant chose `target: all` **3/3**; with the
+  description stating the rule it chose `target: polymer` **3/3**. So the trap is
+  real AND a description-level correction defeats it. That is evidence the prompt
+  rule will land too — and evidence for the general technique: put the correction
+  where the CHOICE is made (the advertised description), not where the failure
+  shows up.
 - **Suite gap this exposes, worth fixing separately:** an entire defect class —
   solvent, periodic boundaries, multi-molecule fitting — cannot appear in an
   adk-only acceptance suite. One solvated system (trp cage) covers it.
