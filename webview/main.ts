@@ -1994,22 +1994,36 @@ async function main(): Promise<void> {
     if (ids.length === 0) return 0;
     const list = [...ids];
     const prev = new Float32Array(list.length * stride);
+    // AFTER as well as BEFORE. This is the funnel every representation writer
+    // reaches — colour/size/opacity across points, edges and trace vertices, the
+    // three style verbs, orientation, `rainbow`, `bake`, and a bind's initial
+    // apply — so capturing the written values here gives all of them a forward
+    // face at once, and undo/redo become a two-way swap over the same id list.
+    //
+    // Values, not a re-run of the verb. `bake` reads the DISPLAYED FRAME's channel
+    // values at execution time, so replaying a verb string at a different playhead
+    // yields different numbers; replaying the floats is byte-identical by
+    // construction. That is why redo restores state rather than re-issuing commands.
+    const next = new Float32Array(list.length * stride);
     for (let i = 0; i < list.length; i++) {
       const at = list[i] * stride;
       for (let c = 0; c < stride; c++) {
         prev[i * stride + c] = buf[at + c];
-        buf[at + c] = valueAt(i, c);
+        const v = valueAt(i, c);
+        next[i * stride + c] = v;
+        buf[at + c] = v;
       }
     }
     onWrite(list);
-    model.recordOp(() => {
+    const restore = (from: Float32Array): number[] => {
       for (let i = 0; i < list.length; i++) {
         const at = list[i] * stride;
-        for (let c = 0; c < stride; c++) buf[at + c] = prev[i * stride + c];
+        for (let c = 0; c < stride; c++) buf[at + c] = from[i * stride + c];
       }
       onWrite(list);
       return [];
-    });
+    };
+    model.recordOp(() => restore(prev), () => restore(next));
     return list.length;
   };
   const makeRepWriter = (
@@ -2062,10 +2076,15 @@ async function main(): Promise<void> {
       if (n > 0) {
         const snap = bindingRegistry.snapshot();
         const stats = bindingRegistry.release(ids, axis);
+        const after = bindingRegistry.snapshot();
         if (stats.touched > 0) {
           refreshBindingBadge();
           model.recordOp(() => {
             bindingRegistry.restore(snap);
+            refreshBindingBadge();
+            return [];
+          }, () => {
+            bindingRegistry.restore(after);
             refreshBindingBadge();
             return [];
           });
@@ -2588,9 +2607,14 @@ async function main(): Promise<void> {
       else applyScalarsToAxis(commandContext, b.axis, b.points, values);
       const snap = bindingRegistry.snapshot();
       bindingRegistry.add(b);
+      const after = bindingRegistry.snapshot();
       refreshBindingBadge();
       model.recordOp(() => {
         bindingRegistry.restore(snap);
+        refreshBindingBadge();
+        return [];
+      }, () => {
+        bindingRegistry.restore(after);
         refreshBindingBadge();
         return [];
       });
@@ -2627,9 +2651,14 @@ async function main(): Promise<void> {
         acc(bindingRegistry.release(sel.vertices, ORIENTATION_AXIS));
       }
       if (total.touched === 0) return total; // nothing changed — record no op
+      const after = bindingRegistry.snapshot();
       refreshBindingBadge();
       model.recordOp(() => {
         bindingRegistry.restore(snap);
+        refreshBindingBadge();
+        return [];
+      }, () => {
+        bindingRegistry.restore(after);
         refreshBindingBadge();
         return [];
       });
@@ -2658,6 +2687,9 @@ async function main(): Promise<void> {
         const prev = r.prev;
         model.recordOp(() => {
           registry.setActive(domain, prev);
+          return [];
+        }, () => {
+          registry.setActive(domain, label);
           return [];
         });
       }

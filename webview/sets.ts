@@ -342,9 +342,17 @@ export interface CommittedSelection {
 
 export const MAX_BRACKET_LANES = 4;
 
-/** One undoable state change: `undo()` reverts it and returns affected points. */
+/** One undoable state change. `undo()` reverts it, `redo()` re-applies it, and
+ * both return the affected point indices so the renderer can flip just those bits.
+ *
+ * `redo` is REQUIRED, not optional. An op without a forward face would sit on the
+ * stack looking redoable and quietly do nothing — a redo that leaves a *nearly*
+ * correct state is worse than no redo, because it is trusted. Requiring it makes
+ * the compiler enumerate every record site instead of leaving the gap to be found
+ * by a user. */
 interface UndoOp {
   undo(): number[];
+  redo(): number[];
 }
 
 /**
@@ -460,7 +468,7 @@ export class SelectionModel {
     const set = this.target;
     const pts = set.add(e);
     if (!pts) return [];
-    this.pushUndo({ undo: () => set.remove(e) ?? [] });
+    this.pushUndo({ undo: () => set.remove(e) ?? [], redo: () => set.add(e) ?? [] });
     this.emit();
     return pts;
   }
@@ -480,6 +488,11 @@ export class SelectionModel {
       undo: () => {
         const a = set.add(e) ?? [];
         if (droppedHide) a.push(...(droppedHide.hiddenPart.add(e) ?? []));
+        return a;
+      },
+      redo: () => {
+        const a = set.remove(e) ?? [];
+        if (droppedHide) a.push(...(droppedHide.hiddenPart.remove(e) ?? []));
         return a;
       },
     });
@@ -526,6 +539,17 @@ export class SelectionModel {
         }
         return a;
       },
+      // Forward order mirrors the original carve: drop the covering ancestors
+      // first, then lay the complement back down.
+      redo: () => {
+        const a: number[] = [];
+        for (const r of removed) {
+          a.push(...(set.remove(r.entry) ?? []));
+          if (r.hpDropped) a.push(...(sel!.hiddenPart.remove(r.entry) ?? []));
+        }
+        for (const c of added) a.push(...(set.add(c) ?? []));
+        return a;
+      },
     });
     this.emit();
     return affected;
@@ -536,7 +560,7 @@ export class SelectionModel {
     const set = this.pendingSet;
     const entries = set.listEntries();
     const pts = set.clear();
-    this.pushUndo({ undo: () => set.addMany(entries) });
+    this.pushUndo({ undo: () => set.addMany(entries), redo: () => set.clear() });
     this.emit();
     return pts;
   }
@@ -554,6 +578,11 @@ export class SelectionModel {
       undo: () => {
         const a = set.addMany(entries);
         if (sel) a.push(...sel.hiddenPart.addMany(hpEntries));
+        return a;
+      },
+      redo: () => {
+        const a = set.clear();
+        if (sel) a.push(...sel.hiddenPart.clear());
         return a;
       },
     });
@@ -580,6 +609,15 @@ export class SelectionModel {
         for (let i = ops.length - 1; i >= 0; i--) affected.push(...ops[i].undo());
         return affected;
       },
+      // The exact mirror: forward, in the order they were recorded. Sound even
+      // though a stroke is not minimal — a paint backtrack records an INVERSE op
+      // into the open stroke rather than popping, so replaying in order
+      // reproduces the same net state that recording it did.
+      redo: () => {
+        const affected: number[] = [];
+        for (let i = 0; i < ops.length; i++) affected.push(...ops[i].redo());
+        return affected;
+      },
     });
   }
 
@@ -588,8 +626,8 @@ export class SelectionModel {
    * Ctrl+Z drives, so no second undo system can ever exist. The closure must
    * revert that external state itself and return the affected point indices;
    * between beginStroke/endStroke it coalesces like any other op. */
-  recordOp(undo: () => number[]): void {
-    this.pushUndo({ undo });
+  recordOp(undo: () => number[], redo: () => number[]): void {
+    this.pushUndo({ undo, redo });
   }
 
   // -- lifecycle ----------------------------------------------------------------
@@ -609,7 +647,15 @@ export class SelectionModel {
       lane: this.freeLane(),
     };
     this.committedList.push(sel);
-    this.pendingSet = new NodeSet(this.hierarchy);
+    // CAPTURED, not re-created on redo. Later ops in the same stroke capture this
+    // interim object BY REFERENCE (addToTarget closes over `this.target`), so a
+    // redo that installed a FRESH set would leave those ops mutating an orphan
+    // while the live pending set stayed empty — the selection would come back and
+    // the pending footprint would silently not. Reported as an undo-only concern;
+    // measured as redo-only (LIFO makes undo safe), so it lands here with the
+    // forward face rather than ahead of it. tests/sets.test.ts pins both halves.
+    const interim = new NodeSet(this.hierarchy);
+    this.pendingSet = interim;
     this.pushUndo({
       undo: () => {
         const i = this.committedList.indexOf(sel);
@@ -621,6 +667,12 @@ export class SelectionModel {
         const affected = this.pendingSet.resolvedPoints();
         this.pendingSet = set;
         return affected.concat(set.resolvedPoints());
+      },
+      redo: () => {
+        this.committedList.push(sel);
+        const affected = this.pendingSet.resolvedPoints();
+        this.pendingSet = interim; // the SAME object later ops captured
+        return affected.concat(sel.set.resolvedPoints());
       },
     });
     this.emit();
@@ -660,6 +712,10 @@ export class SelectionModel {
         sel.hidden = !hidden;
         return sel.set.resolvedPoints();
       },
+      redo: () => {
+        sel.hidden = hidden;
+        return sel.set.resolvedPoints();
+      },
     });
     this.emit();
     return sel.set.resolvedPoints();
@@ -682,6 +738,7 @@ export class SelectionModel {
     const pts = (hidden ? sel.hiddenPart.add(e) : sel.hiddenPart.remove(e)) ?? [];
     this.pushUndo({
       undo: () => (hidden ? (sel.hiddenPart.remove(e) ?? []) : (sel.hiddenPart.add(e) ?? [])),
+      redo: () => (hidden ? (sel.hiddenPart.add(e) ?? []) : (sel.hiddenPart.remove(e) ?? [])),
     });
     this.emit();
     return pts;
@@ -732,6 +789,10 @@ export class SelectionModel {
         sel.name = prev;
         return [];
       },
+      redo: () => {
+        sel.name = next;
+        return [];
+      },
     });
     this.emit();
     return true;
@@ -748,6 +809,12 @@ export class SelectionModel {
     this.pushUndo({
       undo: () => {
         this.committedList.splice(Math.min(idx, this.committedList.length), 0, sel);
+        return sel.set.resolvedPoints();
+      },
+      redo: () => {
+        const i = this.committedList.indexOf(sel);
+        if (i >= 0) this.committedList.splice(i, 1);
+        if (this.editingId === sel.id) this.editingId = null;
         return sel.set.resolvedPoints();
       },
     });
