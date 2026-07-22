@@ -149,7 +149,7 @@ export function pointShaders(): { vertex: string; fragment: string } {
 export function edgeTubeShaders(): { vertex: string; fragment: string } {
   return {
     vertex: `
-      // static per-corner: x = side (-1 | +1 across width), y = end (0 | 1)
+      // EDGE TUBE static per-corner: x = side (-1 | +1 across width), y = end (0 | 1)
       attribute vec2 aCorner;
       attribute vec3 iStart; attribute vec3 iEnd;
       attribute float iVisible; attribute float iRadius; attribute vec4 iColor;
@@ -271,7 +271,7 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
 export function traceTubeShaders(): { vertex: string; fragment: string } {
   return {
     vertex: `
-      // static per-corner: x = side (-1 | +1 across width), y = end (0 | 1)
+      // TRACE TUBE static per-corner: x = side (-1 | +1 across width), y = end (0 | 1)
       attribute vec2 aCorner;
       attribute vec3 iStart; attribute vec3 iEnd;
       attribute float iVisible;
@@ -435,8 +435,7 @@ export const RIBBON_THICKNESS = 0.15;
 export function ribbonShaders(): { vertex: string; fragment: string } {
   return {
     vertex: `
-      // static per-corner: x = side (-1 | +1 across width), y = end (0 | 1)
-      // static per-corner: x = side (-1 | +1 across width), y = end (0 | 1),
+      // RIBBON static per-corner: x = side (-1 | +1 across width), y = end (0 | 1),
       // z = offset through the thickness (-1 | +1)
       attribute vec3 aCorner;
       attribute vec3 iStart; attribute vec3 iEnd;
