@@ -2088,6 +2088,33 @@ async function main(): Promise<void> {
    * per-flip cost off the bound path. Static (per_point) channels are
    * skipped: their bind-time apply is already exact at every frame. */
   const channelScopeByName = new Map(header.channels.map((c) => [c.name, c.scope]));
+  /**
+   * WHICH TARGET each channel's values were last computed FOR — the fact this
+   * system has never had, and whose absence is a whole class of silent
+   * wrongness. `header.channels` answers "does this channel exist"; nothing
+   * answered "is it still about the thing you are asking about". A
+   * target-dependent provider (proximity to a selection, say) is correct only
+   * for the selection it was run on, so liveness is the wrong question at the
+   * requires-channel gate below.
+   *
+   * The EXACT index set, not a hash and not the address string. An address can
+   * be fooled by a selection edited between runs; a hash trades a correctness
+   * property for memory that is not scarce here. A stale fingerprint produces a
+   * silently wrong picture, so the comparison is the one that cannot be fooled.
+   *
+   * Written ONLY in declareProducedChannel — every channel-keyed mirror updates
+   * at the single point a channel enters the viewer, which
+   * tests/channel_mirror.test.ts enforces.
+   */
+  const channelTargetByName = new Map<string, Int32Array>();
+  /** Canonical form of a resolved target: sorted, de-duplicated indices. */
+  const canonicalTarget = (points: readonly number[]): Int32Array =>
+    Int32Array.from([...new Set(points)]).sort();
+  const sameTarget = (a: Int32Array | undefined, b: Int32Array): boolean => {
+    if (!a || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  };
   // ASSERT-THE-UNREACHABLE (B-3): a BOUND channel's block is always present in
   // the displayed chunk — a bind can only be created once the channel is
   // declared (channelmap gate checks the displayed chunk carries it), a
@@ -2273,12 +2300,22 @@ async function main(): Promise<void> {
    * A re-declaration (same name, producer already replaced the data) skips
    * the append but still invalidates so the new values flow.
    */
-  const declareProducedChannel = (mod: AnalysisMod, delta: Channel, warning?: string): void => {
+  const declareProducedChannel = (
+    mod: AnalysisMod,
+    delta: Channel,
+    points: readonly number[],
+    warning?: string,
+  ): void => {
     const existing = header.channels.find((c) => c.name === delta.name);
     if (!existing) {
       applyChannelDelta(header, delta); // fail-closed; throws → caught below → error line
       channelScopeByName.set(delta.name, delta.scope);
     }
+    // Record what these values describe. This runs for a re-declaration too —
+    // that is the whole point: the data was just replaced, so the fingerprint
+    // must move with it. One write site covers both a hand-typed provider run
+    // and a sequenced one, so the two can never disagree.
+    channelTargetByName.set(delta.name, canonicalTarget(points));
     player.invalidateAll(); // old-shape cached chunks → refetch new-shape (S2/S3)
     const width = channelComponents(delta) === 3 ? "vector" : "scalar";
     asyncLine("ok",
@@ -2390,7 +2427,7 @@ async function main(): Promise<void> {
           // the declaration into THIS header so the channel becomes bindable
           // with no reload — the conversational property. Declaring is not
           // binding; the user binds it to an axis afterwards.
-          declareProducedChannel(mod, checked.channel, checked.warning);
+          declareProducedChannel(mod, checked.channel, points, checked.warning);
           return true;
         }
         return true;
@@ -2412,7 +2449,30 @@ async function main(): Promise<void> {
       // first (ONE level, resolved statically — a missing/ambiguous/too-deep
       // provider fails HERE, before anything runs, naming the channel).
       let sequencedProvider: string | null = null;
-      if (mod.requiresChannel && !header.channels.some((c) => c.name === mod.requiresChannel)) {
+      let refreshedProvider = false;
+      // LIVENESS IS THE WRONG QUESTION. This used to ask only "is the channel
+      // declared", which is sufficient for a TARGET-INDEPENDENT provider
+      // (ribbon_dir computes the same field whatever you point it at, so cartoon
+      // works) and silently wrong for a target-DEPENDENT one. A proximity field
+      // computed for selection A is not an answer about selection B, but it is
+      // just as declared — so the second spotlight bound the first one's numbers,
+      // showed a static picture, and reported success. Ask instead whether the
+      // live values were computed for THIS target.
+      //
+      // AN EMPTY TARGET COUNTS AS UNCHANGED, decided rather than inherited. A
+      // bare invocation resolves to no points, and that must not mean "a new
+      // target" — it would recompute on every bare call and hand a
+      // target-dependent provider an empty selection to raise on, turning a
+      // working invocation into a failure attributed to the wrong mod. It must
+      // not mean "skip sequencing" either: a bare `cartoon` legitimately relies
+      // on the first declaration happening. So an empty target still triggers a
+      // FIRST declaration and never a REFRESH — which also preserves the
+      // documented escape hatch of pinning a provider's parameters by running it
+      // by hand and then invoking the consumer bare.
+      const liveChannel = header.channels.some((c) => c.name === mod.requiresChannel);
+      const staleForThisTarget = liveChannel && points.length > 0 &&
+        !sameTarget(channelTargetByName.get(mod.requiresChannel!), canonicalTarget(points));
+      if (mod.requiresChannel && (!liveChannel || staleForThisTarget)) {
         const dep = resolveChannelDependency(mod, listRecipes());
         if ("error" in dep) {
           asyncLine("error", `${mod.name}: ${dep.error}`);
@@ -2441,6 +2501,7 @@ async function main(): Promise<void> {
             return;
           }
           sequencedProvider = dep.provider;
+          refreshedProvider = liveChannel; // it existed already → this was a REFRESH
         }
       }
       const ok = await runModOnce(mod, points, expr, params);
@@ -2448,11 +2509,20 @@ async function main(): Promise<void> {
       // the consumer then failed, the channel STAYS declared (append-only, not
       // undoable). Say so plainly rather than leaving the partial state a mystery.
       if (!ok && sequencedProvider) {
-        asyncLine("ok",
-          `note: channel "${mod.requiresChannel}" was declared by "${sequencedProvider}" and REMAINS declared — ` +
-          `sequencing is not atomicity (channels are append-only; a declaration is not undoable). ` +
-          `"${mod.name}" itself failed and wrote nothing, so nothing there is undone — the provider's ` +
-          `declaration stands.`);
+        // Two different partial states, and saying the wrong one is worse than
+        // saying nothing. A FIRST declaration leaves a channel that did not
+        // exist before; a REFRESH leaves one whose values were replaced under
+        // whatever was already bound to it. The first wording is pinned by
+        // tests/redesign.ts, so it is kept verbatim rather than generalised.
+        asyncLine("ok", refreshedProvider
+          ? `note: channel "${mod.requiresChannel}" was RECOMPUTED by "${sequencedProvider}" for this ` +
+            `target and those new values stand — sequencing is not atomicity (channel data is replaced ` +
+            `in place and is not undoable). "${mod.name}" itself failed and wrote nothing, so anything ` +
+            `still bound to that channel is now reading the new numbers.`
+          : `note: channel "${mod.requiresChannel}" was declared by "${sequencedProvider}" and REMAINS declared — ` +
+            `sequencing is not atomicity (channels are append-only; a declaration is not undoable). ` +
+            `"${mod.name}" itself failed and wrote nothing, so nothing there is undone — the provider's ` +
+            `declaration stands.`);
       }
     })();
   };
