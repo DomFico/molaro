@@ -104,3 +104,34 @@ elsewhere rather than a 15th, and that is a real piece of work.
 `reports/PARKED.md` now holds four items: hold-gesture *semantics* (superseded —
 C shipped the ruled version), the pending-mutation guard, mod outcome-line routing,
 and the ribbon segment count.
+
+---
+
+# STATE — close the gaps (2026-07-22)
+
+From `005ffd9`. All committed and pushed; tree clean.
+
+| item | hash | what |
+|---|---|---|
+| A | `71de524` | **the gate: lane green** — 990/3, both failures documented flakes cleared 2/2 in isolation |
+| C | `b010de3` | attribute-budget guard — **and the correction that my ceiling diagnosis was wrong** |
+| D | `5944320` | **coverage is fine**: S34 pins the bond shader; preambles named so the anchor trap cannot recur |
+| B | `ab5bbe6` | S49 pins the hold gesture, 14/14 |
+
+## Green
+469 unit tests + typecheck at every commit; S49 14/14; S34+S43 42/42 after the
+preamble change; full lane green at session start.
+
+## The one decision I most want reviewed
+**The attribute budget is the measured 14, not the driver's 16.** The brief assumed
+the ceiling was the driver's; it is not, and a guard written that way would not have
+fired. 14 is empirical on this driver — the message says so — but if it is wrong
+elsewhere the guard either nags or misses. It is one constant.
+
+## Not done
+- **The full lane has not run since B, C and D landed.** S34/S43/S49 were run
+  individually and are green, and C's guard is init-only — but that is reasoning
+  about coverage, which is the exact thing this session showed failing. **Run the
+  lane before shipping.**
+- The status line the budget guard writes is immediately overwritten by the header
+  line; `console.error` and the exposed result carry it. Cosmetic, unfixed.

@@ -287,3 +287,82 @@ walk, in the render loop. Lean: the producer emits both, no contract change.
 **And the thing I would measure first:** how much visible faceting is segment count
 versus the **miter limit clamp** at `dot(along, m) ≥ 0.25`. If it is mostly clamp,
 subdivision is the wrong fix for the symptom.
+
+---
+
+# Session: close the gaps (2026-07-22)
+
+## A3 — the lane is green; two documented flakes, cleared by isolation · `71de524`
+
+**Result.** `990 checks passed, 3 failed · 21.7min` — S27 (2), S38 (1). Both match
+ledger signatures, S38's `2 → 2` upload count verbatim. **Cleared 2/2 in isolation**:
+S27 17/17, S38 46/46, S38 recovering to `2 → 10` and `2 → 17`.
+
+**Decided.** Record the occurrence and continue, rather than either halting or waving
+it through. A failure that *resembles* a known flake, on a session that changed the
+renderer and added an input handler, is not evidence of anything until it clears
+alone. Neither failure touches either change.
+
+**Wrong if.** The flake is not a flake but a rare interaction with the new code.
+Two clean isolations argue against it; a third data point would come free next lane.
+
+---
+
+## B3 — S49 pins the hold gesture · `ab5bbe6`
+
+**Decided.** A scenario over all six predicates, importing the template and dwell
+duration from source rather than restating them.
+
+**The finding is the two bugs in my own first draft**, both of which *passed for the
+wrong reason*. Boot seeds a committed selection per bulk category, so "a point in no
+selection" never held — the check passed while resolving to a seeded selection.
+And `create_sele alpha` does not necessarily contain the point under the cursor, so
+newest-wins asserted a rule the fixture did not set up. Both now construct their
+states and assert the setup held.
+
+**Wrong if.** The centre point stops being coverable by `all`, which cannot happen.
+
+---
+
+## C3 — the attribute-budget guard, and my earlier diagnosis was wrong · `b010de3`
+
+**Decided.** Guard on a MEASURED budget of 14, reporting the driver's number beside
+it; walk the registry, not the scene; non-fatal.
+
+**The correction.** I reported the ribbon's zero-pixel failure as hitting the
+driver's ceiling. **It is not.** The driver reports `MAX_VERTEX_ATTRIBS = 16`, and a
+bare program links at 15 and 16, failing only at 17. Yet the pass draws at 14 named
+attributes and silently stops at 15 — proven by adding one dummy attribute to the
+*working* 8-vertex geometry. The gap is framework-injected attributes counting
+against the same budget. **A guard written against `MAX_VERTEX_ATTRIBS` — the obvious
+one, and the one the brief assumed — would not have fired.**
+
+**Weighed.** (i) Guard on the driver max — rejected by the measurement. (ii) Detect
+the link failure directly — there is none to detect; the program links. (iii) A
+measured budget with both numbers in the message — chosen.
+
+**Wrong if.** 14 is specific to this driver. Likely it is; the message says the
+number is measured, and it is one constant.
+
+**Also.** The first version walked the scene and was called two lines before `const
+scene`, so init died on a temporal dead zone and took the whole viewer down — a
+louder failure than the silent one, and not a better one. It walks the registry now,
+which cannot be ordered wrongly.
+
+---
+
+## D3 — bond tube coverage is FINE; the near-miss was the anchor · `5944320`
+
+**Answer: yes, S34 pins it.** A deliberate regression pushing the bond pass offscreen
+fails S34 ten checks deep, starting `{"red":0,"green":0,"blue":0}`. So a full lane
+would have caught my wrong-shader edit; I ran S43/S44 instead, which is precisely the
+reasoning-about-coverage failure the lane exists to prevent.
+
+**Two invalid experiments before a valid one**, worth recording: pushing the *bond*
+pass to 15 attributes changed nothing, because it declares 10 against the ribbon's 14
+and has headroom. "I broke it" needs checking as much as "it passed".
+
+**The one-line fix taken.** Each shader now names itself in its per-corner preamble —
+EDGE TUBE / TRACE TUBE / RIBBON. They were byte-identical, which is what let a
+single-replace hit the wrong function. Comment-only, so no pixel can move; S34 + S43
+confirm 42 checks unchanged.
