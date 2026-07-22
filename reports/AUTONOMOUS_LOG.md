@@ -102,3 +102,103 @@ opening the terminal takes focus away (`preserveFocus: false`).
 `preserveFocus: true`, and focus-on-hover — are unnecessary. Neither should be built.
 
 **Depends on it.** The hold-semantics decision, which stays parked (see PARKED.md).
+
+---
+
+## D1 — every recorded op gains a forward face; `redo()` is REQUIRED · `6229785`
+
+**Decided.** Widen `UndoOp` to `{ undo(); redo(); }` with `redo` mandatory, and give
+all 16 record sites a forward closure.
+
+**Weighed.** (i) `redo?()` optional — additive, no call site forced to change, and
+rejected: an op without a forward face sits on the stack looking redoable and quietly
+does nothing, which is the exact failure mode this feature must not have. (ii)
+Required — chosen; the compiler then enumerates the sites instead of leaving the gap
+to be found by a user. It found one in `sets.ts` I had missed and all five in
+`main.ts`.
+
+**Consequence worth noting.** `writeRepValues` is the single funnel every
+representation writer reaches, so capturing the written values there gave the whole
+colour/size/opacity/style/orientation grid a forward face in one edit.
+
+**Wrong if.** Some op's forward closure is not the true inverse of its undo. The
+byte-identity walk in `tests/sets.test.ts` is the guard; it compares a fingerprint at
+every depth down and back up rather than only at the ends.
+
+**Depends on it.** D-2, D-3.
+
+---
+
+## D2 — ONE invalidation point, reached by routing `endStroke` through `pushUndo` · `d9799cc`
+
+**Decided.** Rather than hooking redo-invalidation at both `pushUndo` and
+`endStroke`'s direct stack push, remove the second entrance: `endStroke` now pushes
+through `pushUndo`.
+
+**Weighed.** (i) Hook both sites — correct today, and rejected: it leaves two doors
+into the stack, so the next person to add a push has to know to hook it too. That is
+the two-lists shape this repo has paid for repeatedly. (ii) Route through `pushUndo`
+— chosen. Safe because `strokeOps` is already null by then, so it takes the stack
+branch. One door means the hook cannot be half-installed.
+
+**Wrong if.** Routing changed stroke semantics. It does not — the composite is pushed
+identically, and ~21 E2E `undoDepth` predicates plus the unit suite would fail loudly
+on a granularity change. A test covers the compound-invalidation case specifically,
+because that is precisely what the rejected option would have missed.
+
+**Depends on it.** D-3.
+
+---
+
+## D3 — the cap is BYTES (64 MB) with an ENTRY floor (20) · `d9799cc`
+
+**Decided.** Trim the undo stack by retained bytes, never below 20 entries, dropping
+oldest first.
+
+**Weighed.** (i) No cap — the status quo, ruled out by the brief and by arithmetic:
+value-replay doubles what a representation op retains. (ii) A count cap (e.g. 100
+entries) — simple and predictable, and rejected because it cannot bound memory here:
+one full-system write retains `points × 3 × 4 × 2` bytes, so 100 entries is hundreds
+of megabytes on a large scene and nothing on a small one. (iii) Bytes with an entry
+floor — chosen: the floor is the quantity a person reasons about (how far back can I
+go), the ceiling is the quantity that hurts. Light ops accumulate far past the floor.
+
+**The numbers are arbitrary the way any budget is.** 64 MB is small beside the frame
+cache the player already holds; 20 entries is more than the undo-a-few-times habit
+this replaces. They exist to make the failure bounded, not to be exactly right.
+
+**Wrong if.** Someone routinely does more than 20 full-scene writes and expects to
+walk back through all of them. Then the floor is too low — and it is one constant.
+
+---
+
+## D4 — redo refuses at a provider boundary by DROPPING the future, with a reason · `d9799cc`
+
+**Decided.** Declaring or recomputing a channel calls `model.dropRedo(reason)`, which
+clears the walked-back future and keeps the reason so `Ctrl+Shift+Z` can say why.
+
+**Weighed.** (i) Let redo cross it — rejected by the ruling and by the reasoning:
+ops replay values, so replaying them over data replaced since would lay the same
+writes on different numbers and report success. (ii) A barrier entry redo stops at,
+leaving the future intact behind it — rejected: it keeps unreachable ops alive
+holding buffers, and the "intact" future is exactly the thing that is no longer
+valid. (iii) Drop the future and explain — chosen. Undo is untouched; only the
+forward direction is refused.
+
+**Why a declaration must do this at all**, which is the non-obvious part: a
+declaration is not an op, records nothing, and would not otherwise clear the redo
+stack — so without this, `undo → run a channel mod → redo` replays writes against
+values that moved, silently. The refusal exists because the invalidation is invisible.
+
+**Fence.** `sets.ts` stays domain-free: it exposes `dropRedo(reason: string)` and
+knows nothing about what changed. The reason string is composed in `main.ts`.
+
+**Wrong if.** The refusal proves too aggressive in practice — any channel run
+anywhere kills the redo stack, including one unrelated to what was walked back. A
+finer rule would need ops to record which channels they read; not built, and it is
+the first thing I would revisit.
+
+**Verified in the real viewer**, not only in unit tests: two writes → two undos
+returning to baseline exactly → two redos byte-identical → a new op after an undo leaves
+`redoDepth 0`. That exercises `writeRepValues`' after-capture, which the unit suite
+cannot reach.
