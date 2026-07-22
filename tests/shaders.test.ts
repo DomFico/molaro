@@ -9,6 +9,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  ALPHA_PASS_CHUNK,
   IMPOSTOR_DEPTH_DEFINE,
   IMPOSTOR_SHADE_CHUNK,
   STYLE_VERTEX_CHUNK,
@@ -17,6 +18,7 @@ import {
   focusFlashShaders,
   highlightShaders,
   pointShaders,
+  ribbonShaders,
   traceTubeShaders,
 } from "../webview/shaders.ts";
 
@@ -194,4 +196,53 @@ test("the highlight is restrained: one specular term, no second light, overlays 
   assert.match(IMPOSTOR_SHADE_CHUNK, /vStyleParams\.z \* pow\(max\(nz, 0\.0\), vStyleParams\.w\)/);
   assert.doesNotMatch(highlightShaders().fragment, /impostorShade|pow\(/);
   assert.doesNotMatch(focusFlashShaders().fragment, /impostorShade|pow\(/);
+});
+
+
+// ---------------------------------------------------------------------------
+// The alpha-class split. Every geometry pass draws twice — an opaque half that
+// writes depth and a translucent half that does not — because one pass doing
+// both kept only the running minima of an arbitrary instance order, which made
+// the SAME atoms at the SAME alpha read solid from one side and see-through
+// from the other (adk: front/back gap 7.9 → 0.2 once the split landed).
+// ---------------------------------------------------------------------------
+
+const GEOMETRY_VERTEX = {
+  points: pointShaders().vertex,
+  edgeTube: edgeTubeShaders().vertex,
+  traceTube: traceTubeShaders().vertex,
+  ribbon: ribbonShaders().vertex,
+};
+
+test("every GEOMETRY vertex shader embeds THE shared alpha-split chunk exactly once", () => {
+  for (const [name, src] of Object.entries(GEOMETRY_VERTEX)) {
+    assert.equal(src.split(ALPHA_PASS_CHUNK).length - 1, 1,
+      `${name} must embed the shared chunk exactly once — a local copy of the ` +
+      `classifier is how the two halves start disagreeing about which instances they own`);
+  }
+});
+
+test("the chunk is a PARTITION: every instance belongs to exactly one half", () => {
+  // opaque half keeps alpha >= 1, translucent half keeps alpha < 1 — complementary
+  // predicates over one boundary, so nothing is drawn twice and nothing is dropped.
+  assert.match(ALPHA_PASS_CHUNK, /uAlphaPass < 0\.5 \? alpha >= 1\.0 : alpha < 1\.0/);
+  assert.match(ALPHA_PASS_CHUNK, /uniform float uAlphaPass/);
+});
+
+test("every geometry pass CONSULTS the split — declaring the chunk is not using it", () => {
+  for (const [name, src] of Object.entries(GEOMETRY_VERTEX)) {
+    const body = src.slice(src.indexOf("void main"));
+    assert.match(body, /inAlphaPass\(/,
+      `${name} embeds the chunk but never calls inAlphaPass — the pass would draw ` +
+      `its whole instance set in BOTH halves, double-blending every translucent element`);
+  }
+});
+
+test("the two-ended passes classify by their DIMMEST end", () => {
+  // A segment running alpha 1.0 → 0.4 is translucent material; classifying it by
+  // either end alone would let it stamp depth and re-create the bug it fixes.
+  for (const name of ["traceTube", "ribbon"] as const) {
+    assert.match(GEOMETRY_VERTEX[name], /inAlphaPass\(min\(iColorA\.a, iColorB\.a\)\)/,
+      `${name} must classify on min(A, B), not on one end`);
+  }
 });

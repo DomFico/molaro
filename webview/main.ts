@@ -241,6 +241,69 @@ interface ShapeGenerator<B extends BuiltPass = BuiltPass> {
   build(env: PassEnv): B | null;
 }
 
+/**
+ * The translucent twin of a geometry material: same program, same SHARED
+ * uniform objects, depth writing OFF and `uAlphaPass` flipped to 1.
+ *
+ * Memoized per material because two passes legitimately share one — the trace
+ * pass draws its joint spheres with the POINT material — and one twin per
+ * material keeps the pairing one-to-one.
+ *
+ * The uniform spread is load-bearing: `{...m.uniforms}` copies the uniform
+ * OBJECT REFERENCES, so `k`, the projection z-row and the style array stay the
+ * same objects the opaque half reads. THREE's own `material.clone()` deep-copies
+ * uniforms through UniformsUtils, which would give the twin private copies and
+ * it would silently stop tracking zoom, resize and style writes — the failure
+ * would look like "the faded half is the wrong size", nowhere near this line.
+ */
+const twinOfMaterial = new WeakMap<THREE.ShaderMaterial, THREE.ShaderMaterial>();
+function translucentTwin(m: THREE.ShaderMaterial): THREE.ShaderMaterial {
+  const cached = twinOfMaterial.get(m);
+  if (cached) return cached;
+  const twin = new THREE.ShaderMaterial({
+    vertexShader: m.vertexShader,
+    fragmentShader: m.fragmentShader,
+    uniforms: { ...m.uniforms, uAlphaPass: { value: 1 } },
+    ...(m.defines ? { defines: m.defines } : {}),
+    side: m.side,
+    transparent: true,
+    depthTest: true, // still OCCLUDED BY solid geometry…
+    depthWrite: false, // …but never deletes anything behind it
+  });
+  twinOfMaterial.set(m, twin);
+  return twin;
+}
+/** Test seam: the twin a geometry material was paired with, if any. */
+export function alphaTwinOf(m: THREE.ShaderMaterial): THREE.ShaderMaterial | undefined {
+  return twinOfMaterial.get(m);
+}
+
+/**
+ * Every object drawn with an alpha-split material gains a sibling that draws
+ * the translucent half of the same instances. The geometry is SHARED, so this
+ * costs no buffers and no uploads — the twin re-runs the vertex stage and
+ * collapses whatever the opaque half already drew.
+ *
+ * A pass opts in simply by declaring `uAlphaPass`, which it needs for the
+ * shader anyway; there is no separate registration to forget.
+ */
+function withTranslucentTwins(objects: THREE.Object3D[]): THREE.Object3D[] {
+  const out: THREE.Object3D[] = [];
+  for (const o of objects) {
+    out.push(o);
+    const drawn = o as THREE.Mesh | THREE.Points;
+    const mat = drawn.material as THREE.ShaderMaterial | undefined;
+    if (!mat || !(mat as THREE.ShaderMaterial).uniforms?.uAlphaPass) continue;
+    const twin = translucentTwin(mat);
+    const sibling = (drawn as THREE.Points).isPoints
+      ? new THREE.Points(drawn.geometry, twin)
+      : new THREE.Mesh(drawn.geometry, twin);
+    sibling.frustumCulled = false;
+    out.push(sibling);
+  }
+  return out;
+}
+
 /** Construction + cadence dispatch. Nothing else — state stays with the host
  * or inside the built passes' closures. */
 class ShapeRegistry {
@@ -262,6 +325,10 @@ class ShapeRegistry {
   add<B extends BuiltPass>(gen: ShapeGenerator<B>, env: PassEnv, enabled = true): B | null {
     const pass = gen.build(env);
     if (!pass) return null;
+    // Expand BEFORE the objects are recorded, so twins are covered by
+    // sceneObjects, by the visibility default below, and by reveal()/setActive
+    // — a twin that missed enable-state would draw a disabled shape.
+    pass.objects = withTranslucentTwins(pass.objects);
     this.built.push({
       pass, domain: gen.elementKind, label: gen.shapeLabel ?? gen.name, enabled,
       ...(gen.requiresAxis ? { requiresAxis: gen.requiresAxis } : {}),
@@ -387,7 +454,13 @@ function makeGeometryMaterials(
   const defines = depthVariant === 2 ? { [IMPOSTOR_DEPTH_DEFINE]: "" } : {};
   const s = pointShaders();
   const points = new THREE.ShaderMaterial({
-    transparent: true,
+    // THE OPAQUE HALF. `transparent: false` is the honest flag now that this
+    // draw only ever emits alpha-1 fragments, and it buys the ordering for
+    // free: three.js draws the opaque list before the transparent one, so the
+    // translucent twins land after ALL solid geometry without anyone inventing
+    // renderOrder numbers. Pixels for a fully opaque scene are unchanged —
+    // blending alpha-1 source over anything is the source.
+    transparent: false,
     depthWrite: true, // C2: explicit, never inherited
     depthTest: true,
     defines,
@@ -395,6 +468,7 @@ function makeGeometryMaterials(
       uWorldPerSize: sizing.uWorldPerSize,
       uPxPerWorld: sizing.uPxPerWorld,
       uProjZ: sizing.uProjZ,
+      uAlphaPass: { value: 0 }, // this material IS the opaque half
       ...style,
     },
     vertexShader: s.vertex,
@@ -407,12 +481,16 @@ function makeGeometryMaterials(
   // depends on the side vector's orientation.
   const et = edgeTubeShaders();
   const edges = new THREE.ShaderMaterial({
-    transparent: true,
+    // the opaque half — see the points material above
+    transparent: false,
     depthWrite: true, // C2: explicit, never inherited
     depthTest: true,
     side: THREE.DoubleSide,
     defines,
-    uniforms: { uWorldPerSize: sizing.uWorldPerSize, uProjZ: sizing.uProjZ, ...style },
+    uniforms: {
+      uWorldPerSize: sizing.uWorldPerSize, uProjZ: sizing.uProjZ,
+      uAlphaPass: { value: 0 }, ...style,
+    },
     vertexShader: et.vertex,
     fragmentShader: et.fragment,
   });
@@ -422,12 +500,16 @@ function makeGeometryMaterials(
   // pass. DoubleSide for the same billboard-winding reason as edges.
   const tt = traceTubeShaders();
   const traces = new THREE.ShaderMaterial({
-    transparent: true,
+    // the opaque half — see the points material above
+    transparent: false,
     depthWrite: true, // C2: explicit, never inherited
     depthTest: true,
     side: THREE.DoubleSide,
     defines,
-    uniforms: { uWorldPerSize: sizing.uWorldPerSize, uProjZ: sizing.uProjZ, ...style },
+    uniforms: {
+      uWorldPerSize: sizing.uWorldPerSize, uProjZ: sizing.uProjZ,
+      uAlphaPass: { value: 0 }, ...style,
+    },
     vertexShader: tt.vertex,
     fragmentShader: tt.fragment,
   });
@@ -1120,13 +1202,14 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
     };
     const sh = ribbonShaders();
     const material = new THREE.ShaderMaterial({
-      transparent: true,
+      transparent: false, // the opaque half — see makeGeometryMaterials
       depthWrite: true, // C2 discipline: explicit, never inherited
       depthTest: true,
       side: THREE.DoubleSide, // a ribbon HAS a back face (two-sided shade)
       uniforms: {
         uWorldPerSize: env.sizing.uWorldPerSize,
         uStyles: env.styleUniforms.uStyles,
+        uAlphaPass: { value: 0 },
       },
       vertexShader: sh.vertex,
       fragmentShader: sh.fragment,
@@ -1471,9 +1554,13 @@ async function main(): Promise<void> {
     // dead zone. (It was, first time — and a ReferenceError during init killed the
     // whole viewer, which is a louder failure than the silent one being guarded
     // but not a better one.)
+    // A translucent twin SHARES its opaque half's geometry, so checking it
+    // again would report the same pass twice for one fault.
+    const checked = new Set<THREE.BufferGeometry>();
     for (const obj of registry.objects()) {
       const g = (obj as Partial<THREE.Mesh>).geometry as THREE.BufferGeometry | undefined;
-      if (!g || !g.attributes) continue;
+      if (!g || !g.attributes || checked.has(g)) continue;
+      checked.add(g);
       const count = Object.keys(g.attributes).length;
       if (count > SAFE_VERTEX_ATTRS) over.push({ pass: obj.name || g.type || "(unnamed)", count });
     }
@@ -1491,8 +1578,11 @@ async function main(): Promise<void> {
   };
 
   const registry = new ShapeRegistry();
-  // Registration order IS draw order (scene order — the naive-transparency
-  // compositing depends on it): points, edges, polylines, then the overlays.
+  // Registration order is scene order: points, edges, polylines, then the
+  // overlays. It NO LONGER decides transparent compositing — each pass now
+  // registers an opaque draw and a translucent twin, and three.js draws the
+  // whole opaque list before the whole transparent one, so solid geometry
+  // always precedes faded geometry regardless of which pass registered first.
   registry.add(spherePointsGenerator, passEnv);
   const edgePass = registry.add(edgeTubesGenerator, passEnv);
   const tracePass = registry.add(traceTubesGenerator, passEnv);
@@ -3393,6 +3483,14 @@ async function main(): Promise<void> {
         : (): { start: number; radius: number; color: number } =>
             ({ start: 0, radius: 0, color: 0 }),
       geometryMaterials: materials,
+      // C2's other half: each geometry material's translucent twin, so the
+      // depth policy can be asserted on BOTH halves rather than on the one
+      // that happens to be reachable.
+      alphaTwins: {
+        points: alphaTwinOf(materials.points),
+        edges: alphaTwinOf(materials.edges),
+        traces: alphaTwinOf(materials.traces),
+      },
       depthVariant,
       sizing: {
         worldPerSize: sizing.uWorldPerSize.value,

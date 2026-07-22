@@ -82,6 +82,39 @@ vec3 impostorShade(vec3 color, float nz) {
 }
 `;
 
+/**
+ * ALPHA-CLASS SPLIT — the chunk that ends view-dependent transparency.
+ *
+ * Every geometry pass now draws TWICE: once for its fully opaque instances
+ * (depth write ON, so they occlude properly) and once for its translucent ones
+ * (depth write OFF, so they cannot delete one another). `uAlphaPass` tells a
+ * draw which half it is; instances belonging to the other half collapse out
+ * exactly the way hidden ones already do, so this adds no new idiom.
+ *
+ * WHY. One pass that blends AND writes depth keeps a fragment only if it is
+ * nearer than every fragment already drawn at that pixel — and instances are
+ * drawn in HEADER order, never depth order. The layers that survive are
+ * therefore the running minima of an arbitrary sequence. Rotate the camera 180°
+ * and that sequence reverses: a 15-layer accumulation becomes one layer, and
+ * the same atoms at the same alpha read as solid from one side and see-through
+ * from the other. Measured on adk (3341 atoms, pointsize 20, alpha 0.15): the
+ * front/back mean-brightness gap was 7.9 with the depth stamp and 0.2 without.
+ *
+ * It is also why a faded bond still hid the trace behind it: at alpha 0.1 the
+ * bond's own pixels were 99.8% gone, but its depth stamp still rejected the
+ * trace. One cause, both symptoms.
+ *
+ * WHY NOT JUST TURN DEPTH WRITING OFF. Then opaque geometry would stop
+ * occluding anything, and the analytic per-fragment depth chosen for correct
+ * interpenetration (variant 2) would have nothing to write into. The split
+ * keeps depth exactly where it is meaningful and removes it only where it was
+ * destroying information.
+ */
+export const ALPHA_PASS_CHUNK = `
+uniform float uAlphaPass;  // 0 = the opaque half, 1 = the translucent half
+bool inAlphaPass(float alpha) { return uAlphaPass < 0.5 ? alpha >= 1.0 : alpha < 1.0; }
+`;
+
 /** Base points pass: ray-traced sphere impostors reading aColor/aSize/
  * aVisible/aOpacity. Shading is the shared impostorShade chunk (headlight
  * Lambert + one restrained specular highlight). */
@@ -92,6 +125,7 @@ export function pointShaders(): { vertex: string; fragment: string } {
       attribute float aOpacity; attribute float aStyle;
       ${IMPOSTOR_SIZING_CHUNK}
       ${STYLE_VERTEX_CHUNK}
+      ${ALPHA_PASS_CHUNK}
       varying vec3 vColor; varying float vVisible; varying float vOpacity;
       varying float vRadius; varying float vViewDepth;
       void main() {
@@ -101,7 +135,10 @@ export function pointShaders(): { vertex: string; fragment: string } {
         vec4 mv = modelViewMatrix * vec4(position, 1.0);
         vViewDepth = -mv.z;
         gl_Position = projectionMatrix * mv;
-        gl_PointSize = aVisible > 0.5 ? impostorDiameterPx(vRadius, vViewDepth) : 0.0;
+        // a zero-diameter sprite rasterizes nothing — the same collapse hidden
+        // points already used, now also carrying the alpha-class split
+        gl_PointSize = (aVisible > 0.5 && inAlphaPass(aOpacity))
+          ? impostorDiameterPx(vRadius, vViewDepth) : 0.0;
       }`,
     fragment: `
       uniform vec2 uProjZ;
@@ -159,6 +196,7 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
       attribute float iSizeA; attribute float iSizeB;
       uniform float uWorldPerSize;
       ${STYLE_VERTEX_CHUNK}
+      ${ALPHA_PASS_CHUNK}
       varying vec4 vColor; varying float vU;
       varying float vRadius;
       varying float vT; varying float vLen;
@@ -180,9 +218,11 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
         float dA = sqrt(max(0.0, rsA * rsA - radius * radius));
         float dB = sqrt(max(0.0, rsB * rsB - radius * radius));
         // collapsed instances (hidden edge, zero radius, degenerate segment,
-        // or a tube swallowed whole by its endpoint spheres) leave the clip
-        // volume entirely — no fragments, no depth writes
-        if (iVisible < 0.5 || radius <= 0.0 || len * len < 1e-16 || dA + dB >= len) {
+        // a tube swallowed whole by its endpoint spheres, or an instance
+        // belonging to the OTHER alpha half) leave the clip volume entirely —
+        // no fragments, no depth writes
+        if (iVisible < 0.5 || radius <= 0.0 || len * len < 1e-16 || dA + dB >= len
+            || !inAlphaPass(iColor.a)) {
           gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
           vColor = vec4(0.0); vU = 0.0; vRadius = 0.0;
           vT = 0.0; vLen = 1.0; vDA = 0.0; vDB = 0.0;
@@ -280,6 +320,7 @@ export function traceTubeShaders(): { vertex: string; fragment: string } {
       attribute float iStyle;
       uniform float uWorldPerSize;
       ${STYLE_VERTEX_CHUNK}
+      ${ALPHA_PASS_CHUNK}
       varying vec4 vColor; varying float vU;
       varying float vRadius; varying float vDepth;
       void main() {
@@ -291,8 +332,12 @@ export function traceTubeShaders(): { vertex: string; fragment: string } {
         vec3 seg = mvB - mvA;
         float len = length(seg);
         // collapsed instances (hidden segment, degenerate length, both end
-        // radii zero) leave the clip volume — no fragments, no depth writes
-        if (iVisible < 0.5 || len * len < 1e-16 || max(rA, rB) <= 0.0) {
+        // radii zero, or the other alpha half) leave the clip volume — no
+        // fragments, no depth writes. A segment counts as opaque only if BOTH
+        // ends are: a gradient from 1.0 to 0.4 is translucent material and must
+        // not stamp depth for its opaque end.
+        if (iVisible < 0.5 || len * len < 1e-16 || max(rA, rB) <= 0.0
+            || !inAlphaPass(min(iColorA.a, iColorB.a))) {
           gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
           vColor = vec4(0.0); vU = 0.0; vRadius = 0.0; vDepth = 1.0;
           return;
@@ -451,11 +496,13 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
       attribute float iStyle;
       uniform float uWorldPerSize;
       ${STYLE_VERTEX_CHUNK}
+      ${ALPHA_PASS_CHUNK}
       varying vec4 vColor;
       varying vec3 vNormal;
       void main() {
         vStyleParams = styleParams(iStyle);
-        bool shown = iWidth.x >= 0.0 && iWidth.y >= 0.0;
+        bool shown = iWidth.x >= 0.0 && iWidth.y >= 0.0
+          && inAlphaPass(min(iColorA.a, iColorB.a));
         float wA = uWorldPerSize * abs(iWidth.x);
         float wB = uWorldPerSize * abs(iWidth.y);
         vec3 mvA = (modelViewMatrix * vec4(iStart, 1.0)).xyz;

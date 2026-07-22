@@ -5513,11 +5513,27 @@ async function S32(): Promise<void> {
       };
 
       // C2: depthWrite pinned EXPLICITLY on all three geometry materials, and
-      // the boot config actually selected this variant.
-      const mats = await d.evaluate<{ p: boolean; e: boolean; t: boolean; dv: number }>(
-        `(()=>{const m=${V}.geometryMaterials; return {p:m.points.depthWrite, e:m.edges.depthWrite, t:m.traces.depthWrite, dv:${V}.depthVariant};})()`);
+      // the boot config actually selected this variant. Since the alpha split,
+      // C2 has TWO halves to pin: the opaque half must still write depth (or
+      // solid geometry stops occluding), and the translucent twin must NOT (or
+      // faded elements delete whatever is behind them — the view-dependent
+      // opacity bug this split exists to kill).
+      const mats = await d.evaluate<{
+        p: boolean; e: boolean; t: boolean; dv: number;
+        tp: boolean; te: boolean; tt: boolean; twins: number;
+      }>(
+        `(()=>{const m=${V}.geometryMaterials, w=${V}.alphaTwins; return {
+          p:m.points.depthWrite, e:m.edges.depthWrite, t:m.traces.depthWrite,
+          tp:w.points?.depthWrite, te:w.edges?.depthWrite, tt:w.traces?.depthWrite,
+          twins:[w.points,w.edges,w.traces].filter(Boolean).length,
+          dv:${V}.depthVariant};})()`);
       check("S32: depthWrite === true on ALL THREE geometry materials (C2)",
         mats.p && mats.e && mats.t, JSON.stringify(mats));
+      check("S32: every geometry material HAS a translucent twin (the split is wired)",
+        mats.twins === 3, `twins=${mats.twins}`);
+      check("S32: depthWrite === false on ALL THREE translucent twins (C2, other half)",
+        mats.tp === false && mats.te === false && mats.tt === false,
+        JSON.stringify({ tp: mats.tp, te: mats.te, tt: mats.tt }));
       check("S32: the boot config selected this depth variant", mats.dv === variant,
         `dv=${mats.dv}`);
       check("S32: no bbox warning on a bbox-carrying header",
