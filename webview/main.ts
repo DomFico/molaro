@@ -2023,7 +2023,7 @@ async function main(): Promise<void> {
       onWrite(list);
       return [];
     };
-    model.recordOp(() => restore(prev), () => restore(next));
+    model.recordOp(() => restore(prev), () => restore(next), prev.byteLength + next.byteLength);
     return list.length;
   };
   const makeRepWriter = (
@@ -2335,6 +2335,16 @@ async function main(): Promise<void> {
     // must move with it. One write site covers both a hand-typed provider run
     // and a sequenced one, so the two can never disagree.
     channelTargetByName.set(delta.name, canonicalTarget(points));
+    // REDO CANNOT CROSS THIS. A declaration is not an op — it records nothing and
+    // is not undoable — but ops already walked back may have READ this channel's
+    // values, and a re-declaration replaces those values in place. Replaying them
+    // forward would put the same writes over different numbers and report success,
+    // which is the silent-wrongness this whole feature must not have. So the
+    // walked-back future is dropped here, with a reason the refusal can quote.
+    model.dropRedo(
+      `channel "${delta.name}" was ${existing ? "recomputed" : "declared"} by "${mod.name}", and ` +
+      `channel data is replaced in place rather than undone — anything walked back may have read ` +
+      `the old values, so it can no longer be replayed. Undo still works; redo starts again from here.`);
     player.invalidateAll(); // old-shape cached chunks → refetch new-shape (S2/S3)
     const width = channelComponents(delta) === 3 ? "vector" : "scalar";
     asyncLine("ok",
@@ -2977,7 +2987,7 @@ async function main(): Promise<void> {
     focusPoints(hierarchy.subgroupPoints(hierarchy.subgroupOfPoint(idx)));
   });
 
-  // -- keys: Escape cancels; Ctrl+Z = system-wide undo (state, never camera) ----
+  // -- keys: Escape cancels; Ctrl+Z undo, Ctrl+Shift+Z redo (state, never camera) --
   window.addEventListener("keydown", (e) => {
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
@@ -2987,6 +2997,18 @@ async function main(): Promise<void> {
     } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "z" || e.key === "Z")) {
       e.preventDefault();
       refreshPoints(model.undo());
+    } else if ((e.ctrlKey || e.metaKey) && e.shiftKey && (e.key === "z" || e.key === "Z")) {
+      // The same stack, walked the other way — there is no second history, and
+      // `redoStack` lives inside the same private model for the same reason
+      // Ctrl+Z does: so no second undo system can ever exist.
+      e.preventDefault();
+      const pts = model.redo();
+      if (pts === null) {
+        // Say WHY when there is a reason, rather than letting a refusal look like
+        // an empty stack.
+        const why = model.redoBlockedReason;
+        if (why) setStatus(`redo refused — ${why}`);
+      } else refreshPoints(pts);
     }
   });
 

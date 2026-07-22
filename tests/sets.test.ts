@@ -537,3 +537,150 @@ test("seed() records nothing and never touches the pending set", () => {
   assert.deepEqual(m.pending.resolvedPoints().slice().sort(), pendingBefore,
     "seed builds its own set — it must not disturb the pending one");
 });
+
+// -- redo -----------------------------------------------------------------------
+
+test("redo re-applies the last undone op and moves it back to the undo stack", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  const after = m.pending.resolvedPoints().slice().sort();
+  m.undo();
+  assert.equal(m.pending.entryCount, 0);
+  assert.equal(m.redoDepth, 1, "the undone op is retained, not discarded");
+  m.redo();
+  assert.deepEqual(m.pending.resolvedPoints().slice().sort(), after);
+  assert.equal(m.redoDepth, 0);
+  assert.equal(m.undoDepth, 1, "redone ops go back where they came from");
+});
+
+test("undo → redo returns a byte-identical prior state across every selection op", () => {
+  // Walk a session all the way down and all the way back up; the fingerprint at
+  // each depth on the way up must equal the one at the same depth on the way down.
+  const m = model();
+  const shot = (): string => JSON.stringify({
+    pending: m.pending.resolvedPoints().slice().sort(),
+    committed: m.committed().map((c) => [c.name, c.hidden, c.set.resolvedPoints().slice().sort()]),
+  });
+  const down: string[] = [shot()];
+  m.addToTarget(sub(0)); down.push(shot());
+  m.addToTarget(sub(1)); down.push(shot());
+  m.commit();           down.push(shot());
+  m.addToTarget(sub(2)); down.push(shot());
+  m.setHidden(m.committed()[0].id, true); down.push(shot());
+  m.rename(m.committed()[0].id, "renamed"); down.push(shot());
+  const depth = m.undoDepth;
+  for (let i = 0; i < depth; i++) m.undo();
+  assert.equal(shot(), down[0], "undoing everything returns the starting state");
+  for (let i = 0; i < depth; i++) {
+    m.redo();
+    assert.equal(shot(), down[i + 1], `redo step ${i + 1} must reproduce the state exactly`);
+  }
+});
+
+test("undo → new op → redo does NOTHING (the redo stack is invalidated)", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  m.undo();
+  assert.equal(m.redoDepth, 1);
+  m.addToTarget(sub(1));                       // a NEW op after the undo
+  assert.equal(m.redoDepth, 0, "the walked-back future is unreachable now");
+  const after = m.pending.resolvedPoints().slice().sort();
+  assert.equal(m.redo(), null, "redo reports there is nothing to do");
+  assert.deepEqual(m.pending.resolvedPoints().slice().sort(), after, "…and changes nothing");
+});
+
+test("undo → new COMPOUND op → redo does nothing — the case a pushUndo-only hook would miss", () => {
+  // endStroke used to push straight onto the stack, bypassing pushUndo. A redo
+  // hook installed only in pushUndo would therefore have failed to invalidate for
+  // paint drags, create_sele, hide batches and every commands macro — the most
+  // common mutations there are. This is that exact shape.
+  const m = model();
+  m.addToTarget(sub(0));
+  m.undo();
+  assert.equal(m.redoDepth, 1);
+  m.beginStroke();
+  m.addToTarget(sub(1));
+  m.addToTarget(sub(2));
+  m.endStroke();
+  assert.equal(m.redoDepth, 0, "a compound stroke invalidates the redo stack like any other op");
+  assert.equal(m.redo(), null);
+});
+
+test("a compound stroke redoes as ONE entry, forward in recording order", () => {
+  const m = model();
+  m.beginStroke();
+  m.addToTarget(sub(0));
+  m.addToTarget(sub(1));
+  m.addToTarget(sub(2));
+  m.endStroke();
+  const after = m.pending.resolvedPoints().slice().sort();
+  assert.equal(m.undoDepth, 1, "three ops, one entry");
+  m.undo();
+  assert.equal(m.pending.entryCount, 0);
+  m.redo();
+  assert.deepEqual(m.pending.resolvedPoints().slice().sort(), after);
+  assert.equal(m.undoDepth, 1);
+});
+
+test("redo of a commit reuses the SAME interim pending set later ops captured", () => {
+  // The Item B failure, as a test. A redo that installed a fresh pending set would
+  // leave the trailing op mutating an orphan: the selection would come back and
+  // the pending footprint would silently not.
+  const m = model();
+  m.addToTarget(sub(0));
+  m.commit();
+  m.addToTarget(sub(1));                       // captures the INTERIM set by reference
+  const pendingAfter = m.pending.resolvedPoints().slice().sort();
+  m.undo();                                    // the trailing add
+  m.undo();                                    // the commit
+  m.redo();                                    // the commit
+  m.redo();                                    // the trailing add
+  assert.equal(m.committed().length, 1, "the selection is back");
+  assert.deepEqual(m.pending.resolvedPoints().slice().sort(), pendingAfter,
+    "and so is the pending footprint — the trailing op found the set it captured");
+});
+
+test("redo is refused while a stroke is open rather than interleaving with a live edit", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  m.undo();
+  m.beginStroke();
+  m.addToTarget(sub(1));
+  assert.equal(m.redo(), null, "an in-flight mutation is not a place to replay into");
+  m.endStroke();
+});
+
+test("dropRedo refuses the future and says why, without touching undo", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  m.addToTarget(sub(1));
+  m.undo();
+  assert.equal(m.redoDepth, 1);
+  m.dropRedo("the values those ops read were replaced");
+  assert.equal(m.redoDepth, 0);
+  assert.equal(m.redo(), null, "the walked-back future is gone");
+  assert.match(m.redoBlockedReason ?? "", /replaced/, "and the refusal can say why");
+  assert.equal(m.undoDepth, 1, "undo is untouched — only the forward direction is refused");
+  m.undo();
+  assert.equal(m.redoBlockedReason, null, "a fresh future clears the spent refusal");
+  assert.equal(m.redoDepth, 1);
+});
+
+test("dropRedo on an empty redo stack sets no reason (nothing was refused)", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  m.dropRedo("irrelevant");
+  assert.equal(m.redoBlockedReason, null, "a refusal message with nothing to refuse would be noise");
+});
+
+test("the stack cap trims the OLDEST heavy entries and never below the floor", () => {
+  const m = model();
+  // Each op declares 8 MB retained; the budget is 64 MB with a 20-entry floor.
+  const heavy = 8 * 1024 * 1024;
+  for (let i = 0; i < 30; i++) m.recordOp(() => [], () => [], heavy);
+  assert.equal(m.undoDepth, 20, "trimmed to the entry floor, not below it");
+  // Light ops are not trimmed: the budget is bytes, not entries.
+  const light = model();
+  for (let i = 0; i < 200; i++) light.recordOp(() => [], () => []);
+  assert.equal(light.undoDepth, 200, "a byte budget must not punish cheap history");
+});

@@ -710,7 +710,17 @@ existing machinery (nothing new renders):
   refused before anything runs, naming the channel. **Sequencing is not
   atomicity**: if the provider runs and the consumer then fails, the channel
   stays declared (channels are append-only, not undoable) — one undo covers the
-  consumer's commands, not the provider's declaration.
+  consumer's commands, not the provider's declaration. The same is true when the
+  consumer SUCCEEDS, and the outcome says so rather than leaving it to be inferred
+  from an undo that did less than expected.
+
+  **Redo does not cross that boundary.** A declaration is not an op — it records
+  nothing and cannot be undone — but ops already walked back may have READ the
+  channel's values, and a re-declaration replaces those values in place. Replaying
+  them forward would lay the same writes over different numbers and report success.
+  So declaring or recomputing a channel DROPS the walked-back future, and a
+  subsequent `Ctrl+Shift+Z` refuses with the reason rather than looking like an
+  empty stack. Undo is unaffected; redo simply starts again from there.
 
 **Invocation** is the same own-verb shape: `<modname> <target>`. The verb
 acknowledges immediately (`running <mod> on N points…`) and the outcome
@@ -923,6 +933,33 @@ stop resolving). The selector names **mods, not points** — bare names,
 - If nothing is deletable (unknown names, only built-ins, or no workspace
   mods), `rm` reports and never prompts. It touches nothing outside
   `.molaro/mods/`.
+
+## Undo and redo — `Ctrl+Z` / `Ctrl+Shift+Z`
+
+One system-wide stack, walked in both directions. Every state change is recorded
+as an op that can be reversed *and* re-applied; a stroke (a paint drag, a
+`create_sele`, a `hide` batch, a `produces: commands` macro) is one entry in both
+directions. Camera moves are never recorded.
+
+**Redo restores values, it does not re-run commands.** That is not a preference:
+`bake` reads the channel's values *at the displayed frame* when it executes, so
+re-running the same verb string at a different playhead produces different numbers.
+Replaying the recorded values instead is byte-identical by construction.
+
+**Any new op discards the walked-back future** — including a compound one, which is
+the common case.
+
+**A redone binding reads CURRENT channel data.** A binding stores its channel name
+and range, not the numbers; the values it applies come from whatever the channel
+holds now. Redoing a bind therefore replays the buffer values it wrote, rather than
+assuming the next frame flip will re-derive them — a flip only happens when the
+frame actually changes, so a redo while paused would otherwise leave the buffers
+stale. If the channel's data has been replaced since, redo refuses instead (see the
+provider boundary above).
+
+**The stack is capped by bytes, not entries** (64 MB, with a floor of 20 entries).
+Recording both directions doubles what a representation op retains, so an unbounded
+stack became a real liability; the oldest entries are dropped first.
 
 ## Listing: `ls`
 

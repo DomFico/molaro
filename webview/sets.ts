@@ -353,7 +353,34 @@ export const MAX_BRACKET_LANES = 4;
 interface UndoOp {
   undo(): number[];
   redo(): number[];
+  /** Bytes this op retains, for the stack cap. Only ops that hold buffers report
+   * one — a selection op captures a handful of entries and is nominal. */
+  weight?: number;
 }
+
+/** THE CAP. Nothing trimmed the undo stack before: no cap, no shift, no splice
+ * anywhere. That was harmless while an op held one before-array and nothing
+ * replayed forward. Value-replay doubles it — every representation op now retains
+ * an after-array too — so an unbounded stack became a real liability, and the cap
+ * is part of this design rather than a follow-up.
+ *
+ * BYTES, NOT ENTRIES, and the arithmetic is why. A count cap cannot bound memory
+ * here: one full-system colour write on a large scene retains points × 3 × 4 × 2
+ * bytes, so a "generous" 100 entries could hold hundreds of megabytes on a big
+ * system while holding almost nothing on a small one. The user-visible quantity
+ * people reason about is how many actions they can walk back, so the floor is an
+ * entry count and the ceiling is a byte budget: keep at least MIN_ENTRIES whatever
+ * they cost, then trim the oldest until the budget is met.
+ *
+ * 64 MB and 20 entries. 64 MB is small beside the frame cache the player already
+ * holds and large enough that ordinary editing never reaches it; 20 entries is
+ * more history than the undo-a-few-times habit this replaces, and it is a FLOOR
+ * rather than a limit — light ops accumulate far past it. Both are arbitrary in
+ * the way any budget is; they are here to make the failure bounded rather than to
+ * be exactly right. Trimming drops the OLDEST entries, so the depth you lose is
+ * the depth you were least likely to reach. */
+const MAX_STACK_BYTES = 64 * 1024 * 1024;
+const MIN_STACK_ENTRIES = 20;
 
 /**
  * The pending-target + committed-selections model with a system-wide undo
@@ -372,6 +399,12 @@ export class SelectionModel {
   private editingId: number | null = null;
   private nextId = 1;
   private readonly undoStack: UndoOp[] = [];
+  /** Ops walked back off the undo stack, newest last. Cleared by ANY new op —
+   * see pushUndo, which is the single point every op enters through. */
+  private readonly redoStack: UndoOp[] = [];
+  /** Why the walked-back future was dropped, if it was dropped by something other
+   * than a new op. Surfaced when the user then asks to redo. */
+  private redoBlocked: string | null = null;
   /** When non-null, undoable ops coalesce here (one paint stroke = one undo). */
   private strokeOps: UndoOp[] | null = null;
   /** Stroke nesting depth — beginStroke/endStroke are REENTRANT: a command that
@@ -407,6 +440,33 @@ export class SelectionModel {
   }
   get canUndo(): boolean {
     return this.undoStack.length > 0;
+  }
+  /** Drop the walked-back future because state those ops DEPEND ON changed
+   * outside the stack, and say why.
+   *
+   * Ops replay values; they do not re-derive them. If something they read has
+   * been replaced since they were recorded, replaying them forward would produce
+   * a state that never existed — the same writes over different inputs, reported
+   * as success. That is the one outcome a redo must not have, so the future is
+   * dropped rather than replayed, and the reason is kept so the refusal can say
+   * more than "nothing to redo".
+   *
+   * Deliberately reason-agnostic: this model knows nothing about what changed,
+   * only that a caller declared it out of scope. */
+  dropRedo(reason: string): void {
+    if (this.redoStack.length === 0) return;
+    this.redoStack.length = 0;
+    this.redoBlocked = reason;
+  }
+  /** Set when redo was dropped by dropRedo rather than by a new op. */
+  get redoBlockedReason(): string | null {
+    return this.redoBlocked;
+  }
+  get canRedo(): boolean {
+    return this.redoStack.length > 0;
+  }
+  get redoDepth(): number {
+    return this.redoStack.length;
   }
   get undoDepth(): number {
     return this.undoStack.length;
@@ -603,7 +663,14 @@ export class SelectionModel {
     const ops = this.strokeOps;
     this.strokeOps = null;
     if (!ops || ops.length === 0) return;
-    this.undoStack.push({
+    // Through pushUndo, NOT a direct stack push. This used to bypass it, which
+    // would have put the redo-invalidation hook in a place that missed every
+    // compound stroke — paint drags, create_sele, hide batches, and every
+    // produces: commands macro, i.e. the most common mutation class in the
+    // system. Routing it here leaves ONE place an op can enter the stack, so the
+    // hook cannot be half-installed. Safe because strokeOps is already null by
+    // this point, so pushUndo takes its stack branch.
+    this.pushUndo({
       undo: () => {
         const affected: number[] = [];
         for (let i = ops.length - 1; i >= 0; i--) affected.push(...ops[i].undo());
@@ -618,6 +685,7 @@ export class SelectionModel {
         for (let i = 0; i < ops.length; i++) affected.push(...ops[i].redo());
         return affected;
       },
+      weight: ops.reduce((n, o) => n + (o.weight ?? 0), 0),
     });
   }
 
@@ -626,8 +694,8 @@ export class SelectionModel {
    * Ctrl+Z drives, so no second undo system can ever exist. The closure must
    * revert that external state itself and return the affected point indices;
    * between beginStroke/endStroke it coalesces like any other op. */
-  recordOp(undo: () => number[], redo: () => number[]): void {
-    this.pushUndo({ undo, redo });
+  recordOp(undo: () => number[], redo: () => number[], weight = 0): void {
+    this.pushUndo({ undo, redo, weight });
   }
 
   // -- lifecycle ----------------------------------------------------------------
@@ -851,6 +919,22 @@ export class SelectionModel {
     const op = this.undoStack.pop();
     if (!op) return null;
     const pts = op.undo();
+    this.redoStack.push(op); // walked back, not thrown away
+    this.redoBlocked = null; // a fresh future exists; any old refusal is spent
+    this.emit();
+    return pts;
+  }
+
+  /** Re-apply the last undone op. Null when there is nothing to redo. */
+  redo(): number[] | null {
+    // An open stroke means a mutation is in flight; it will clear the redo stack
+    // the moment its first child records, so redoing into it would interleave a
+    // replay with a live edit. Refuse rather than guess.
+    if (this.strokeOps && this.strokeOps.length > 0) return null;
+    const op = this.redoStack.pop();
+    if (!op) return null;
+    const pts = op.redo();
+    this.undoStack.push(op);
     this.emit();
     return pts;
   }
@@ -863,8 +947,30 @@ export class SelectionModel {
   // -- internals ------------------------------------------------------------------
 
   private pushUndo(op: UndoOp): void {
-    if (this.strokeOps) this.strokeOps.push(op);
-    else this.undoStack.push(op);
+    if (this.strokeOps) {
+      this.strokeOps.push(op);
+      // A child of an open stroke is still a NEW mutation: the moment one is
+      // recorded, anything walked back is unreachable. Clearing here rather than
+      // at endStroke means a stroke that opens and records but never closes
+      // cannot leave a stale redo stack behind.
+      this.redoStack.length = 0;
+      return;
+    }
+    this.undoStack.push(op);
+    this.redoStack.length = 0;
+    this.trimStack();
+  }
+
+  /** Enforce the byte budget by dropping the OLDEST entries, never below the
+   * entry floor. Runs on push only — undo/redo move ops between stacks without
+   * changing the total. */
+  private trimStack(): void {
+    let held = 0;
+    for (const o of this.undoStack) held += o.weight ?? 0;
+    while (held > MAX_STACK_BYTES && this.undoStack.length > MIN_STACK_ENTRIES) {
+      const dropped = this.undoStack.shift();
+      held -= dropped?.weight ?? 0;
+    }
   }
   /** Default name for a new commit: the numbering RESTARTS — the smallest
    * `selection_N` not currently in use (deleting selection_1 frees the name
