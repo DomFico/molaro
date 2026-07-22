@@ -1,3 +1,4 @@
+import { channelConsumers, machineryNote } from "../webview/recipes.ts";
 /**
  * The assistant's system prompt. The body is the reviewable artifact the brief
  * specifies verbatim (it encodes correctness conventions a model otherwise gets
@@ -413,8 +414,9 @@ first. A shape may require a channel: drawing traces as \`ribbon\` with nothing 
 
 /** Render the live scene into the "loaded system" section. */
 export function renderContext(c: SceneContext): string {
+  const consumers = channelConsumers(c.mods);
   const mods = c.mods.length
-    ? c.mods.map((m) => `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${m.channel ? ` → ${m.channel}` : ""})${m.requiresChannel ? ` [requires ${m.requiresChannel}]` : ""}`).join("\n")
+    ? c.mods.map((m) => `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${m.channel ? ` → ${m.channel}` : ""})${machineryNote(m.channel, consumers)}${m.requiresChannel ? ` [requires ${m.requiresChannel}]` : ""}`).join("\n")
     : "  (none yet — you have not written any)";
   return [
     "## The loaded system",

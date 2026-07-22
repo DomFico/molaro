@@ -53,6 +53,8 @@ import {
   type Mod,
   type ParamValue,
   type RecipeOrigin,
+  channelConsumers,
+  machineryNote,
 } from "./recipes.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
 
@@ -1892,12 +1894,17 @@ export function makeLsHandler(ctx: CommandContext): CommandHandler {
  * command verbs stay with help/?.
  */
 export function makeModsHandler(): CommandHandler {
-  const recipeLine = (r: Mod): string => {
+  const recipeLine = (r: Mod, consumers: ReadonlyMap<string, string[]>): string => {
     let line = `  ${r.name} — `;
     line +=
       r.kind === "representation"
         ? `representation · ${r.axis}`
         : `analysis · ${r.produces}${r.produces === "per-point-scalar" ? ` → ${r.axis}` : ""}`;
+    // Demote a channel mod that exists to serve another: say what it is for,
+    // instead of presenting it beside the mods a person actually types. It stays
+    // listed and stays invocable — a mod's name is its verb, so omitting it would
+    // make this listing lie about what `help` and tab-completion still know.
+    line += machineryNote("channel" in r ? r.channel : undefined, consumers);
     if (r.author) line += ` · by ${r.author}`;
     if (r.source) line += ` · ${r.source}`;
     return line;
@@ -1907,6 +1914,7 @@ export function makeModsHandler(): CommandHandler {
       return { status: "error", message: "mods takes no arguments — it lists the recipe registry" };
     }
     const all = listRecipes();
+    const consumers = channelConsumers(all);
     if (all.length === 0) return { status: "ok", message: "no recipes" };
     // group by origin, first-seen order; registration order within a group
     const byOrigin = new Map<RecipeOrigin, Mod[]>();
@@ -1918,7 +1926,7 @@ export function makeModsHandler(): CommandHandler {
     const lines: string[] = [];
     for (const [origin, group] of byOrigin) {
       lines.push(`${origin}:`);
-      for (const r of group) lines.push(recipeLine(r));
+      for (const r of group) lines.push(recipeLine(r, consumers));
     }
     return { status: "ok", message: capLines(lines, "recipes") };
   };

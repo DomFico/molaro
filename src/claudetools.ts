@@ -24,7 +24,10 @@
  */
 import { tool, createSdkMcpServer, type Options } from "@anthropic-ai/claude-agent-sdk";
 import { z } from "zod";
-import { MOD_AXES, MOD_PARAM_TYPES, MOD_PRODUCES, resolveParameters, type ModAxis, type ModParam, type ModProduces } from "../webview/recipes.ts";
+import {
+  channelConsumers, machineryNote, MOD_AXES, MOD_PARAM_TYPES, MOD_PRODUCES, resolveParameters,
+  type ModAxis, type ModParam, type ModProduces,
+} from "../webview/recipes.ts";
 
 export const MCP_SERVER_NAME = "molaro";
 
@@ -269,12 +272,13 @@ export function buildToolDefs(deps: ToolDeps) {
       const c = await deps.getContext();
       const modLines = c.mods.length
         ? c.mods.map((m) => {
+            const machinery = machineryNote(m.channel, channelConsumers(c.mods));
             const params = m.params && m.params.length
               ? ` [params: ${m.params.map((p) => `${p.name}:${p.type}${p.default !== undefined ? `=${p.default}` : " (required)"}`).join(", ")}]`
               : "";
             const chan = m.channel ? ` → ${m.channel}` : "";
             const needs = m.requiresChannel ? ` [requires channel: ${m.requiresChannel}]` : "";
-            return `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${chan})${needs}${params}${m.description ? `: ${m.description}` : ""}`;
+            return `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${chan})${machinery}${needs}${params}${m.description ? `: ${m.description}` : ""}`;
           }).join("\n")
         : "  (none yet)";
       const kinds = c.subgroupKinds.length

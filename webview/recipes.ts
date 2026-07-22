@@ -602,6 +602,59 @@ export function channelProviders(mods: readonly Mod[]): Map<string, string[]> {
   return out;
 }
 
+/**
+ * Which channels are REQUIRED by some other mod, and by whom.
+ *
+ * A `produces: channel` mod whose channel appears here exists to serve a
+ * consumer rather than to be invoked on its own — machinery, not a command. The
+ * listings use this to DEMOTE it: say what it is for, rather than presenting it
+ * beside the mods a person actually types.
+ *
+ * DERIVED FROM THE DEPENDENCY EDGE, deliberately, rather than from a `# internal:`
+ * header flag. A new header key would need threading through nine sites and would
+ * be silently dropped by serializeMod's fixed key array on any write_mod
+ * overwrite — a mod would quietly stop being machinery because someone edited it.
+ * The edge is already declared, already parsed, and cannot drift from itself.
+ *
+ * DEMOTED, NEVER HIDDEN, and never filtered out of the underlying lists. A mod's
+ * name IS its command verb: dispatch, completion, `help <name>` and `rm all` all
+ * still see it, so a listing that omitted it would simply lie. Worse, dropping a
+ * mod from the host's analysis-mod list would stop it being recognised as Python
+ * and make it reachable through the UNGATED run_command instead of the gated
+ * run_mod. This is presentation only.
+ *
+ * The parameter is STRUCTURAL on purpose: the host's SceneContext.mods carries no
+ * `kind` field, so a signature demanding one would compile against the registry
+ * and silently return nothing for get_context and the system prompt.
+ */
+export function channelConsumers(
+  mods: readonly { name: string; requiresChannel?: string }[],
+): Map<string, string[]> {
+  const byChannel = new Map<string, string[]>();
+  for (const m of mods) {
+    if (!m.requiresChannel) continue;
+    const seen = byChannel.get(m.requiresChannel);
+    if (seen) seen.push(m.name);
+    else byChannel.set(m.requiresChannel, [m.name]);
+  }
+  return byChannel;
+}
+
+/** The demotion note for a mod, or "" when it is a mod you would invoke.
+ *
+ * Takes the CHANNEL NAME rather than the mod: `Mod` is a union whose `Recipe`
+ * arm has no channel field at all, so a structural `{ channel?: string }`
+ * parameter shares no property with it and TypeScript rejects the call. Passing
+ * the name keeps this usable from both tiers without either of them owning a
+ * type the other cannot satisfy. */
+export function machineryNote(
+  channel: string | undefined,
+  consumers: ReadonlyMap<string, string[]>,
+): string {
+  const who = channel ? consumers.get(channel) : undefined;
+  return who && who.length ? ` · machinery for ${who.join(", ")} — runs automatically` : "";
+}
+
 /** P-3: resolve a consumer's `# requires-channel` against the registry — a STATIC
  * analysis (no mod runs), so a missing/ambiguous/too-deep dependency is known
  * before anything executes, not discovered by running into it. Returns:
