@@ -1,3 +1,23 @@
+# STANDING PRACTICE — the lane runs BEFORE STATE.md is written
+
+**A session is finished when the lane is green with everything in it — not when the
+last commit lands.** "Run it before shipping" was deferred three sessions running,
+which means it was not a gate, it was a suggestion. The lane now runs before the
+session's STATE is written, so the state that gets recorded is one the lane has
+actually seen.
+
+Two rules that go with it, both learned the hard way:
+
+- **`pkill -f "chrome.*--remote-debugging"` first.** Stray browsers starve the CPU
+  and are the root cause of most entries below. (Use a bracketed pattern —
+  `remote-debug[g]ing` — or the pattern matches the killing shell's own command line
+  and takes it down too.)
+- **A signature matching a known flake is not evidence** on a session that changed
+  the renderer or added a handler. Isolate the red, twice, and tally it here. The
+  ledger tells you what to suspect; the isolation run is what settles it.
+
+---
+
 # FLAKE LEDGER — isolated-run tallies (record EVERY set, green or red)
 
 Rule: docs/COMMAND_LAYER.md "Flake-triage rule". Denominator must grow on
@@ -299,3 +319,16 @@ until it clears alone. It did.
 **Verdict for the session:** the lane is green against the ribbon cross-section and
 the hold gesture. Neither failure touches either change: S38 is a bound-channel
 upload count and S27 is a producer round-trip plot.
+
+
+## 2026-07-22 (second lane) — after the shader naming, S49 and the attribute guard
+
+`1000 checks passed, 0 failed · wall 18.7min · 1 SCENARIO FAILURE: S35`
+
+**Zero assertion failures.** S35 reported `0/0 checks` — not a failed check but a
+failed driver START (`E2EDriver.start` threw), the documented startup class. Isolated
+twice: 7/7 both times.
+
+Worth separating in the tally, because `0/0` and `n-1/n` are different animals: an
+assertion failure says the product may be wrong, a startup failure says the harness
+could not begin. Only the first is evidence about the code.
