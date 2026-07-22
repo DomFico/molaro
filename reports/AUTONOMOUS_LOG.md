@@ -366,3 +366,68 @@ and has headroom. "I broke it" needs checking as much as "it passed".
 EDGE TUBE / TRACE TUBE / RIBBON. They were byte-identical, which is what let a
 single-replace hit the wrong function. Comment-only, so no pixel can move; S34 + S43
 confirm 42 checks unchanged.
+
+---
+
+# Session: the lane, and sizing the ribbon chapter (2026-07-22)
+
+## A4 — the lane runs before STATE, adopted as standing practice · `bad0c1e`
+
+**Result.** `1000 checks passed, 0 failed · 18.7min`. **Zero assertion failures.**
+S35 reported `0/0 checks` — a failed driver START, not a failed check — and passed
+7/7 in isolation twice.
+
+**Decided.** Record the practice at the top of the ledger, with two rules beside it:
+clear chrome with a BRACKETED pattern (the naive one matches the killing shell's own
+command line — it took the shell down twice), and a matching flake signature is not
+evidence on a session that touched the renderer.
+
+**Also separated in the tally:** `0/0` and `n-1/n` are different animals. An
+assertion failure says the product may be wrong; a startup failure says the harness
+could not begin. Only the first is evidence about the code.
+
+---
+
+## B4 — the clamp is inactive, and linear subdivision is not the fix
+
+**Read-only. Two measurements, both decisive, and the second reframes the chapter.**
+
+**The clamp never engages.** It binds only above a 151.0° turn; measured across
+25,876 junctions on three systems the maximum anywhere is 103.7° and the fraction
+over threshold is **0.000%**. Confirmed against pixels: turning it off changes
+**0.2%** of the ribbon (3549 → 3556), and 0.05 vs 0.001 are identical.
+
+**Linear subdivision leaves every corner untouched.** Max turn 97.0° raw, 97.0° at
+×4, 97.0° at ×8 — it inserts straight junctions *between* the corners. The parked
+lean ("still a linear copy, just of more vertices") is measurably not a fix. A spline
+is: Catmull-Rom ×8 takes 97° → 34.8°.
+
+**Why the wrong plan survived**, which is the transferable part: the *median* turn
+angle improves to 0.0° under linear subdivision while the *maximum* — the thing you
+see — does not move. A statistic that flatters a fix that does nothing.
+
+**Recommendation.** Leave the clamp alone. Do not build subdivision. The real question
+is whether the drawn backbone may differ from the supplied one, which is a ruling.
+
+---
+
+## C4 — a slot can be freed, but not the obvious one
+
+**Read-only, with bounded experiments reverted after each.**
+
+`position` is supplied and never read, and the objects disable frustum culling.
+Removing it draws **byte-identical** — genuinely dead weight. **But it frees nothing**:
+removing it *and* adding one attribute draws ZERO, because the framework injects
+`position` regardless. Removing one of OUR attributes and spending the slot *does*
+work — identical pixels.
+
+**Decided.** Rank the merges; lean candidate 1 (`iWidthA`+`iWidthB`+`iVisible` → one
+`vec2` with visibility in the sign), which frees two slots at no precision cost
+because widths are non-negative and the shader already treats non-positive width as
+collapse.
+
+**Wrong if.** The sign trick collides with a future signed width. Nothing suggests one.
+
+**The lesson worth keeping:** I would have reported "`position` is free" from reading
+alone, and been wrong in the way that matters. The count that governs is not the one
+you can see in the geometry.

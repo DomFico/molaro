@@ -135,3 +135,38 @@ elsewhere the guard either nags or misses. It is one constant.
   lane before shipping.**
 - The status line the budget guard writes is immediately overwritten by the header
   line; `console.error` and the exposed result carry it. Cosmetic, unfixed.
+
+---
+
+# STATE — the lane, and sizing the ribbon chapter (2026-07-22)
+
+From `f6e869c`. Committed and pushed; tree clean. **The lane ran before this was
+written**, per the practice adopted this session.
+
+| item | hash | what |
+|---|---|---|
+| A | `bad0c1e` | **lane green — 1000 checks, 0 assertion failures**; the lane-before-STATE practice recorded at the top of the ledger |
+| B+C | (this commit) | `reports/RIBBON_SIZING.md` — both investigations, read-only, nothing built |
+
+## The answer this session existed to produce
+
+**Per-face normals: an afternoon.** A slot can be freed at no precision cost, and
+that it converts into a usable one is measured, not assumed.
+
+**Removing the faceting: a chapter — and not the one that was parked.** It is neither
+the clamp (0.000% of junctions reach it; disabling it moves 0.2% of pixels) nor the
+segment count (linear subdivision leaves the worst corner *exactly* unchanged). It is
+whether the drawn backbone may stop being the supplied one. That is a ruling.
+
+## The one thing I most want reviewed
+
+**The parked lean was wrong and I had believed it.** "Subdivide in the producer —
+still a linear copy, just of more vertices" is precisely the operation that does
+nothing here, and it survived because the median turn angle improves to 0° under it
+while the maximum does not move at all. Worth checking my reasoning in
+`RIBBON_SIZING.md`, because retiring a plan is as consequential as adopting one.
+
+## Not done, deliberately
+Nothing was built. No subdivision, no per-face normals, no attribute merge — all
+three are out of scope by the brief and the last two are attended decisions now that
+they are priced.
