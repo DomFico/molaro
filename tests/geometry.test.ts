@@ -21,6 +21,8 @@ import {
   sceneExtent,
   traceSegments,
   worldPerSizeUnit,
+  packRibbonWidth,
+  unpackRibbonWidth,
 } from "../webview/geometry.ts";
 import { decodeFrameChunk, parseHeader, validateFrameChunk } from "../contract/contract.ts";
 
@@ -149,4 +151,36 @@ test("worldPerSizeUnit: the pixel-parity formula, pinned", () => {
   assert.ok(Math.abs(k - 0.03387) < 1e-4, `k on the reference data (${k})`);
   // linear in S: doubling the scene doubles world radii, pixels stay put
   assert.ok(Math.abs(worldPerSizeUnit(2 * S) - 2 * k) < 1e-12);
+});
+
+// -- the ribbon width/visibility packing ---------------------------------------
+//
+// Three attributes became one so per-face normals had a slot. The encoding rides
+// visibility on the sign of the width, which only works while widths are
+// non-negative — a property guaranteed today by parseSize's clamp, in a different
+// file, for unrelated reasons. These pin the packing's own end of that bargain.
+
+test("packRibbonWidth: a visible end keeps its magnitude, a hidden one is negated", () => {
+  assert.equal(packRibbonWidth(3, true), 3);
+  assert.equal(packRibbonWidth(3, false), -3);
+  assert.deepEqual(unpackRibbonWidth(packRibbonWidth(7.5, true)), { magnitude: 7.5, visible: true });
+  assert.deepEqual(unpackRibbonWidth(packRibbonWidth(7.5, false)), { magnitude: 7.5, visible: false });
+});
+
+test("packRibbonWidth REFUSES a negative width rather than silently hiding the band", () => {
+  // The failure this prevents: a negative magnitude packs to a positive number with
+  // the visibility bit inverted, so the band vanishes and nothing says why.
+  assert.throws(() => packRibbonWidth(-1, true), /non-negative/);
+  assert.throws(() => packRibbonWidth(-0.001, false), /non-negative/);
+  assert.throws(() => packRibbonWidth(Number.NaN, true), /non-negative/,
+    "NaN too — `!(x >= 0)` catches what `x < 0` misses");
+});
+
+test("packRibbonWidth: a hidden ZERO width is ambiguous and harmlessly so", () => {
+  // -0 reads back as visible. A zero width already draws nothing, so both readings
+  // produce the same picture — recorded because it is the one lossy case.
+  const packed = packRibbonWidth(0, false);
+  assert.equal(Object.is(packed, -0), true, "the sign is there…");
+  assert.equal(unpackRibbonWidth(packed).visible, true, "…but reads back as visible");
+  assert.equal(unpackRibbonWidth(packed).magnitude, 0, "and zero width draws nothing either way");
 });

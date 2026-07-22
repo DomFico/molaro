@@ -68,6 +68,7 @@ import {
   NO_BBOX_WARNING,
   sceneExtent,
   traceSegments,
+  packRibbonWidth,
   worldPerSizeUnit,
   type Box3Like,
 } from "./geometry.ts";
@@ -933,29 +934,52 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
     if (seg.count === 0) return null;
     const geo = new THREE.InstancedBufferGeometry();
     geo.instanceCount = seg.count;
-    // THIN BOX CROSS-SECTION as base geometry: 8 corners, not 4. Thickness is
+    // THIN BOX CROSS-SECTION as base geometry: 16 corners, not 8. Thickness is
     // per-vertex geometry — the instance count is untouched and slot ≡ header
     // order still holds, because a thicker band is more corners per segment, not
     // more segments. aCorner = (side across, end along, offset through thickness).
-    const corner: number[] = [];
-    for (const z of [-1, 1]) for (const end of [0, 1]) for (const x of [-1, 1]) corner.push(x, end, z);
-    // v index = z*4 + end*2 + side.  Four faces, ends left open (a ribbon is a
-    // strip; a cap would need its own normal and buys nothing at these widths).
-    const quad = (a: number, b: number, c: number, d: number) => [a, c, b, b, c, d];
-    const index = [
-      ...quad(4, 5, 6, 7),   // +thickness broad face
-      ...quad(0, 1, 2, 3),   // -thickness broad face
-      ...quad(1, 5, 3, 7),   // +across edge
-      ...quad(0, 4, 2, 6),   // -across edge
+    //
+    // SIXTEEN rather than eight so each of the four faces carries its OWN normal.
+    // Eight shared corners force one averaged normal per corner, and the edges then
+    // light exactly like the faces — which throws away the only thing the thickness
+    // buys. The slot for aFace was bought by packing width and visibility together;
+    // this pass sat at the 14-attribute ceiling before that, and the 16-corner
+    // version drew ZERO pixels with nothing reporting why.
+    const FACES: { z: [number, number]; x: [number, number]; face: number }[] = [
+      { z: [1, 1], x: [-1, 1], face: 0 },    // +normal broad face
+      { z: [-1, -1], x: [-1, 1], face: 1 },  // -normal broad face
+      { z: [-1, 1], x: [1, 1], face: 2 },    // +across edge
+      { z: [-1, 1], x: [-1, -1], face: 3 },  // -across edge
     ];
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(8 * 3), 3));
+    const corner: number[] = [];
+    const faceId: number[] = [];
+    const index: number[] = [];
+    for (const f of FACES) {
+      const base = corner.length / 3;
+      for (const end of [0, 1]) {
+        for (let u = 0; u < 2; u++) {
+          corner.push(
+            f.x[0] === f.x[1] ? f.x[0] : (u === 0 ? -1 : 1),
+            end,
+            f.z[0] === f.z[1] ? f.z[0] : (u === 0 ? -1 : 1),
+          );
+          faceId.push(f.face);
+        }
+      }
+      index.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
+    }
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(16 * 3), 3));
     geo.setAttribute("aCorner", new THREE.Float32BufferAttribute(corner, 3));
+    geo.setAttribute("aFace", new THREE.Float32BufferAttribute(faceId, 1));
     geo.setIndex(index);
     const iStart = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
     const iEnd = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
-    const iVisible = new THREE.InstancedBufferAttribute(new Float32Array(seg.count).fill(1), 1);
-    const iWidthA = new THREE.InstancedBufferAttribute(new Float32Array(seg.count), 1);
-    const iWidthB = new THREE.InstancedBufferAttribute(new Float32Array(seg.count), 1);
+    // WIDTH AND VISIBILITY IN ONE ATTRIBUTE. iWidthA + iWidthB + iVisible were
+    // three of the fourteen slots this pass is allowed; visibility rides the SIGN
+    // of each end's width (packRibbonWidth owns that invariant), which frees two
+    // and leaves room for the per-face normal. No precision is lost — the sign bit
+    // was unused because a width is never negative.
+    const iWidth = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 2), 2);
     const iColorA = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 4), 4);
     const iColorB = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 4), 4);
     const iAcrossA = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
@@ -967,14 +991,12 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
     const iPrevPoint = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
     const iNextPoint = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
     const iStyle = new THREE.InstancedBufferAttribute(new Float32Array(seg.count), 1);
-    for (const a of [iStart, iEnd, iVisible, iWidthA, iWidthB, iColorA, iColorB, iAcrossA, iAcrossB, iPrevPoint, iNextPoint, iStyle]) {
+    for (const a of [iStart, iEnd, iWidth, iColorA, iColorB, iAcrossA, iAcrossB, iPrevPoint, iNextPoint, iStyle]) {
       a.setUsage(THREE.DynamicDrawUsage);
     }
     geo.setAttribute("iStart", iStart);
     geo.setAttribute("iEnd", iEnd);
-    geo.setAttribute("iVisible", iVisible);
-    geo.setAttribute("iWidthA", iWidthA);
-    geo.setAttribute("iWidthB", iWidthB);
+    geo.setAttribute("iWidth", iWidth);
     geo.setAttribute("iColorA", iColorA);
     geo.setAttribute("iColorB", iColorB);
     geo.setAttribute("iAcrossA", iAcrossA);
@@ -1041,17 +1063,22 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
       iColorA.needsUpdate = true;
       iColorB.needsUpdate = true;
     };
+    // Both fills write the SAME packed array, so each has to preserve the other's
+    // half: widths re-apply the current visibility, visibility re-applies the
+    // current magnitude. Neither can clobber the other by running second.
+    const segVisible = (k: number): boolean =>
+      visible[seg.pointA[k]] > 0.5 && visible[seg.pointB[k]] > 0.5;
     const fillWidths = (ids?: readonly number[]): void => {
       const ts = rep.state.traceSize;
-      const wA = iWidthA.array as Float32Array;
-      const wB = iWidthB.array as Float32Array;
+      const w = iWidth.array as Float32Array;
       const write = (v: number): void => {
-        for (const e of endsOfVertex[v]) (e.b ? wB : wA)[e.k] = ts[v];
+        for (const e of endsOfVertex[v]) {
+          w[e.k * 2 + (e.b ? 1 : 0)] = packRibbonWidth(ts[v], segVisible(e.k));
+        }
       };
       if (ids) for (const v of ids) write(v);
       else for (let v = 0; v < env.traceVertices.length; v++) write(v);
-      iWidthA.needsUpdate = true;
-      iWidthB.needsUpdate = true;
+      iWidth.needsUpdate = true;
     };
     const fillAcross = (ids?: readonly number[]): void => {
       const ori = rep.state.orientation;
@@ -1083,11 +1110,13 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
       iStyle.needsUpdate = true;
     };
     const fillVisibility = (): void => {
-      const vis = iVisible.array as Float32Array;
+      const w = iWidth.array as Float32Array;
       for (let k = 0; k < seg.count; k++) {
-        vis[k] = visible[seg.pointA[k]] > 0.5 && visible[seg.pointB[k]] > 0.5 ? 1 : 0;
+        const vis = segVisible(k);
+        w[k * 2] = packRibbonWidth(Math.abs(w[k * 2]), vis);
+        w[k * 2 + 1] = packRibbonWidth(Math.abs(w[k * 2 + 1]), vis);
       }
-      iVisible.needsUpdate = true;
+      iWidth.needsUpdate = true;
     };
     const sh = ribbonShaders();
     const material = new THREE.ShaderMaterial({
@@ -1129,7 +1158,7 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
       attrVersions: () => ({
         start: iStart.version,
         across: iAcrossA.version,
-        width: iWidthA.version,
+        width: iWidth.version,
         color: iColorA.version,
       }),
     };

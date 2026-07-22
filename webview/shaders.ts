@@ -438,9 +438,13 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
       // RIBBON static per-corner: x = side (-1 | +1 across width), y = end (0 | 1),
       // z = offset through the thickness (-1 | +1)
       attribute vec3 aCorner;
+      // which of the box's four faces this corner belongs to, so each shades with
+      // its own normal: 0 = +normal, 1 = -normal, 2 = +across edge, 3 = -across
+      attribute float aFace;
       attribute vec3 iStart; attribute vec3 iEnd;
-      attribute float iVisible;
-      attribute float iWidthA; attribute float iWidthB;
+      // width AND visibility: |x| is end A's width, |y| is end B's, and a NEGATIVE
+      // component means the instance is hidden (packRibbonWidth owns the encoding).
+      attribute vec2 iWidth;
       attribute vec4 iColorA; attribute vec4 iColorB;
       attribute vec3 iAcrossA; attribute vec3 iAcrossB;
       attribute vec3 iPrevPoint; attribute vec3 iNextPoint;
@@ -451,13 +455,14 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
       varying vec3 vNormal;
       void main() {
         vStyleParams = styleParams(iStyle);
-        float wA = uWorldPerSize * iWidthA;
-        float wB = uWorldPerSize * iWidthB;
+        bool shown = iWidth.x >= 0.0 && iWidth.y >= 0.0;
+        float wA = uWorldPerSize * abs(iWidth.x);
+        float wB = uWorldPerSize * abs(iWidth.y);
         vec3 mvA = (modelViewMatrix * vec4(iStart, 1.0)).xyz;
         vec3 mvB = (modelViewMatrix * vec4(iEnd, 1.0)).xyz;
         vec3 seg = mvB - mvA;
         float len = length(seg);
-        if (iVisible < 0.5 || len * len < 1e-16 || max(wA, wB) <= 0.0) {
+        if (!shown || len * len < 1e-16 || max(wA, wB) <= 0.0) {
           gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
           vColor = vec4(0.0); vNormal = vec3(0.0, 0.0, 1.0);
           return;
@@ -511,11 +516,13 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // Per-face normal: the two broad faces look along ±nrm, the two edges
         // along ±across. Averaging one normal across all of them would light the
         // edges as if they were the face and lose the thickness cue entirely.
-        // One normal for the whole box rather than per face. Correct on the two
-        // broad faces, which are what you see; the edges shade as if they were
-        // face, which at 15% of the width is a sliver. A per-face normal needs a
-        // 15th vertex attribute and this shader is already at 14.
-        vNormal = nrm;
+        // PER-FACE NORMAL. The two broad faces look along ±nrm; the two edges look
+        // along ±across, so a glancing view catches the edge as an edge instead of
+        // lighting it like the face it is not. This is what the packed width bought.
+        vNormal = aFace < 0.5 ? nrm
+                : aFace < 1.5 ? -nrm
+                : aFace < 2.5 ? across
+                : -across;
         gl_Position = projectionMatrix * vec4(pos, 1.0);
       }`,
     fragment: `

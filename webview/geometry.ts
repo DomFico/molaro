@@ -151,3 +151,40 @@ export function computeBounds(positions: Float32Array): Box3Like {
   }
   return { min, max };
 }
+
+/**
+ * Pack a ribbon end's WIDTH and its instance's VISIBILITY into one float.
+ *
+ * The ribbon's vertex-attribute budget is 14 and it used all 14, so per-face
+ * normals had nowhere to go. `iWidthA`, `iWidthB` and `iVisible` collapse into one
+ * `vec2` by riding visibility on the sign of the magnitude — three attributes into
+ * one, two slots freed, no precision lost.
+ *
+ * THE INVARIANT LIVES HERE, not in whatever produced the number. The encoding only
+ * works because a width is never negative — today `parseSize` clamps negatives to
+ * zero, in a different file, for reasons that have nothing to do with this packing.
+ * Two things that must agree, in different places, is the shape this project has
+ * paid for repeatedly, and it fails SILENTLY here: a negative width would read as
+ * "hidden" and the band would vanish with nothing reporting why. So the packer
+ * refuses the input rather than trusting the clamp to stay put.
+ *
+ * The one ambiguous case is benign by construction: a hidden end whose width is
+ * exactly 0 packs to -0, which reads back as visible — and a zero width already
+ * draws nothing, so the picture is identical either way.
+ */
+export function packRibbonWidth(magnitude: number, visible: boolean): number {
+  if (!(magnitude >= 0)) {
+    // NaN included — `!(x >= 0)` catches it where `x < 0` would not.
+    throw new RangeError(
+      `ribbon width must be non-negative to pack visibility into its sign (got ${magnitude}). ` +
+      "The sign is the visibility bit; a negative magnitude would silently hide the band.",
+    );
+  }
+  return visible ? magnitude : -magnitude;
+}
+
+/** Read back what packRibbonWidth wrote — the shader does the same two operations
+ * (abs for the width, sign test for visibility), so this is what the tests pin. */
+export function unpackRibbonWidth(packed: number): { magnitude: number; visible: boolean } {
+  return { magnitude: Math.abs(packed), visible: !(packed < 0) };
+}
