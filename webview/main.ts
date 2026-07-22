@@ -1411,6 +1411,56 @@ async function main(): Promise<void> {
   const passEnv: PassEnv = {
     header, rep, positionAttr, pointAttrs, traceVertices, sizing, styleUniforms, depthVariant, materials,
   };
+  /**
+   * THE VERTEX-ATTRIBUTE CEILING, which fails SILENTLY and therefore needs a voice.
+   *
+   * Adding one attribute to the ribbon made it draw ZERO pixels with nothing
+   * reporting anything: the bind succeeded, attribute versions bumped, the scene
+   * rendered, and only that pass was gone. Bisecting found it; nobody should have
+   * to bisect for this twice.
+   *
+   * MEASURED, and the numbers do not agree with the obvious ones. The driver
+   * reports MAX_VERTEX_ATTRIBS = 16, and a bare program links at 16 and fails at
+   * 17 with "Too many attributes". But this pass draws at 14 named attributes and
+   * silently stops at 15 — the gap is attributes the framework injects into every
+   * ShaderMaterial (position/normal/uv and friends), which count against the same
+   * budget without appearing in our geometry. So the useful ceiling is neither the
+   * driver's number nor the one you would count by hand, and a guard written
+   * against `MAX_VERTEX_ATTRIBS` would not have fired at all.
+   *
+   * Hence a MEASURED budget with the driver's number reported beside it, so the
+   * next person sees both and knows which one bit. Non-fatal: one over-budget pass
+   * should not take the whole viewer down, and the message is what was missing.
+   */
+  const SAFE_VERTEX_ATTRS = 14;
+  const checkVertexAttributeBudget = (): { pass: string; count: number }[] => {
+    const gl = renderer.getContext();
+    const driverMax = gl.getParameter(gl.MAX_VERTEX_ATTRIBS) as number;
+    const over: { pass: string; count: number }[] = [];
+    // Walks the REGISTRY rather than the scene: the registry holds every pass and
+    // exists before the scene does, so the check cannot be ordered into a temporal
+    // dead zone. (It was, first time — and a ReferenceError during init killed the
+    // whole viewer, which is a louder failure than the silent one being guarded
+    // but not a better one.)
+    for (const obj of registry.objects()) {
+      const g = (obj as Partial<THREE.Mesh>).geometry as THREE.BufferGeometry | undefined;
+      if (!g || !g.attributes) continue;
+      const count = Object.keys(g.attributes).length;
+      if (count > SAFE_VERTEX_ATTRS) over.push({ pass: obj.name || g.type || "(unnamed)", count });
+    }
+    for (const o of over) {
+      const msg =
+        `VERTEX ATTRIBUTE BUDGET: "${o.pass}" declares ${o.count} attributes; ` +
+        `${SAFE_VERTEX_ATTRS} is the measured ceiling for a pass here. The driver reports ` +
+        `MAX_VERTEX_ATTRIBS=${driverMax}, but the framework injects its own into the same ` +
+        `budget, so a pass over the measured ceiling draws NOTHING and reports no error. ` +
+        `Free an attribute (pack two into one vec) rather than trusting the driver's number.`;
+      console.error(msg);
+      setStatus(msg);
+    }
+    return over;
+  };
+
   const registry = new ShapeRegistry();
   // Registration order IS draw order (scene order — the naive-transparency
   // compositing depends on it): points, edges, polylines, then the overlays.
@@ -1429,6 +1479,8 @@ async function main(): Promise<void> {
     obj.visible = false; // until the first frame is displayed
     scene.add(obj);
   }
+  // Every pass has registered and joined the scene by here.
+  const attrBudgetOver = checkVertexAttributeBudget();
   const { camera, target, size: sceneSize } = frameCamera(
     scale.box,
     scale.S,
@@ -3276,6 +3328,7 @@ async function main(): Promise<void> {
     // Test seam (harness only; production sets no `test` flag): lets the E2E
     // driver read model/camera/player state and drive actions directly.
     (window as unknown as { __viewer?: unknown }).__viewer = {
+      attrBudgetOver,
       camera,
       controls,
       player,
