@@ -2505,6 +2505,24 @@ async function main(): Promise<void> {
         }
       }
       const ok = await runModOnce(mod, points, expr, params);
+      // SUCCESS IS ALSO A PARTIAL STATE, and until now only failure said so. The
+      // provider runs OUTSIDE any stroke — runModOnce opens none, and
+      // declareProducedChannel records nothing — while a `produces: commands`
+      // consumer opens exactly one. So a single typed command produces two
+      // effects and one Ctrl+Z reverses only the second. Said plainly here rather
+      // than left for someone to infer from an undo that did less than they
+      // expected: the promise is narrower than "undo restores what that did", and
+      // every future consumer of a required channel inherits the same shape.
+      if (ok && sequencedProvider) {
+        asyncLine("ok", refreshedProvider
+          ? `note: "${sequencedProvider}" RECOMPUTED channel "${mod.requiresChannel}" for this target ` +
+            `before "${mod.name}" ran. Undo reverses "${mod.name}"'s writes, NOT the recomputed values — ` +
+            `channel data is replaced in place and is not undoable, so anything else bound to that ` +
+            `channel keeps reading the new numbers.`
+          : `note: "${sequencedProvider}" declared channel "${mod.requiresChannel}" before "${mod.name}" ` +
+            `ran. Undo reverses "${mod.name}"'s writes, NOT the declaration — channels are append-only ` +
+            `and a declaration is not undoable, so the channel stays available afterwards.`);
+      }
       // The honest limit: sequencing is NOT atomicity. If the provider ran and
       // the consumer then failed, the channel STAYS declared (append-only, not
       // undoable). Say so plainly rather than leaving the partial state a mystery.
