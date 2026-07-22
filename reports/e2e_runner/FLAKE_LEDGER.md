@@ -332,3 +332,15 @@ twice: 7/7 both times.
 Worth separating in the tally, because `0/0` and `n-1/n` are different animals: an
 assertion failure says the product may be wrong, a startup failure says the harness
 could not begin. Only the first is evidence about the code.
+
+## 2026-07-22 (third lane) — gating the per-face-normal commit
+
+`1006 checks passed, 1 failed · wall 21.1min · 1 SCENARIO FAILURE: S38`
+
+S38 `playback re-derived the bound color (uploads happened) — 2 → 2`, the
+upload-starvation signature verbatim. Isolated twice: 46/46 both runs.
+
+This lane ran **before** STATE was written, which is the practice adopted at the top
+of this file — and it earned its place immediately: it gated a commit that changed
+the ribbon's vertex layout and its shading, exactly the kind of change the previous
+three sessions deferred verifying.

@@ -170,3 +170,44 @@ while the maximum does not move at all. Worth checking my reasoning in
 Nothing was built. No subdivision, no per-face normals, no attribute merge — all
 three are out of scope by the brief and the last two are attended decisions now that
 they are priced.
+
+---
+
+# STATE — per-face normals (2026-07-22, later)
+
+From `5ad29b2`. Committed and pushed; tree clean. **The lane ran before this was
+written** — 1006 checks, one documented flake cleared 2/2.
+
+| hash | what |
+|---|---|
+| `f8c82d6` | per-face normals, paid for by packing width+visibility into one `vec2` |
+| `2df9f44` | the `drawn ≡ supplied` correction to `RIBBON_SIZING.md`, plus two lessons |
+
+## What shipped
+
+The ribbon's box now shades per face: the broad faces along ±normal, the edges along
+±across, so a glancing view catches an edge as an edge. The slot came from packing
+`iWidthA`+`iWidthB`+`iVisible` into one `vec2` with visibility on the sign — two
+slots freed, no precision lost, and `packRibbonWidth` refuses a negative magnitude
+rather than trusting `parseSize`'s clamp in another file.
+
+**Pixel audit:** tube 5296 → 5296, unbound ribbon 0 → 0, **bound ribbon 3549 → 3555
+(+0.17%)**, swap-back 5401 → 5401. Measured in two steps so the attribution is real:
+the merge alone was byte-identical, so the entire +6 is per-face shading.
+
+## The one thing I most want reviewed
+
+**The lossy case in the packing.** A hidden end of width exactly 0 packs to `-0` and
+reads back as visible. It is harmless — a zero width draws nothing either way — but
+it is a real asymmetry in an encoding, it is pinned by a test that asserts the
+ambiguity rather than hiding it, and it is the kind of thing that stops being
+harmless if someone later gives width 0 a meaning other than "invisible".
+
+## Corrected this session
+I had written that a producer-side spline violates `drawn ≡ supplied`. It does not —
+that invariant is about the renderer reading a supplied channel rather than computing
+one. The smoothing chapter is producer work plus a provenance line, and what remains
+open is orientation for a smoothed vertex.
+
+## Not done
+No smoothing, no subdivision. The clamp is untouched, per the ruling.
