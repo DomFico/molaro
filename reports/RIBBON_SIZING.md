@@ -72,21 +72,41 @@ The fork the parked note identified — *who supplies orientation at the subdivi
 resolution* — was posed for **linear subdivision**, which we now know is not the fix.
 The real fix is **smoothing**, and smoothing raises a different and larger question:
 
-> A spline through the anchors is **not the supplied polyline**. Every invariant in
-> this renderer is `drawn ≡ supplied`. Catmull-Rom interpolates its control points,
-> so the curve still passes *through* every anchor — but between anchors it bulges
-> where the data has a straight line. The drawn backbone would no longer be the data.
+> **[CORRECTED]** I first wrote that a spline violates `drawn ≡ supplied`. It does
+> not, and the distinction matters because it is what gates the chapter.
+>
+> That invariant is a RENDERER invariant, established for orientation specifically:
+> an oriented shape must read `across` from the supplied channel rather than
+> computing one. A spline computed in the PRODUCER and sent as a denser polyline
+> satisfies it exactly — the renderer still draws precisely what it was handed.
+>
+> What it actually raises is a **provenance** question, and this codebase already has
+> the pattern: the producer images molecules and holds the solute still, transforms
+> coordinates, and says so out loud in `Header.provenance`. Smoothing the trace is
+> the same class of thing.
+>
+> The measurement path is untouched. Mods compute on atom coordinates, not on the
+> trace polyline — and the polyline is already a derived object, a selected and
+> ordered subset, so it was never the data. The imaging ruling ("mods see exactly
+> what the viewer shows") was about coordinates, which mods do read; the trace
+> polyline is not one of those.
+>
+> So the honest shape is: **the ribbon displays a smoothed path, mods measure raw
+> coordinates, and the smoothing is stated in provenance.** Which is what every
+> cartoon renderer does, and for the reason measured above — the trace turns ~85°
+> per step, so nobody has ever drawn the raw polyline.
 
-That is a semantic decision, not a resolution one, and it is attended. It also
-relocates the work: smoothing belongs wherever the polyline is *authored*, and the
-orientation question follows the same route (a smoothed vertex needs a direction, and
-interpolating a direction field revives the sign-ambiguity walk).
+So the chapter is smaller than I first sized it. It is not blocked on a semantic
+ruling about what the renderer may draw; it is producer work plus a provenance line,
+of the kind already shipped once. What remains genuinely open is orientation: a
+smoothed vertex still needs a direction, and interpolating a direction field revives
+the sign-ambiguity walk that `ribbon_dir` had to solve along the chain.
 
-**Recommendation: neither subdivision nor a clamp change.** Leave the clamp exactly
-where it is — it costs nothing and does nothing. Do not build linear subdivision at
-any resolution; it is measurably not the fix. If the faceting is worth removing, the
-question to put to a person is *"may the drawn backbone differ from the supplied
-one?"*, and until that is answered the chapter should not start.
+**Recommendation: leave the clamp exactly where it is** — it costs nothing and does
+nothing. **Do not build linear subdivision at any resolution**; it is measurably not
+the fix. If the faceting is worth removing, the work is a producer-side spline with a
+provenance line, and the open question is how a smoothed vertex gets its orientation
+— not whether the renderer is allowed to draw it.
 
 ---
 

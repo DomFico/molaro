@@ -431,3 +431,41 @@ collapse.
 **The lesson worth keeping:** I would have reported "`position` is free" from reading
 alone, and been wrong in the way that matters. The count that governs is not the one
 you can see in the geometry.
+
+---
+
+## D4 — per-face normals shipped; the sizing report's framing corrected · `f8c82d6`
+
+**Built**, on the ruling that it is an afternoon. The slot came from packing
+`iWidthA`+`iWidthB`+`iVisible` into one `vec2` with visibility on the sign — two
+slots freed, no precision lost.
+
+**The assertion went where the packing lives**, as directed: `packRibbonWidth`
+refuses a negative magnitude rather than trusting `parseSize`'s clamp, which lives in
+another file and exists for unrelated reasons. It would have failed silently — a
+negative width reads as "hidden" and the band vanishes with no message. `!(x >= 0)`
+also catches NaN, which `x < 0` does not.
+
+**Measured in two steps on purpose**: the merge alone was byte-identical (3549), so
+the entire +6 that followed is attributable to per-face shading rather than to the
+repacking. 3549 → 3555 on the bound ribbon; tube, degeneracy and swap-back all
+byte-identical.
+
+**Correction recorded in `RIBBON_SIZING.md`.** I wrote that a producer-side spline
+violates `drawn ≡ supplied`. It does not: that invariant is about the renderer
+reading a supplied channel rather than computing one, and a spline sent as a denser
+polyline satisfies it exactly. It is a *provenance* question, which this codebase
+already has a pattern for. The chapter is smaller than I sized it — producer work
+plus a provenance line — and what remains open is orientation for a smoothed vertex,
+not permission to draw it.
+
+**And the naming lesson from the same exchange, worth keeping:** "a linear copy, just
+of more vertices" collapsed two senses of *linear*. Linear COPY is a transport
+property (the renderer copies what it is handed at a fixed cadence, however it was
+computed); linear INTERPOLATION is a geometry operation. The transport argument was
+sound and the geometry silently inherited its adjective. Nothing about the cadence
+objection ever required the subdivision to be linear.
+
+**The statistic lesson, which generalises past this:** the median improving to 0°
+while the max held at 97° is a statistic flattering a fix that does nothing. **For any
+smoothing question, the max is what you see and the median is what reassures you.**
