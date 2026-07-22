@@ -202,3 +202,88 @@ the first thing I would revisit.
 returning to baseline exactly → two redos byte-identical → a new op after an undo leaves
 `redoDepth 0`. That exercises `writeRepValues`' after-capture, which the unit suite
 cannot reach.
+
+---
+
+# Overnight part 2
+
+## A2 — the lane is green; the eviction path it was meant to stress was never reached · `79f1522`
+
+**Result.** Full lane green against the redo push: 49 scenarios, 993 checks, 0
+failed, 21.0 min. All ~21 `undoDepth` predicates hold.
+
+**The finding that matters more than the green.** The specific risk — eviction —
+was *not exercised*. The lane's scenes are 6000 points, so one full-scene write
+retains ~141 KB and crossing the 64 MB budget needs ~466 of them; nothing comes
+close. Two things bound the exposure: no product code reads `undoDepth`/`canUndo` at
+all (only E2E predicates do), and the trim touches only the undo stack while
+undo/redo move ops between stacks without changing the total.
+
+**Decided.** Pin the untested interaction at unit level rather than leave it to a
+user on large data: survivors still undo/redo in the right order, and an evicted op
+never runs in either direction.
+
+**Wrong if.** Eviction interacts with something outside the two stacks. Nothing
+suggests it does.
+
+---
+
+## B2 — ribbon thickness is 15% of width, proportional, square-edged · `2a44249`
+
+**Decided.** A thin box cross-section, 8 base corners, thickness = 0.15 × half
+width, ends open, square edges.
+
+**Weighed.** (i) Absolute thickness — rejected: chunky on a thin band, invisible on
+a wide one. (ii) Proportional — chosen; slenderness is constant across widths.
+(iii) Bevelled edges — rejected: needs its own normals for a sliver you cannot see
+at this ratio. (iv) Per-face normals via a 15th vertex attribute — **attempted and
+reverted**, see below.
+
+**Pixel audit.** tube 5296 → 5296, unbound ribbon 0 → 0, **bound ribbon 3087 →
+3549 (+15%)**, tube-after-swap 5401 → 5401. Only the bound silhouette moved, and
+upward, which is what thickness means.
+
+**Two findings.** A 15th vertex attribute made the ribbon draw **zero pixels with
+no error surfaced anywhere** — bind succeeded, attribute versions bumped, only the
+pixels vanished. Bisecting with thickness 0 proved it was the geometry, not the
+offset math. And my first edit landed in `edgeTubeShaders`: it opens with the
+identical comment and `attribute vec2 aCorner`, so a single-replace on a
+non-unique anchor hit the wrong shader — and S43 could not catch it, because it
+exercises trace tubes rather than bonds.
+
+**Wrong if.** 15% reads as too thin or too thick on real curves. It is one constant.
+
+---
+
+## C2 — the hold gesture: key `F`, refuse on no selection, newest on several · `74f0808`
+
+**Decided.** `F` unmodified; a point in no committed selection refuses with a
+message; a point in several resolves to the most recently created, with the name
+shown during the dwell; the setting is workspace-scoped.
+
+**Weighed.** (i) Silent no-op when nothing resolves — rejected: indistinguishable
+from a broken key. (ii) Refuse loudly — chosen. (iii) Ambiguity by prompt or picker
+— rejected as a second gesture stage; showing the resolved name during the dwell
+gives the same safety for free.
+
+**The finding.** The harness serves its own page, not `renderHtml`, so
+`__VIEWER__.holdCommand` is undefined under test — the same shape as the plot CSP
+bug. Rather than duplicate the default in the webview and the host,
+`DEFAULT_HOLD_COMMAND` lives in `commands.ts` and the host imports it as its
+`getConfiguration` fallback. Two spellings of one default fails silently: the
+gesture would work in one context and not the other.
+
+**Wrong if.** `F` collides with something a future panel wants. Nothing claims it now.
+
+---
+
+## D2 — the segment count is parked with a lean toward producer-supplied orientation
+
+Written up in `PARKED.md`. The fork is orientation, not geometry: a subdivided
+vertex is not a point, so either the producer supplies orientation at the subdivided
+resolution or something interpolates a direction field — reviving the sign-ambiguity
+walk, in the render loop. Lean: the producer emits both, no contract change.
+
+**And the thing I would measure first:** how much visible faceting is segment count
+versus the **miter limit clamp** at `dot(along, m) ≥ 0.25`. If it is mostly clamp,
+subdivision is the wrong fix for the symptom.

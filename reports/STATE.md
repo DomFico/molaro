@@ -1,4 +1,4 @@
-# STATE — overnight run
+# STATE — overnight run (part 1)
 
 Started from `b8a5eed`, tree clean and pushed. Everything below is committed and
 pushed to `origin/main`; the tree is clean.
@@ -57,3 +57,50 @@ have you find it.
 
 Channel declarations remain append-only and non-undoable; the macro refusal is
 unchanged; the hold-F gesture is unbuilt; nothing on the ship list was touched.
+
+
+---
+
+# STATE — overnight run, part 2
+
+Started from `f024bb9`. Everything below is committed and pushed; tree clean.
+
+## Committed
+
+| item | hash | what |
+|---|---|---|
+| A | `79f1522` | **the gate: full lane GREEN** — 49 scenarios, 993 checks, 0 failed, 21.0 min — plus tests for the eviction path the lane cannot reach |
+| B | `2a44249` | ribbon thin box cross-section, pixel-audited, screenshots at the miter camera |
+| D | `816b1cb` | segment count parked with a lean (writeup only, nothing built) |
+| C | `74f0808` | the hold gesture: template from settings, dwell-to-fire, target shown while dwelling |
+
+## Green
+
+- Full E2E lane green at the start; **S36 + S43 + S44 re-run green after the ribbon
+  change** (43 checks); 469 unit tests and typecheck clean at every commit.
+- Gesture verified in the real viewer: dwell showed the resolved command, firing
+  reported its outcome, `undoDepth` unchanged for a camera-only template, move-off
+  cancelled.
+
+## The one decision I most want reviewed
+
+**The ribbon shades with one normal for the whole box, not per face.** Per-face
+normals are the better picture — the edges would catch light as edges — but they
+need a 15th vertex attribute, and adding one made the ribbon draw **zero pixels with
+nothing reporting an error anywhere**. At 15% of the width the edges are a sliver, so
+the compromise is cheap; but if edge shading matters, the route is fewer attributes
+elsewhere rather than a 15th, and that is a real piece of work.
+
+## Not done
+
+- The full lane was **not** re-run after Items B and C. The ribbon-touching
+  scenarios were (S36/S43/S44, green) and the gesture adds a key handler no
+  scenario exercises, but a full lane before shipping remains the honest gate.
+- The gesture has **no E2E scenario**. It was verified with a one-off driver, which
+  is weaker than a pinned scenario and will not catch a regression.
+
+## Carried forward
+
+`reports/PARKED.md` now holds four items: hold-gesture *semantics* (superseded —
+C shipped the ruled version), the pending-mutation guard, mod outcome-line routing,
+and the ribbon segment count.
