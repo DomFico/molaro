@@ -328,7 +328,8 @@ export class NodeSet {
  * `hidden` makes ALL its resolved points invisible; `hiddenPart` holds the
  * individually hidden member entries (a subset of `set`) so a few members can
  * be hidden without hiding the whole selection. `lane` is the horizontal
- * bracket lane its bracket occupies in the bottom tree (movable).
+ * bracket lane its bracket occupies in the bottom tree — assigned once at
+ * construction by freeLane() and never changed; there is no move operation.
  */
 export interface CommittedSelection {
   id: number;
@@ -353,7 +354,7 @@ interface UndoOp {
  *   - `targetContains(p)`  → the green (pending) footprint
  *   - `isPointHidden(p)`   → union of hidden committed selections
  * Undo covers state changes only (never camera): build edits, clear-pending,
- * commit, hide/unhide, rename, delete, bracket-lane moves — each `undo()`
+ * commit, hide/unhide, rename, delete — each `undo()`
  * returns the affected point indices so the renderer can flip just those bits.
  */
 export class SelectionModel {
