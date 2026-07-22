@@ -684,3 +684,41 @@ test("the stack cap trims the OLDEST heavy entries and never below the floor", (
   for (let i = 0; i < 200; i++) light.recordOp(() => [], () => []);
   assert.equal(light.undoDepth, 200, "a byte budget must not punish cheap history");
 });
+
+test("eviction does not corrupt what remains: surviving ops still undo/redo exactly", () => {
+  // The E2E lane cannot reach this. Its scenes are 6000 points, so a full-scene
+  // representation write retains ~141 KB and it would take ~466 of them to cross
+  // the 64 MB budget — no scenario does that. Eviction is therefore a
+  // SIZE-DEPENDENT path: unexercised on small data, reachable on large. This is
+  // the unit-level stand-in.
+  const m = model();
+  const heavy = 8 * 1024 * 1024;
+  const fired: number[] = [];
+  for (let i = 0; i < 30; i++) m.recordOp(() => { fired.push(-i); return []; }, () => { fired.push(i); return []; }, heavy);
+  assert.equal(m.undoDepth, 20, "trimmed to the floor");
+  // The SURVIVORS are the newest 20 (indices 10..29) — walk them all back and forward.
+  for (let i = 0; i < 20; i++) m.undo();
+  assert.equal(m.undoDepth, 0);
+  assert.equal(m.redoDepth, 20, "every survivor is redoable");
+  assert.deepEqual(fired.slice(0, 20), [-29, -28, -27, -26, -25, -24, -23, -22, -21, -20,
+    -19, -18, -17, -16, -15, -14, -13, -12, -11, -10],
+    "newest-first on the way down, and the evicted oldest ten never ran");
+  fired.length = 0;
+  for (let i = 0; i < 20; i++) m.redo();
+  assert.deepEqual(fired, [10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+    20, 21, 22, 23, 24, 25, 26, 27, 28, 29],
+    "and oldest-first on the way back up, in the order they were recorded");
+  assert.equal(m.undoDepth, 20);
+});
+
+test("an evicted op is unreachable, not silently re-run", () => {
+  const m = model();
+  const heavy = 8 * 1024 * 1024;
+  let evictedRan = false;
+  m.recordOp(() => { evictedRan = true; return []; }, () => { evictedRan = true; return []; }, heavy);
+  for (let i = 0; i < 30; i++) m.recordOp(() => [], () => [], heavy);
+  while (m.canUndo) m.undo();
+  while (m.canRedo) m.redo();
+  assert.equal(evictedRan, false,
+    "the dropped op must be gone entirely — a half-present op is worse than an absent one");
+});
