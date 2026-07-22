@@ -20,3 +20,56 @@ Anything triggered from the viewer (a gesture, a future button) would be silent.
 **Lean:** mirror non-`ok` statuses to the topbar status line, not just `error` — the
 all-nomatch summary is status `nomatch` and is exactly what a non-terminal user must
 not miss. Out of scope tonight; it is gesture-adjacent and the gesture is parked.
+
+## P4 — ribbon segment count (subdivision). Written up, not built.
+
+The ribbon draws one quad per polyline vertex, so a bend is exactly as coarse as
+the supplied curve. On a tight turn the band is visibly faceted, and the miter only
+makes the facets meet cleanly — it cannot add any.
+
+**Subdividing in the PRODUCER sidesteps what killed renderer-side subdivision.** The
+renderer's objection was that generating vertices at draw time breaks
+slot ≡ header order and forces compaction. A producer that emits a denser polyline
+does not: it is still a linear copy, just of more vertices, and every downstream
+invariant holds unchanged because the header simply says there are more of them.
+
+**The fork that makes it a chapter is orientation, not geometry.**
+
+`orientation` is a per-point-per-frame channel, and polyline vertices map UP from
+points. A subdivided vertex is not a point — nothing in the contract gives it a
+channel value. So one of two things has to happen, and they are different projects:
+
+**(a) The producer supplies orientation at the subdivided resolution.**
+Clean in the renderer: every vertex has a real supplied value and `drawn ≡ supplied`
+holds unmodified. The cost is that the producer must now own the orientation field
+for vertices that do not correspond to points — which means either the mod that
+computes orientation also computes the subdivision (coupling two concerns that are
+currently independent), or the contract grows a per-VERTEX channel scope beside the
+per-point one. That second option is a wire change and is out of scope by standing
+rule.
+
+**(b) Something interpolates between supplied orientations.**
+No contract change and no producer coupling. But interpolating a direction field has
+its own coherence question, and it is the same one `ribbon_dir` already had to solve
+along the chain: two adjacent supplied directions can be near-antiparallel, and the
+naive interpolation through the midpoint is undefined exactly where you most need it.
+Slerp on the sphere fixes magnitude but not the sign ambiguity; the sign has to be
+resolved against a neighbour, which is a walk, which is the thing that made the
+frame-to-frame flip-correction subtle. Doing it per frame at draw time also puts a
+walk in the render loop.
+
+**My lean: (a), with the producer emitting a denser polyline AND the orientation
+values for it, and no contract change** — i.e. subdivision becomes something a mod
+opts into by supplying both, rather than a renderer feature. That keeps
+`drawn ≡ supplied` literally true, keeps the walk in Python where the existing
+flip-correction already lives, and makes the coarseness a property of the data
+rather than of the viewer. The cost is that a coarse polyline stays coarse until
+someone re-emits it, which is honest: the viewer is not inventing curve that the
+data did not contain.
+
+**What I would want measured before building either:** how much of the faceting is
+actually the segment count versus the miter limit clamp. The miter clamps at
+`dot(along, m) ≥ 0.25`, and a tight enough bend hits that clamp — where more
+segments would not help, because each one still meets its neighbour at a clamped
+corner. If the visible faceting on real curves is mostly clamp rather than
+resolution, this whole item is the wrong fix for the symptom.
