@@ -24,6 +24,7 @@ import { join } from "node:path";
 
 import { ProducerBroker } from "./broker.ts";
 import { parseModFile, resolveParameters, serializeMod, type AnalysisMod, type Mod } from "../webview/recipes.ts";
+import { replacementNote, saveModFile, type ModWriteResult } from "./modfile.ts";
 import { parseClaudeCommand, type ClaudeCommand } from "../webview/claudemodel.ts";
 import { createClaudeStub } from "../webview/claudestub.ts";
 import { DEFAULT_COLOR, DEFAULT_OPACITY, DEFAULT_SIZE } from "../webview/representation.ts";
@@ -245,14 +246,13 @@ function rgbToHex([r, g, b]: readonly [number, number, number]): string {
 
 /** The save path a later authoring step writes through: serialize a mod to
  * `.molaro/mods/<name>.py`. Analysis mods only (serializeMod refuses R
- * mods — they are code, not files). */
-export function saveWorkspaceMod(mod: Mod): string {
+ * mods — they are code, not files). The write itself lives in src/modfile.ts,
+ * which is vscode-free and therefore testable — it preserves any prior file
+ * rather than clobbering it, and reports what it displaced. */
+export function saveWorkspaceMod(mod: Mod): ModWriteResult {
   const dir = modsDir();
   if (!dir) throw new Error("no workspace folder — nowhere to save mods");
-  mkdirSync(dir, { recursive: true });
-  const file = join(dir, `${mod.name}.py`);
-  writeFileSync(file, serializeMod(mod), "utf-8");
-  return file;
+  return saveModFile(dir, mod.name, serializeMod(mod));
 }
 
 async function pickFile(): Promise<vscode.Uri | undefined> {
@@ -492,7 +492,11 @@ function openPanel(
       ...(spec.params && spec.params.length ? { params: spec.params } : {}),
       description: spec.description, code: spec.code,
     };
-    const file = saveWorkspaceMod(mod);
+    const { file, backup } = saveWorkspaceMod(mod);
+    // A replacement is stated, not inferred. The human approved this mod's source,
+    // not the disappearance of another — so say what was displaced and where it
+    // went, in the same line that reports the write.
+    const replaced = replacementNote(backup);
     // Re-parse the file we just wrote with the SAME parser registration uses, so
     // a malformed mod (e.g. produces: channel without a # channel: name) reports
     // its PRECISE reason to the model — the reload path only logs it and the
@@ -504,7 +508,7 @@ function openPanel(
     // The disk write is NOT the registration. Re-push and wait for the viewer to
     // say whether it took — write_mod reports what THIS answers, never the write.
     const r = await pushWorkspaceMods(spec.name);
-    return { ok: r.ok, name: spec.name, file, message: r.message };
+    return { ok: r.ok, name: spec.name, file, message: `${r.message}${replaced}` };
   };
 
   // The GATED delete_mod tool's host action. Refuses everything that is not a
