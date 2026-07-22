@@ -477,3 +477,63 @@ test("clearAllHidden clears the whole flag AND member hides as one undo op", () 
   m.undo();
   assert.ok(sel.hidden && m.isPointHidden(4), "undo restores flag + member together");
 });
+
+// -- the LIFO invariant commit() rests on ------------------------------------
+//
+// commit()'s undo closure does NOT capture the post-commit pending set. It reads
+// `this.pendingSet` LIVE at undo time and swaps the pre-commit set back in,
+// justified by a comment: "LIFO undo has already reverted anything done to the
+// interim pending set". Later ops in the same session capture that interim object
+// BY REFERENCE, so if the justification ever stopped holding, undo would restore a
+// selection while silently losing the pending footprint — with nothing failing.
+//
+// It holds today, and these pin why: strict LIFO means every op recorded after the
+// commit is undone BEFORE it, and nothing mutates the pending set without
+// recording. Written now because the claim was load-bearing and unguarded, and
+// because a redo stack — which replays forward — is exactly what would break it.
+
+test("commit(): LIFO empties the interim pending set before the commit's own undo runs", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  const before = m.pending.resolvedPoints().slice().sort();
+  m.commit();
+  m.addToTarget(sub(1));
+  m.addToTarget(sub(2));
+  m.undo();
+  m.undo();
+  assert.equal(m.pending.entryCount, 0, "the interim set is empty by the time commit's undo reads it");
+  m.undo();
+  assert.deepEqual(m.pending.resolvedPoints().slice().sort(), before,
+    "undoing the commit restores the ORIGINAL pending set, not a fresh empty one");
+  assert.equal(m.committed().length, 0);
+});
+
+test("commit(): stacked commits chain their pending swaps correctly", () => {
+  const m = model();
+  m.addToTarget(sub(0));
+  const p1 = m.pending.resolvedPoints().slice().sort();
+  m.commit();
+  m.addToTarget(sub(1));
+  const p2 = m.pending.resolvedPoints().slice().sort();
+  m.commit();
+  m.addToTarget(sub(2));
+  m.undo();                                   // the third set's mutation
+  m.undo();                                   // commit #2 → pending must be the second set
+  assert.deepEqual(m.pending.resolvedPoints().slice().sort(), p2);
+  m.undo();                                   // the second set's mutation
+  m.undo();                                   // commit #1 → pending must be the first set
+  assert.deepEqual(m.pending.resolvedPoints().slice().sort(), p1);
+});
+
+test("seed() records nothing and never touches the pending set", () => {
+  // The one candidate for an UNRECORDED pending mutation, which would put a
+  // change outside LIFO's reach and invalidate commit()'s justification.
+  const m = model();
+  m.addToTarget(sub(0));
+  const depth = m.undoDepth;
+  const pendingBefore = m.pending.resolvedPoints().slice().sort();
+  m.seed("prefab", [sub(1)]);
+  assert.equal(m.undoDepth, depth, "seed is initial state, not an undoable op");
+  assert.deepEqual(m.pending.resolvedPoints().slice().sort(), pendingBefore,
+    "seed builds its own set — it must not disturb the pending one");
+});
