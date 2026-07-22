@@ -23,7 +23,7 @@ import { VirtualList } from "./virtuallist.ts";
 
 const ROW_H = 18;
 const DRAG_THRESHOLD_PX = 5;
-const HOLD_MS = 400;
+export const HOLD_MS = 400;
 
 export interface TreeGestures {
   /** Left click (no drag, no hold). */

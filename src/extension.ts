@@ -25,6 +25,7 @@ import { join } from "node:path";
 import { ProducerBroker } from "./broker.ts";
 import { parseModFile, resolveParameters, serializeMod, type AnalysisMod, type Mod } from "../webview/recipes.ts";
 import { replacementNote, saveModFile, type ModWriteResult } from "./modfile.ts";
+import { DEFAULT_HOLD_COMMAND } from "../webview/commands.ts";
 import { parseClaudeCommand, type ClaudeCommand } from "../webview/claudemodel.ts";
 import { createClaudeStub } from "../webview/claudestub.ts";
 import { DEFAULT_COLOR, DEFAULT_OPACITY, DEFAULT_SIZE } from "../webview/representation.ts";
@@ -806,6 +807,12 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   // early-Z kept, cannot regress frame rate on unmeasured hardware).
   const depthVariant =
     vscode.workspace.getConfiguration("molaro").get<number>("viewer.depthVariant", 2) === 1 ? 1 : 2;
+  // The hold gesture runs a COMMAND TEMPLATE, not a named operation. The viewer
+  // substitutes the resolved target for {target} and runs the result through the
+  // ordinary command path, so it stays domain-free: it knows "run this string",
+  // which is the same thing typing knows. Empty disables the gesture.
+  const holdTemplate = vscode.workspace
+    .getConfiguration("molaro").get<string>("viewer.holdCommand", DEFAULT_HOLD_COMMAND);
 
   const csp = buildWebviewCsp({
     cspSource: webview.cspSource,
@@ -825,7 +832,7 @@ function renderHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
 </head>
 <body>
   ${HUD_BODY}
-  <script nonce="${nonce}">window.__VIEWER__ = { autoplay: false, depthVariant: ${depthVariant} };</script>
+  <script nonce="${nonce}">window.__VIEWER__ = ${JSON.stringify({ autoplay: false, depthVariant, holdCommand: holdTemplate })};</script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

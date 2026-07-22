@@ -35,6 +35,11 @@
           ],
           "default": 2,
           "description": "Impostor depth path: 1 = flat sprite depth (early-Z preserved), 2 = analytic per-fragment depth (correct interpenetration \u2014 required for real oriented geometry such as the ribbon to compose with sprites). Default 2, an architectural call made without hardware measurement; set 1 if frame rate matters more than crossing correctness on your hardware. Takes effect when a viewer panel is (re)opened."
+        },
+        "molaro.viewer.holdCommand": {
+          "type": "string",
+          "default": "view {target}",
+          "markdownDescription": "Command run when the hold key is held over a point in the viewer. `{target}` is replaced by the resolved committed selection (`@name`). Empty disables the gesture. The command runs through the ordinary command path \u2014 pre-validated, one undo stroke."
         }
       }
     },

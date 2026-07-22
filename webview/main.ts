@@ -42,10 +42,10 @@ import {
   type RepresentationState,
 } from "./representation.ts";
 import { bulkCategories, buildTree } from "./classification.ts";
-import { flashRow, mountTree, type TreeHandle } from "./tree.ts";
+import { HOLD_MS, flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
-import { applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
+import { DEFAULT_HOLD_COMMAND, applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
 import { BindingRegistry, type Binding } from "./bindings.ts";
 import { AXIS_DOMAIN, BIND_SIZE_MAX, mapScalar, ORIENTATION_AXIS, SCALAR_AXES, type BindAxis } from "./channelmap.ts";
 import { bindTypedResult } from "./claudebind.ts";
@@ -3002,10 +3002,82 @@ async function main(): Promise<void> {
     focusPoints(hierarchy.subgroupPoints(hierarchy.subgroupOfPoint(idx)));
   });
 
+  // -- the hold gesture ---------------------------------------------------------
+  //
+  // Hold the key over a point and, after a dwell, a COMMAND TEMPLATE from settings
+  // runs with the resolved target substituted in. The webview knows only "run this
+  // string" — the template names whatever operation the workspace wants, so no
+  // application vocabulary lands in here.
+  //
+  // It goes through runCommand, the same entry typing uses, so the effect is
+  // pre-validated and lands as ONE undo stroke. No new verb, no new context
+  // method, no direct write.
+  //
+  // DWELL, not press-and-release, reusing tree.ts's HOLD_MS so the two hold-feels
+  // cannot drift apart. The resolving target is shown WHILE the dwell runs, which
+  // is what a release-triggered version would have bought — you see which
+  // selection it resolved to before it commits — without a second gesture stage.
+  // Moving the pointer cancels.
+  //
+  // RESOLUTION, decided rather than left implicit: the point under the cursor, then
+  // the committed selections containing it. None → refuse and say so, because a
+  // gesture that silently does nothing is indistinguishable from a broken key.
+  // Several → the most recently created, since that is the one you just made; its
+  // name is displayed during the dwell, so the choice is visible before it acts.
+  const HOLD_KEY = "f";
+  // The default lives HERE and the host imports it as its getConfiguration
+  // fallback, so the two cannot disagree. `view` is chosen because it is neutral
+  // vocabulary and camera-only — a default gesture should demonstrate the feature
+  // without writing state the user did not ask for.
+  const holdTemplate = String(
+    (window as unknown as { __VIEWER__?: { holdCommand?: string } })
+      .__VIEWER__?.holdCommand ?? DEFAULT_HOLD_COMMAND);
+  let lastPointer: { x: number; y: number } | null = null;
+  let holdTimer: number | null = null;
+  let holdFrom: { x: number; y: number } | null = null;
+  const cancelHold = (): void => {
+    if (holdTimer !== null) { window.clearTimeout(holdTimer); holdTimer = null; }
+    holdFrom = null;
+  };
+  /** The committed selection under a point: the most recently created one that
+   * contains it, or null. */
+  const selectionAt = (idx: number): string | null => {
+    const all = model.committed();
+    for (let i = all.length - 1; i >= 0; i--) if (all[i].set.contains(idx)) return all[i].name;
+    return null;
+  };
+  const quoted = (name: string): string => (/^[A-Za-z0-9_-]+$/.test(name) ? name : `"${name}"`);
+  window.addEventListener("pointermove", (e) => {
+    lastPointer = { x: e.clientX, y: e.clientY };
+    if (holdFrom && Math.hypot(e.clientX - holdFrom.x, e.clientY - holdFrom.y) > CLICK_MOVE_THRESHOLD) {
+      cancelHold();
+      setStatus("hold cancelled — pointer moved");
+    }
+  });
+  window.addEventListener("keyup", (e) => { if (e.key.toLowerCase() === HOLD_KEY) cancelHold(); });
+
   // -- keys: Escape cancels; Ctrl+Z undo, Ctrl+Shift+Z redo (state, never camera) --
   window.addEventListener("keydown", (e) => {
     const t = e.target as HTMLElement | null;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
+    if (e.key.toLowerCase() === HOLD_KEY && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (holdTimer !== null || !holdTemplate || !lastPointer) return; // already dwelling / unbound / no pointer yet
+      const idx = pickAt(lastPointer.x, lastPointer.y);
+      const name = idx >= 0 ? selectionAt(idx) : null;
+      if (name === null) {
+        setStatus(idx < 0 ? "hold: nothing under the pointer" : "hold: that point is in no committed selection");
+        return;
+      }
+      const text = holdTemplate.replaceAll("{target}", `@${quoted(name)}`);
+      holdFrom = { ...lastPointer };
+      setStatus(`hold to run: ${text}`);
+      holdTimer = window.setTimeout(() => {
+        holdTimer = null; holdFrom = null;
+        const r = runCommand(text);
+        setStatus(`${text} → ${r.message}`);
+      }, HOLD_MS);
+      return;
+    }
     if (e.key === "Escape") {
       // exit edit mode without committing, else discard the pending target
       refreshPoints(model.editing ? model.endEdit() : model.clearPending());

@@ -58,6 +58,14 @@ import {
 } from "./recipes.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
 
+/** The hold gesture's default command template. `{target}` is replaced by the
+ * resolved selection. Lives here so the webview default and the host's
+ * getConfiguration fallback are ONE value — two spellings of a default is the
+ * two-lists shape, and it fails silently (the gesture would work in one context
+ * and not the other). `view` is neutral and camera-only: a default gesture should
+ * demonstrate the feature without writing state nobody asked for. */
+export const DEFAULT_HOLD_COMMAND = "view {target}";
+
 export type CommandStatus = "ok" | "nomatch" | "error";
 
 export interface CommandResult {

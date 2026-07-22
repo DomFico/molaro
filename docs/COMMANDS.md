@@ -934,6 +934,26 @@ stop resolving). The selector names **mods, not points** — bare names,
   mods), `rm` reports and never prompts. It touches nothing outside
   `.molaro/mods/`.
 
+## The hold gesture — hold `F` over a point
+
+Hold `F` with the pointer over a point and, after the same dwell the tree's hold
+uses, a **command template** runs with the resolved target substituted in. The
+template is the `molaro.viewer.holdCommand` setting; `{target}` is replaced by the
+committed selection under the pointer, as `@name`. Empty disables the gesture.
+
+The viewer knows only "run this string" — it never names an operation, so the
+template can be anything the grammar accepts and no vocabulary leaks into the
+renderer. The command goes through the ordinary command path, so it is
+pre-validated and lands as **one undo stroke**, exactly as if typed.
+
+**What it resolves to is shown while the dwell runs** (`hold to run: …`), so the
+selection is visible before it acts — a point can sit in several, and the rule is
+the most recently created one containing it. Moving the pointer cancels. A point in
+no committed selection refuses and says so, rather than doing nothing silently.
+
+**To see what is bound**, hold the key: the status line names the exact command
+before it runs. The setting itself is the other half of the answer.
+
 ## Undo and redo — `Ctrl+Z` / `Ctrl+Shift+Z`
 
 One system-wide stack, walked in both directions. Every state change is recorded
