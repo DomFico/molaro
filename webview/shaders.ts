@@ -424,11 +424,21 @@ export function focusFlashShaders(): { vertex: string; fragment: string } {
  * (|nz| — a ribbon has a back face; the highlight follows the plane, which
  * is exactly what breaking symmetry means).
  */
+/** Ribbon thickness as a fraction of the band's HALF width, so the box is
+ * 2·w wide and 2·RIBBON_THICKNESS·w thick — i.e. thickness is 15% of width.
+ * Chosen by eye against the miter shots: thin enough to still read as a ribbon
+ * rather than a bar, thick enough that the edge catches light at a glancing
+ * angle, which is the whole point of having one. Proportional rather than
+ * absolute so a thin coil and a wide helix keep the same slenderness. */
+export const RIBBON_THICKNESS = 0.15;
+
 export function ribbonShaders(): { vertex: string; fragment: string } {
   return {
     vertex: `
       // static per-corner: x = side (-1 | +1 across width), y = end (0 | 1)
-      attribute vec2 aCorner;
+      // static per-corner: x = side (-1 | +1 across width), y = end (0 | 1),
+      // z = offset through the thickness (-1 | +1)
+      attribute vec3 aCorner;
       attribute vec3 iStart; attribute vec3 iEnd;
       attribute float iVisible;
       attribute float iWidthA; attribute float iWidthB;
@@ -481,9 +491,32 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         vec3 m = normalize(along + alongNbr);             // bisector tangent
         float denom = max(dot(along, m), 0.25);           // cos(θ/2), clamped = miter limit 4
         float shift = (-aCorner.x * w) * dot(across, m) / denom;
-        vec3 pos = endpoint + across * (aCorner.x * w) + along * shift;
+        // THIN BOX CROSS-SECTION. The band gets thickness through its own plane
+        // normal, so it reads as a solid strip with edges rather than as paper.
+        //
+        // Proportional to width, not absolute: a coil and a helix keep the same
+        // slenderness instead of a fixed thickness looking chunky on one and
+        // invisible on the other. RIBBON_THICKNESS is a fraction of the HALF
+        // width (w), so the box is 2w wide and 2*RIBBON_THICKNESS*w thick.
+        //
+        // DRAWN ≡ SUPPLIED survives: the offset is along cross(along, across),
+        // which is perpendicular to both, so the plane's orientation is untouched
+        // — only its extrusion is new. DEGENERACY survives too: a zero across
+        // gives a zero normal AND w = 0, so every corner still lands on the
+        // endpoint and nothing is drawn. And the MITER survives: the shift does not
+        // depend on aCorner.z, so both faces slide together onto the bisector.
+        vec3 nrm = cross(along, across);
+        vec3 pos = endpoint + across * (aCorner.x * w) + along * shift
+                 + nrm * (aCorner.z * ${RIBBON_THICKNESS.toFixed(3)} * w);
         vColor = atB ? iColorB : iColorA;
-        vNormal = cross(along, across);
+        // Per-face normal: the two broad faces look along ±nrm, the two edges
+        // along ±across. Averaging one normal across all of them would light the
+        // edges as if they were the face and lose the thickness cue entirely.
+        // One normal for the whole box rather than per face. Correct on the two
+        // broad faces, which are what you see; the edges shade as if they were
+        // face, which at 15% of the width is a sliver. A per-face normal needs a
+        // 15th vertex attribute and this shader is already at 14.
+        vNormal = nrm;
         gl_Position = projectionMatrix * vec4(pos, 1.0);
       }`,
     fragment: `

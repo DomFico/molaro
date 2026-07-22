@@ -933,9 +933,24 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
     if (seg.count === 0) return null;
     const geo = new THREE.InstancedBufferGeometry();
     geo.instanceCount = seg.count;
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(4 * 3), 3));
-    geo.setAttribute("aCorner", new THREE.Float32BufferAttribute([-1, 0, 1, 0, -1, 1, 1, 1], 2));
-    geo.setIndex([0, 2, 1, 1, 2, 3]);
+    // THIN BOX CROSS-SECTION as base geometry: 8 corners, not 4. Thickness is
+    // per-vertex geometry — the instance count is untouched and slot ≡ header
+    // order still holds, because a thicker band is more corners per segment, not
+    // more segments. aCorner = (side across, end along, offset through thickness).
+    const corner: number[] = [];
+    for (const z of [-1, 1]) for (const end of [0, 1]) for (const x of [-1, 1]) corner.push(x, end, z);
+    // v index = z*4 + end*2 + side.  Four faces, ends left open (a ribbon is a
+    // strip; a cap would need its own normal and buys nothing at these widths).
+    const quad = (a: number, b: number, c: number, d: number) => [a, c, b, b, c, d];
+    const index = [
+      ...quad(4, 5, 6, 7),   // +thickness broad face
+      ...quad(0, 1, 2, 3),   // -thickness broad face
+      ...quad(1, 5, 3, 7),   // +across edge
+      ...quad(0, 4, 2, 6),   // -across edge
+    ];
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(8 * 3), 3));
+    geo.setAttribute("aCorner", new THREE.Float32BufferAttribute(corner, 3));
+    geo.setIndex(index);
     const iStart = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
     const iEnd = new THREE.InstancedBufferAttribute(new Float32Array(seg.count * 3), 3);
     const iVisible = new THREE.InstancedBufferAttribute(new Float32Array(seg.count).fill(1), 1);
