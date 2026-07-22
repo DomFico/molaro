@@ -1,3 +1,5 @@
+import { HOLD_MS } from "../webview/tree.ts";
+import { DEFAULT_HOLD_COMMAND } from "../webview/commands.ts";
 /**
  * Interaction-redesign validation — drives the REAL webview over the REAL
  * synthetic producer via CDP and asserts the new model end-to-end:
@@ -7980,7 +7982,120 @@ async function S48(): Promise<void> {
 
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48 };
+// ==================== S49: the hold gesture ==================================
+// The only surface shipped in the last two nights with no pinned test, and it is
+// an INPUT surface — the blast radius is every matching event.
+//
+// It exercises the REAL default-resolution path on purpose. The harness serves its
+// own page rather than renderHtml, so window.__VIEWER__ carries no holdCommand and
+// the webview falls through to DEFAULT_HOLD_COMMAND — the same fallback the product
+// uses if the host ever omits the setting. The expected string is IMPORTED from the
+// source rather than written out here, so this pins the single-sourced default
+// instead of pinning a copy of it (a copy would pass while the two drifted).
+/** Comfortably past the product's dwell, derived from it rather than guessed —
+ * a hardcoded wait would pass while the two drifted apart. */
+const HOLD_WAIT = HOLD_MS + 250;
+async function S49(): Promise<void> {
+  console.log("S49 — the hold gesture: dwell, indication, cancel, refusal, newest-wins, one command path");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const status = () => d.evaluate<string>(`document.getElementById("status")?.textContent ?? ""`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const centre = await d.evaluate<{ x: number; y: number }>(`(() => {
+      const r = document.querySelector("canvas").getBoundingClientRect();
+      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
+    })()`);
+    const hover = (x: number, y: number) =>
+      d.evaluate(`window.dispatchEvent(new PointerEvent("pointermove",{clientX:${x},clientY:${y},bubbles:true}))`);
+    const holdDown = () => d.evaluate(`window.dispatchEvent(new KeyboardEvent("keydown",{key:"f",bubbles:true}))`);
+    const holdUp = () => d.evaluate(`window.dispatchEvent(new KeyboardEvent("keyup",{key:"f",bubbles:true}))`);
+
+    // -- the template actually in force is the single-sourced default ----------
+    check("S49: the harness injects no template, so the REAL default-resolution path runs",
+      (await d.evaluate<string>(`String((window.__VIEWER__ && window.__VIEWER__.holdCommand) ?? "(absent)")`)) === "(absent)");
+
+    // -- a point in NO committed selection refuses, visibly --------------------
+    // Boot seeds one committed selection per bulk category, so "no selection" has
+    // to be CONSTRUCTED — the naive version of this check passed for the wrong
+    // reason, resolving to a seeded selection nobody made.
+    await d.evaluate(`(() => {
+      const m = ${V}.model;
+      for (const c of [...m.committed()]) m.deleteSelection(c.id);
+    })()`);
+    check("S49: (setup) no committed selections remain",
+      (await d.evaluate<number>(`${V}.model.committed().length`)) === 0);
+    await hover(centre.x, centre.y);
+    await holdDown();
+    await sleep(80);
+    const refusal = await status();
+    check("S49: a point in no committed selection REFUSES, and says so",
+      /no committed selection|nothing under the pointer/.test(refusal), refusal);
+    const depthAfterRefusal = await undoDepth();
+    await holdUp();
+    await sleep(HOLD_WAIT);
+    check("S49: …and nothing ran — a refusal is not a silent no-op",
+      (await undoDepth()) === depthAfterRefusal);
+
+    // -- with a selection: the dwell SHOWS the resolving target before firing ---
+    const made = await cmd("create_sele all [held]"); // `all` covers whatever is under the cursor
+    check("S49: (setup) a committed selection exists", made.status === "ok", JSON.stringify(made));
+    await hover(centre.x, centre.y);
+    const before = await undoDepth();
+    await holdDown();
+    await sleep(80);
+    const during = await status();
+    check("S49: the dwell NAMES the command and the resolved target before firing",
+      /hold to run:/.test(during) && /@/.test(during), during);
+    check("S49: …and it is the single-sourced default template, not a copy",
+      during.includes(DEFAULT_HOLD_COMMAND.split(" ")[0]), `${during} vs ${DEFAULT_HOLD_COMMAND}`);
+    check("S49: nothing has run yet — the dwell has not elapsed", (await undoDepth()) === before);
+
+    // -- it fires through the command path -------------------------------------
+    await sleep(HOLD_WAIT);
+    const fired = await status();
+    check("S49: the dwell FIRES and reports the command's own outcome",
+      /→/.test(fired) && !/hold to run:/.test(fired), fired);
+    check("S49: a camera-only template records NO undo entry (it went through the command path, which decides that)",
+      (await undoDepth()) === before, `depth ${before} → ${await undoDepth()}`);
+    await holdUp();
+
+    // -- move-off cancels -------------------------------------------------------
+    await hover(centre.x, centre.y);
+    const preCancel = await undoDepth();
+    await holdDown();
+    await sleep(60);
+    await hover(centre.x + 120, centre.y + 120);
+    const cancelled = await status();
+    check("S49: moving the pointer CANCELS the dwell, and says so",
+      /cancel/i.test(cancelled), cancelled);
+    await sleep(HOLD_WAIT);
+    check("S49: …and nothing ran after the cancel",
+      (await undoDepth()) === preCancel && !/→/.test(await status()));
+    await holdUp();
+
+    // -- several selections: the NEWEST wins, and its name is the one shown -----
+    // Both must actually CONTAIN the point under the cursor, so the target is the
+    // picked index rather than a category that may not cover it — the first
+    // version of this check asserted newest-wins while the newer selection did not
+    // contain the point at all, and passed nothing.
+    // `all` necessarily contains whatever is under the cursor, so both selections
+    // genuinely overlap it without the test needing to pick the point itself.
+    const first = await cmd("create_sele all [older]");
+    const second = await cmd("create_sele all [newer]");
+    check("S49: (setup) two overlapping selections, newest last",
+      first.status === "ok" && second.status === "ok", JSON.stringify([first, second]));
+    await hover(centre.x, centre.y);
+    await holdDown();
+    await sleep(80);
+    const ambiguous = await status();
+    check("S49: with several selections over the point, the NEWEST is resolved and displayed",
+      /@newer/.test(ambiguous), ambiguous);
+    await holdUp();
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -8018,7 +8133,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
-  S48: "full",
+  S48: "full", S49: "full",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {
