@@ -277,3 +277,25 @@ with the thing being built. Therefore, MEASURED-URGENT, not preference:
   - S32 ×1 isolated (strays killed) → PASS (ALL). ×1 (strays present) → hung 200s.
   - S42 (prior P-3 run) isolated → PASS (5/5).
   - Ribbon scenarios S43/S44 (the miter's own) → PASS in-pool AND isolated.
+
+## 2026-07-22 — full lane after the ribbon cross-section + hold gesture
+
+`990 checks passed, 3 failed · wall 21.7min · 2 SCENARIO FAILURES: S27, S38`
+
+- **S38** — `playback re-derived the bound color (uploads happened) — 2 → 2`.
+  The documented upload-starvation signature verbatim.
+- **S27** — `the plot DRAWS it … no series` + `the playhead marker is live`.
+  The documented plot/marker pixel tail.
+
+**Cleared by isolation, twice each**: S27 17/17 and S38 46/46 on both runs, with
+S38's upload count recovering to `2 → 10` and `2 → 17` (the flake is `2 → 2`).
+Chrome was cleared before the lane and again before each isolation run.
+
+Recorded rather than waved through, because the signature matching the ledger is
+what makes it a flake — a failure that merely *resembles* a known one, on a night
+that changed the renderer and added an input handler, is not evidence of anything
+until it clears alone. It did.
+
+**Verdict for the session:** the lane is green against the ribbon cross-section and
+the hold gesture. Neither failure touches either change: S38 is a bound-channel
+upload count and S27 is a producer round-trip plot.
