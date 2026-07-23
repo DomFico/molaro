@@ -218,6 +218,23 @@ export const HUD_CSS = /* css */ `
     display: flex; flex-direction: row; align-items: flex-start; gap: 18px; height: 100%; }
   #root[data-dock="top"] .cat-block, #root[data-dock="bottom"] .cat-block {
     min-width: max-content; overflow-y: auto; max-height: 100%; }
+
+  /* Boot loading overlay — covers the (necessarily blank) canvas while the
+     producer parses the dataset. A large topology takes several seconds to
+     load, all before the first frame arrives; the spinner ANIMATES so that
+     wait reads as working, never frozen. pointer-events:none keeps it inert
+     over the canvas, and main() REMOVES it from the DOM on the first displayed
+     frame — so steady-state DOM/pixels are unchanged. */
+  #loading-overlay { position: absolute; inset: 0; z-index: 30; pointer-events: none;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    gap: 14px; background: #1e1e1e; }
+  #loading-overlay .spinner { width: 34px; height: 34px; border-radius: 50%;
+    border: 3px solid #3a3a3a; border-top-color: #7aa2f7; animation: mol-spin 0.9s linear infinite; }
+  #loading-overlay.errored .spinner { animation: none; border-top-color: #d16969; }
+  #loading-overlay .loading-text { font: 12px monospace; color: #9a9a9a;
+    max-width: 80%; text-align: center; white-space: normal; line-height: 1.5; }
+  #loading-overlay.errored .loading-text { color: #d16969; }
+  @keyframes mol-spin { to { transform: rotate(360deg); } }
 `;
 
 export const HUD_BODY = /* html */ `
@@ -238,6 +255,10 @@ export const HUD_BODY = /* html */ `
       </div>
       <div id="divider" title="drag to resize the panel"></div>
       <div id="app">
+        <div id="loading-overlay">
+          <div class="spinner"></div>
+          <div class="loading-text" id="loading-text">loading…</div>
+        </div>
         <div id="viewer-actions">
           <button id="terminal-btn" title="Open the command terminal">Terminal</button>
           <button id="clear-btn" disabled>Clear</button>

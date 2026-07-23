@@ -543,6 +543,15 @@ def main() -> None:
     sys.stdout = sys.stderr  # ...then make any stray print() harmless
     stdin = sys.stdin.buffer
 
+    # Coarse loading signal (single source; see src/hostmessages.ts note): the
+    # dataset is parsed in build_source BEFORE the serve loop reads the first
+    # `header` request, so a large topology (e.g. the 222k-atom membrane, ~5-8s
+    # to load) leaves the viewer with nothing to show and no protocol message to
+    # relay. This stderr line — forwarded by the broker to the host, which
+    # recognizes the PRODUCER-STATUS: marker — lets the viewer say "loading a
+    # large system", not appear frozen. Emitted before the blocking load.
+    log.info("PRODUCER-STATUS: loading data source — a large system can take several seconds to parse")
+
     try:
         source = build_source(args)
     except Exception as exc:

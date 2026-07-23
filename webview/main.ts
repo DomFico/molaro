@@ -141,6 +141,26 @@ function setStatus(text: string): void {
   if (el) el.textContent = text;
 }
 
+// -- boot loading overlay: the "loading, not frozen" signal ------------------
+// The producer parses the whole dataset before it can answer the header, so a
+// large system leaves the canvas blank for several seconds. These drive the
+// animated overlay (hud.ts) that fills that gap; hideLoadingOverlay removes it
+// once the first frame is on screen, failLoadingOverlay turns it into a static
+// error if the producer never delivers.
+function setLoadingText(text: string): void {
+  const el = document.getElementById("loading-text");
+  if (el) el.textContent = text;
+}
+function hideLoadingOverlay(): void {
+  document.getElementById("loading-overlay")?.remove();
+}
+function failLoadingOverlay(text: string): void {
+  const el = document.getElementById("loading-overlay");
+  if (!el) return;
+  el.classList.add("errored"); // stops the spinner, reddens the copy
+  setLoadingText(text);
+}
+
 // ---------------------------------------------------------------------------
 // The shape-generator registry: the pattern the scene build always followed,
 // made explicit — each draw pass is a geometry, a material off the shared
@@ -1386,6 +1406,13 @@ async function main(): Promise<void> {
       seekFrame(Number((msg as { frame?: number }).frame ?? 0));
       return;
     }
+    if (msg?.type === "producerStatus") {
+      // a coarse loading step the producer emitted on stderr, surfaced by the
+      // host (src/hostmessages.ts) — refresh the overlay copy while we wait for
+      // the header. Harmless if the overlay is already gone (setLoadingText no-ops).
+      setLoadingText(String((msg as { text?: string }).text ?? ""));
+      return;
+    }
     if (msg?.type === "modsLoaded") {
       const push = msg as unknown as { mods?: unknown; id?: number; confirm?: string };
       const outcome = installMods(push.mods);
@@ -1438,8 +1465,34 @@ async function main(): Promise<void> {
   // late-bound once the player exists (the listener is live before boot ends)
   let seekFrame: (frame: number) => void = () => {};
 
-  setStatus("requesting header…");
-  const headerBytes = await transport.request({ type: "header" });
+  // The producer parses the ENTIRE dataset (topology + trajectory) before it
+  // can answer the header — for a large single-frame system (e.g. the 222k-atom
+  // membrane complex) md.load spends ~5-8.5s and ~0.5 GB RSS doing it, during
+  // which the canvas is necessarily blank. The header wait is DELIBERATELY NOT
+  // deadline-killed: big systems parse slowly, and a genuine producer failure
+  // already surfaces as producerExit (transport rejects the pending request →
+  // main().catch below), so a hard timeout could only ABORT a load that was
+  // going to succeed. Instead the animated overlay stays up and its copy
+  // escalates at these thresholds, so a slow load reads as working, not hung.
+  const LOADING_SLOW_MS = 4_000; // a large system is normal past this
+  const LOADING_STALL_HINT_MS = 30_000; // still going: point at the producer log
+  setStatus("loading…");
+  const slowTimer = window.setTimeout(
+    () => setLoadingText("loading a large system — this can take several seconds…"),
+    LOADING_SLOW_MS,
+  );
+  const stallTimer = window.setTimeout(
+    () =>
+      setLoadingText(
+        "still loading — the panel is working. A very large system parses slowly; " +
+          "if it never appears, check the “Point Viewer Producer” output for errors.",
+      ),
+    LOADING_STALL_HINT_MS,
+  );
+  const headerBytes = await transport.request({ type: "header" }).finally(() => {
+    window.clearTimeout(slowTimer);
+    window.clearTimeout(stallTimer);
+  });
   rejectIfErrorPayload(headerBytes);
   const header = parseHeader(new TextDecoder().decode(headerBytes));
   const nFrames = header.n_frames;
@@ -3520,7 +3573,10 @@ async function main(): Promise<void> {
     positionAttr.needsUpdate = true;
     registry.frameFlip(); // the instanced edge pass owns copies of these endpoints
     applyBindings(chunk, f, "style"); // live style bindings re-derive (no-op when unbound)
-    if (displayedFrame === -1) registry.reveal(); // enabled passes only
+    if (displayedFrame === -1) {
+      registry.reveal(); // enabled passes only
+      hideLoadingOverlay(); // first real frame is on the canvas — the load is done
+    }
     displayedFrame = f;
     shownSinceMark++;
     // the ONE displayed-frame flip point — playback and scrub both land here,
@@ -3956,6 +4012,11 @@ function setupPanelDocking(
 }
 
 main().catch((err) => {
+  const message = err instanceof Error ? err.message : String(err);
   console.error("[viewer]", err);
-  setStatus(`error: ${err instanceof Error ? err.message : String(err)}`);
+  setStatus(`error: ${message}`);
+  // If boot failed before the first frame (e.g. the producer died while loading),
+  // the overlay is still up and animating — turn it into a static error so the
+  // user sees what went wrong instead of a spinner that never resolves.
+  failLoadingOverlay(`failed to load: ${message}`);
 });

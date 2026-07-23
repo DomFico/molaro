@@ -32,7 +32,7 @@ import { createClaudeStub } from "../webview/claudestub.ts";
 import { DEFAULT_COLOR, DEFAULT_OPACITY, DEFAULT_SIZE } from "../webview/representation.ts";
 import { createClaudeBackend, type ClaudeBackend } from "./claudebackend.ts";
 import { buildTargetExamples, gatherLiveState, type SceneContext } from "./claudetools.ts";
-import { relaysTerminalMessageToViewer, resolveModDeletion } from "./hostmessages.ts";
+import { producerStatusFromLog, relaysTerminalMessageToViewer, resolveModDeletion } from "./hostmessages.ts";
 import { clearApiKey, NO_KEY_HINT, promptAndStoreApiKey, resolveApiKey } from "./claudeauth.ts";
 import { createPlotHost } from "../webview/plothost.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
@@ -322,6 +322,11 @@ function openPanel(
   // already flowing to the viewer, so get_context needs no injected request and
   // the producer FIFO is undisturbed. Cached once.
   let cachedHeader: HeaderPeek | null = null;
+  // The producer's most recent coarse loading line (stderr → onLog). Cached so
+  // the boot race can't swallow it: a line emitted before the webview's listener
+  // is live is re-posted when the webview first speaks (its header request).
+  let lastProducerStatus: string | null = null;
+  let flushedProducerStatus = false;
   const peekHeader = (payload: Uint8Array): void => {
     if (cachedHeader || payload.length === 0 || payload[0] !== 0x7b /* { */) return;
     try {
@@ -347,7 +352,19 @@ function openPanel(
         void panel.webview.postMessage({ type: "producerExit", message: reason });
         void vscode.window.showErrorMessage(`Point Viewer producer: ${reason}`);
       },
-      onLog: (line) => producerLog.appendLine(line),
+      onLog: (line) => {
+        producerLog.appendLine(line);
+        // Surface the producer's coarse loading step to the viewer's loading
+        // overlay (the big-topology "not frozen" signal). This is the one signal
+        // available while the producer blocks parsing a large dataset before the
+        // serve loop starts — a plain stderr line, never an out-of-band protocol
+        // frame (which would break the transport's FIFO correlation).
+        const status = producerStatusFromLog(line);
+        if (status) {
+          lastProducerStatus = status;
+          void panel.webview.postMessage({ type: "producerStatus", text: status });
+        }
+      },
     },
   );
 
@@ -740,6 +757,15 @@ function openPanel(
       return;
     }
     if (msg?.type === "toProducer" && msg.request) {
+      // The webview's first request (its boot header ask) proves its listener is
+      // live — flush any loading status that was emitted before then, so the
+      // overlay shows the producer's own words rather than only the generic copy.
+      if (!flushedProducerStatus) {
+        flushedProducerStatus = true;
+        if (lastProducerStatus) {
+          void panel.webview.postMessage({ type: "producerStatus", text: lastProducerStatus });
+        }
+      }
       try {
         broker.send(msg.request as { type: "header" | "frames" | "run_mod" });
       } catch (err) {
