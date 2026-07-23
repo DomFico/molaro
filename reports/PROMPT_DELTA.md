@@ -17,6 +17,22 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
 
 ## Since the last prompt pass
 
+### `background <color>` — the scene background (commit 8fa3ce1)
+- **Teach:** `background <color>` sets the viewer's scene background to a literal color —
+  a CSS name (`background steelblue`) or hex (`background #101820`). It is **targetless**
+  (exactly one color token, no address) — unlike the point/edge/trace color verbs, it
+  styles the whole scene, so it takes no target; a bare `background` or a second token is a
+  quiet error. It is a `run_command` **manipulation** (grammar), not a mod, and undoes in
+  one Ctrl+Z. Because it takes a **literal** color token (the same `parseColor` the color
+  verbs use), the assistant **can** pick a specific named color here — this is NOT the
+  per-point-scalar colormap (that remains the single red→magenta ramp); the two must not be
+  conflated in the prompt.
+- **Point at:** the worked example `background #101820` (or a named color). **Nuance for the
+  attended pass:** `prompt_examples.test.ts` resolves every `GRAMMAR_EXAMPLES` entry against
+  the address resolver — a targetless command has no address to resolve, so either the
+  example harness needs a targetless case or `background` is taught in prose with an inline
+  example rather than added to the resolved-examples list. Decide at the attended pass.
+
 ### Mod parameters (P-1, commit 78836ee)
 - **Teach:** a mod may declare parameters in its header, `# param: <name> <type>
   [<default>]` (type ∈ number | string | boolean). Invoke with
