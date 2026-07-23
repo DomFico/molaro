@@ -1,5 +1,6 @@
 import { HOLD_MS } from "../webview/tree.ts";
 import { DEFAULT_HOLD_COMMAND } from "../webview/commands.ts";
+import { DASH_SCALE } from "../webview/shaders.ts";
 /**
  * Interaction-redesign validation — drives the REAL webview over the REAL
  * synthetic producer via CDP and asserts the new model end-to-end:
@@ -9354,7 +9355,165 @@ async function S55(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55 };
+// ==================== S56: pixel proofs — bicolor halves + dash gaps =========
+// The two primitives PROVE-RENDER (the state stories are S54/S55): isolate
+// the edge layer (pointopacity/traceopacity 0 — the S19 staging trick), then
+// (1) dashed < solid lit-fragment count over the SAME tube region, with a
+// return-to-solid differential so a starved/stale frame cannot fake the
+// drop; (2) a bicolor edge's two halves classify as DIFFERENT colors at
+// 30%/70% along the probe segment, with a solid-green baseline at the same
+// spots proving the sampler reads THE tube. Harness hazards heeded: frame-0
+// pin, rAF settle before every capture, differentials across states.
+async function S56(): Promise<void> {
+  console.log("S56 — pixel proofs: dash gaps darken the tube; bicolor halves differ on screen");
+  await withDriver(async (d) => {
+    await d.evaluate(`${V}.player.seek(0)`); // deterministic frame-0 positions
+    await sleep(400);
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    // load-immunity: never capture before the page renders fresh frames
+    const snap = async (tag: string): Promise<string> => {
+      await d.evaluate(`(async () => {
+        for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r));
+      })()`);
+      return d.captureB64(`${REPORT}/S56_${tag}.png`);
+    };
+    /** strict red-pixel count over the canvas (below the top strip). */
+    const redCount = (b64: string) =>
+      d.evaluate<number>(`(async () => {
+        const app = document.getElementById('app').getBoundingClientRect();
+        const img = new Image();
+        await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+        const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+        const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+        const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+          Math.round(app.width), Math.round(app.height) - 60).data;
+        let n = 0;
+        for (let i = 0; i < px.length; i += 4) {
+          if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) n++;
+        }
+        return n;
+      })()`);
+
+    // ---- isolate the edge layer: only tubes contribute classified pixels ----
+    await cmd("pointopacity all 0");
+    await cmd("traceopacity all 0");
+
+    // ---- (1) DASH: dashed < solid over the same region, then back ----------
+    const EXPR = "alpha.group-0.subgroup-0";
+    await cmd(`colorbonds ${EXPR} red`);
+    await cmd(`bondsize ${EXPR} 3`);
+    await cmd(`view ${EXPR}`); // frame the region so gaps resolve to many px
+    await sleep(1600); // tween + flash fully out (S34's settle discipline)
+    // pick the dash scale from MEASURED geometry: period ≈ meanLen/3 gives
+    // ~3 periods per edge, so gaps must appear on every tube regardless of
+    // the dataset's absolute scale (scale = meanLen / (3 · DASH_SCALE · k))
+    const m = await d.evaluate<{ meanLen: number; k: number; n: number }>(`(()=>{
+      const v=${V};
+      const pts=new Set(v.debug.resolvePoints(${JSON.stringify(EXPR)}));
+      const pos=v.positionAttr.array;
+      let sum=0, n=0;
+      for (let e=0;e<v.edges.length;e++) {
+        const a=v.edges[e][0], b=v.edges[e][1];
+        if (!pts.has(a)||!pts.has(b)) continue;
+        const dx=pos[3*a]-pos[3*b], dy=pos[3*a+1]-pos[3*b+1], dz=pos[3*a+2]-pos[3*b+2];
+        sum+=Math.hypot(dx,dy,dz); n++;
+      }
+      return { meanLen: n>0 ? sum/n : 0, k: v.sizing.worldPerSize, n };
+    })()`);
+    check("S56: (setup) the region has contained edges with measurable length",
+      m.n > 0 && m.meanLen > 0 && m.k > 0, JSON.stringify(m));
+    const dashScale = m.meanLen / (3 * DASH_SCALE * m.k);
+    const solid = await redCount(await snap("solid"));
+    check("S56: (setup) the solid red tubes are decisively visible", solid > 500, `red=${solid}`);
+    const dashCmd = await cmd(`dashbonds ${EXPR} ${dashScale.toFixed(4)}`);
+    check("S56: (setup) dashbonds lands with the measured scale", dashCmd.status === "ok",
+      JSON.stringify(dashCmd));
+    await sleep(250);
+    const dashed = await redCount(await snap("dashed"));
+    check("S56: DASHED < SOLID — the gaps remove lit fragments over the same region",
+      dashed < solid * 0.9 && solid - dashed > 100,
+      `solid=${solid} dashed=${dashed}`);
+    // the return-to-solid differential: proves the drop was the DASH, not a
+    // starved frame or a moved camera (prove-render, never one capture)
+    await cmd(`dashbonds ${EXPR} 0`);
+    await sleep(250);
+    const resolid = await redCount(await snap("resolid"));
+    check("S56: dash 0 returns the SAME solid count (the drop was the dash pattern)",
+      Math.abs(resolid - solid) < solid * 0.15, `solid=${solid} resolid=${resolid}`);
+
+    // ---- (2) BICOLOR: the two halves classify differently on screen --------
+    // probe: an edge whose endpoints project front-facing and well separated
+    const probe = await d.evaluate<{ e: number; a: number; b: number } | null>(`(()=>{
+      const v=${V};
+      for (let e=0;e<v.edges.length;e++) {
+        const a=v.edges[e][0], b=v.edges[e][1];
+        const pa=v.debug.projectPoint(a), pb=v.debug.projectPoint(b);
+        if (pa.front && pb.front && Math.hypot(pa.x-pb.x, pa.y-pb.y) > 40) return { e, a, b };
+      }
+      return null;
+    })()`);
+    check("S56: found a bicolor probe edge", probe !== null, JSON.stringify(probe));
+    if (probe) {
+      // isolate the probe: spheres collapsed, every edge faded, ours lit fat
+      await cmd("pointsize all 0");
+      await cmd("bondopacity all 0");
+      await cmd(`bondopacityof #${probe.a} 1`);
+      await cmd(`bondsizeof #${probe.a} 3`);
+      await d.evaluate(`${V}.focusPoints([${probe.a}, ${probe.b}])`);
+      await sleep(1600); // tween done, flash fully out
+      /** classify 5×5 patches at 30% and 70% along the projected segment. */
+      const sampleEnds = async (tag: string) => {
+        const b64 = await snap(tag);
+        return d.evaluate<{ nearA: string; nearB: string }>(`(async () => {
+          const v=${V};
+          const pa=v.debug.projectPoint(${probe.a}), pb=v.debug.projectPoint(${probe.b});
+          const img = new Image();
+          await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+          const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+          const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+          const classify = (x, y) => {
+            const px = g.getImageData(Math.round(x) - 2, Math.round(y) - 2, 5, 5).data;
+            let r = 0, gr = 0, bl = 0;
+            for (let i = 0; i < px.length; i += 4) {
+              if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) r++;
+              else if (px[i+1] > px[i] + 50 && px[i+1] > px[i+2] + 50) gr++;
+              else if (px[i+2] > px[i] + 60 && px[i+2] > px[i+1] + 60) bl++;
+            }
+            if (r > 8) return 'red';
+            if (gr > 8) return 'green';
+            if (bl > 8) return 'blue';
+            return 'other';
+          };
+          const at = (t) => classify(pa.x + (pb.x-pa.x)*t, pa.y + (pb.y-pa.y)*t);
+          return { nearA: at(0.3), nearB: at(0.7) };
+        })()`);
+      };
+      // BASELINE: one constant → BOTH spots the same color (the sampler
+      // provably reads the tube, and a solid edge provably has no split)
+      await cmd(`colorbondsof #${probe.a} green`);
+      await sleep(250);
+      const base = await sampleEnds("bicolor_base");
+      check("S56: baseline — a solid green edge reads green at BOTH sample spots",
+        base.nearA === "green" && base.nearB === "green", JSON.stringify(base));
+      // THE SPLIT: endpoint colors red/blue → the halves classify apart
+      await cmd(`colorpoints #${probe.a} red`);
+      await cmd(`colorpoints #${probe.b} blue`);
+      const bi = await cmd(`bicolorbondsof #${probe.a}`);
+      check("S56: (setup) bicolorbondsof lands on the probe", bi.status === "ok", JSON.stringify(bi));
+      await sleep(250);
+      const split = await sampleEnds("bicolor_split");
+      check("S56: BICOLOR — the A half reads the A endpoint's RED on screen",
+        split.nearA === "red", JSON.stringify(split));
+      check("S56: BICOLOR — the B half reads the B endpoint's BLUE on screen",
+        split.nearB === "blue", JSON.stringify(split));
+      check("S56: ...and the two halves DIFFER (the split renders)",
+        split.nearA !== split.nearB, JSON.stringify(split));
+    }
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -9393,7 +9552,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
   S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
-  S53: "full", S54: "full", S55: "full",
+  S53: "full", S54: "full", S55: "full", S56: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

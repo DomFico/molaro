@@ -38,17 +38,21 @@ point types `anchor` and `t0`–`t3`).
 | `colorpoints <expr> <color>` | Color those points a constant color (CSS name or `#hex`; hidden points too; last-write-wins; one undo stroke) | `colorpoints alpha green` |
 | `colorbonds <expr> <color>` | Color every edge with **both** endpoints in the target (contained) | `colorbonds beta.group-0.subgroup-0 #ff8800` |
 | `colorbondsof <expr> <color>` | Color every edge **touching** the target (either endpoint — deliberately reaches one hop outside) | `colorbondsof #124 red` |
+| `bicolorbonds <expr>` | **Split-color** every contained edge (both endpoints in the target): each half takes its endpoint point’s **CURRENT** color — a **snapshot** at execution time (no color token, no two-argument form; re-run after recoloring points; one undo stroke) | `bicolorbonds alpha` |
+| `bicolorbondsof <expr>` | The incident sibling (either endpoint — reaches one hop outside, reading the out-of-set endpoint’s color) | `bicolorbondsof #124` |
 | `colortrace <expr> <color>` | Color polyline vertices whose **subgroup** contains a resolved point (maps up; boundary segments blend) | `colortrace alpha steelblue` |
 | `pointsize <expr> <size>` | Size those points — a **world-anchored** sphere radius that scales with zoom (0 is legal and **never hides**; negatives clamp to 0) | `pointsize alpha 2` |
 | `bondsize <expr> <size>` | Width for edges with **both** endpoints in the target — a world-anchored tube radius that scales with zoom | `bondsize beta.group-0.subgroup-0 0` |
 | `bondsizeof <expr> <size>` | Width for edges **touching** the target (either endpoint — the incident reach) | `bondsizeof #124 1.5` |
 | `tracesize <expr> <size>` | Thickness for polyline vertices whose **subgroup** contains a resolved point | `tracesize alpha 1.5` |
+| `dashbonds <expr> <scale>` | **Dash** every contained edge: 0 = solid (the default), >0 sets a **world-length dash period** proportional to the scale (zoom-stable — zooming magnifies dashes with the geometry; negatives clamp to 0; one undo stroke) | `dashbonds alpha 1.5` |
+| `dashbondsof <expr> <scale>` | The incident sibling (either endpoint — the incident reach) | `dashbondsof #124 2` |
 | `pointopacity <expr> <a>` | Fade those points (0–1; 0 is invisible-but-**present**, never a hide; clamps) | `pointopacity alpha 0.5` |
 | `bondopacity <expr> <a>` | Alpha for edges with **both** endpoints in the target | `bondopacity beta.group-0.subgroup-0 0` |
 | `bondopacityof <expr> <a>` | Alpha for edges **touching** the target (either endpoint — the incident reach) | `bondopacityof #124 0.3` |
 | `traceopacity <expr> <a>` | Alpha for polyline vertices whose **subgroup** contains a resolved point | `traceopacity alpha 0.7` |
 | `rainbow <expr>` | Color those points an even hue ramp in resolution order (the first **recipe**: per-point values, not one constant; one undo stroke) | `rainbow alpha.group-0` |
-| `bake <expr> <channel> <axis> [<min> <max>]` | Write a declared data channel (at the displayed frame) onto a representation axis — scalar channel → point `color`/`size`/`opacity`, edge `bondcolor`/`bondsize`/`bondopacity` (**endpoint mean**, contained edges), polyline `tracecolor`/`tracesize`/`traceopacity` (each vertex reads **its** point), normalized over min..max; **vector (3-wide) channel → `orientation`, raw** (one undo stroke) | `bake all energy color 0 2.5` |
+| `bake <expr> <channel> <axis> [<min> <max>]` | Write a declared data channel (at the displayed frame) onto a representation axis — scalar channel → point `color`/`size`/`opacity`, edge `bondcolor`/`bondsize`/`bondopacity`/`bonddash` (**endpoint mean**, contained edges) and `bondcolorends` (**per-endpoint** color: each half of the edge reads its **own** endpoint — no mean), polyline `tracecolor`/`tracesize`/`traceopacity` (each vertex reads **its** point), normalized over min..max; **vector (3-wide) channel → `orientation`, raw** (one undo stroke) | `bake all energy color 0 2.5` |
 | `bind <expr> <channel> <axis> [<min> <max>]` | Register a **channel→axis binding** (same gate as `bake`): the axis **re-derives from the channel on every frame flip**; last-bind-wins per element within an axis; one undo stroke. Vector channel → `orientation` (raw; **drives the oriented shapes — the ribbon `shape traces ribbon` renders it**) or `offset` (raw, on **points**; **displaces the drawn positions — shown = raw + offset**; bind-only, `bake` refuses it) | `bind all energy color 0 2.5` |
 | `unbind <expr> [<axis>]` / `unbind all [<axis>]` | Release binding **coverage element-wise**, one axis or all (values stay as last applied — except `offset`, which is **zeroed**: positions return to raw; one undo op) | `unbind alpha color` |
 | `channels` | Read-only list of the **declared channels** — the bindable vocabulary `bake`/`bind` read, per-frame vs static, which are bound (bare — takes no target). A `produces: channel` mod's channel appears here the instant it declares | `channels` |
@@ -610,13 +614,16 @@ listed by `bindings` and counted in the status-line badge.
   same recorded stroke and the positions snap back to raw; one Ctrl+Z
   restores the binding *and* the displacement.
 - **All three element domains bind**: the scalar axes cover points
-  (`color`/`size`/`opacity`), edges (`bondcolor`/`bondsize`/`bondopacity` —
-  an edge's value is the **mean of its two endpoints'** channel values,
-  computed on the raw values before the range lens; coverage is the
-  **contained** edges, both endpoints resolved, colorbonds' rule), and
+  (`color`/`size`/`opacity`), edges (`bondcolor`/`bondsize`/`bondopacity`/
+  `bonddash` — an edge's value is the **mean of its two endpoints'** channel
+  values, computed on the raw values before the range lens; coverage is the
+  **contained** edges, both endpoints resolved, colorbonds' rule — plus
+  `bondcolorends`, the **per-endpoint** exception: each half of the edge
+  reads its **own** endpoint's value through the lens, no mean), and
   polyline vertices (`tracecolor`/`tracesize`/`traceopacity` — each vertex
-  reads **its own point's** value). Coverage lives in each domain's own id
-  space; releases never cross domains.
+  reads **its own point's** value). `bonddash` maps `[0,1]` onto the fixed
+  `0..4` dash range (`bondsize`'s `0..6` pattern; 0 = solid). Coverage
+  lives in each domain's own id space; releases never cross domains.
 - **Static channels stay exact for free**: a `per_point` channel's values
   cannot change per frame, so its binding's bind-time apply is already
   correct at every frame (the per-flip applier skips it).
