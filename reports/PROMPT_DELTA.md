@@ -17,6 +17,27 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
 
 ## Since the last prompt pass
 
+### `smooth` / `delay` — offset-axis temporal-position mods (commits a46165a, 00b0301)
+- **Teach:** two commands mods on the NEW `offset` position axis (a bound `per_point_per_frame`
+  3-vector channel displaces the drawn positions: `shown = raw + offset`). `smooth <region>
+  ?window=N` smooths a region's motion (windowed average of positions over ±N frames; N is the
+  level; `window=0` = off). `delay <region> ?frames=k` shows each point at its position from k
+  frames earlier. Both bind a computed offset channel to the `offset` axis; both are undoable
+  (one Ctrl+Z), per-region, re-runnable. **DISTINCT from a color/scalar mod** — these move
+  POSITIONS, not appearance.
+- **The pattern to teach for authoring MORE of these:** any position-valued temporal effect `T`
+  is a mod producing a whole-system `per_point_per_frame` vector channel `offset = T(pos) − pos`
+  (zero outside the target), bound to `offset`. So a new effect (predict, exaggerate, jitter…)
+  is ONE `produces: channel` mod + a one-line `produces: commands` macro (`# requires-channel:`
+  + `bind all <channel> offset`). **`bind all` is correct** because the channel is zero outside
+  the region (and it avoids emitting a giant `#index` string — a commands mod only gets
+  `target_indices`).
+- **Point at:** `.molaro/mods/{smoothing,smooth,delay_offset,delay}.py`. **Gotchas to teach
+  authors:** vectorize (cumsum / gather, NO per-frame Python loop → 5s `run_mod` timeout); the
+  channel is WHOLE-SYSTEM (full `n_frames·n_points·3`, zero outside target — do NOT shrink it to
+  the selection); a `# requires-channel:` consumer's params now forward to its provider for
+  shared names (so `?window=`/`?frames=` reach the computation).
+
 ### `background <color>` — the scene background (commit 8fa3ce1)
 - **Teach:** `background <color>` sets the viewer's scene background to a literal color —
   a CSS name (`background steelblue`) or hex (`background #101820`). It is **targetless**
