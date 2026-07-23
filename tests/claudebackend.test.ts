@@ -19,7 +19,7 @@ import { mapSdkMessage, approvalPreview, argsPreview, isRuntimeUnavailable, erro
 import { MOD_AXES, MOD_PRODUCES } from "../webview/recipes.ts";
 import { commandMacroRefusal } from "../webview/commands.ts";
 import { resolveModDeletion } from "../src/hostmessages.ts";
-import { buildSystemPrompt } from "../src/claudeprompt.ts";
+import { buildSystemPrompt, GRAMMAR_EXAMPLES } from "../src/claudeprompt.ts";
 import { parseClaudeEvent, type ClaudeEvent } from "../webview/claudemodel.ts";
 
 function sampleContext(): SceneContext {
@@ -576,6 +576,42 @@ test("system prompt teaches durability: derive vocabulary at run time, respect t
   assert.match(p, /phosphorus/i);
   // respect target_indices guidance
   assert.match(p, /Respect `target_indices`/);
+});
+
+// -- the 2026-07-23 attended prompt pass: offset axis, background, and the
+// run-use correctness rules folded from reports/PROMPT_DELTA.md. Each guards a
+// shipped surface with a documented failure so it can't rot back out.
+test("system prompt teaches the offset axis and its smooth/delay mods (PROMPT_DELTA 2026-07-23)", () => {
+  const p = buildSystemPrompt(sampleContext());
+  // the offset axis mechanism + the two shipped commands mods on it
+  assert.match(p, /shown = raw \+\s*offset/);
+  assert.match(p, /smooth <region> \?window=N/);
+  assert.match(p, /delay <region> \?frames=k/);
+  // the authoring PAIR: a produces:channel offset mod + a requires-channel macro that binds
+  assert.match(p, /bind all <channel> offset/);
+  // offset is a bind-only vector axis in the bake/bind reference
+  assert.match(p, /\bbind-only\b/);
+});
+
+test("system prompt teaches the targetless `background` command in prose, not as a target example", () => {
+  const p = buildSystemPrompt(sampleContext());
+  assert.match(p, /background <color>/);
+  assert.match(p, /[Tt]argetless/);
+  // and it is NOT smuggled into the resolved-target examples (it has no address)
+  for (const e of GRAMMAR_EXAMPLES) assert.ok(!/^\s*background\b/.test(e.cmd), `\`${e.cmd}\` is targetless — keep it out of GRAMMAR_EXAMPLES`);
+});
+
+test("system prompt teaches the run-use correctness rules folded in the 2026-07-23 pass", () => {
+  const p = buildSystemPrompt(sampleContext());
+  // a channel is whole-system (resolves the Rule-6 conflict for channel mods)
+  assert.match(p, /A channel spans the WHOLE SYSTEM/);
+  // direction channels as unit vectors (the false 'hard swing' trap)
+  assert.match(p, /should be returned as UNIT vectors/);
+  // a per-point-scalar's ramp is min-maxed over the TARGET (the RMSF-on-solvent trap)
+  assert.match(p, /min-maxed over\s+whatever was TARGETED/);
+  assert.match(p, /the molecule comes out uniformly flat/);
+  // figure dpi / size-cap recovery
+  assert.match(p, /lower `dpi`/);
 });
 
 test("system prompt without context still instructs get_context first", () => {

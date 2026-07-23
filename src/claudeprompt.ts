@@ -79,7 +79,14 @@ a distance, an angle).
 **\`produces: per-point-scalar\`** — one value per entry of \`target_indices\`, in that exact
 order, returned as a flat \`list[float]\`. **Every value must be normalized to [0, 1]** —
 the viewer maps [0,1] onto color/size/opacity and does not rescale for you. You choose
-the normalization; state it in the mod's header comment. Declare an \`axis\` (\`color\`,
+the normalization; state it in the mod's header comment. **The [0,1] ramp is min-maxed over
+whatever was TARGETED — so pick the target with care: when the request is about the MOLECULE
+(how it moves, how exposed it is, how anything varies across it), target the molecule
+(\`polymer\`, a chain, a residue range), NOT \`all\`.** On a solvated box any per-atom quantity
+run over \`all\` spends its whole range on the most extreme component — almost always the
+water — and the molecule comes out uniformly flat, silently, with no error; \`all\` is right
+only when the whole system IS the molecule. (Rule 3's selection-driven RMSD is the
+superposition case of this same rule.) Declare an \`axis\` (\`color\`,
 \`size\`, or \`opacity\`). Use this to paint a *continuous computed* per-atom quantity onto
 the structure (RMSF, B-factor-like quantities, per-atom SASA). **Two hard facts:** (1) the
 \`color\` axis maps through **one built-in hue ramp (red→magenta)** — you CANNOT choose
@@ -149,13 +156,24 @@ atom→residue index once, then index the per-residue array with it:
     per_atom = per_res[:, res_of_atom, :]     # (n_frames, n_points, 3) — what you return
     return {"values": per_atom.reshape(-1).tolist(), "components": 3}
 
+**A channel spans the WHOLE SYSTEM, not the target.** Its length is
+\`n_frames * n_points * components\` over EVERY point — this is the ONE place Rule 6 does NOT
+mean "shrink the output". *Where* a channel applies is decided later by the \`bind\`/\`bake\`
+target, not by the mod; use \`target_indices\` only to choose what to spend effort computing,
+filling the rest with a neutral value (zero for an offset or a direction). A partial channel
+is refused — and would be wrong even if allowed, because a scene-level shape swap reads every
+element (the unselected ones would collapse on a zero facing vector).
+
 \`.molaro/mods/channel_flow.py\` is the full worked example (you cannot open it — the shape
 above is the source of truth). **A direction channel (\`components: 3\`) owns its
-frame-to-frame coherence.** Computing each frame independently can invert a direction's sign
-between adjacent frames; the renderer draws exactly what you supply, so an oriented shape
-will strobe. Seed each frame from the previous: compute the frame's vectors, then flip any
-whose dot product with the previous frame's is negative. If you miss it a warning names the
-breach, and the values are still drawn as supplied.
+frame-to-frame coherence, and should be returned as UNIT vectors** — the renderer normalizes
+anyway, and the producer's coherence check dots adjacent frames RAW, so a short vector
+(mdtraj's native nm, e.g. a ~0.12 nm C=O) trips a false "hard swing" on magnitude alone.
+Computing each frame independently can also invert a direction's sign between adjacent
+frames; the renderer draws exactly what you supply, so an oriented shape will strobe.
+Seed each frame from the previous: compute the frame's vectors, then flip any whose dot
+product with the previous frame's is negative. If you miss it a warning names the breach,
+and the values are still drawn as supplied.
 
 **\`produces: figure\`** — for plots richer than \`per-frame-series\` or \`scatter\`. Return
 EXACTLY this dict:
@@ -173,7 +191,9 @@ Emit \`bbox\`/\`xlim\` MECHANICALLY from the matplotlib axes (\`ax.get_position(
 \`ax.get_xlim()\`) — hand-computing them yields a playhead that is plausibly and silently
 misaligned. \`.molaro/mods/figure_metric.py\`'s \`_figure_reply\` does exactly this (again, the
 dict above is the source of truth; you cannot open the file). An axis declared
-\`x_is_frames\` gets a playhead and click-to-seek.
+\`x_is_frames\` gets a playhead and click-to-seek. A \`figure\` mod can declare a \`dpi\`
+parameter (see Parameters below); the PNG has a size cap, so if a run is refused as too
+large, lower \`dpi\`.
 
 Returns are validated strictly. A wrong length, a non-finite value, an out-of-range
 scalar, an exception, or a timeout means NOTHING is drawn and you get the error back.
@@ -225,6 +245,24 @@ Two hard rules, both enforced (a violation fails LOUDLY before anything runs):
   the channel STAYS declared — channels are append-only and a declaration is not
   undoable. One undo covers this mod's commands, not the provider's declaration.
   (\`get_context\` shows which mods declare and which require each channel.)
+
+## Moving positions over time — the \`offset\` axis
+
+A 3-wide channel bound to the \`offset\` axis DISPLACES the drawn positions (\`shown = raw +
+offset\`): it MOVES points, it does not restyle them (distinct from the color/scalar ramp).
+Two shipped \`commands\` mods drive it: \`smooth <region> ?window=N\` (replaces each point's
+shown position with a windowed average of its own positions over ±N frames, so jitter reads
+as smooth motion) and \`delay <region> ?frames=k\` (shows each point where it was k frames
+earlier). Each runs its provider then binds, in ONE invocation.
+
+Author a NEW position effect \`T\` as a PAIR of mods: a \`produces: channel\` mod computing the
+whole-system offset (\`offset = T(pos) − pos\`, zero outside the target — the
+channel-is-whole-system rule above), plus a one-line \`produces: commands\` macro that declares
+\`# requires-channel: <channel>\` and emits \`bind all <channel> offset\`. \`bind all\` is correct
+because the channel is already zero outside the region (and it avoids emitting a giant
+\`#index\` string — a commands mod only gets \`target_indices\`). Vectorize the computation
+(cumsum / gather — never a per-frame Python loop, the 5s run_mod timeout).
+\`.molaro/mods/{smoothing,smooth,delay_offset,delay}.py\` are the worked pair.
 
 ## Correctness rules — these are not stylistic
 
@@ -310,6 +348,7 @@ export const GRAMMAR_EXAMPLES: { cmd: string; target: string; note: string }[] =
   { cmd: "bind all mobility color 0 5", target: "all", note: "bind a computed per-frame scalar channel to color — animates as it plays (real channel name from get_context)" },
   { cmd: "bake all fluctuation color 0 2", target: "all", note: "snapshot the displayed frame's channel onto color — STATIC (use bind for animated; real channel name from get_context)" },
   { cmd: "bind polymer.A.* backbone orientation", target: "polymer.A.*", note: "bind a 3-wide direction channel to orientation, then `shape traces ribbon` renders it (real channel name from get_context)" },
+  { cmd: "bind all smoothing offset", target: "all", note: "bind a 3-wide OFFSET channel — displaces positions (shown = raw + offset); bind-only, whole-system, zero outside its region (real channel name from get_context)" },
 ];
 
 const GRAMMAR_REFERENCE = `## Manipulating the scene: the command grammar (\`run_command\`)
@@ -365,6 +404,13 @@ base look — do not re-apply a guessed default.
 \`[name]\`); \`hide <target>\` / \`show <target>\`; \`ls\` / \`ls @name\` lists; \`rename\`,
 \`add\`/\`remove\` edit a selection's members. (\`rm\` deletes mod FILES and is refused to you.)
 
+**Targetless scene commands** — no address, no \`all\`, they style the WHOLE scene:
+\`background <color>\` sets the scene background to a LITERAL color (a CSS name or \`#hex\`:
+\`background steelblue\`, \`background #101820\`). Exactly one color token — a bare \`background\`
+or a second token is a quiet error; one undo op. Unlike the per-point-scalar colormap (the
+single red→magenta ramp you cannot pick a hue on), \`background\` takes a real color token, so
+here you CAN choose the exact color. The two must not be conflated.
+
 **Self-diagnosis**: a **parse error** means bad syntax (it says what/where); a **nomatch**
 (\`nothing matches "…"\`) means valid syntax that resolved to nothing — check the level
 (count the dots) and the exact label spelling/case. An empty result is never an error.
@@ -391,7 +437,10 @@ quantity varies with frame and the request doesn't pin one ("as it plays", "over
 "updating"), bind.
 
 Axes: \`color\` \`size\` \`opacity\` on points; \`bondcolor\` \`bondsize\` \`bondopacity\` on edges;
-\`tracecolor\` \`tracesize\` \`traceopacity\` on polylines; \`orientation\` for a 3-wide channel.
+\`tracecolor\` \`tracesize\` \`traceopacity\` on polylines; and two 3-wide VECTOR axes —
+\`orientation\` (per-vertex; drives the oriented shapes, e.g. the ribbon) and \`offset\`
+(per-point; DISPLACES the drawn positions, \`shown = raw + offset\`; **bind-only** — \`bake\`
+refuses it, and \`unbind\` ZEROES it so positions snap back to raw).
 
 \`unbind <target> [<axis>]\` releases coverage — values stay as last applied. \`bindings\` lists
 what is live. Both a bake and a bind are one undo stroke.

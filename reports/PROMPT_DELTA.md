@@ -18,6 +18,12 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
 ## Since the last prompt pass
 
 ### `smooth` / `delay` — offset-axis temporal-position mods (commits a46165a, 00b0301)
+> **STATUS: CONSUMED 2026-07-23** — now in claudeprompt.ts (the "## Moving positions over
+> time — the `offset` axis" section: the mechanism `shown = raw + offset`, `smooth`/`delay`,
+> and the produces:channel + requires-channel-macro authoring PAIR pointing at
+> `.molaro/mods/{smoothing,smooth,delay_offset,delay}.py`; `offset` added to the bake/bind
+> axes as a bind-only vector axis; a `bind all smoothing offset` worked example added to
+> GRAMMAR_EXAMPLES). Guarded by claudebackend/prompt_examples tests. Do not re-teach.
 - **Teach:** two commands mods on the NEW `offset` position axis (a bound `per_point_per_frame`
   3-vector channel displaces the drawn positions: `shown = raw + offset`). `smooth <region>
   ?window=N` smooths a region's motion (windowed average of positions over ±N frames; N is the
@@ -39,6 +45,13 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
   shared names (so `?window=`/`?frames=` reach the computation).
 
 ### `background <color>` — the scene background (commit 8fa3ce1)
+> **STATUS: CONSUMED 2026-07-23** — now in claudeprompt.ts as a "Targetless scene commands"
+> paragraph in the grammar reference (literal color, exactly one token, quiet error on a bare
+> or extra token, and the explicit contrast with the per-point-scalar red→magenta colormap).
+> TARGETLESS decision made: taught in PROSE with an inline example, kept OUT of
+> GRAMMAR_EXAMPLES (whose invariant is every-target-resolves) — guarded by a new
+> prompt_examples test asserting no targetless command sneaks into the resolved list. Do not
+> re-teach.
 - **Teach:** `background <color>` sets the viewer's scene background to a literal color —
   a CSS name (`background steelblue`) or hex (`background #101820`). It is **targetless**
   (exactly one color token, no address) — unlike the point/edge/trace color verbs, it
@@ -55,6 +68,11 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
   example rather than added to the resolved-examples list. Decide at the attended pass.
 
 ### Mod parameters (P-1, commit 78836ee)
+> **STATUS: CONSUMED 2026-07-23** — already in claudeprompt.ts (the "## Parameters — one mod,
+> reused with different settings" section: `# param:` header, required vs defaulted, the third
+> `compute(data, target_indices, params)` arg, and "get_context lists each mod's parameters …
+> read them there, never guess"). write_mod's `params` field is guarded by claudebackend
+> tests. Confirmed present this pass; do not re-teach.
 - **Teach:** a mod may declare parameters in its header, `# param: <name> <type>
   [<default>]` (type ∈ number | string | boolean). Invoke with
   `<mod> <target> ?key=value ?key2=value2` — the separator is a reserved `?`
@@ -73,6 +91,10 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
   otherwise. This is the pattern the reference mods now follow.
 
 ### Static channel name (P-2, commit 9ef9c42)
+> **STATUS: CONSUMED 2026-07-23** — already in claudeprompt.ts (channel section: name declared
+> in the header `# channel: <name>`, return carries data only — no `name` in the return,
+> guarded by the `doesNotMatch(/"name": "<channel name>"/)` assertion). Confirmed present this
+> pass; do not re-teach.
 - **Teach:** a `produces: channel` mod declares its channel NAME in the header,
   `# channel: <name>` (a single token). The return carries ONLY data
   `{values, components, min?, max?}` — do NOT put a `name` in the return (it is
@@ -81,6 +103,10 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
   is name-free).
 
 ### requires-channel sequencing (P-3, commit cf13b91)
+> **STATUS: CONSUMED 2026-07-23** — already in claudeprompt.ts (the "## Requiring a channel —
+> one invocation instead of two" section: `# requires-channel:`, provider runs first, ONE
+> LEVEL only, and the honest "sequencing is not atomicity" limit). Reinforced this pass by the
+> offset-axis authoring pattern, which uses a requires-channel macro. Do not re-teach.
 - **Teach:** a mod may declare `# requires-channel: <name>`; on invocation its
   provider (the `# channel:` mod) runs FIRST — one invocation instead of two.
   ONE LEVEL only (a missing/ambiguous/deeper provider is refused, naming the
@@ -90,12 +116,22 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
 - **Point at:** the shipped `setup_flow.py` (requires `flow_dir`, then binds it).
 
 ### write_mod authoring fields (P-1/P-2/P-3)
+> **STATUS: CONSUMED 2026-07-23** — a TOOL-SCHEMA capability, not prompt prose: `write_mod`'s
+> `params`/`channel`/`requiresChannel` fields and their approval-preview naming are guarded by
+> claudebackend tests ("write_mod can author a PARAMETERIZED mod", "P-2 … names the declared
+> channel"). The prompt teaches the header lines the assistant declares (`# param:`,
+> `# channel:`, `# requires-channel:`); write_mod carries them. Do not re-teach.
 - **Teach:** `write_mod` gained `params`, `channel`, and `requiresChannel` fields
   so the assistant can author parameterized / channel / requiring mods. The
   approval preview names the declared channel and required channel; a malformed
   one is re-parsed and reported precisely, not "not loaded".
 
 ### Figure resolution (Item C, commit c3651c8; extraction parked)
+> **STATUS: CONSUMED 2026-07-23 (the dpi knob) — the SAVE/extraction half remains PARKED.**
+> claudeprompt.ts's figure section now states a `figure` mod can declare a `dpi` parameter and
+> to lower it if a run is refused as too large (the size cap); the generic Parameters section +
+> get_context's advertised `figure_metric [params: dpi…]` do the rest (cold R5 confirmed it
+> lands). NOT folded: how to SAVE a figure to disk — still parked (reports/PARKED.md Item C).
 - **Teach (once the extraction fork resolves):** `figure_metric` takes `dpi`
   (default 100) — pass `?dpi=200` for higher resolution. The figure has a 2 MiB
   size cap; if exceeded the refusal says to lower the dpi (now a real knob).
@@ -103,6 +139,13 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
   reports/PARKED.md Item C); revisit when the extraction path is decided.
 
 ### Vector channels should be returned as UNIT vectors (found in real use, 2026-07-21)
+> **STATUS: CONSUMED 2026-07-23** — folded into the channel section's coherence paragraph: "a
+> direction channel … should be returned as UNIT vectors — the renderer normalizes anyway, and
+> the producer's coherence check dots adjacent frames RAW, so a short vector (mdtraj's native
+> nm, e.g. a ~0.12 nm C=O) trips a false 'hard swing' on magnitude alone", kept alongside the
+> already-present sign-flip / seed-from-previous-frame guidance. Scoped to DIRECTION channels
+> (offset/displacement channels are legitimately non-unit). Guarded by a claudebackend test.
+> Do not re-teach.
 
 - **Teach (where the vector-channel return shape is taught):** normalize a
   direction channel before returning it. The producer's frame-to-frame coherence
@@ -129,6 +172,13 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
   traps at the point of composition.
 
 ### A channel is WHOLE-SYSTEM — `target_indices` does not shrink it (found in real use, 2026-07-21)
+> **STATUS: CONSUMED 2026-07-23** — folded into the channel section as an explicit paragraph
+> ("A channel spans the WHOLE SYSTEM, not the target … the ONE place Rule 6 does NOT mean
+> 'shrink the output'; where it applies is decided by the bind/bake target; use target_indices
+> only to choose what to compute, filling the rest with a neutral value; a partial channel is
+> refused and would be wrong even if allowed — a scene-level shape swap reads every element").
+> Distinct from the per-residue BROADCAST trap (already in the prompt). Guarded by a
+> claudebackend test. Do not re-teach.
 
 - **The conflict to resolve in the prompt, not leave to inference.** Rule #6 tells a
   mod author to respect `target_indices`. The channel length check requires
@@ -150,6 +200,14 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
 - **Point at:** `.molaro/mods/ribbon_dir.py`, which now documents this at the return.
 
 ### A per-point-scalar's ramp is normalized over the TARGET — so `all` spends the range on solvent (found in real use, 2026-07-21)
+> **STATUS: CONSUMED 2026-07-23** — folded into the per-point-scalar section as the general
+> rule at the point the target is chosen: "The [0,1] ramp is min-maxed over whatever was
+> TARGETED … when the request is about the MOLECULE, target the molecule (polymer, a chain, a
+> residue range), NOT `all` … on a solvated box any per-atom quantity over `all` spends its
+> whole range on the most extreme component — almost always the water — and the molecule comes
+> out uniformly flat, silently … (Rule 3's selection-driven RMSD is the superposition case of
+> this same rule)". rmsf.py's own description already carries it (the A/B-verified seat).
+> Guarded by claudebackend tests. Do not re-teach.
 
 - **THE GENERAL RULE, and it is not about RMSF.** A `per-point-scalar` mod returns
   values in `[0,1]`, min-maxed **over whatever was targeted** — that is the CONTRACT,

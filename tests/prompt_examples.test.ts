@@ -68,6 +68,17 @@ test("the residue-targeting examples specifically resolve (the Part C substance)
   assert.ok(resolveCount("polymer.A.CYS*") > 0, "single-residue glob resolves");
 });
 
+test("targetless commands (e.g. `background`) are taught in prose, NOT as resolved-target examples", () => {
+  // GRAMMAR_EXAMPLES' invariant is 'every target resolves non-empty'. A targetless
+  // command (background <color>) has no address to resolve, so it CANNOT live here —
+  // the 2026-07-23 pass teaches it in prose with an inline example instead. This guards
+  // that decision: every example carries a target expression after its verb.
+  for (const { cmd } of GRAMMAR_EXAMPLES) {
+    assert.ok(!/^\s*background\b/.test(cmd), `\`${cmd}\` is targetless — teach it in prose, keep it out of the resolved-target examples`);
+    assert.ok(cmd.trim().split(/\s+/).length >= 2, `\`${cmd}\` must carry a target expression`);
+  }
+});
+
 test("the prompt's stated nomatch/parse-error self-diagnosis is accurate", () => {
   // the level footgun the prompt warns about: an atom type in the subgroup slot
   assert.equal(resolveCount("polymer.A.CA"), 0, "`polymer.A.CA` is a nomatch (CA is one level too shallow)");
