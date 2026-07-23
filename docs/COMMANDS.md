@@ -57,6 +57,7 @@ point types `anchor` and `t0`–`t3`).
 | `styles` | Read-only listing of the style registry (bare; index 0 = default) | `styles` |
 | `shape <points\|bonds\|traces> <name>` | Draw a whole **domain** as a named registered shape (scene-level — per-target assignment is a parked chapter; one undo op) | `shape traces tube` |
 | `shapes` | Read-only listing of the shape registry per domain (bare) | `shapes` |
+| `background <color>` | Set the **scene background** (CSS name or `#hex`; **targetless** — scene state, not per-element, so no target and no `all`; session-only; one undo op; repeating the current color records no hollow undo entry) | `background navy` |
 
 **The ribbon** (`shape traces ribbon`) is the first ORIENTED shape: a flat
 band along each polyline whose plane comes from the **orientation** buffer —

@@ -1457,8 +1457,20 @@ async function main(): Promise<void> {
   renderer.setSize(container.clientWidth, container.clientHeight);
   // Clear to the scene background, never the GL default — otherwise a resize (or
   // the first frame before data arrives) flashes the default clear color (A4).
-  renderer.setClearColor(new THREE.Color(BACKGROUND), 1);
+  // `backgroundColor` is the ONE background instance: scene.background is
+  // assigned this same object when the scene is built below, and `background
+  // <color>` writes it in place through applyBackground.
+  const backgroundColor = new THREE.Color(BACKGROUND);
+  renderer.setClearColor(backgroundColor, 1);
   container.appendChild(renderer.domElement);
+  /** THE background writer — every path (verb, undo, redo) goes through it so
+   * the two sinks (scene.background and the renderer's clear color) can never
+   * disagree: copy into the shared instance, then re-push the clear color
+   * (setClearColor copies the value, so it must be re-pushed per write). */
+  const applyBackground = (c: THREE.Color): void => {
+    backgroundColor.copy(c);
+    renderer.setClearColor(backgroundColor, 1);
+  };
 
   // -- interaction state layers ------------------------------------------------
   // Polyline vertices in HEADER ORDER (flattened polylines) — the axis
@@ -1592,7 +1604,7 @@ async function main(): Promise<void> {
   const pendingPass = registry.add(pendingOverlayGenerator, passEnv)!;
   const flashPass = registry.add(focusFlashGenerator, passEnv)!;
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(BACKGROUND);
+  scene.background = backgroundColor; // the SAME instance the clear color reads
   for (const obj of registry.objects()) {
     obj.frustumCulled = false;
     obj.visible = false; // until the first frame is displayed
@@ -2898,6 +2910,25 @@ async function main(): Promise<void> {
         active: registry.activeOf(domain),
       }))
     ),
+    // Scene background (session-only — nothing persists it). CRITICAL:
+    // SRGBColorSpace on setRGB — r185 color management is ON, so without it
+    // parseColor's sRGB fractions are read as linear and the background
+    // renders washed out. The no-op guard is the setShape discipline:
+    // repeating the current color applies (identically) but records NO op,
+    // so undo never carries a hollow entry.
+    setBackground: (rgb: [number, number, number]) => {
+      const next = new THREE.Color().setRGB(rgb[0], rgb[1], rgb[2], THREE.SRGBColorSpace);
+      if (next.equals(backgroundColor)) return; // same color — record nothing
+      const prev = backgroundColor.clone();
+      applyBackground(next);
+      model.recordOp(() => {
+        applyBackground(prev);
+        return [];
+      }, () => {
+        applyBackground(next);
+        return [];
+      });
+    },
     // The bake/bind gate's READ surface. Declarations come from the header;
     // values come from whatever is IN HAND at the displayed frame — the
     // header block for per_point, the displayed chunk's zero-copy view for
@@ -2988,6 +3019,7 @@ async function main(): Promise<void> {
       commandContext.shapesInfo().some((s) => s.domain === domain && s.names.includes(label))
         ? { prev: label }
         : null,
+    setBackground: () => {},
     colorEdges: () => 0, colorTrace: () => 0,
     sizePoints: () => 0, sizeEdges: () => 0, sizeTrace: () => 0,
     opacityPoints: () => 0, opacityEdges: () => 0, opacityTrace: () => 0,
@@ -3552,6 +3584,8 @@ async function main(): Promise<void> {
         },
         /** what a click at client (x,y) would pick (-1 = empty space). */
         pick: (x: number, y: number): number => pickAt(x, y),
+        /** current scene background as an sRGB hex string (the S50 seam). */
+        background: (): string => backgroundColor.getHexString(THREE.SRGBColorSpace),
         /** centroid+radius of the currently visible points (current frame). */
         visibleBounds: (): { center: [number, number, number]; radius: number } | null => {
           const idx: number[] = [];

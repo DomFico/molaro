@@ -81,6 +81,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
   const shapeState: Record<string, string[]> = { point: ["sphere"], edge: ["tube"], vertex: ["tube", "ribbon"] };
   const shapeActive: Record<string, string> = { point: "sphere", edge: "tube", vertex: "tube" };
   const shapeOps: { domain: string; label: string }[] = [];
+  const bgOps: [number, number, number][] = [];
   const refOps: { names: string[]; hidden: boolean }[] = [];
   const memberOps: { name: string; mode: "add" | "remove"; entries: Entry[] }[] = [];
   const colorOps: { points: number[]; rgb: [number, number, number] }[] = [];
@@ -341,6 +342,9 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
       (["point", "edge", "vertex"] as const).map((domain) => ({
         domain, names: shapeState[domain] ?? [], active: shapeActive[domain] ?? null,
       })),
+    setBackground: (rgb) => {
+      bgOps.push([...rgb] as [number, number, number]);
+    },
     edges,
     colorEdges: (edgeIds, rgb) => {
       edgeOps.push({ edgeIds: [...edgeIds], rgb });
@@ -393,7 +397,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
     colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, modRunCode, rmArms, sels,
-    bindCalls, bindingReg, orientationOps, elemEachOps, styleOps, shapeOps, shapeActive,
+    bindCalls, bindingReg, orientationOps, elemEachOps, styleOps, shapeOps, shapeActive, bgOps,
   };
 }
 
@@ -1569,6 +1573,41 @@ test("A-3+: the vanish-warning clears once the required axis is bound", () => {
   const r = registry.runCommand("shape traces ribbon");
   assert.equal(r.status, "ok");
   assert.equal(r.message, "traces now draw as ribbon (was tube)", "no warning when the axis is bound");
+});
+
+// -- background: the targetless scene-background primitive -------------------------
+
+test("background: one color token sets the scene background through the context", () => {
+  const { registry, bgOps } = makeRegistry();
+  const named = registry.runCommand("background navy");
+  assert.equal(named.status, "ok");
+  assert.equal(named.message, "background → navy");
+  const hex = registry.runCommand("background #ff8800");
+  assert.equal(hex.status, "ok");
+  assert.equal(hex.message, "background → #ff8800");
+  // ONE parser (parseColor) — the writes carry its exact 0..1 fractions
+  assert.deepEqual(bgOps, [[0, 0, 0x80 / 255], [1, 0x88 / 255, 0]]);
+});
+
+test("background: quiet errors — bare, extra tokens, non-color; none writes", () => {
+  const { registry, bgOps } = makeRegistry();
+  const bare = registry.runCommand("background");
+  assert.equal(bare.status, "error");
+  assert.match(bare.message, /background needs exactly one color — background <color> \(e\.g\. background navy\)/);
+  const extra = registry.runCommand("background navy extra");
+  assert.equal(extra.status, "error");
+  assert.match(extra.message, /needs exactly one color/);
+  const bad = registry.runCommand("background notacolor");
+  assert.equal(bad.status, "error");
+  // the EXACT resolveColorArgs wording — the family's one bad-color message
+  assert.equal(bad.message, 'unknown color "notacolor" — use a CSS color name (red, steelblue) or hex (#ff8800)');
+  assert.equal(bgOps.length, 0, "no failure wrote anything");
+});
+
+test("background: surfaced by help — the summary line and the verb description", () => {
+  const { registry } = makeRegistry();
+  assert.match(HELP_TEXT, /background <color>/);
+  assert.match(registry.runCommand("help background").message, /^background — /);
 });
 
 test("bind family: help surfaces all three verbs", () => {

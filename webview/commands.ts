@@ -240,6 +240,11 @@ export interface CommandContext {
   ): { prev: string | null; requiresAxis?: BindAxis } | null;
   /** The shape registry's read surface: each domain's names + active. */
   shapesInfo(): { domain: "point" | "edge" | "vertex"; names: string[]; active: string | null }[];
+  /** Set the scene background to a constant color — TARGETLESS scene state
+   * (not per-element; no `all`), session-only. One undo op via recordOp in
+   * the implementation; repeating the CURRENT color applies but records
+   * NOTHING (the setShape no-op discipline — no hollow undo entry). */
+  setBackground(rgb: [number, number, number]): void;
   /** The orientation writer: per-vertex RAW 3-vectors (flat, 3 × ids
    * length) into the stride-3 orientation buffer — the SAME writer core
    * color rides (capture, LWW-clear of same-axis coverage, one stroke,
@@ -1342,6 +1347,31 @@ export function makeShapeHandler(ctx: CommandContext): CommandHandler {
   };
 }
 
+/** `background <color>` — set the scene background. TARGETLESS by decision:
+ * the background is scene state, not per-element, so there is no target (no
+ * `all`) — exactly one color token. Bare `background`, extra tokens, or a
+ * non-color are quiet errors (the color family's discipline: error result,
+ * no write, no stroke). The color vocabulary and the bad-color wording are
+ * resolveColorArgs' EXACTLY — one parser (parseColor), one message. */
+export function makeBackgroundHandler(ctx: CommandContext): CommandHandler {
+  const usage = "background <color> (e.g. background navy)";
+  return (args: string): CommandResult => {
+    const words = args.trim().split(/\s+/).filter((w) => w !== "");
+    if (words.length !== 1) {
+      return { status: "error", message: `background needs exactly one color — ${usage}` };
+    }
+    const rgb = parseColor(words[0]);
+    if (rgb === null) {
+      return {
+        status: "error",
+        message: `unknown color "${words[0]}" — use a CSS color name (red, steelblue) or hex (#ff8800)`,
+      };
+    }
+    ctx.setBackground(rgb);
+    return { status: "ok", message: `background → ${words[0]}` };
+  };
+}
+
 /** `shapes` — read-only listing of the shape registry per domain. */
 export function makeShapesHandler(ctx: CommandContext): CommandHandler {
   return (args: string): CommandResult => {
@@ -2280,6 +2310,8 @@ export const HELP_TEXT = [
   "  styles       list the style registry (read-only)",
   "  shape <points|bonds|traces> <name>   draw a whole domain as a named",
   "               registered shape (scene-level; one undo op) · shapes  list",
+  "  background <color>          set the scene background (CSS name or #hex;",
+  "               targetless — scene state, session-only; one undo op)",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  mods         list the recipe registry: name, axis, origin, and credit",
   "               (author · source, display-only; recipes, not verbs)",
@@ -2453,6 +2485,11 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "shapes",
     makeShapesHandler(ctx),
     "read-only listing of the shape registry per domain (bare — takes no target)",
+  );
+  registry.register(
+    "background",
+    makeBackgroundHandler(ctx),
+    "set the scene background color (targetless — scene state, session-only; one undo op; repeating the current color records nothing): background <color>",
   );
   registry.register(
     "ls",

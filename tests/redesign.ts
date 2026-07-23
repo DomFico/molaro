@@ -8111,7 +8111,107 @@ async function S49(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49 };
+// ==================== S50: background <color> ================================
+// The targetless scene-background primitive: one color token drives BOTH sinks
+// (scene.background + the renderer clear color), rides the ONE undo stack
+// (one Ctrl+Z per background, LIFO), and fails quietly (error result, no
+// write, no stroke). Pixel proofs sample an EMPTY spot (the S3 scan) so the
+// patch reads pure background; the debug seam (sRGB hex) is asserted EXACTLY.
+async function S50(): Promise<void> {
+  console.log("S50 — background <color>: both sinks, seam + pixels, LIFO undo, quiet errors");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const seam = () => d.evaluate<string>(`${V}.debug.background()`);
+    // settle-before-capture (the load-immunity rule): the write lands in scene
+    // state instantly, but a pixel read is only honest after frames DREW it
+    const settle = () =>
+      d.evaluate(`(async () => {
+        for (let i = 0; i < 3; i++) await new Promise(r => requestAnimationFrame(r));
+      })()`);
+    // the S3 empty-spot scan: a pixel showing pure background, no geometry
+    const empty = await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const r=document.getElementById('app').getBoundingClientRect();
+      const spots=[[r.left+20,r.bottom-20],[r.left+20,r.top+80],[r.right-20,r.bottom-20]];
+      for (const [x,y] of spots) if (${V}.debug.pick(x,y) < 0) return {x,y};
+      return null;
+    })()`);
+    check("S50: found an empty pixel to sample", empty !== null);
+    // a 2×2 patch at the empty spot, every pixel within ±3 of the expected RGB
+    const patch = (rgb: [number, number, number]) =>
+      d.samplePatch({
+        centerExpr: `({x:${empty!.x},y:${empty!.y}})`,
+        half: 1,
+        classify: `Math.abs(r-${rgb[0]})<=3 && Math.abs(g-${rgb[1]})<=3 && Math.abs(b-${rgb[2]})<=3`,
+      });
+
+    // -- baseline: the shipped default, seam and pixels agreeing ---------------
+    const base = await undoDepth();
+    check("S50: the seam reads the default background", (await seam()) === "1e1e1e", await seam());
+    if (empty) {
+      await settle();
+      const p0 = await patch([30, 30, 30]);
+      check("S50: baseline pixels ARE the default (30,30,30)±3", p0.count === 4, `${p0.count}/4`);
+    }
+
+    // -- background navy: ok, one undo entry, both reads flip ------------------
+    const navy = await cmd("background navy");
+    check("S50: background navy → ok", navy.status === "ok", JSON.stringify(navy));
+    check("S50: …one undo entry", (await undoDepth()) === base + 1,
+      `depth ${await undoDepth()} vs base ${base}`);
+    check("S50: …seam reads navy exactly", (await seam()) === "000080", await seam());
+    if (empty) {
+      await settle();
+      const p1 = await patch([0, 0, 128]);
+      check("S50: …pixels ARE navy (0,0,128)±3", p1.count === 4, `${p1.count}/4`);
+    }
+
+    // -- repeating the SAME color applies but records NOTHING (no hollow undo) --
+    const again = await cmd("background navy");
+    check("S50: repeating the current color is ok but records NO op",
+      again.status === "ok" && (await undoDepth()) === base + 1,
+      `depth ${await undoDepth()}`);
+
+    // -- a second color stacks a second entry ----------------------------------
+    const gold = await cmd("background gold");
+    check("S50: background gold → ok, depth +2", gold.status === "ok" && (await undoDepth()) === base + 2,
+      `depth ${await undoDepth()}`);
+    check("S50: …seam reads gold exactly", (await seam()) === "ffd700", await seam());
+    await settle();
+    await d.screenshot(`${REPORT}/S50_background_gold.png`);
+
+    // -- undo is LIFO: one Ctrl+Z per background -------------------------------
+    await d.ctrlZ();
+    await sleep(100);
+    check("S50: Ctrl+Z steps back to navy (seam)", (await seam()) === "000080", await seam());
+    check("S50: …depth +1", (await undoDepth()) === base + 1, `depth ${await undoDepth()}`);
+    if (empty) {
+      await settle();
+      const p2 = await patch([0, 0, 128]);
+      check("S50: …and the PIXELS are navy again", p2.count === 4, `${p2.count}/4`);
+    }
+    await d.ctrlZ();
+    await sleep(100);
+    check("S50: second Ctrl+Z restores the default (seam)", (await seam()) === "1e1e1e", await seam());
+    check("S50: …depth back to base", (await undoDepth()) === base, `depth ${await undoDepth()}`);
+    if (empty) {
+      await settle();
+      const p3 = await patch([30, 30, 30]);
+      check("S50: …and the PIXELS are the default again", p3.count === 4, `${p3.count}/4`);
+    }
+
+    // -- the quiet-error paths: error result, no write, no stroke --------------
+    for (const bad of ["background", "background notacolor", "background navy extra"]) {
+      const r = await cmd(bad);
+      check(`S50: \`${bad}\` errors quietly`,
+        r.status === "error" && (await undoDepth()) === base && (await seam()) === "1e1e1e",
+        `${r.status} depth=${await undoDepth()} seam=${await seam()}`);
+    }
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -8149,7 +8249,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
-  S48: "full", S49: "full",
+  S48: "full", S49: "full", S50: "full",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {
