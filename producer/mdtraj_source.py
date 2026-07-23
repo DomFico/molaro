@@ -24,12 +24,17 @@ split is re-merged). It reuses the inputs this file prepares at load
 respects the GLOBAL split verdict ``self.centering`` (decided once over all
 frames) — a centering-OFF system still streams raw exactly as 2a did.
 
-Two things are still resident, both cleared in 2c: (1) the header's bbox is built
-from the RAW startup sweep (a display-only sample; the edge PBC sample is
-centering-invariant because centering preserves every bonded pair's distance);
-(2) a CENTERED copy is exposed as ``trajectory``/``_xyz`` for the analysis mods
-(``rg``/``rmsd``/``rmsf``/``smoothing``). 2c makes ``trajectory`` lazy, moves the
-split-decision into the startup sweep, drops ``_xyz``, and realizes the memory win.
+Phase 2c makes the streaming path TRULY lazy: the eager resident copy 2a/2b kept
+is gone. The header's bbox is still built from the RAW startup sweep (a
+display-only sample; the edge PBC sample is centering-invariant because centering
+preserves every bonded pair's distance), and that same one-pass sweep now also
+decides the GLOBAL split/centering verdict and runs the one-time no-tear
+assertion — byte-identically to what a whole-trajectory load computed. The
+CENTERED ``trajectory`` the analysis mods read (``rg``/``rmsd``/``rmsf``/
+``smoothing``) is materialised lazily on first access and cached, and ``_xyz`` is
+gone on the streaming path, so a source no mod analyses never holds the whole
+trajectory resident. (The resident path — single-frame / non-seekable inputs —
+still keeps ``_xyz`` and an eager ``trajectory``, unchanged.)
 
 Requires mdtraj + numpy (the benchmark `mdbench` conda env). The synthetic
 source has no such dependency; this one is only imported when a real dataset is
@@ -228,55 +233,54 @@ class MdtrajSource(DataSource):
         self._build_header_fields()
 
     def _build_streaming(self, topology_path: str) -> None:
-        """The Phase 2a spine: header from a one-pass out-of-core sweep, frames
-        streamed on demand; a resident CENTERED copy kept only for the mods.
+        """The truly-lazy streaming path (Phase 2c): the header AND the global
+        centering verdict both come from ONE out-of-core startup sweep, and the
+        full trajectory is never resident. Frames stream on demand, centered per
+        chunk (2b); the mod-facing ``trajectory`` is a lazy full-load-and-center
+        realised only on first access (see the ``trajectory`` property).
 
-        Order: load the resident copy FIRST (it is also the atom-count gate and
-        the mod-facing `trajectory`), THEN sweep the handle out-of-core for the
-        raw header fields. The two coordinate views are the 2a display/measure
-        split — see the module docstring.
+        No ``md.load`` here — 2a/2b's eager resident copy (and its ``_xyz``) is
+        gone. The single sweep does the atom-count gate (per chunk), the raw
+        header fields, the GLOBAL split/centering DECISION and the one-time
+        no-tear assertion; then the 2b centering inputs are stashed from the raw
+        frame 0 it captured and the header is built.
         """
-        # (1) The centering verdict + the resident _xyz the mods' second engine
-        #     reads are (2c step 1) still produced here by a TRANSIENT whole load,
-        #     but the traj OBJECT is no longer retained — `trajectory` is lazy now
-        #     (see the property). Doubles as the atom-count consistency gate.
-        #     2c step 2 moves the verdict into the startup sweep and deletes this
-        #     load and _xyz outright.
         self._trajectory = None                     # materialised lazily on first access
-        traj = md.load(self._traj_path, top=topology_path)
-        if traj.n_atoms != self.n_points:
-            raise ValueError(
-                f"atom-count mismatch: topology has {self.n_points}, "
-                f"trajectory has {traj.n_atoms}"
-            )
-        self.centering = self._center_on_solute(traj)
-        self._xyz = np.ascontiguousarray(traj.xyz, dtype="<f4")
-        del traj
 
-        # (2) ONE out-of-core sweep over the RAW streamed coordinates for the
-        #     header's frame-derived fields (raw bbox + edge PBC sample). This
-        #     is the path 2c keeps after the resident copy above is dropped.
+        # ONE out-of-core sweep: raw header fields (bbox + edge PBC sample + raw
+        # frame 0) AND the global centering verdict (`self.centering`) AND the
+        # one-time no-tear assertion — all in a single pass over the handle.
         self._startup_scan()
 
-        # (3) 2b centering inputs, prepared now (NOT applied in 2a). centroid0 is
-        #     taken from the RAW frame 0 the scan captured, so it lives in the
-        #     same coordinate frame give_frames streams.
+        # 2b centering inputs. centroid0 is taken from the RAW frame 0 the scan
+        # captured, so it lives in the coordinate frame give_frames streams.
         self._prepare_center_inputs(self._scan_frame0)
 
-        # (4) header (topology fields + the scan's raw bbox/edges).
+        # header (topology fields + the scan's raw bbox/edges).
         self._build_header_fields()
 
     def _startup_scan(self) -> None:
         """ONE streaming sweep over the RAW coordinates via the persistent handle
-        (decision D1), ≤1 chunk resident. Reads every frame once and accumulates
-        the header's frame-derived fields plus the raw frame 0 that Phase 2b
-        needs for the centering target. Populates:
+        (decision D1), ≤1 chunk resident. In a single pass it accumulates THREE
+        things (2c folds the last two off the now-deleted resident copy):
 
-          self._bbox_lo / self._bbox_hi   raw running min/max over all points+frames
-          self._edge_sample               (S, N, 3) raw coords at the PBC sample frames
-          self._scan_frame0               (N, 3) raw frame-0 coords (2b centroid input)
+          1. the header's raw frame-derived fields —
+             self._bbox_lo / self._bbox_hi   raw running min/max over points+frames
+             self._edge_sample               (S, N, 3) raw coords at the PBC frames
+             self._scan_frame0               (N, 3) raw frame-0 coords (2b target);
+          2. the GLOBAL centering DECISION — the anchor's per-frame coordinates and
+             the internal-bond + projected-gap split tests, reduced afterward to
+             self.centering by _decide_centering_from_scan. Byte-identical to a
+             whole-trajectory _center_on_solute: a per-frame reduction is
+             independent of how the frames are chunked, and the swept bytes equal
+             md.load's bytes (the byte-exact gate proves both);
+          3. the one-time NO-TEAR assertion for the loose-molecule re-imaging —
+             the running pre/post-wrap max bond length, checked once (in the
+             reducer) after the verdict is known. The grouping is topology-only,
+             so wrapping whole groups cannot stretch a bond; asserted, not trusted.
         """
         handle = self._handle
+        top = self._topology
         n = self.n_points
         T = self.n_frames
 
@@ -289,6 +293,26 @@ class MdtrajSource(DataSource):
         lo = np.full(3, np.inf, dtype=np.float64)
         hi = np.full(3, -np.inf, dtype=np.float64)
         frame0: Optional[np.ndarray] = None
+
+        # Centering-decision scaffolding (2c). The anchor and the loose-molecule
+        # grouping are topology-only, fixed before the sweep; the per-frame
+        # coordinate reductions are gathered inside it. `has_unitcell` is read off
+        # frame 0 (a container either carries a box for every frame or none).
+        anchor = self._solute_indices()
+        anchor_sorted = np.sort(anchor)
+        groups = self._wrappable_groups(anchor) if anchor.size else []
+        grp_flat = np.concatenate(groups) if groups else np.asarray([], dtype=int)
+        grp_owner = (
+            np.concatenate([np.full(len(g), i) for i, g in enumerate(groups)])
+            if groups else np.asarray([], dtype=int)
+        )
+        bond_ij = np.asarray([(a.index, b.index) for a, b in top.bonds], dtype=np.int64)
+        has_unitcell = False
+        anchor_chunks: List[np.ndarray] = []   # per-chunk (c, |anchor|, 3), raw, sorted cols
+        box_chunks: List[np.ndarray] = []      # per-chunk (c, 3) unit-cell lengths
+        tear_before = 0.0
+        tear_after = 0.0
+        tear_centroid0: Optional[np.ndarray] = None
 
         handle.seek(0)
         start = 0
@@ -304,14 +328,43 @@ class MdtrajSource(DataSource):
                     f"atom-count mismatch: topology has {n}, "
                     f"trajectory frame has {xyz.shape[1]}"
                 )
-            flat = xyz.reshape(-1, 3)
-            lo = np.minimum(lo, flat.min(axis=0))
-            hi = np.maximum(hi, flat.max(axis=0))
+            pts_flat = xyz.reshape(-1, 3)
+            lo = np.minimum(lo, pts_flat.min(axis=0))
+            hi = np.maximum(hi, pts_flat.max(axis=0))
             for gi in wanted:
                 if start <= gi < start + c:
                     sample_pos[gi] = xyz[gi - start].copy()
             if start == 0:
                 frame0 = xyz[0].copy()
+                has_unitcell = chunk.unitcell_lengths is not None
+
+            # ---- centering-decision accumulation (2c) ----
+            if anchor.size and has_unitcell:
+                anchor_chunks.append(xyz[:, anchor_sorted, :].copy())
+                box = np.asarray(chunk.unitcell_lengths, dtype=np.float32)
+                box_chunks.append(box)
+                if groups:
+                    # Speculatively shift+wrap this chunk EXACTLY as give_frames
+                    # will (assuming centering ON), accumulating the pre/post-wrap
+                    # max bond length. Asserted once, in the reducer, only if ON;
+                    # for an OFF (split) verdict the wrap is discarded unchecked,
+                    # matching the resident path (which never wraps a split anchor).
+                    cc = xyz[:, anchor_sorted, :].mean(axis=1)      # (c,3)
+                    if tear_centroid0 is None:
+                        tear_centroid0 = cc[0].copy()
+                    shift = (tear_centroid0 - cc).astype(np.float32)
+                    shifted = xyz + shift[:, None, :]
+                    tear_before = max(
+                        tear_before, self._max_bond_length_xyz(shifted, bond_ij))
+                    centre = shifted[:, anchor_sorted, :].mean(axis=1)
+                    cents = np.empty((c, len(groups), 3), dtype=np.float32)
+                    for gi, g in enumerate(groups):
+                        cents[:, gi, :] = shifted[:, g, :].mean(axis=1)
+                    image = np.round((cents - centre[:, None, :]) / box[:, None, :])
+                    shifted[:, grp_flat, :] -= (
+                        image[:, grp_owner, :] * box[:, None, :]).astype(np.float32)
+                    tear_after = max(
+                        tear_after, self._max_bond_length_xyz(shifted, bond_ij))
             start += c
 
         self._bbox_lo = lo
@@ -320,6 +373,66 @@ class MdtrajSource(DataSource):
             [sample_pos[int(gi)] for gi in sample_idx], axis=0
         ).astype("<f4")
         self._scan_frame0 = frame0
+
+        # ---- reduce the swept accumulators to the GLOBAL centering verdict ----
+        self.centering = self._decide_centering_from_scan(
+            anchor_sorted, has_unitcell, anchor_chunks, box_chunks, groups,
+            tear_before, tear_after,
+        )
+
+    def _decide_centering_from_scan(
+        self, anchor_sorted: np.ndarray, has_unitcell: bool,
+        anchor_chunks: List[np.ndarray], box_chunks: List[np.ndarray],
+        groups: List[np.ndarray], tear_before: float, tear_after: float,
+    ) -> str:
+        """Reduce the startup sweep's accumulators to the GLOBAL centering verdict
+        (2c) — the same on/off answer, off-reason and shift/jump statistics a
+        whole-trajectory ``_center_on_solute`` produces, plus the one-time no-tear
+        assertion for an ON verdict with loose molecules. Mirrors
+        ``_center_on_solute``'s control flow and float arithmetic exactly, so a
+        streaming source's verdict is byte-identical to the resident computation.
+        """
+        if not has_unitcell:
+            return "off (no unit-cell information — not a periodic system)"
+        if self.n_frames < 2:
+            return "off (single frame — nothing can wrap)"
+        if anchor_sorted.size == 0:
+            return "off (no polymer or ligand to anchor on — nothing to hold still)"
+
+        anchor_xyz = np.concatenate(anchor_chunks, axis=0)   # (T, |anchor|, 3), sorted cols
+        boxes = np.concatenate(box_chunks, axis=0)           # (T, 3)
+
+        why = self._anchor_is_split_core(anchor_sorted, anchor_xyz, boxes)
+        if why:
+            return f"off ({why}, which a rigid translation cannot repair)"
+
+        centroid = anchor_xyz.mean(axis=1)                                 # (T, 3)
+        shift = (centroid[0] - centroid).astype(np.float32)                # (T, 3)
+        moved = float(np.linalg.norm(shift, axis=1).max())
+        jump_before = float(np.linalg.norm(np.diff(centroid, axis=0), axis=1).max())
+        after = (anchor_xyz + shift[:, None, :]).mean(axis=1)              # == centroid + shift
+        jump_after = float(np.linalg.norm(np.diff(after, axis=0), axis=1).max())
+
+        if groups:
+            # Wrapping whole groups cannot stretch a bond — every bond lies inside
+            # one group by construction. Assert it over EVERY swept frame rather
+            # than trust it: this is the check the resident copy used to run once;
+            # 2c moves it here. tear_before/after are the sweep's running pre/
+            # post-wrap max bond lengths.
+            if tear_after > max(tear_before, PBC_BOND_CUTOFF_NM) + 1e-4:
+                raise RuntimeError(
+                    f"wrapping loose molecules stretched a bond to {tear_after:.3f} nm "
+                    f"(was {tear_before:.3f} nm) — the grouping tore a molecule apart"
+                )
+            wrapped = f"{len(groups)} loose molecules re-imaged around it"
+        else:
+            wrapped = "no loose molecules to wrap"
+
+        return (
+            f"on ({anchor_sorted.size} solute atoms held still; largest per-frame shift "
+            f"{moved:.2f} nm; solute jump/frame {jump_before:.2f} → {jump_after:.3f} nm); "
+            f"{wrapped}"
+        )
 
     def _prepare_center_inputs(self, frame0_xyz: np.ndarray) -> None:
         """Stash the inputs Phase 2b's ``_apply_centering`` will consume — the
@@ -468,10 +581,10 @@ class MdtrajSource(DataSource):
             layout (``_center_flat``/``_center_owner``) precomputed at load.
 
         ``_wrap_loose_molecules``'s tear-detection assertion is NOT re-run per
-        chunk: the grouping is topology-only (identical here), and the resident
-        copy already asserted no tear over EVERY frame at load while this reads
-        the same frames from the same file. (2c, which drops the resident copy,
-        must move that one-time check into the startup sweep.)
+        chunk: the grouping is topology-only (identical here), so wrapping whole
+        groups cannot stretch a bond. With the resident copy gone (2c), the
+        startup sweep runs that one-time no-tear assertion over EVERY frame while
+        it reads the file once (see ``_decide_centering_from_scan``).
         """
         if not self.centering.startswith("on"):
             return                              # global verdict OFF → stream raw (R1)
@@ -534,6 +647,18 @@ class MdtrajSource(DataSource):
             np.linalg.norm(traj.xyz[:, ij[:, 0], :] - traj.xyz[:, ij[:, 1], :], axis=2).max()
         )
 
+    @staticmethod
+    def _max_bond_length_xyz(xyz: np.ndarray, ij: np.ndarray) -> float:
+        """Max bond length (nm) over all frames for the full-index bond pairs
+        ``ij`` ((n_bonds, 2)) on a raw coordinate block ``xyz`` ((frames, N, 3)).
+        The array-level twin of ``_max_bond_length`` for the startup sweep's tear
+        check, where no ``Trajectory`` object is resident."""
+        if ij.shape[0] == 0:
+            return 0.0
+        return float(
+            np.linalg.norm(xyz[:, ij[:, 0], :] - xyz[:, ij[:, 1], :], axis=2).max()
+        )
+
     def _anchor_is_split(self, traj, anchor: np.ndarray) -> Optional[str]:
         """Is the anchor scattered across periodic images? Reason, or None.
 
@@ -554,17 +679,39 @@ class MdtrajSource(DataSource):
            measuring how far apart they sit does NOT work — the corpus duplex
            decomposes into 26 unbonded residues 4.4 nm apart in a 5.8 nm box
            and is nonetheless perfectly intact (largest internal gap 0.13 nm).
+
+        The coordinate math lives in ``_anchor_is_split_core`` so the resident path
+        (here, whole trajectory) and the streaming startup-sweep decision (the
+        anchor's coordinates accumulated per chunk) compute ONE identical verdict.
         """
-        members = set(int(i) for i in anchor)
+        anchor_sorted = np.sort(anchor)
+        return self._anchor_is_split_core(
+            anchor_sorted, traj.xyz[:, anchor_sorted, :], traj.unitcell_lengths
+        )
+
+    def _anchor_is_split_core(
+        self, anchor_sorted: np.ndarray, anchor_xyz: np.ndarray, boxes: np.ndarray
+    ) -> Optional[str]:
+        """The coordinate core of the anchor-split test, over the anchor's OWN
+        coordinates only: ``anchor_xyz`` is (frames, |anchor|, 3) with columns
+        aligned to the ascending ``anchor_sorted``, ``boxes`` is (frames, 3).
+        Shared by the resident ``_anchor_is_split`` and the streaming sweep so both
+        yield the identical verdict from the same expressions."""
+        top = self._topology
+        members = set(int(i) for i in anchor_sorted)
 
         pairs = [
             (a.index, b.index)
-            for a, b in traj.topology.bonds
+            for a, b in top.bonds
             if a.index in members and b.index in members
         ]
         if pairs:
-            ij = np.asarray(pairs)
-            d = np.linalg.norm(traj.xyz[:, ij[:, 0], :] - traj.xyz[:, ij[:, 1], :], axis=2)
+            # map full atom index -> column in the anchor-only coordinate block
+            pos = {int(anchor_sorted[k]): k for k in range(anchor_sorted.size)}
+            ij = np.asarray([(pos[i], pos[j]) for i, j in pairs])
+            d = np.linalg.norm(
+                anchor_xyz[:, ij[:, 0], :] - anchor_xyz[:, ij[:, 1], :], axis=2
+            )
             worst = float(d.max())
             if worst > PBC_BOND_CUTOFF_NM:
                 frame = int(np.unravel_index(int(np.argmax(d)), d.shape)[0])
@@ -574,11 +721,12 @@ class MdtrajSource(DataSource):
                     "is torn across a periodic boundary"
                 )
 
-        sub = traj.xyz[:, sorted(members), :]
-        for frame in range(traj.n_frames):
-            box = traj.unitcell_lengths[frame]
+        # anchor_xyz columns are already ascending-index (== sorted(members)) order,
+        # so this is the resident path's `traj.xyz[:, sorted(members), :]`.
+        for frame in range(anchor_xyz.shape[0]):
+            box = boxes[frame]
             for axis in range(3):
-                v = np.sort(sub[frame, :, axis])
+                v = np.sort(anchor_xyz[frame, :, axis])
                 extent = float(v[-1] - v[0])
                 if extent <= box[axis] * CENTER_SPLIT_TOLERANCE:
                     continue                       # too compact to straddle anything

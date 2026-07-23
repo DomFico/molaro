@@ -184,7 +184,11 @@ def check_system(sid: str):
         contract_ok = len(vals) == nA and float(vals.min()) >= 0.0 and float(vals.max()) <= 1.0
         try:
             mdtraj_raw = np.asarray(md.rmsf(traj, traj, frame=0), dtype=float)  # nm
-            mda_raw = mda_rmsf_nm(spec["topology"], spec["trajectory"], "all", src._xyz)  # nm
+            # served coordinates = the CENTERED `trajectory` the producer exposes.
+            # 2c drops the streaming `_xyz`; `trajectory.xyz` is the same served
+            # block (per-chunk `give_frames` output is byte-identical to it), so the
+            # second engine still reads exactly what the viewer gets.
+            mda_raw = mda_rmsf_nm(spec["topology"], spec["trajectory"], "all", traj.xyz)  # nm
             two_engine = float(np.max(np.abs(mdtraj_raw - mda_raw)))
             norm_delta = float(np.max(np.abs(vals - minmax(mda_raw))))
             ok = contract_ok and two_engine < TOL and norm_delta < TOL
@@ -221,7 +225,8 @@ def check_alignment_and_subset():
     # end to end through run_mod.
     ca = list(traj.topology.select("name CA"))
     vals = np.asarray(run_values(src, "rmsf", ca), dtype=float)
-    mda_ca = mda_rmsf_nm(spec["topology"], spec["trajectory"], "name CA", src._xyz)
+    # served coordinates via the CENTERED `trajectory` (2c drops streaming `_xyz`)
+    mda_ca = mda_rmsf_nm(spec["topology"], spec["trajectory"], "name CA", traj.xyz)
     subset_ok = (len(vals) == len(ca)
                  and float(vals.min()) >= 0.0 and float(vals.max()) <= 1.0
                  and float(np.max(np.abs(vals - minmax(mda_ca)))) < TOL)
