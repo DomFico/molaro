@@ -73,3 +73,28 @@ actually the segment count versus the miter limit clamp. The miter clamps at
 segments would not help, because each one still meets its neighbour at a clamped
 corner. If the visible faceting on real curves is mostly clamp rather than
 resolution, this whole item is the wrong fix for the symptom.
+
+## P5 — edge-primitives (bicolor + dashed) follow-ups
+**Parked by the ship.** The bicolor/dashed edge primitives (incr 51) shipped with a
+`clear_to_merge` adversarial pass; the completeness critic surfaced four non-blocking
+items, each proven-safe-today, deferred rather than gold-plated into the same merge.
+Pick these up when the edges work continues (especially before the "authorable edges"
+substrate chapter, which extends this exact code).
+- **Redo assertion for the new verbs.** Undo is E2E-proven; redo (Ctrl+Shift+Z)
+  through the double-`withBindingClear` stroke for `bicolorbonds`/`bonddash`
+  specifically is not asserted. **Lean:** add a redo leg to S54/S55 — cheap, closes an
+  inherited-behavior gap. Low risk (no provider boundary in these direct rep writes,
+  so the [[viewer-increment-44-d1-d4]] redo-future-drop rule doesn't bite).
+- **Alpha-divergence guard.** `min(iColorA.a,iColorB.a)` alpha-pass routing is correct
+  only because both halves' alpha always come from the single `edgeOpacity[e]`. That's
+  an unguarded convention. **Lean:** add a unit assertion that no writer sets one
+  half's alpha alone (a `two-lists-must-agree`-flavored guard), so a future edge writer
+  can't silently diverge them.
+- **Junction-dash depth.** Dash `discard` at a capped/analytic-trimmed junction isn't
+  pixel-proven; only the straight tube is. **Lean:** reasoned safe (a gap reveals the
+  sphere behind, not a background hole), so a written note may suffice; add a junction
+  pixel spot-check only if the interaction-edge work makes dashed junctions common.
+- **Bind-takeover advisory under-count (cosmetic).** `overlapStats` skips the other
+  axis, so displacing the OTHER color axis's binding under-reports the element count in
+  the advisory message (coverage IS released; message-only). **Lean:** count both color
+  axes' coverage in the takeover advisory when the written axis shares the A/B buffer.
