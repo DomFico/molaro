@@ -8713,7 +8713,191 @@ async function S52(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52 };
+// ==================== S53: the delay mod — SECOND offset consumer ============
+// The two-mod delay pair over the SAME offset axis (S51's foundation, S52's
+// rail): a `produces: channel` provider (`delay_offset`) computes a
+// per-point-per-frame LAG displacement — the vector from raw[t] to raw[t-k] —
+// and a `produces: commands` macro (`delay`, requires-channel: delay_offset)
+// binds it to offset in one command. It exists to PROVE the extensibility: a
+// new position effect is a new mod PAIR on the identical rail, with NO engine
+// change. The claims mirror S52 exactly:
+//   A  invocation DECLARES the vector channel and BINDS it to offset (provider
+//      first, then the macro's `bind all delay_offset offset`), as exactly ONE
+//      undo stroke (the bind; the declaration is not an op)
+//   B  GATHER — at a frame t with history, shown = raw + offset AND shown =
+//      raw[t-k] EXACTLY (the position from k frames earlier). k=3 is NON-default
+//      (the declared default is 5), so shown == raw[t-3] and not raw[t-5] proves
+//      the `?frames=` level reached the provider's computation
+//   C  the offset is nonzero over the delayed region and EXACTLY zero outside;
+//      uncovered points draw at their raw position (untouched)
+//   D  CLAMP — at a frame t < k (no history) the earliest frame is held:
+//      shown = raw[0], offset = raw[0] - raw[t] (the documented edge policy)
+//   E  one Ctrl+Z reverses the bind (offset zeroed, zero-copy raw, base depth);
+//      the channel stays declared (append-only, not undoable)
+// Single-chunk verification (S52's trick): CHUNK_FRAMES = 8, so chunk 0 is
+// frames [0, 8). With k=3, the GATHER frame 7 reads raw[4] and the CLAMP frame 1
+// holds raw[0] — every frame this scenario inspects (0, 1, 4, 7) lives in that
+// one chunk, so raw[t] and raw[t-k] are both readable without the offset path.
+async function S53(): Promise<void> {
+  console.log("S53 — delay mod: a temporal-lag offset bound to the offset axis (second consumer)");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const rafs = () => d.evaluate(`(async () => {
+      for (let i = 0; i < 3; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`);
+    const seekTo = async (f: number): Promise<void> => {
+      await d.evaluate(`${V}.player.seek(${f})`);
+      await d.waitFor(`${V}.player.frame === ${f} && ${V}.player.getFrame(${f}) !== null`, 20000);
+      await rafs();
+    };
+    // THE ZERO-COPY IDENTITY (S51's discipline): inactive offset must repoint the
+    // attribute at the chunk's own buffer — buffer identity + exact byte offset.
+    const zeroCopy = () => d.evaluate<boolean>(`(()=>{
+      const f = ${V}.player.frame;
+      const chunk = ${V}.player.getFrame(f);
+      if (!chunk) return false;
+      const arr = ${V}.positionAttr.array;
+      const off = (f - chunk.start) * 6000 * 3;
+      return arr.buffer === chunk.positions.buffer &&
+        arr.byteOffset === chunk.positions.byteOffset + off * 4 &&
+        arr.length === 6000 * 3;
+    })()`);
+    const offsetAllZero = () => d.evaluate<boolean>(`${V}.rep.state.offset.every((x) => x === 0)`);
+    const channelsMsg = async () => (await cmd("channels")).message;
+    const bindingsMsg = async () => (await cmd("bindings")).message;
+
+    await d.evaluate(`${V}.setPlaying(false)`);
+    await seekTo(0);
+    const depth0 = await undoDepth();
+
+    // clean slate: neither the channel nor a binding exists yet
+    check("S53: no delay_offset channel or binding before invocation",
+      !(await channelsMsg()).includes("delay_offset") && (await bindingsMsg()) === "no bindings",
+      `${await channelsMsg()} | ${await bindingsMsg()}`);
+
+    // -- A: invoke the ONE command — delay a region by a chosen (non-default) lag -
+    const K = 3;             // NON-default (declared default is 5) → proves forwarding
+    const GATHER = 7;        // t-k = 4, still in chunk 0 → history exists (the gather)
+    const SRC = GATHER - K;  // = 4
+    const CLAMP = 1;         // t < k → no history → hold raw[0] (the clamp)
+    const r = await cmd(`delay #0-199 ?frames=${K}`);
+    check("S53: `delay` acknowledges and hands off to the async producer round-trip",
+      r.status === "ok" && /running delay on 200 points/.test(r.message), JSON.stringify(r));
+
+    // the P-3 sequence is async: the provider declares the channel, then the
+    // macro binds it; then the channel's data rides refetched chunks and the
+    // offset applies. Poll each stage rather than sleep. Poll at GATHER (frame 7),
+    // NOT frame 0 — at frame 0 the region is in its clamp (raw[0]-raw[0] = 0), so
+    // its offset is legitimately zero and would never trip a nonzero poll.
+    await d.waitFor(`${V}.command("channels").message.includes("delay_offset")`, 20000);
+    await d.waitFor(`${V}.command("bindings").message.includes("delay_offset")`, 20000);
+    await seekTo(GATHER);
+    await d.waitFor(
+      `${V}.player.getFrame(${GATHER}) !== null && ${V}.rep.state.offset.slice(0, 600).some((x) => Math.abs(x) > 1e-3)`,
+      20000);
+    await rafs();
+
+    check("S53: `delay_offset` declared as a per-frame VECTOR (3-wide) channel",
+      /delay_offset — vector \(3-wide\)/.test(await channelsMsg()) &&
+        /delay_offset.*per-frame/.test(await channelsMsg()),
+      await channelsMsg());
+    check("S53: it is BOUND to the offset axis over `all`",
+      /delay_offset → offset on "all" — 6000 points · raw vectors/.test(await bindingsMsg()),
+      await bindingsMsg());
+    check("S53: the whole macro is EXACTLY one undo stroke (the bind; the declaration is not an op)",
+      (await undoDepth()) === depth0 + 1, `depth ${depth0} → ${await undoDepth()}`);
+
+    // -- B/C: shown = raw + offset = raw[t-k] EXACTLY; region vs outside -------
+    // At the displayed GATHER frame 7 the lag reads frame SRC = 4; both live in
+    // chunk 0, so raw[7] and raw[4] are read straight from the one chunk. A
+    // default-5 run would show raw[2] here, so shown == raw[4] proves frames=3.
+    const state = await d.evaluate<{
+      rawOffOk: boolean; gatherOk: boolean; covMax: number;
+      uncovOffMax: number; uncovShownOk: boolean; detail: string;
+    }>(`(()=>{
+      const N = 6000;
+      const chunk = ${V}.player.getFrame(${GATHER});  // chunk 0, start 0
+      const arr = ${V}.positionAttr.array;             // shown buffer at frame ${GATHER}
+      const off = ${V}.rep.state.offset;
+      const base = (${GATHER} - chunk.start) * N * 3;  // frame ${GATHER} raw
+      const srcBase = (${SRC} - chunk.start) * N * 3;  // frame ${SRC} raw = raw[t-k]
+      let rawOffOk = true, gatherOk = true, covMax = 0, uncovOffMax = 0, uncovShownOk = true, detail = "";
+      for (const p of [0, 50, 120, 199]) {              // covered
+        for (let c = 0; c < 3; c++) {
+          const rawT = chunk.positions[base + p*3 + c];
+          const rawSrc = chunk.positions[srcBase + p*3 + c];
+          const shown = arr[p*3 + c];
+          if (Math.abs(shown - (rawT + off[p*3 + c])) > 1e-4) { rawOffOk = false; detail += " rawoff p=" + p + " c=" + c; }
+          if (Math.abs(shown - rawSrc) > 1e-3) { gatherOk = false; detail += " gather p=" + p + " c=" + c; }
+          covMax = Math.max(covMax, Math.abs(off[p*3 + c]));
+        }
+      }
+      for (const p of [200, 3000, 5999]) {              // uncovered
+        for (let c = 0; c < 3; c++) {
+          uncovOffMax = Math.max(uncovOffMax, Math.abs(off[p*3 + c]));
+          if (arr[p*3 + c] !== chunk.positions[base + p*3 + c]) uncovShownOk = false;
+        }
+      }
+      return { rawOffOk, gatherOk, covMax, uncovOffMax, uncovShownOk, detail };
+    })()`);
+    check("S53: shown = raw + offset for covered points (the offset axis applies the channel)",
+      state.rawOffOk, state.detail);
+    check("S53: shown = raw[t-3] EXACTLY — the lag is a pure gather, and frames=3 reached the compute",
+      state.gatherOk, state.detail);
+    check("S53: the offset is NONZERO over the delayed region", state.covMax > 1e-2, `covMax=${state.covMax}`);
+    check("S53: the offset is EXACTLY zero outside the region", state.uncovOffMax === 0, `uncovMax=${state.uncovOffMax}`);
+    check("S53: uncovered points draw at their raw position (untouched)", state.uncovShownOk);
+
+    // -- D: CLAMP — at frame 1 (< k=3, no history) the earliest frame is held ---
+    await seekTo(CLAMP);
+    const clamp = await d.evaluate<{ shownOk: boolean; offOk: boolean; mag: number; detail: string }>(`(()=>{
+      const N = 6000;
+      const chunk = ${V}.player.getFrame(${CLAMP});    // chunk 0
+      const arr = ${V}.positionAttr.array;             // shown at frame ${CLAMP}
+      const off = ${V}.rep.state.offset;
+      const base = (${CLAMP} - chunk.start) * N * 3;   // frame ${CLAMP} raw = raw[t]
+      const srcBase = 0;                                // held earliest = raw[0]
+      let shownOk = true, offOk = true, mag = 0, detail = "";
+      for (const p of [0, 50, 120, 199]) {
+        for (let c = 0; c < 3; c++) {
+          const rawT = chunk.positions[base + p*3 + c];
+          const raw0 = chunk.positions[srcBase + p*3 + c];
+          const shown = arr[p*3 + c];
+          if (Math.abs(shown - raw0) > 1e-3) { shownOk = false; detail += " shown p=" + p + " c=" + c; }
+          if (Math.abs(off[p*3 + c] - (raw0 - rawT)) > 1e-3) { offOk = false; detail += " off p=" + p + " c=" + c; }
+          mag = Math.max(mag, Math.abs(raw0 - rawT));
+        }
+      }
+      return { shownOk, offOk, mag, detail };
+    })()`);
+    check("S53: CLAMP — a frame before the lag holds the earliest frame: shown = raw[0]",
+      clamp.shownOk, clamp.detail);
+    check("S53: CLAMP — the offset there is exactly raw[0] − raw[t] (the documented edge policy)",
+      clamp.offOk, clamp.detail);
+    check("S53: (data precondition) the clamp actually displaces (raw[0] ≠ raw[1])",
+      clamp.mag > 1e-3, `mag=${clamp.mag}`);
+    await seekTo(GATHER);
+    await d.screenshot(`${REPORT}/S53_delayed.png`);
+
+    // -- E: one Ctrl+Z reverses the bind; the channel stays declared -----------
+    await d.evaluate(`void document.activeElement?.blur?.()`);
+    await d.ctrlZ();
+    await sleep(300);
+    await seekTo(0);
+    check("S53: one Ctrl+Z zeroes the offset, snaps back to zero-copy raw, base depth, binding gone",
+      (await offsetAllZero()) && (await zeroCopy()) &&
+        !(await bindingsMsg()).includes("delay_offset") && (await undoDepth()) === depth0,
+      `offZero=${await offsetAllZero()} zc=${await zeroCopy()} depth=${await undoDepth()}`);
+    check("S53: the delay_offset CHANNEL remains declared (append-only, not undoable)",
+      (await channelsMsg()).includes("delay_offset"), await channelsMsg());
+    await seekTo(30);
+    check("S53: a further seek does not re-displace (truly unbound)", await zeroCopy());
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -8752,6 +8936,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
   S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
+  S53: "full",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {
