@@ -9,10 +9,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
+  AXIS_DOMAIN,
   BIND_AXES,
   BIND_SIZE_MAX,
   gateChannelBind,
   normalizeScalars,
+  VECTOR_AXES,
   type ChannelDecl,
 } from "../webview/channelmap.ts";
 
@@ -29,24 +31,42 @@ test("gate: the axis list is the three scalar point axes", () => {
   assert.equal(BIND_SIZE_MAX, 6);
 });
 
-test("gate: orientation ACCEPTS a 3-wide channel raw — range null, no normalization", () => {
-  const r = gateChannelBind(scalar({ components: 3 }), "orientation", null, [1, 0, 0]);
-  assert.deepEqual(r, { range: null });
+test("the vector axes: orientation (vertex) and offset (point) — two entries, own domains", () => {
+  assert.deepEqual([...VECTOR_AXES], ["orientation", "offset"]);
+  assert.equal(AXIS_DOMAIN.orientation, "vertex");
+  assert.equal(AXIS_DOMAIN.offset, "point");
 });
 
-test("gate: scalar→orientation refuses by width; a range on orientation is a category error", () => {
-  const narrow = gateChannelBind(scalar(), "orientation", null, VALUES);
-  assert.ok("error" in narrow && narrow.error.includes("orientation needs a vector (3-wide) channel"), JSON.stringify(narrow));
-  const ranged = gateChannelBind(scalar({ components: 3 }), "orientation", [0, 1], [1, 0, 0]);
-  assert.ok("error" in ranged && ranged.error.includes("meaningless for the orientation axis"), JSON.stringify(ranged));
-  // the finiteness spot-check runs on the vector path too, element = i / 3
-  const bad = gateChannelBind(scalar({ components: 3 }), "orientation", null, [1, 0, 0, 0, NaN, 0]);
-  assert.ok("error" in bad && bad.error.includes("non-finite value at element 1"), JSON.stringify(bad));
-});
+// The vector-arm matrix runs over BOTH vector axes: the gate's vector arm is
+// membership in VECTOR_AXES, so every acceptance and refusal must hold — and
+// NAME its axis — for each member identically.
+for (const axis of VECTOR_AXES) {
+  test(`gate: ${axis} ACCEPTS a 3-wide channel raw — range null, no normalization`, () => {
+    const r = gateChannelBind(scalar({ components: 3 }), axis, null, [1, 0, 0]);
+    assert.deepEqual(r, { range: null });
+  });
 
-test("gate: unknown axis is refused by name", () => {
+  test(`gate: scalar→${axis} refuses by width; a range on ${axis} is a category error`, () => {
+    const narrow = gateChannelBind(scalar(), axis, null, VALUES);
+    assert.ok("error" in narrow && narrow.error.includes(`${axis} needs a vector (3-wide) channel`), JSON.stringify(narrow));
+    const ranged = gateChannelBind(scalar({ components: 3 }), axis, [0, 1], [1, 0, 0]);
+    assert.ok("error" in ranged && ranged.error.includes(`meaningless for the ${axis} axis`), JSON.stringify(ranged));
+    // the finiteness spot-check runs on the vector path too, element = i / 3
+    const bad = gateChannelBind(scalar({ components: 3 }), axis, null, [1, 0, 0, 0, NaN, 0]);
+    assert.ok("error" in bad && bad.error.includes("non-finite value at element 1"), JSON.stringify(bad));
+  });
+
+  test(`gate: a per-frame channel refuses before the ${axis} vector arm`, () => {
+    const r = gateChannelBind(scalar({ scope: "per_frame", components: 3 }), axis, null, [1, 0, 0]);
+    assert.ok("error" in r && r.error.includes("per-frame"), JSON.stringify(r));
+  });
+}
+
+test("gate: unknown axis is refused by name, listing BOTH vector axes", () => {
   const r = gateChannelBind(scalar({ min: 0, max: 1 }), "colr", null, VALUES);
   assert.ok("error" in r && r.error.includes('unknown axis "colr"'));
+  assert.ok("error" in r && r.error.includes("orientation") && r.error.includes("offset"),
+    JSON.stringify(r));
 });
 
 test("gate: a per-frame channel is a series, not per-element — refused", () => {

@@ -35,10 +35,13 @@ import {
   gateChannelBind,
   mapScalar,
   normalizeScalars,
+  OFFSET_AXIS,
   ORIENTATION_AXIS,
   SCALAR_AXES,
+  VECTOR_AXES,
   type BindAxis,
   type ScalarAxis,
+  type VectorAxis,
   type ChannelDecl,
 } from "./channelmap.ts";
 import {
@@ -199,11 +202,15 @@ export interface CommandContext {
    * Returns what last-bind-wins took
    * from earlier SAME-AXIS bindings' coverage. */
   createBinding(b: Binding, scalars: readonly number[]): ReleaseStats;
-  /** Release binding coverage element-wise, in BOTH id spaces (scalar
-   * coverage holds POINT ids; orientation coverage holds polyline-VERTEX
-   * ids — the two must never be released with each other's ids). null in a
-   * slot = every element of that space; axis null = every axis. One
-   * recorded op when anything changed. Values stay as last applied. */
+  /** Release binding coverage element-wise, each axis in ITS OWN id space
+   * (AXIS_DOMAIN keys the three spaces — point/edge/vertex ids overlap
+   * numerically and must never be released with each other's ids). null in
+   * a slot = every element of that space; axis null = every axis. One
+   * recorded stroke when anything changed. Values stay as last applied —
+   * EXCEPT the offset axis, whose released coverage is ZEROED in the same
+   * stroke (positions snap back to raw; a frozen per-frame offset would be
+   * a broken static shift). `offsetZeroed` reports how many points that
+   * zeroing touched (absent/0 = none). */
   releaseBindings(
     sel: {
       points: readonly number[] | null;
@@ -211,7 +218,7 @@ export interface CommandContext {
       edges: readonly number[] | null;
     },
     axis: BindAxis | null,
-  ): ReleaseStats;
+  ): ReleaseStats & { offsetZeroed?: number };
   /** Per-element edge/trace writers — the Each siblings of the broadcast
    * writers, for the channel consumers (bake/bind) and any future
    * per-element scalar source. Same one-stroke capture/LWW discipline. */
@@ -250,6 +257,12 @@ export interface CommandContext {
    * color rides (capture, LWW-clear of same-axis coverage, one stroke,
    * GPU-less dispatch: nothing subscribes yet). STATE-ONLY until O-2. */
   orientationVerticesEach(vertexIds: readonly number[], values: readonly number[]): number;
+  /** The offset writer: per-POINT RAW displacement 3-vectors (flat, 3 × ids
+   * length) into the stride-3 offset buffer — the same writer core, plus a
+   * shown-position refresh so a recorded write (bind's initial apply, undo,
+   * redo) moves the drawn positions visibly while paused. Reached only
+   * through `bind` (offset is bind-only — bake refuses it). */
+  offsetPointsEach(points: readonly number[], values: readonly number[]): number;
   /** The binding registry, read-only (the bindings verb + status badge). */
   listBindings(): readonly Binding[];
   /** The contract's edge list — endpoint point-index pairs, in header order.
@@ -1178,7 +1191,9 @@ function parseChannelAxisArgs(
  *     data read); edge axes → the ENDPOINT MEAN over CONTAINED edge ids
  *     (both endpoints resolved — colorbonds' rule; mean of raws, THEN the
  *     lens).
- *   "vector" — the orientation axis: RAW per-vertex 3-vectors, VERTEX ids.
+ *   "vector" — a vector axis, RAW 3-vectors over the axis's OWN domain
+ *     (AXIS_DOMAIN): orientation → VERTEX ids, each vertex its point's
+ *     vector (the map-up); offset → POINT ids, each point its own vector.
  */
 function resolveChannelAxis(
   ctx: CommandContext,
@@ -1199,7 +1214,8 @@ function resolveChannelAxis(
     }
   | {
       kind: "vector";
-      vertexIds: number[];
+      axis: VectorAxis;
+      ids: number[];
       values: number[];
       channel: string;
       expr: string;
@@ -1223,27 +1239,41 @@ function resolveChannelAxis(
   const inHand = ctx.channelValues(p.channel);
   const gate = gateChannelBind(decl, p.axisWord, p.explicitRange, inHand ? inHand.values : null);
   if ("error" in gate) return { status: "error", message: gate.error };
-  if (p.axisWord === ORIENTATION_AXIS) {
-    const inSet = new Set(r.points);
-    const vertexIds: number[] = [];
-    for (let v = 0; v < ctx.traceVertices.length; v++) {
-      if (inSet.has(ctx.traceVertices[v])) vertexIds.push(v);
-    }
-    if (vertexIds.length === 0) {
-      return {
-        status: "nomatch",
-        message: `no polyline vertices in "${p.expr}" — orientation lives on the polyline domain`,
-      };
-    }
+  if ((VECTOR_AXES as readonly string[]).includes(p.axisWord)) {
+    const vAxis = p.axisWord as VectorAxis;
     const src = inHand!.values;
-    const values = new Array<number>(vertexIds.length * 3);
-    for (let i = 0; i < vertexIds.length; i++) {
-      const at = ctx.traceVertices[vertexIds[i]] * 3;
+    if (AXIS_DOMAIN[vAxis] === "vertex") {
+      // orientation: VERTEX ids, each vertex reads ITS point's vector.
+      const inSet = new Set(r.points);
+      const ids: number[] = [];
+      for (let v = 0; v < ctx.traceVertices.length; v++) {
+        if (inSet.has(ctx.traceVertices[v])) ids.push(v);
+      }
+      if (ids.length === 0) {
+        return {
+          status: "nomatch",
+          message: `no polyline vertices in "${p.expr}" — ${vAxis} lives on the polyline domain`,
+        };
+      }
+      const values = new Array<number>(ids.length * 3);
+      for (let i = 0; i < ids.length; i++) {
+        const at = ctx.traceVertices[ids[i]] * 3;
+        values[i * 3] = src[at];
+        values[i * 3 + 1] = src[at + 1];
+        values[i * 3 + 2] = src[at + 2];
+      }
+      return { kind: "vector", axis: vAxis, ids, values, channel: p.channel, expr: p.expr, frame: inHand!.frame };
+    }
+    // offset: POINT ids, each point its OWN vector — no map, no mean.
+    const ids = r.points;
+    const values = new Array<number>(ids.length * 3);
+    for (let i = 0; i < ids.length; i++) {
+      const at = ids[i] * 3;
       values[i * 3] = src[at];
       values[i * 3 + 1] = src[at + 1];
       values[i * 3 + 2] = src[at + 2];
     }
-    return { kind: "vector", vertexIds, values, channel: p.channel, expr: p.expr, frame: inHand!.frame };
+    return { kind: "vector", axis: vAxis, ids, values, channel: p.channel, expr: p.expr, frame: inHand!.frame };
   }
   const axis = p.axisWord as ScalarAxis;
   const domain = AXIS_DOMAIN[axis];
@@ -1470,7 +1500,17 @@ export function makeBakeHandler(ctx: CommandContext): CommandHandler {
     const r = resolveChannelAxis(ctx, "bake", usage, args);
     if ("status" in r) return r;
     if (r.kind === "vector") {
-      const n = ctx.orientationVerticesEach(r.vertexIds, r.values);
+      if (r.axis === OFFSET_AXIS) {
+        // RULED: offset is BIND-ONLY. A baked (frozen) per-frame offset
+        // over a moving trajectory is a broken static shift — the same
+        // reason unbind zeroes instead of freezing. Nothing was applied
+        // (resolveChannelAxis only reads).
+        return {
+          status: "error",
+          message: `offset is bind-only — a one-time frozen offset is not supported; use: bind ${r.expr} ${r.channel} offset`,
+        };
+      }
+      const n = ctx.orientationVerticesEach(r.ids, r.values);
       const at = r.frame === null ? "static" : `frame ${r.frame}`;
       return {
         status: "ok",
@@ -1502,24 +1542,33 @@ export function makeBakeHandler(ctx: CommandContext): CommandHandler {
  */
 export function makeBindHandler(ctx: CommandContext): CommandHandler {
   const usage =
-    "bind <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondsize|bondopacity · polyline tracecolor|tracesize|traceopacity · orientation; e.g. bind all energy color 0 2.5)";
+    "bind <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondsize|bondopacity · polyline tracecolor|tracesize|traceopacity · orientation · offset; e.g. bind all energy color 0 2.5)";
   return (args: string): CommandResult => {
     const r = resolveChannelAxis(ctx, "bind", usage, args);
     if ("status" in r) return r;
     const at = r.frame === null ? "static" : `frame ${r.frame}`;
     if (r.kind === "vector") {
       const released = ctx.createBinding(
-        { channel: r.channel, axis: ORIENTATION_AXIS, points: r.vertexIds, expr: r.expr, range: null },
+        { channel: r.channel, axis: r.axis, points: r.ids, expr: r.expr, range: null },
         r.values,
       );
       const took =
         released.points > 0
           ? `; took ${released.points} elements from ${released.touched} earlier binding${released.touched === 1 ? "" : "s"}`
           : "";
+      if (r.axis === OFFSET_AXIS) {
+        return {
+          status: "ok",
+          message:
+            `bound "${r.channel}" → offset on ${r.ids.length} points of "${r.expr}" ` +
+            `(applied at ${at}, raw vectors)${took} — live: re-derives as the displayed frame changes; ` +
+            `displaces the drawn positions (shown = raw + offset; unbind zeroes it)`,
+        };
+      }
       return {
         status: "ok",
         message:
-          `bound "${r.channel}" → orientation on ${r.vertexIds.length} vertices of "${r.expr}" ` +
+          `bound "${r.channel}" → orientation on ${r.ids.length} vertices of "${r.expr}" ` +
           `(applied at ${at}, raw vectors)${took} — live: re-derives as the displayed frame changes; ` +
           `drives the oriented shapes (shape traces ribbon)`,
       };
@@ -1547,8 +1596,10 @@ export function makeBindHandler(ctx: CommandContext): CommandHandler {
  * elements of the target leave their bindings (shrink; emptied bindings
  * drop), scoped to one axis when the trailing word names one, across every
  * axis otherwise. Values stay as last applied — releasing a binding
- * freezes the current look, it repaints nothing. One recorded op when
- * anything changed. */
+ * freezes the current look, it repaints nothing — EXCEPT the offset axis:
+ * released offset coverage is ZEROED in the same stroke (positions snap
+ * back to raw; a frozen per-frame offset over a moving trajectory would be
+ * a broken static shift). One recorded stroke when anything changed. */
 export function makeUnbindHandler(ctx: CommandContext): CommandHandler {
   const usage = "unbind <target> [<axis>] | unbind all [<axis>]";
   return (args: string): CommandResult => {
@@ -1558,7 +1609,8 @@ export function makeUnbindHandler(ctx: CommandContext): CommandHandler {
     const split = splitTrailingWord(expr);
     if (
       split.word !== null &&
-      ((SCALAR_AXES as readonly string[]).includes(split.word) || split.word === ORIENTATION_AXIS)
+      ((SCALAR_AXES as readonly string[]).includes(split.word) ||
+        (VECTOR_AXES as readonly string[]).includes(split.word))
     ) {
       axis = split.word as BindAxis;
       expr = split.expr;
@@ -1569,7 +1621,7 @@ export function makeUnbindHandler(ctx: CommandContext): CommandHandler {
     if (ctx.listBindings().length === 0) {
       return { status: "nomatch", message: "no bindings to release" };
     }
-    let stats: ReleaseStats;
+    let stats: ReleaseStats & { offsetZeroed?: number };
     if (expr === "all") {
       // exact: every binding (of the axis), no resolution needed
       stats = ctx.releaseBindings({ points: null, vertices: null, edges: null }, axis);
@@ -1594,13 +1646,22 @@ export function makeUnbindHandler(ctx: CommandContext): CommandHandler {
         message: `nothing bound matches "${expr}"${axis === null ? "" : ` on ${axis}`}`,
       };
     }
+    // The tail must stay TRUTHFUL per axis: style-axis releases freeze the
+    // current look; offset releases ZERO (positions return to raw).
+    const zeroed = stats.offsetZeroed ?? 0;
+    const tail =
+      axis === OFFSET_AXIS
+        ? "offsets zeroed, positions return to raw"
+        : zeroed > 0
+          ? `values stay as last applied; ${zeroed} offset${zeroed === 1 ? "" : "s"} zeroed, positions return to raw`
+          : "values stay as last applied";
     return {
       status: "ok",
       message: `released ${stats.points} bound elements across ${stats.touched} binding${
         stats.touched === 1 ? "" : "s"
       }${stats.removed > 0 ? ` (${stats.removed} removed)` : ""}${
         axis === null ? "" : ` on ${axis}`
-      } — values stay as last applied`,
+      } — ${tail}`,
     };
   };
 }
@@ -1644,7 +1705,9 @@ export function makeBindingsHandler(ctx: CommandContext): CommandHandler {
         `  ${b.channel} → ${b.axis} on "${b.expr}" — ${b.points.length} ${
           b.axis === ORIENTATION_AXIS
             ? "vertices · raw vectors"
-            : `${domainNoun(AXIS_DOMAIN[b.axis])} · range ${b.range![0]}..${b.range![1]}${AXIS_DOMAIN[b.axis] === "edge" ? " · endpoint mean" : ""}`
+            : b.axis === OFFSET_AXIS
+              ? "points · raw vectors"
+              : `${domainNoun(AXIS_DOMAIN[b.axis])} · range ${b.range![0]}..${b.range![1]}${AXIS_DOMAIN[b.axis] === "edge" ? " · endpoint mean" : ""}`
         }`,
     );
     return {
@@ -2300,9 +2363,13 @@ export const HELP_TEXT = [
   "               (each vertex reads ITS point); axis `orientation` takes a",
   "               VECTOR (3-wide) channel, raw (no range), onto polyline",
   "               vertices — it drives the oriented shapes (shape traces",
-  "               ribbon; unbound orientation = collapsed, nothing draws)",
+  "               ribbon; unbound orientation = collapsed, nothing draws);",
+  "               axis `offset` takes a VECTOR channel, raw, onto POINTS —",
+  "               it DISPLACES the drawn positions (shown = raw + offset;",
+  "               bind-only: bake refuses it)",
   "  unbind <expr>|all [<axis>]  release binding coverage element-wise,",
-  "               one axis or all (values stay as last applied)",
+  "               one axis or all (values stay as last applied — except",
+  "               offset, which is zeroed: positions return to raw)",
   "  bindings     list channel bindings (read-only)",
   "  stylepoints / stylebonds / styletrace <expr> <style>   select a",
   "               registered shading style per target (standard | matte;",
@@ -2439,12 +2506,12 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registry.register(
     "bind",
     makeBindHandler(ctx),
-    "register a channel→axis binding over the target (same gate/range as bake): the axis re-derives from the channel on every frame flip; last-bind-wins per element within an axis; one undo stroke: bind <target> <channel> <axis> [<min> <max>]",
+    "register a channel→axis binding over the target (same gate/range as bake): the axis re-derives from the channel on every frame flip; last-bind-wins per element within an axis; one undo stroke; axis `offset` (vector, bind-only) displaces the drawn positions: bind <target> <channel> <axis> [<min> <max>]",
   );
   registry.register(
     "unbind",
     makeUnbindHandler(ctx),
-    "release binding coverage element-wise, one axis or all — unbind <target> [<axis>] | unbind all [<axis>] (values stay as last applied; one undo op)",
+    "release binding coverage element-wise, one axis or all — unbind <target> [<axis>] | unbind all [<axis>] (values stay as last applied, except offset which is zeroed — positions return to raw; one undo op)",
   );
   registry.register(
     "channels",

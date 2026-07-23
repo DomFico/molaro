@@ -35,7 +35,7 @@ import {
 import { BIND_SIZE_MAX, bindTypedResult } from "../webview/claudebind.ts";
 import type { ChannelDecl } from "../webview/channelmap.ts";
 import { BindingRegistry, type Binding } from "../webview/bindings.ts";
-import { AXIS_DOMAIN, SCALAR_AXES } from "../webview/channelmap.ts";
+import { AXIS_DOMAIN, OFFSET_AXIS, SCALAR_AXES, VECTOR_AXES } from "../webview/channelmap.ts";
 
 function makeHeader(): Header {
   const category = [0, 0, 1];
@@ -76,6 +76,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
   const bindingReg = new BindingRegistry();
   const bindCalls: { b: Binding; scalars: number[] }[] = [];
   const orientationOps: { vertexIds: number[]; values: number[] }[] = [];
+  const offsetOps: { points: number[]; values: number[] }[] = [];
   const elemEachOps: { axis: string; ids: number[]; values: number[] }[] = [];
   const styleOps: { kind: "points" | "edges" | "trace"; ids: number[]; index: number }[] = [];
   const shapeState: Record<string, string[]> = { point: ["sphere"], edge: ["tube"], vertex: ["tube", "ribbon"] };
@@ -271,25 +272,42 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
       return bindingReg.add(b);
     },
     releaseBindings: (sel, axis) => {
-      // mirror the main.ts composite: each axis gets ITS OWN id space
-      const total = { touched: 0, removed: 0, points: 0 };
+      // mirror the main.ts composite: each axis gets ITS OWN id space, and
+      // released OFFSET coverage is zeroed (captured BEFORE the release,
+      // recorded here into offsetOps as the composite's zero write would be)
+      const zeroIds: number[] = [];
+      if (axis === null || axis === OFFSET_AXIS) {
+        const req = sel.points === null ? null : new Set(sel.points);
+        for (const b of bindingReg.all()) {
+          if (b.axis !== OFFSET_AXIS) continue;
+          for (const p of b.points) if (req === null || req.has(p)) zeroIds.push(p);
+        }
+      }
+      const total = { touched: 0, removed: 0, points: 0, offsetZeroed: 0 };
       const acc = (s: { touched: number; removed: number; points: number }): void => {
         total.touched += s.touched;
         total.removed += s.removed;
         total.points += s.points;
       };
-      const idsFor = (a: (typeof SCALAR_AXES)[number]) =>
+      const idsFor = (a: (typeof SCALAR_AXES)[number] | (typeof VECTOR_AXES)[number]) =>
         AXIS_DOMAIN[a] === "point" ? sel.points : AXIS_DOMAIN[a] === "edge" ? sel.edges : sel.vertices;
-      for (const a of SCALAR_AXES) {
+      for (const a of [...SCALAR_AXES, ...VECTOR_AXES]) {
         if (axis === null || axis === a) acc(bindingReg.release(idsFor(a), a));
       }
-      if (axis === null || axis === "orientation") acc(bindingReg.release(sel.vertices, "orientation"));
+      if (total.touched > 0 && zeroIds.length > 0) {
+        offsetOps.push({ points: [...zeroIds], values: new Array<number>(zeroIds.length * 3).fill(0) });
+        total.offsetZeroed = zeroIds.length;
+      }
       return total;
     },
     listBindings: () => bindingReg.all(),
     orientationVerticesEach: (vertexIds, values) => {
       orientationOps.push({ vertexIds: [...vertexIds], values: [...values] });
       return vertexIds.length;
+    },
+    offsetPointsEach: (points, values) => {
+      offsetOps.push({ points: [...points], values: [...values] });
+      return points.length;
     },
     colorEdgesEach: (ids, rgb) => {
       elemEachOps.push({ axis: "bondcolor", ids: [...ids], values: [...rgb] });
@@ -397,7 +415,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
     colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, modRunCode, rmArms, sels,
-    bindCalls, bindingReg, orientationOps, elemEachOps, styleOps, shapeOps, shapeActive, bgOps,
+    bindCalls, bindingReg, orientationOps, offsetOps, elemEachOps, styleOps, shapeOps, shapeActive, bgOps,
   };
 }
 
@@ -1444,6 +1462,101 @@ test("orientation: the two id spaces never mix — the DISCRIMINATING partial un
   // axis-scoped: unbind all orientation touches nothing (already gone)
   const none = registry.runCommand("unbind all orientation");
   assert.equal(none.status, "nomatch");
+});
+
+// -- offset: the second vector axis — vector-on-POINT, bind-only, unbind zeroes --
+// Runs on ORI_FIXTURE (traceVertices [0, 2]) so the point-id and vertex-id
+// spaces are numerically DISTINCT: the domain routing between the two vector
+// axes is discriminated, not coincidental.
+
+test("offset: bind accepts a 3-wide channel RAW onto POINT ids — no vertex map, no mean", () => {
+  const { registry, bindingReg, bindCalls } = makeRegistry(ORI_FIXTURE);
+  const r = registry.runCommand("bind all flow offset");
+  assert.equal(r.status, "ok");
+  assert.equal(
+    r.message,
+    'bound "flow" → offset on 3 points of "all" (applied at frame 4, raw vectors) — live: re-derives as the displayed frame changes; displaces the drawn positions (shown = raw + offset; unbind zeroes it)',
+  );
+  assert.equal(bindCalls.length, 1);
+  assert.deepEqual(bindCalls[0].b.points, [0, 1, 2],
+    "coverage holds POINT ids — [0, 1] here would be the vertex map leaking in");
+  assert.deepEqual(bindCalls[0].scalars, [1, 0, 0, 0, 1, 0, 0, 0, 1],
+    "each point's OWN raw vector, point order");
+  assert.deepEqual(
+    bindingReg.all().map((b) => ({ axis: b.axis, points: b.points, range: b.range })),
+    [{ axis: "offset", points: [0, 1, 2], range: null }],
+  );
+  const list = registry.runCommand("bindings");
+  assert.match(list.message, /flow → offset on "all" — 3 points · raw vectors/);
+});
+
+test("offset: the two vector axes route to DIFFERENT domains on the same scene", () => {
+  const { registry, bindingReg } = makeRegistry(ORI_FIXTURE);
+  registry.runCommand("bind all flow orientation"); // VERTEX ids [0, 1]
+  registry.runCommand("bind all flow offset"); // POINT ids [0, 1, 2]
+  assert.deepEqual(
+    bindingReg.all().map((b) => ({ axis: b.axis, points: b.points })),
+    [
+      { axis: "orientation", points: [0, 1] },
+      { axis: "offset", points: [0, 1, 2] },
+    ],
+    "same channel, same target — each vector axis covers its OWN id space",
+  );
+});
+
+test("offset: the gate refusals name the offset axis; bake refuses it outright", () => {
+  const { registry, bindingReg, orientationOps, offsetOps } = makeRegistry(ORI_FIXTURE);
+  const cases: [string, RegExp][] = [
+    ["bind all energy offset", /offset needs a vector \(3-wide\) channel — "energy" is scalar/],
+    ["bind all flow offset 0 1", /meaningless for the offset axis/],
+    ["bake all flow offset", /offset is bind-only/],
+    ["bake all energy offset", /offset needs a vector/],
+  ];
+  for (const [cmd, want] of cases) {
+    const r = registry.runCommand(cmd);
+    assert.equal(r.status, "error", cmd);
+    assert.match(r.message, want, cmd);
+  }
+  assert.equal(bindingReg.count(), 0, "no refusal bound anything");
+  assert.equal(orientationOps.length + offsetOps.length, 0, "no refusal wrote anything");
+});
+
+test("offset: axis-scoped unbind ZEROES the released coverage — the departure from freeze", () => {
+  const { registry, bindingReg, offsetOps } = makeRegistry(ORI_FIXTURE);
+  registry.runCommand("bind all flow offset");
+  offsetOps.length = 0; // drop the bind's initial apply — watch the release
+  const r = registry.runCommand("unbind all offset");
+  assert.equal(r.status, "ok");
+  assert.equal(
+    r.message,
+    "released 3 bound elements across 1 binding (1 removed) on offset — offsets zeroed, positions return to raw",
+  );
+  assert.equal(bindingReg.count(), 0);
+  assert.deepEqual(offsetOps, [{ points: [0, 1, 2], values: [0, 0, 0, 0, 0, 0, 0, 0, 0] }],
+    "the released coverage was zero-written (recorded), not left frozen");
+});
+
+test("offset: a PARTIAL unbind zeroes only the released points; an all-axis unbind stays truthful per axis", () => {
+  const { registry, bindingReg, offsetOps } = makeRegistry(ORI_FIXTURE);
+  registry.runCommand("bind all flow offset");
+  registry.runCommand("bind all energy color 0 2.5");
+  offsetOps.length = 0;
+  // c1 = point 2: offset loses point 2 (zeroed); color loses point 2 (frozen)
+  const part = registry.runCommand("unbind c1");
+  assert.equal(
+    part.message,
+    "released 2 bound elements across 2 bindings — values stay as last applied; 1 offset zeroed, positions return to raw",
+  );
+  assert.deepEqual(offsetOps, [{ points: [2], values: [0, 0, 0] }]);
+  // an axis-scoped release of a NON-offset axis zeroes nothing
+  offsetOps.length = 0;
+  const color = registry.runCommand("unbind all color");
+  assert.match(color.message, / on color — values stay as last applied$/);
+  assert.equal(offsetOps.length, 0, "a color release never touches the offset buffer");
+  assert.deepEqual(
+    bindingReg.all().map((b) => ({ axis: b.axis, points: b.points })),
+    [{ axis: "offset", points: [0, 1] }],
+  );
 });
 
 test("bindings: read-only list with the live notice; empty says so; bare only", () => {

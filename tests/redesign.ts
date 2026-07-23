@@ -1924,21 +1924,40 @@ async function S10(): Promise<void> {
       await sleep(650); // let this case's flashes expire before the next
     }
 
-    // camera frames the FULL union: command pose == focusPoints(resolved set)
+    // camera frames the FULL union: command pose == focusPoints(resolved set).
+    // Pose reads are SETTLE-POLLED, not bare fixed-sleep reads (the S8/S9
+    // camSettled rule): the tween advances only on rendered frames, and under
+    // desktop load this machine's headless render loop freezes for 10–21s at
+    // a stretch (measured with an in-page rAF-gap sampler; the freezes hit
+    // the `view` leg and the focusPoints leg alike) — a fixed 650ms then
+    // photographs the camera mid-flight and the two identical framing paths
+    // "disagree". The assertion itself is unchanged: both legs must land on
+    // the same pose within 0.01.
+    const camPose = () => d.evaluate<number[]>(
+      `[...${V}.camera.position.toArray(), ...${V}.controls.target.toArray()]`);
+    const camSettled = async (): Promise<number[]> => {
+      for (let i = 0; i < 40; i++) {
+        const a = await camPose();
+        await d.evaluate(`(async () => {
+          for (let j = 0; j < 2; j++) await new Promise(r => requestAnimationFrame(r));
+        })()`);
+        const b = await camPose();
+        if (a.every((v, k) => Math.abs(v - b[k]) < 0.01)) return b;
+      }
+      return camPose();
+    };
     for (const expr of [`@selection_1."subgroup-0" + @selection_1.t1`,
                         "alpha.group-0.subgroup-3 + #5"]) {
       await d.evaluate(`${V}.resetCamera()`);
       await sleep(700);
       await d.evaluate(`${V}.focusPoints(${V}.debug.resolvePoints(${JSON.stringify(expr)}))`);
       await sleep(650);
-      const direct = await d.evaluate<number[]>(
-        `[...${V}.camera.position.toArray(), ...${V}.controls.target.toArray()]`);
+      const direct = await camSettled();
       await d.evaluate(`${V}.resetCamera()`);
       await sleep(700);
       await d.evaluate(`${V}.command(${JSON.stringify("view " + expr)})`);
       await sleep(650);
-      const viaCmd = await d.evaluate<number[]>(
-        `[...${V}.camera.position.toArray(), ...${V}.controls.target.toArray()]`);
+      const viaCmd = await camSettled();
       check(`S10: camera frames the full union — ${expr}`,
         direct.every((v, i) => Math.abs(v - viaCmd[i]) < 0.01),
         `direct=${direct.map((v) => v.toFixed(2))} cmd=${viaCmd.map((v) => v.toFixed(2))}`);
@@ -8211,7 +8230,312 @@ async function S50(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50 };
+// ==================== S51: the OFFSET axis — shown = raw + offset =============
+// The second vector axis (vector-on-POINT; orientation is vector-on-vertex):
+// a bound 3-wide channel DISPLACES the drawn positions. The claims:
+//   A  UNBOUND PAYS ZERO — the position path is the byte-identical zero-copy
+//      chunk subarray (buffer identity, no allocation), undo stack flat
+//   B  the gate refusals name the offset axis; bake refuses it (bind-only)
+//   C  PARTIAL application — shown = raw + offset for covered points, = raw
+//      EXACTLY for uncovered; re-derived live across seeks; applied visibly
+//      while PAUSED (the write-cadence refresh)
+//   D  cross-buffer isolation (the S39 discipline): offset flips touch no
+//      style buffer, no junction fill, and record NOTHING
+//   E  DISPLAY ≠ MEASURE follows SHOWN — visibleBounds/projectPoint/pick all
+//      compute from the displaced positions
+//   F  one Ctrl+Z after bind + flips → pristine (zero-copy raw, zero buffer,
+//      no binding, base depth)
+//   G  pixels — a covered point RENDERS at the displaced location
+//   H  the RULING: unbind ZEROES (recorded) — positions snap back to raw
+//      immediately, one stroke; undoing the unbind restores the binding AND
+//      the displacement, and the restored binding is LIVE again
+async function S51(): Promise<void> {
+  console.log("S51 — the offset axis: shown = raw + offset, unbind zeroes");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const rafs = () => d.evaluate(`(async () => {
+      for (let i = 0; i < 3; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`);
+    const seekTo = async (f: number): Promise<void> => {
+      await d.evaluate(`${V}.player.seek(${f})`);
+      await d.waitFor(`${V}.player.frame === ${f} && ${V}.player.getFrame(${f}) !== null`, 20000);
+      await rafs();
+    };
+    const vers = () =>
+      d.evaluate<{ p: { color: number; size: number; opacity: number };
+                   e: { sizeA: number; sizeB: number };
+                   t: { radius: number; color: number } }>(
+        `({ p: ${V}.repAttrVersions(), e: ${V}.edgeAttrVersions(), t: ${V}.traceAttrVersions() })`);
+    // THE ZERO-COPY IDENTITY: inactive offset must repoint the attribute at
+    // the chunk's own buffer (no allocation, no copy) — asserted by buffer
+    // IDENTITY and exact byte offset, not by value equality.
+    const zeroCopy = () => d.evaluate<boolean>(`(()=>{
+      const f = ${V}.player.frame;
+      const chunk = ${V}.player.getFrame(f);
+      if (!chunk) return false;
+      const arr = ${V}.positionAttr.array;
+      const off = (f - chunk.start) * 6000 * 3;
+      return arr.buffer === chunk.positions.buffer &&
+        arr.byteOffset === chunk.positions.byteOffset + off * 4 &&
+        arr.length === 6000 * 3;
+    })()`);
+    // shown ≡ raw + offset at the DISPLAYED frame: covered spot points carry
+    // raw + their own flow vector (float32-rounded); uncovered points equal
+    // raw EXACTLY. Straight from the same chunk data the flip read.
+    const shownState = () => d.evaluate<{ covOk: boolean; uncovOk: boolean; detail: string }>(`(()=>{
+      const f = ${V}.player.frame;
+      const chunk = ${V}.player.getFrame(f);
+      const arr = ${V}.positionAttr.array;
+      const off = (f - chunk.start) * 6000 * 3;
+      const flow = chunk.channels.get("flow");
+      let covOk = true, uncovOk = true, detail = "f=" + f;
+      for (const p of [0, 7, 150, 199]) {
+        for (let c = 0; c < 3; c++) {
+          const want = Math.fround(chunk.positions[off + p*3 + c] + flow[off + p*3 + c]);
+          if (Math.abs(arr[p*3 + c] - want) > 1e-6) {
+            covOk = false; detail += " cov p=" + p + " c=" + c;
+          }
+        }
+      }
+      for (const p of [200, 3000, 5999]) {
+        for (let c = 0; c < 3; c++) {
+          if (arr[p*3 + c] !== chunk.positions[off + p*3 + c]) {
+            uncovOk = false; detail += " uncov p=" + p + " c=" + c;
+          }
+        }
+      }
+      return { covOk, uncovOk, detail };
+    })()`);
+    const offsetAllZero = () =>
+      d.evaluate<boolean>(`${V}.rep.state.offset.every((x) => x === 0)`);
+    const settle = async (): Promise<void> => {
+      for (let i = 0; i < 40; i++) {
+        const a = await d.evaluate<number[]>(`${V}.camera.position.toArray()`);
+        await rafs();
+        const b = await d.evaluate<number[]>(`${V}.camera.position.toArray()`);
+        if (Math.hypot(a[0]-b[0], a[1]-b[1], a[2]-b[2]) < 1e-4) return;
+      }
+    };
+
+    // Determinism: every check reads buffers at a specific seeked frame.
+    await d.evaluate(`${V}.setPlaying(false)`);
+    await seekTo(0);
+
+    // -- A: UNBOUND PAYS ZERO — zero-copy identity, flat undo stack --------
+    const shape = await d.evaluate<{ len: number }>(`({ len: ${V}.rep.state.offset.length })`);
+    check("S51: the offset buffer is per-point stride 3, zero by default",
+      shape.len === 6000 * 3 && (await offsetAllZero()), JSON.stringify(shape));
+    const depth0 = await undoDepth();
+    check("S51: UNBOUND — the position path is the zero-copy chunk subarray", await zeroCopy());
+    await seekTo(5); await seekTo(10);
+    check("S51: …and stays zero-copy across seeks, undo stack flat",
+      (await zeroCopy()) && (await undoDepth()) === depth0);
+
+    // -- B: the gate refuses the wrong shapes; bake refuses offset ---------
+    const refusals: [string, RegExp][] = [
+      ["bind all energy offset", /offset needs a vector \(3-wide\) channel — "energy" is scalar/],
+      ["bind all flow offset 0 1", /meaningless for the offset axis/],
+      ["bake all flow offset", /offset is bind-only/],
+    ];
+    for (const [text, want] of refusals) {
+      const r = await cmd(text);
+      check(`S51: refusal — ${text}`, r.status === "error" && want.test(r.message), JSON.stringify(r));
+    }
+    check("S51: no refusal wrote or recorded anything",
+      (await offsetAllZero()) && (await zeroCopy()) && (await undoDepth()) === depth0);
+
+    // -- C: bind → partial application, visible while PAUSED, live on seek --
+    const bounds0 = await d.evaluate<{ center: number[]; radius: number }>(`${V}.debug.visibleBounds()`);
+    const bind = await cmd("bind #0-199 flow offset");
+    check("S51: bind #0-199 flow offset is accepted and says it displaces",
+      bind.status === "ok" && /displaces the drawn positions/.test(bind.message) &&
+        /raw vectors/.test(bind.message),
+      JSON.stringify(bind));
+    check("S51: bind is exactly ONE undo stroke", (await undoDepth()) === depth0 + 1);
+    check("S51: bindings lists the points · raw vectors row",
+      /flow → offset on "#0-199" — 200 points · raw vectors/.test((await cmd("bindings")).message),
+      (await cmd("bindings")).message);
+    const paused = await shownState();
+    check("S51: PAUSED APPLY — shown = raw + offset for covered, = raw for uncovered, NO flip needed",
+      paused.covOk && paused.uncovOk, paused.detail);
+    await seekTo(40);
+    const at40 = await shownState();
+    check("S51: LIVE — a seek re-derives the displacement from frame 40's vectors",
+      at40.covOk && at40.uncovOk, at40.detail);
+    // precondition: the two frames genuinely differ, so C discriminates
+    const differ = await d.evaluate<boolean>(`(()=>{
+      const a = ${V}.player.getFrame(10), b = ${V}.player.getFrame(40);
+      const ax = a.channels.get("flow")[(10 - a.start) * 6000 * 3];
+      const bx = b.channels.get("flow")[(40 - b.start) * 6000 * 3];
+      return Math.abs(ax - bx) > 1e-4;
+    })()`);
+    check("S51: (data precondition) frames 10 and 40 supply different vectors", differ);
+
+    // -- D: offset flips touch NO style buffer and record NOTHING ----------
+    const vD = await vers();
+    const depD = await undoDepth();
+    await seekTo(50); await seekTo(60);
+    const vD2 = await vers();
+    check("S51: offset flips touch NO other buffer and record NOTHING (S39 discipline)",
+      vD2.p.color === vD.p.color && vD2.p.size === vD.p.size && vD2.p.opacity === vD.p.opacity &&
+        vD2.e.sizeA === vD.e.sizeA && vD2.e.sizeB === vD.e.sizeB &&
+        vD2.t.radius === vD.t.radius && vD2.t.color === vD.t.color &&
+        (await undoDepth()) === depD,
+      JSON.stringify({ vD, vD2 }));
+
+    // -- E: DISPLAY ≠ MEASURE follows SHOWN --------------------------------
+    // visibleBounds' center is the MEAN of the drawn positions, so binding
+    // must move it by exactly the mean displacement over the visible points
+    // (computed from the offset buffer, independent of the position path).
+    await seekTo(10);
+    const boundsNow = await d.evaluate<{ center: number[]; radius: number }>(`${V}.debug.visibleBounds()`);
+    const expectDelta = await d.evaluate<{ n: number; d: number[]; mag: number }>(`(()=>{
+      const vis = ${V}.rep.state.visible, off = ${V}.rep.state.offset;
+      let n = 0, dx = 0, dy = 0, dz = 0;
+      for (let p = 0; p < vis.length; p++) {
+        if (vis[p] > 0.5) { n++; dx += off[p*3]; dy += off[p*3+1]; dz += off[p*3+2]; }
+      }
+      return { n, d: [dx/n, dy/n, dz/n], mag: Math.hypot(dx/n, dy/n, dz/n) };
+    })()`);
+    check("S51: (data precondition) the mean visible displacement is measurable",
+      expectDelta.mag > 1e-3, JSON.stringify(expectDelta));
+    // bounds0 was captured at frame 10 pre-bind; boundsNow at frame 10 bound —
+    // the raw positions are identical, so the center delta IS the displacement
+    const boundsFollow = [0, 1, 2].every((c) =>
+      Math.abs((boundsNow.center[c] - bounds0.center[c]) - expectDelta.d[c]) < 1e-3);
+    check("S51: visibleBounds follows SHOWN — center moved by exactly the mean displacement",
+      boundsFollow,
+      JSON.stringify({ before: bounds0.center, after: boundsNow.center, want: expectDelta.d }));
+    // projectPoint parity: the seam's screen position equals a manual
+    // projection of raw + flow (the displaced world position)
+    const parity = await d.evaluate<{ dx: number; dy: number; front: boolean }>(`(()=>{
+      const f = ${V}.player.frame;
+      const chunk = ${V}.player.getFrame(f);
+      const off = (f - chunk.start) * 6000 * 3;
+      const flow = chunk.channels.get("flow");
+      const p = 150;
+      const cam = ${V}.camera;
+      cam.updateMatrixWorld();
+      const v = cam.position.clone().set(
+        chunk.positions[off + p*3] + flow[off + p*3],
+        chunk.positions[off + p*3+1] + flow[off + p*3+1],
+        chunk.positions[off + p*3+2] + flow[off + p*3+2]).project(cam);
+      const rect = document.querySelector('#app canvas').getBoundingClientRect();
+      const mx = rect.left + ((v.x + 1) / 2) * rect.width;
+      const my = rect.top + ((1 - v.y) / 2) * rect.height;
+      const pr = ${V}.debug.projectPoint(p);
+      return { dx: Math.abs(pr.x - mx), dy: Math.abs(pr.y - my), front: pr.front };
+    })()`);
+    check("S51: projectPoint follows SHOWN — matches a manual raw+flow projection sub-pixel",
+      parity.dx < 0.5 && parity.dy < 0.5, JSON.stringify(parity));
+
+    // -- F: derived-not-recorded — ONE Ctrl+Z restores everything ----------
+    check("S51: any amount of seeking added ZERO undo entries", (await undoDepth()) === depth0 + 1);
+    await d.ctrlZ();
+    await sleep(300);
+    check("S51: ONE Ctrl+Z → zero buffer, zero-copy raw positions, binding gone, base depth",
+      (await offsetAllZero()) && (await zeroCopy()) &&
+        (await cmd("bindings")).message === "no bindings" && (await undoDepth()) === depth0);
+    await seekTo(20);
+    check("S51: …and a further seek does not re-displace (truly gone)", await zeroCopy());
+
+    // -- G: PIXELS — a covered point renders at the DISPLACED location -----
+    await cmd("bind #0-199 flow offset");
+    await cmd("colorpoints #150 red");
+    // occlusion isolation (the standing pixel-proof rule): fade every OTHER
+    // element to zero — zero-alpha fragments discard, nothing occludes
+    await cmd("pointopacity all 0");
+    await cmd("pointopacity #150 1");
+    await cmd("bondopacity all 0");
+    await cmd("bondopacityof all 0");
+    await cmd("traceopacity all 0");
+    // find a frame where the probe's displacement is USEFULLY off the view
+    // axis: after zooming to the (displaced) probe, its raw location must
+    // project ≥ 60 px away, else the pixel claim cannot discriminate
+    let probeFrame = -1;
+    let pr: { x: number; y: number; front: boolean } | null = null;
+    let rawScreen: { x: number; y: number; front: boolean; sep: number } | null = null;
+    for (const f of [10, 25, 40, 55, 70]) {
+      await seekTo(f);
+      await d.evaluate(`${V}.zoomToPoints([150])`);
+      await settle();
+      await rafs();
+      pr = await d.evaluate<{ x: number; y: number; front: boolean }>(`${V}.debug.projectPoint(150)`);
+      rawScreen = await d.evaluate<{ x: number; y: number; front: boolean; sep: number }>(`(()=>{
+        const f = ${V}.player.frame;
+        const chunk = ${V}.player.getFrame(f);
+        const off = (f - chunk.start) * 6000 * 3;
+        const cam = ${V}.camera;
+        cam.updateMatrixWorld();
+        const v = cam.position.clone().set(
+          chunk.positions[off + 450], chunk.positions[off + 451], chunk.positions[off + 452]).project(cam);
+        const rect = document.querySelector('#app canvas').getBoundingClientRect();
+        const x = rect.left + ((v.x + 1) / 2) * rect.width;
+        const y = rect.top + ((1 - v.y) / 2) * rect.height;
+        const pr = ${V}.debug.projectPoint(150);
+        return { x, y, front: v.z < 1 && v.z > -1, sep: Math.hypot(pr.x - x, pr.y - y) };
+      })()`);
+      if (rawScreen.sep > 60) { probeFrame = f; break; }
+    }
+    check("S51: (setup) found a frame separating displaced from raw by > 60 px",
+      probeFrame >= 0, JSON.stringify(rawScreen));
+    // pick follows SHOWN: a click at the DISPLACED screen location hits 150
+    const picked = await d.evaluate<number>(`${V}.debug.pick(${pr!.x}, ${pr!.y})`);
+    check("S51: pick follows SHOWN — the displaced screen location picks the probe",
+      picked === 150, `picked ${picked}`);
+    const redAt = (x: number, y: number) =>
+      d.samplePatch({
+        centerExpr: `({x:${Math.round(x)},y:${Math.round(y)}})`,
+        half: 3,
+        classify: `r > g + 60 && r > b + 60`,
+      });
+    await rafs();
+    const pxDisplaced = await redAt(pr!.x, pr!.y);
+    check("S51: PIXELS — the covered point RENDERS at the displaced location",
+      pxDisplaced.count > 5, JSON.stringify(pxDisplaced));
+    await d.screenshot(`${REPORT}/S51_offset_displaced.png`);
+    // …and NOT at the raw location (only when that location is on-canvas)
+    const rawOnCanvas = await d.evaluate<boolean>(`(()=>{
+      const rect = document.querySelector('#app canvas').getBoundingClientRect();
+      return ${rawScreen!.front} && ${rawScreen!.x} > rect.left + 8 && ${rawScreen!.x} < rect.right - 8 &&
+        ${rawScreen!.y} > rect.top + 8 && ${rawScreen!.y} < rect.bottom - 8;
+    })()`);
+    if (rawOnCanvas) {
+      const pxRaw = await redAt(rawScreen!.x, rawScreen!.y);
+      check("S51: …and NOT at the raw location", pxRaw.count === 0, JSON.stringify(pxRaw));
+    }
+
+    // -- H: the RULING — unbind ZEROES (recorded); undo restores it --------
+    const depH = await undoDepth();
+    const un = await cmd("unbind all offset");
+    check("S51: unbind all offset says zeroed, positions return to raw",
+      un.status === "ok" && /offsets zeroed, positions return to raw/.test(un.message),
+      JSON.stringify(un));
+    check("S51: unbind is ONE stroke", (await undoDepth()) === depH + 1);
+    check("S51: …the buffer is zero and the positions SNAPPED back to zero-copy raw, while paused",
+      (await offsetAllZero()) && (await zeroCopy()) &&
+        !/flow → offset/.test((await cmd("bindings")).message));
+    await d.evaluate(`void document.activeElement?.blur?.()`);
+    await d.ctrlZ();
+    await sleep(300);
+    const restored = await shownState();
+    check("S51: UNDOING the unbind restores the binding AND the displacement",
+      restored.covOk && restored.uncovOk &&
+        /flow → offset on "#0-199" — 200 points · raw vectors/.test((await cmd("bindings")).message) &&
+        (await undoDepth()) === depH,
+      restored.detail);
+    await seekTo(probeFrame >= 0 ? (probeFrame + 15) % 140 : 30);
+    const liveAgain = await shownState();
+    check("S51: …and the restored binding is LIVE — it re-derives on the next seek",
+      liveAgain.covOk && liveAgain.uncovOk, liveAgain.detail);
+    check("S51: the missing-block arm stayed unreachable",
+      (await d.evaluate<number>(`${V}.debug.missingBoundBlockHits()`)) === 0);
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -8249,7 +8573,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
-  S48: "full", S49: "full", S50: "full",
+  S48: "full", S49: "full", S50: "full", S51: "full",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

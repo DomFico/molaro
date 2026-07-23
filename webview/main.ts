@@ -47,7 +47,7 @@ import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
 import { DEFAULT_HOLD_COMMAND, applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
 import { BindingRegistry, type Binding } from "./bindings.ts";
-import { AXIS_DOMAIN, BIND_SIZE_MAX, mapScalar, ORIENTATION_AXIS, SCALAR_AXES, type BindAxis } from "./channelmap.ts";
+import { AXIS_DOMAIN, BIND_SIZE_MAX, mapScalar, OFFSET_AXIS, ORIENTATION_AXIS, SCALAR_AXES, VECTOR_AXES, type BindAxis } from "./channelmap.ts";
 import { bindTypedResult } from "./claudebind.ts";
 import { PLOT_RESULT_KINDS } from "./claudemodel.ts";
 import { parseTypedResult } from "./claudemodel.ts";
@@ -2343,12 +2343,40 @@ async function main(): Promise<void> {
   // — forcing the missing-block behavior to be RULED, not silently inherited
   // as a stale hold. (redesign S-seam asserts debug.missingBoundBlockHits===0.)
   let missingBoundBlockHits = 0;
-  const applyBindings = (chunk: FrameChunk, f: number): void => {
+  /** ONE applier, TWO cadence PHASES around the flip copy — the preamble
+   * (unbound early-return, static-channel skip, block lookup, the
+   * missing-block instrumentation) stays single-sourced across both:
+   *   "position" — runs BEFORE setPositionsFor/frameFlip: ONLY the offset
+   *     axis, whose re-derived vectors must be combined into the positions
+   *     the flip copy hands every pass.
+   *   "style"    — runs AFTER the flip: every other axis (the original
+   *     applier, unchanged).
+   */
+  const applyBindings = (chunk: FrameChunk, f: number, phase: "position" | "style"): void => {
     if (bindingRegistry.count() === 0) return;
     for (const b of bindingRegistry.all()) {
+      if ((b.axis === OFFSET_AXIS) !== (phase === "position")) continue;
       if (channelScopeByName.get(b.channel) !== "per_point_per_frame") continue;
       const block = chunk.channels.get(b.channel);
       if (!block) { missingBoundBlockHits++; continue; } // asserted unreachable — see above
+      if (b.axis === OFFSET_AXIS) {
+        // The offset arm (position phase): b.points holds POINT ids — no
+        // vertex map, no mean; each point stores its OWN raw 3-vector at
+        // this frame. Direct UNRECORDED pokes (derived state, the
+        // orientation arm's discipline — one Ctrl+Z after a thousand flips
+        // still restores pre-bind state from the bind stroke's captures).
+        // No repWrite here: the combined positions reach every pass through
+        // setPositionsFor + the ordinary frameFlip that follows.
+        const off3 = (f - chunk.start) * header.n_points * 3;
+        const buf = rep.state.offset;
+        for (const p of b.points) {
+          const at = off3 + p * 3;
+          buf[p * 3] = block[at];
+          buf[p * 3 + 1] = block[at + 1];
+          buf[p * 3 + 2] = block[at + 2];
+        }
+        continue;
+      }
       if (b.axis === ORIENTATION_AXIS) {
         // The vector arm: b.points holds polyline-VERTEX ids; each vertex
         // stores ITS point's raw 3-vector at this frame. No normalization
@@ -2424,6 +2452,69 @@ async function main(): Promise<void> {
     ORIENTATION_AXIS,
     makeRepEachWriter(rep.state.orientation, 3, repWrite("orientation")),
   );
+  // -- the OFFSET axis: shown = supplied raw + bound supplied offset -----------
+  // The position path has two modes, chosen by offsetActive():
+  //   INACTIVE — the verbatim zero-copy subarray repoint (byte-identical to
+  //     the pre-offset viewer: no allocation, no loop, no copy).
+  //   ACTIVE   — combine raw + rep.state.offset into a host-owned `shown`
+  //     buffer (lazily allocated on the first active flip) and point the
+  //     attribute there.
+  // The non-zero flag is recomputed ONLY at write cadence (the writer's
+  // onWrite below) — never per flip; per-flip cost of the inactive path is
+  // one flag read plus a scan of the (small) binding list.
+  let offsetBufferNonZero = false;
+  const refreshOffsetNonZero = (): void => {
+    const buf = rep.state.offset;
+    offsetBufferNonZero = false;
+    for (let i = 0; i < buf.length; i++) {
+      if (buf[i] !== 0) { offsetBufferNonZero = true; break; }
+    }
+  };
+  // Active = a live offset binding (per-flip re-derive incoming) OR residual
+  // non-zero displacement (mid-undo/redo: the writer restore can land before
+  // the registry restore — the flag keeps the combine honest in the gap).
+  const offsetActive = (): boolean =>
+    offsetBufferNonZero || bindingRegistry.all().some((b) => b.axis === OFFSET_AXIS);
+  let shown: Float32Array | null = null; // lazily allocated on first ACTIVE flip
+  const setPositionsFor = (chunk: FrameChunk, f: number): void => {
+    const offset = (f - chunk.start) * header.n_points * 3;
+    if (!offsetActive()) {
+      // the verbatim original path — zero-copy, byte-identical
+      positionAttr.array = chunk.positions.subarray(offset, offset + header.n_points * 3);
+      return;
+    }
+    const raw = chunk.positions.subarray(offset, offset + header.n_points * 3);
+    if (shown === null) shown = new Float32Array(header.n_points * 3);
+    shown.set(raw);
+    const d = rep.state.offset;
+    for (let i = 0; i < shown.length; i++) shown[i] += d[i];
+    positionAttr.array = shown;
+  };
+  /** Re-run the position combine for the DISPLAYED chunk (write cadence
+   * only): a recorded offset write — bind's initial apply, undo, redo, the
+   * unbind zeroing — must move the drawn positions visibly while paused,
+   * without waiting for the next flip. frameFlip() re-copies the endpoint/
+   * vertex snapshots the instanced passes own. */
+  const refreshShownPositions = (): void => {
+    if (displayedFrame < 0) return;
+    const chunk = player.getFrame(displayedFrame);
+    if (!chunk) return;
+    setPositionsFor(chunk, displayedFrame);
+    positionAttr.needsUpdate = true;
+    registry.frameFlip();
+  };
+  const composedOffsetOnWrite = (ids: readonly number[]): void => {
+    refreshOffsetNonZero();
+    registry.repWrite("offset", ids); // no subscriber today; cadence-uniform
+    refreshShownPositions();
+  };
+  /** The raw per-element offset writer (recorded, one stroke) — the SAME
+   * stride-3 core color/orientation ride. Used directly by the release
+   * composite's zeroing (coverage is already released there; wrapping it in
+   * withBindingClear would re-release nothing and snapshot pointlessly). */
+  const offsetPointsEachRaw = makeRepEachWriter(rep.state.offset, 3, composedOffsetOnWrite);
+  /** The bind-time writer: LWW-clear of same-axis coverage + the raw core. */
+  const offsetPointsEach = withBindingClear(OFFSET_AXIS, offsetPointsEachRaw);
   const colorPoints = withBindingClear("color", makeRepWriter(rep.state.color, 3, repWrite("color")));
   const colorPointsEach = withBindingClear("color", makeRepEachWriter(rep.state.color, 3, repWrite("color")));
   const sizePointsEach = withBindingClear("size", makeRepEachWriter(rep.state.size, 1, repWrite("size")));
@@ -2812,6 +2903,7 @@ async function main(): Promise<void> {
       const takeover = bindingRegistry.overlapStats(b.points, b.axis);
       model.beginStroke();
       if (b.axis === ORIENTATION_AXIS) orientationVerticesEach(b.points, values);
+      else if (b.axis === OFFSET_AXIS) offsetPointsEach(b.points, values);
       else applyScalarsToAxis(commandContext, b.axis, b.points, values);
       const snap = bindingRegistry.snapshot();
       bindingRegistry.add(b);
@@ -2841,8 +2933,23 @@ async function main(): Promise<void> {
       },
       axis: BindAxis | null,
     ) => {
+      // The OFFSET RULING: released offset coverage ZEROES (positions snap
+      // back to raw), it does not freeze — a per-frame offset frozen across
+      // a moving trajectory is a broken static shift. Capture WHICH covered
+      // points will be released BEFORE the release (coverages are disjoint
+      // per axis, so no duplicates), zero them RECORDED after it, all in
+      // ONE stroke: one Ctrl+Z restores the binding AND the displacement.
+      const zeroIds: number[] = [];
+      if (axis === null || axis === OFFSET_AXIS) {
+        const req = sel.points === null ? null : new Set(sel.points);
+        for (const b of bindingRegistry.all()) {
+          if (b.axis !== OFFSET_AXIS) continue;
+          for (const p of b.points) if (req === null || req.has(p)) zeroIds.push(p);
+        }
+      }
+      model.beginStroke();
       const snap = bindingRegistry.snapshot();
-      const total = { touched: 0, removed: 0, points: 0 };
+      const total = { touched: 0, removed: 0, points: 0, offsetZeroed: 0 };
       const acc = (s: { touched: number; removed: number; points: number }): void => {
         total.touched += s.touched;
         total.removed += s.removed;
@@ -2852,13 +2959,13 @@ async function main(): Promise<void> {
       // overlap numerically and must never cross (AXIS_DOMAIN is the key).
       const idsFor = (a: BindAxis): readonly number[] | null =>
         AXIS_DOMAIN[a] === "point" ? sel.points : AXIS_DOMAIN[a] === "edge" ? sel.edges : sel.vertices;
-      for (const a of SCALAR_AXES) {
+      for (const a of [...SCALAR_AXES, ...VECTOR_AXES]) {
         if (axis === null || axis === a) acc(bindingRegistry.release(idsFor(a), a));
       }
-      if (axis === null || axis === ORIENTATION_AXIS) {
-        acc(bindingRegistry.release(sel.vertices, ORIENTATION_AXIS));
+      if (total.touched === 0) {
+        model.endStroke();
+        return total; // nothing changed — record no op
       }
-      if (total.touched === 0) return total; // nothing changed — record no op
       const after = bindingRegistry.snapshot();
       refreshBindingBadge();
       model.recordOp(() => {
@@ -2870,10 +2977,20 @@ async function main(): Promise<void> {
         refreshBindingBadge();
         return [];
       });
+      if (zeroIds.length > 0) {
+        // The RAW writer (coverage already released above — nothing left to
+        // LWW-clear): records the zeroing with the current displacement as
+        // its captured prior, and its onWrite snaps the shown positions
+        // back to raw immediately, while paused.
+        offsetPointsEachRaw(zeroIds, new Array<number>(zeroIds.length * 3).fill(0));
+        total.offsetZeroed = zeroIds.length;
+      }
+      model.endStroke();
       return total;
     },
     listBindings: () => bindingRegistry.all(),
     orientationVerticesEach,
+    offsetPointsEach,
     colorEdgesEach,
     sizeEdgesEach,
     opacityEdgesEach,
@@ -3010,8 +3127,9 @@ async function main(): Promise<void> {
       names.every((n) => commandContext.committedEntries().has(n)) ? { deleted: 0, points: 0 } : null,
     colorPoints: () => 0, colorPointsEach: () => 0, sizePointsEach: () => 0, opacityPointsEach: () => 0,
     createBinding: () => ({ touched: 0, removed: 0, points: 0 }),
-    releaseBindings: () => ({ touched: 0, removed: 0, points: 0 }),
+    releaseBindings: () => ({ touched: 0, removed: 0, points: 0, offsetZeroed: 0 }),
     orientationVerticesEach: () => 0,
+    offsetPointsEach: () => 0,
     colorEdgesEach: () => 0, sizeEdgesEach: () => 0, opacityEdgesEach: () => 0,
     colorTraceEach: () => 0, sizeTraceEach: () => 0, opacityTraceEach: () => 0,
     stylePoints: () => 0, styleEdges: () => 0, styleTrace: () => 0,
@@ -3387,11 +3505,11 @@ async function main(): Promise<void> {
   const displayFrame = (f: number): boolean => {
     const chunk = player.getFrame(f);
     if (!chunk) return false;
-    const offset = (f - chunk.start) * header.n_points * 3;
-    positionAttr.array = chunk.positions.subarray(offset, offset + header.n_points * 3);
+    applyBindings(chunk, f, "position"); // bound offsets re-derive BEFORE the flip copy
+    setPositionsFor(chunk, f); // zero-copy raw, or shown = raw + offset when active
     positionAttr.needsUpdate = true;
     registry.frameFlip(); // the instanced edge pass owns copies of these endpoints
-    applyBindings(chunk, f); // live channel bindings re-derive (no-op when unbound)
+    applyBindings(chunk, f, "style"); // live style bindings re-derive (no-op when unbound)
     if (displayedFrame === -1) registry.reveal(); // enabled passes only
     displayedFrame = f;
     shownSinceMark++;
@@ -3488,6 +3606,9 @@ async function main(): Promise<void> {
       model,
       edges: header.edges, // parity audits test edge endpoints vs resolvePoints
       traceVertices, // parity audits map vertices to subgroups vs resolvePoints
+      // offset seam: the shared position attribute — S51 asserts the
+      // zero-copy identity when inactive and shown = raw + offset when bound
+      positionAttr,
       // impostor seam: the C2 depthWrite assertion reads the geometry
       // materials; sizing lets pixel tests predict projected extents;
       // edgeAttrVersions proves the cadence split (flips never re-upload

@@ -49,8 +49,8 @@ point types `anchor` and `t0`–`t3`).
 | `traceopacity <expr> <a>` | Alpha for polyline vertices whose **subgroup** contains a resolved point | `traceopacity alpha 0.7` |
 | `rainbow <expr>` | Color those points an even hue ramp in resolution order (the first **recipe**: per-point values, not one constant; one undo stroke) | `rainbow alpha.group-0` |
 | `bake <expr> <channel> <axis> [<min> <max>]` | Write a declared data channel (at the displayed frame) onto a representation axis — scalar channel → point `color`/`size`/`opacity`, edge `bondcolor`/`bondsize`/`bondopacity` (**endpoint mean**, contained edges), polyline `tracecolor`/`tracesize`/`traceopacity` (each vertex reads **its** point), normalized over min..max; **vector (3-wide) channel → `orientation`, raw** (one undo stroke) | `bake all energy color 0 2.5` |
-| `bind <expr> <channel> <axis> [<min> <max>]` | Register a **channel→axis binding** (same gate as `bake`): the axis **re-derives from the channel on every frame flip**; last-bind-wins per element within an axis; one undo stroke. Vector channel → `orientation` (raw; **drives the oriented shapes — the ribbon `shape traces ribbon` renders it**) | `bind all energy color 0 2.5` |
-| `unbind <expr> [<axis>]` / `unbind all [<axis>]` | Release binding **coverage element-wise**, one axis or all (values stay as last applied; one undo op) | `unbind alpha color` |
+| `bind <expr> <channel> <axis> [<min> <max>]` | Register a **channel→axis binding** (same gate as `bake`): the axis **re-derives from the channel on every frame flip**; last-bind-wins per element within an axis; one undo stroke. Vector channel → `orientation` (raw; **drives the oriented shapes — the ribbon `shape traces ribbon` renders it**) or `offset` (raw, on **points**; **displaces the drawn positions — shown = raw + offset**; bind-only, `bake` refuses it) | `bind all energy color 0 2.5` |
+| `unbind <expr> [<axis>]` / `unbind all [<axis>]` | Release binding **coverage element-wise**, one axis or all (values stay as last applied — except `offset`, which is **zeroed**: positions return to raw; one undo op) | `unbind alpha color` |
 | `channels` | Read-only list of the **declared channels** — the bindable vocabulary `bake`/`bind` read, per-frame vs static, which are bound (bare — takes no target). A `produces: channel` mod's channel appears here the instant it declares | `channels` |
 | `bindings` | Read-only list of the channel bindings (bare — takes no target) | `bindings` |
 | `stylepoints` / `stylebonds` / `styletrace` `<expr> <style>` | Select a registered **shading style** per target (per-element style index; `standard` is the default look, byte-identical; `stylebonds` = contained edges, `styletrace` = subgroup map-up; one undo stroke) | `stylepoints alpha matte` |
@@ -596,6 +596,19 @@ listed by `bindings` and counted in the status-line badge.
   reads orientation, so the effect is invisible; every message and the
   `bindings` row say so. A scalar channel on `orientation`, or a vector
   channel on a scalar axis, both refuse loudly by width.
+- **The offset axis — a vector channel that displaces the picture**:
+  `bind <target> <vector-channel> offset` binds a **3-wide** channel to the
+  per-**point** offset buffer, raw (no range — same category error as
+  orientation), and the drawn positions become **shown = supplied raw +
+  bound supplied offset** — combined before every flip's copy, so every
+  pass (points, tubes, traces) and every measure (`view`, picking, bounds)
+  follows the displaced positions. Uncovered points draw exactly raw; an
+  unbound scene keeps the zero-copy position path untouched. **Bind-only**:
+  `bake` refuses `offset` (a one-time frozen per-frame offset over a moving
+  trajectory would be a broken static shift). For the same reason,
+  **releasing offset coverage ZEROES it** — `unbind` writes zeros in the
+  same recorded stroke and the positions snap back to raw; one Ctrl+Z
+  restores the binding *and* the displacement.
 - **All three element domains bind**: the scalar axes cover points
   (`color`/`size`/`opacity`), edges (`bondcolor`/`bondsize`/`bondopacity` —
   an edge's value is the **mean of its two endpoints'** channel values,

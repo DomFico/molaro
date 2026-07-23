@@ -43,14 +43,25 @@ export const EDGE_AXES = ["bondcolor", "bondsize", "bondopacity"] as const;
 export const TRACE_AXES = ["tracecolor", "tracesize", "traceopacity"] as const;
 export const SCALAR_AXES = [...BIND_AXES, ...EDGE_AXES, ...TRACE_AXES] as const;
 export type ScalarAxis = (typeof SCALAR_AXES)[number];
-/** The vector axis: a 3-wide channel consumed RAW (no range, no
+/** The first vector axis: a 3-wide channel consumed RAW (no range, no
  * normalization — the A-1 ruling made min/max on 3-wide a contract
- * violation). STATE-ONLY until the oriented generator lands (O-2): the
- * orientation buffer is written and re-derived, and nothing draws it. */
+ * violation). Per-vertex "across" vectors; the oriented shapes draw it. */
 export const ORIENTATION_AXIS = "orientation" as const;
+/** The second vector axis: a bound 3-wide channel DISPLACES the drawn
+ * positions — shown = supplied raw + bound supplied offset. Vector-on-POINT
+ * (orientation is vector-on-vertex). Consumed raw like orientation; unlike
+ * every other axis, releasing offset coverage ZEROES it (positions snap
+ * back to raw — a frozen per-frame offset over a moving trajectory would
+ * be a broken static shift). Bind-only: bake refuses it. */
+export const OFFSET_AXIS = "offset" as const;
+/** The vector axes: 3-wide channels consumed RAW. The gate's vector arm is
+ * membership here — a third vector axis joins this list, never a second
+ * gate branch. */
+export const VECTOR_AXES = [ORIENTATION_AXIS, OFFSET_AXIS] as const;
+export type VectorAxis = (typeof VECTOR_AXES)[number];
 /** Every bindable axis. Code that MAPS scalars must take ScalarAxis; code
  * that routes bindings takes BindAxis and branches on the vector case. */
-export type BindAxis = ScalarAxis | typeof ORIENTATION_AXIS;
+export type BindAxis = ScalarAxis | VectorAxis;
 /** Which element DOMAIN an axis covers — the id space its coverage lives
  * in. Point ids, edge ids, and polyline-vertex ids overlap numerically;
  * every consumer keys releases and applies by THIS map, never by numbers
@@ -60,6 +71,7 @@ export const AXIS_DOMAIN: Record<BindAxis, "point" | "edge" | "vertex"> = {
   bondcolor: "edge", bondsize: "edge", bondopacity: "edge",
   tracecolor: "vertex", tracesize: "vertex", traceopacity: "vertex",
   orientation: "vertex",
+  offset: "point",
 };
 
 /** size axis: scalar 0..1 → point size 0..BIND_SIZE_MAX (2× the base size 3 —
@@ -68,17 +80,17 @@ export const AXIS_DOMAIN: Record<BindAxis, "point" | "edge" | "vertex"> = {
  * every scalar→axis consumer (claudebind re-exports it). */
 export const BIND_SIZE_MAX = 6;
 
-/** `range` is the scalar normalization lens; NULL means the orientation
- * axis (vectors are consumed raw — there is no range, by ruling). */
+/** `range` is the scalar normalization lens; NULL means a vector axis
+ * (vectors are consumed raw — there is no range, by ruling). */
 export type GateResult = { range: [number, number] | null } | { error: string };
 
 /**
  * Validate one channel→axis request. `explicitRange` is a user-supplied
  * [min, max] that OVERRIDES the declaration (scalar axes only — meaningless
- * for orientation and refused); `values` is the per-element block in hand
- * for the current frame (length N × components), which gets the finiteness
- * spot-check on every path. Returns the normalization range to use (null
- * for orientation), or the loud reason nothing will be applied.
+ * for the vector axes and refused); `values` is the per-element block in
+ * hand for the current frame (length N × components), which gets the
+ * finiteness spot-check on every path. Returns the normalization range to
+ * use (null for a vector axis), or the loud reason nothing will be applied.
  */
 export function gateChannelBind(
   decl: ChannelDecl,
@@ -86,8 +98,11 @@ export function gateChannelBind(
   explicitRange: readonly [number, number] | null,
   values: ArrayLike<number> | null,
 ): GateResult {
-  if (axis !== ORIENTATION_AXIS && !(SCALAR_AXES as readonly string[]).includes(axis)) {
-    return { error: `unknown axis "${axis}" — use ${SCALAR_AXES.join(" | ")} | ${ORIENTATION_AXIS}` };
+  if (
+    !(VECTOR_AXES as readonly string[]).includes(axis) &&
+    !(SCALAR_AXES as readonly string[]).includes(axis)
+  ) {
+    return { error: `unknown axis "${axis}" — use ${SCALAR_AXES.join(" | ")} | ${VECTOR_AXES.join(" | ")}` };
   }
   if (decl.scope === "per_frame") {
     return {
@@ -95,18 +110,18 @@ export function gateChannelBind(
     };
   }
   let range: readonly [number, number] | null = null;
-  if (axis === ORIENTATION_AXIS) {
-    // The vector axis: width 3, consumed RAW. A range is a category error
+  if ((VECTOR_AXES as readonly string[]).includes(axis)) {
+    // A vector axis: width 3, consumed RAW. A range is a category error
     // (the contract already forbids min/max on 3-wide declarations; the
     // gate refuses the explicit form for the same reason).
     if (decl.components !== 3) {
       return {
-        error: `orientation needs a vector (3-wide) channel — "${decl.name}" is scalar (components: ${decl.components})`,
+        error: `${axis} needs a vector (3-wide) channel — "${decl.name}" is scalar (components: ${decl.components})`,
       };
     }
     if (explicitRange !== null) {
       return {
-        error: "a min/max range is meaningless for the orientation axis — vector values are consumed raw",
+        error: `a min/max range is meaningless for the ${axis} axis — vector values are consumed raw`,
       };
     }
   } else {

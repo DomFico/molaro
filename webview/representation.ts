@@ -72,6 +72,12 @@ export interface RepresentationState {
    * normalization call is parked). Zero = no orientation. STATE-ONLY until
    * the oriented generator: no draw pass reads this buffer yet. */
   orientation: Float32Array;
+  /** length 3N — per-POINT raw displacement 3-vector (the offset axis:
+   * shown = supplied raw + this buffer). Zero = no displacement — the
+   * drawn positions are the supplied positions, on the byte-identical
+   * zero-copy path. NOT a GPU attribute: the combine happens host-side
+   * into the shared position attribute (see setPositionsFor in main.ts). */
+  offset: Float32Array;
   /** length N — per-point STYLE INDEX into the style registry (0 =
    * `standard`, the byte-identical default). Categorical, never blended:
    * the shader looks params up per vertex and points are single-vertex. */
@@ -124,13 +130,17 @@ export class RepresentationLayer {
     // a PARKED design call, so this layer stores what it is given.
     // STATE-ONLY until the oriented generator (O-2): nothing reads it.
     const orientation = new Float32Array(nTraceVertices * 3);
+    // Per-point RAW displacement 3-vectors (the offset axis). Zero = "no
+    // displacement" — the honest default; the position path stays the
+    // zero-copy chunk subarray until something writes here.
+    const offset = new Float32Array(nPoints * 3);
     // Style indices: zero = `standard` — the byte-identical default look.
     const style = new Float32Array(nPoints);
     const edgeStyle = new Float32Array(nEdges);
     const traceStyle = new Float32Array(nTraceVertices);
     this.state = {
       color, size, visible, edgeColor, traceColor, edgeSize, traceSize,
-      opacity, edgeOpacity, traceOpacity, orientation, style, edgeStyle, traceStyle,
+      opacity, edgeOpacity, traceOpacity, orientation, offset, style, edgeStyle, traceStyle,
     };
   }
 }
