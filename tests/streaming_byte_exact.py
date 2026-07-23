@@ -61,17 +61,29 @@ def _streamed_bytes(src: MdtrajSource, start: int, count: int) -> bytes:
 
 
 def check_streaming_system(sid: str):
-    """Return (passed, [(label, ok, detail)]) for one seekable system."""
-    spec = resolve_system(sid)
+    """Return (passed, [(label, ok, detail)]) for one seekable corpus system id."""
+    return check_streaming_spec(resolve_system(sid))
+
+
+def check_streaming_spec(spec):
+    """Run the byte-exact streaming matrix for one already-resolved system spec
+    ({name, topology, trajectory, ligand_residues}).
+
+    Split out from ``check_streaming_system`` so an alternate-format sibling test
+    can drive the IDENTICAL matrix against a trajectory path that is not the
+    manifest primary (the corpus's ``.trr``/NetCDF variants), keeping ONE source
+    of truth for the check set — see ``tests/streaming_altformat_byte_exact.py``.
+    """
     src = MdtrajSource(spec["topology"], spec["trajectory"], spec["name"], spec["ligand_residues"])
     T = src.n_frames
 
     # CENTERED reference: a fresh whole-trajectory load run through the SAME
     # _center_on_solute the resident path uses (a no-op for centering-OFF systems)
     # — a DIFFERENT code path (all frames at once) from the per-chunk hook. LE f4.
+    # Its return value is the whole-trajectory VERDICT STRING, pinned below.
     full = md.load(spec["trajectory"], top=spec["topology"])
     raw = np.ascontiguousarray(full.xyz, dtype="<f4")  # keep the pre-centering bytes
-    src._center_on_solute(full)                        # whole-trajectory centering, in place
+    gold_verdict = src._center_on_solute(full)         # whole-trajectory centering, in place
     gold = np.ascontiguousarray(full.xyz, dtype="<f4")
 
     checks = []
@@ -82,6 +94,14 @@ def check_streaming_system(sid: str):
     checks.append(("golden centered iff verdict on",
                    centered == src.centering.startswith("on"),
                    f"centered={centered} verdict={src.centering[:34]!r}"))
+    # Pin the WHOLE verdict string, not just its on/off boolean: the streaming
+    # sweep's ``_decide_centering_from_scan`` must reproduce the resident
+    # ``_center_on_solute`` verdict — off-reason and shift/jump statistics — to
+    # the byte, so the provenance a streamed source reports is identical to what a
+    # whole-trajectory load would have said.
+    checks.append(("centering string == whole-traj verdict",
+                   src.centering == gold_verdict,
+                   f"stream={src.centering[:30]!r}"))
 
     # count = 1 — every frame on its own, concatenated in order.
     got = b"".join(_streamed_bytes(src, i, 1) for i in range(T))
