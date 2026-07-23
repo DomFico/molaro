@@ -8535,7 +8535,185 @@ async function S51(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51 };
+// ==================== S52: the smoothing mod — FIRST offset consumer =========
+// The two-mod smoothing pair over the offset axis (S51's foundation): a
+// `produces: channel` provider (`smoothing`) computes a per-point-per-frame
+// windowed-average DISPLACEMENT, and a `produces: commands` macro (`smooth`,
+// requires-channel: smoothing) binds it to offset — one command. The claims:
+//   A  invocation DECLARES the vector channel and BINDS it to offset (the P-3
+//      sequence: provider first, then the macro's `bind all smoothing offset`),
+//      as exactly ONE undo stroke (the bind; the declaration is not an op)
+//   B  shown = raw + offset AND shown = the ±window windowed MEAN over frames —
+//      the smoothing is exact, and it equals the mean for THIS window (window=7),
+//      which proves the `?window=` level reached the provider's computation
+//   C  the offset is nonzero over the smoothed region and EXACTLY zero outside;
+//      uncovered points draw at their raw position (untouched)
+//   D  jitter reduced — a covered point's peak-to-peak motion over frames is
+//      strictly SMALLER than raw; an uncovered point's is identical
+//   E  one Ctrl+Z reverses the bind (offset zeroed, zero-copy raw, base depth);
+//      the channel stays declared (append-only, not undoable)
+async function S52(): Promise<void> {
+  console.log("S52 — smoothing mod: a windowed-average offset bound to the offset axis");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const rafs = () => d.evaluate(`(async () => {
+      for (let i = 0; i < 3; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`);
+    const seekTo = async (f: number): Promise<void> => {
+      await d.evaluate(`${V}.player.seek(${f})`);
+      await d.waitFor(`${V}.player.frame === ${f} && ${V}.player.getFrame(${f}) !== null`, 20000);
+      await rafs();
+    };
+    // THE ZERO-COPY IDENTITY (S51's discipline): inactive offset must repoint the
+    // attribute at the chunk's own buffer — buffer identity + exact byte offset.
+    const zeroCopy = () => d.evaluate<boolean>(`(()=>{
+      const f = ${V}.player.frame;
+      const chunk = ${V}.player.getFrame(f);
+      if (!chunk) return false;
+      const arr = ${V}.positionAttr.array;
+      const off = (f - chunk.start) * 6000 * 3;
+      return arr.buffer === chunk.positions.buffer &&
+        arr.byteOffset === chunk.positions.byteOffset + off * 4 &&
+        arr.length === 6000 * 3;
+    })()`);
+    const offsetAllZero = () => d.evaluate<boolean>(`${V}.rep.state.offset.every((x) => x === 0)`);
+    const channelsMsg = async () => (await cmd("channels")).message;
+    const bindingsMsg = async () => (await cmd("bindings")).message;
+
+    await d.evaluate(`${V}.setPlaying(false)`);
+    await seekTo(0);
+    const depth0 = await undoDepth();
+
+    // clean slate: neither the channel nor a binding exists yet
+    check("S52: no smoothing channel or binding before invocation",
+      !(await channelsMsg()).includes("smoothing") && (await bindingsMsg()) === "no bindings",
+      `${await channelsMsg()} | ${await bindingsMsg()}`);
+
+    // -- A: invoke the ONE command — smooth a region with a chosen window ------
+    const WINDOW = 7; // ±7 frames → the window is [0,7] at frame 0 = exactly chunk 0
+    const r = await cmd(`smooth #0-199 ?window=${WINDOW}`);
+    check("S52: `smooth` acknowledges and hands off to the async producer round-trip",
+      r.status === "ok" && /running smooth on 200 points/.test(r.message), JSON.stringify(r));
+
+    // the P-3 sequence is async: the provider declares the channel, then the
+    // macro binds it; then the channel's data rides refetched chunks and the
+    // offset applies. Poll each stage rather than sleep.
+    await d.waitFor(`${V}.command("channels").message.includes("smoothing")`, 20000);
+    await d.waitFor(`${V}.command("bindings").message.includes("smoothing")`, 20000);
+    await seekTo(0);
+    await d.waitFor(
+      `${V}.player.getFrame(0) !== null && ${V}.rep.state.offset.slice(0, 600).some((x) => Math.abs(x) > 1e-3)`,
+      20000);
+    await rafs();
+
+    check("S52: `smoothing` declared as a per-frame VECTOR (3-wide) channel",
+      /smoothing — vector \(3-wide\)/.test(await channelsMsg()) &&
+        /smoothing.*per-frame/.test(await channelsMsg()),
+      await channelsMsg());
+    check("S52: it is BOUND to the offset axis over `all`",
+      /smoothing → offset on "all" — 6000 points · raw vectors/.test(await bindingsMsg()),
+      await bindingsMsg());
+    check("S52: the whole macro is EXACTLY one undo stroke (the bind; the declaration is not an op)",
+      (await undoDepth()) === depth0 + 1, `depth ${depth0} → ${await undoDepth()}`);
+
+    // -- B/C: shown = raw + offset = windowed mean; region vs outside ----------
+    // At the DISPLAYED frame 0, the ±7 window clamps to frames [0,7] — which are
+    // exactly the 8 frames of chunk 0 — so the windowed mean is computable from
+    // that one chunk's raw positions, independent of the offset path.
+    const state = await d.evaluate<{
+      rawOffOk: boolean; meanOk: boolean; covMax: number;
+      uncovOffMax: number; uncovShownOk: boolean; detail: string;
+    }>(`(()=>{
+      const N = 6000, W = ${WINDOW};
+      const chunk = ${V}.player.getFrame(0);      // frames [0, 8), start 0
+      const arr = ${V}.positionAttr.array;         // shown buffer at frame 0
+      const off = ${V}.rep.state.offset;
+      const hi = Math.min(W, chunk.count - 1);     // = 7
+      const mean = (p, c) => { let s = 0; for (let k = 0; k <= hi; k++) s += chunk.positions[k*N*3 + p*3 + c]; return s / (hi + 1); };
+      let rawOffOk = true, meanOk = true, covMax = 0, uncovOffMax = 0, uncovShownOk = true, detail = "";
+      for (const p of [0, 50, 120, 199]) {           // covered
+        for (let c = 0; c < 3; c++) {
+          const raw = chunk.positions[p*3 + c];      // frame 0 (k=0)
+          const shown = arr[p*3 + c];
+          if (Math.abs(shown - (raw + off[p*3 + c])) > 1e-4) { rawOffOk = false; detail += " rawoff p=" + p + " c=" + c; }
+          if (Math.abs(shown - mean(p, c)) > 1e-3) { meanOk = false; detail += " mean p=" + p + " c=" + c; }
+          covMax = Math.max(covMax, Math.abs(off[p*3 + c]));
+        }
+      }
+      for (const p of [200, 3000, 5999]) {           // uncovered
+        for (let c = 0; c < 3; c++) {
+          uncovOffMax = Math.max(uncovOffMax, Math.abs(off[p*3 + c]));
+          if (arr[p*3 + c] !== chunk.positions[p*3 + c]) uncovShownOk = false;
+        }
+      }
+      return { rawOffOk, meanOk, covMax, uncovOffMax, uncovShownOk, detail };
+    })()`);
+    check("S52: shown = raw + offset for covered points (the offset axis applies the channel)",
+      state.rawOffOk, state.detail);
+    check("S52: shown = the ±7-frame windowed MEAN — smoothing is exact, and window=7 reached the compute",
+      state.meanOk, state.detail);
+    check("S52: the offset is NONZERO over the smoothed region", state.covMax > 1e-2, `covMax=${state.covMax}`);
+    check("S52: the offset is EXACTLY zero outside the region", state.uncovOffMax === 0, `uncovMax=${state.uncovOffMax}`);
+    check("S52: uncovered points draw at their raw position (untouched)", state.uncovShownOk);
+
+    // -- D: jitter reduced — covered peak-to-peak SMALLER, uncovered identical -
+    const covIdx = [10, 50, 120, 190], uncIdx = [3000, 5999];
+    const allIdx = [...covIdx, ...uncIdx];
+    const sMin: Record<number, number[]> = {}, sMax: Record<number, number[]> = {};
+    const rMin: Record<number, number[]> = {}, rMax: Record<number, number[]> = {};
+    for (const p of allIdx) {
+      sMin[p] = [Infinity, Infinity, Infinity]; sMax[p] = [-Infinity, -Infinity, -Infinity];
+      rMin[p] = [Infinity, Infinity, Infinity]; rMax[p] = [-Infinity, -Infinity, -Infinity];
+    }
+    for (const f of [0, 20, 40, 60]) {
+      await seekTo(f);
+      const sample = await d.evaluate<{ shown: number[][]; raw: number[][] }>(`(()=>{
+        const N = 6000, idx = ${JSON.stringify(allIdx)};
+        const chunk = ${V}.player.getFrame(${f});
+        const base = (${f} - chunk.start) * N * 3;
+        const arr = ${V}.positionAttr.array;         // shown at frame ${f}
+        return {
+          shown: idx.map((p) => [arr[p*3], arr[p*3+1], arr[p*3+2]]),
+          raw: idx.map((p) => [chunk.positions[base+p*3], chunk.positions[base+p*3+1], chunk.positions[base+p*3+2]]),
+        };
+      })()`);
+      allIdx.forEach((p, i) => {
+        for (let c = 0; c < 3; c++) {
+          sMin[p][c] = Math.min(sMin[p][c], sample.shown[i][c]); sMax[p][c] = Math.max(sMax[p][c], sample.shown[i][c]);
+          rMin[p][c] = Math.min(rMin[p][c], sample.raw[i][c]); rMax[p][c] = Math.max(rMax[p][c], sample.raw[i][c]);
+        }
+      });
+    }
+    const ppSum = (mn: Record<number, number[]>, mx: Record<number, number[]>, ids: number[]) =>
+      ids.reduce((acc, p) => acc + (mx[p][0]-mn[p][0]) + (mx[p][1]-mn[p][1]) + (mx[p][2]-mn[p][2]), 0);
+    const covShownPP = ppSum(sMin, sMax, covIdx), covRawPP = ppSum(rMin, rMax, covIdx);
+    check("S52: JITTER REDUCED — covered peak-to-peak motion is strictly smaller than raw",
+      covShownPP < covRawPP - 1e-3, `shownPP=${covShownPP.toFixed(4)} rawPP=${covRawPP.toFixed(4)}`);
+    const uncShownPP = ppSum(sMin, sMax, uncIdx), uncRawPP = ppSum(rMin, rMax, uncIdx);
+    check("S52: an uncovered point's motion is UNCHANGED (its peak-to-peak equals raw)",
+      Math.abs(uncShownPP - uncRawPP) < 1e-4, `shownPP=${uncShownPP.toFixed(4)} rawPP=${uncRawPP.toFixed(4)}`);
+    await seekTo(0);
+    await d.screenshot(`${REPORT}/S52_smoothed.png`);
+
+    // -- E: one Ctrl+Z reverses the bind; the channel stays declared -----------
+    await d.evaluate(`void document.activeElement?.blur?.()`);
+    await d.ctrlZ();
+    await sleep(300);
+    await seekTo(0);
+    check("S52: one Ctrl+Z zeroes the offset, snaps back to zero-copy raw, base depth, binding gone",
+      (await offsetAllZero()) && (await zeroCopy()) &&
+        !(await bindingsMsg()).includes("smoothing") && (await undoDepth()) === depth0,
+      `offZero=${await offsetAllZero()} zc=${await zeroCopy()} depth=${await undoDepth()}`);
+    check("S52: the smoothing CHANNEL remains declared (append-only, not undoable)",
+      (await channelsMsg()).includes("smoothing"), await channelsMsg());
+    await seekTo(30);
+    check("S52: a further seek does not re-displace (truly unbound)", await zeroCopy());
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -8573,7 +8751,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
-  S48: "full", S49: "full", S50: "full", S51: "full",
+  S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

@@ -199,9 +199,14 @@ def run_mod(source, code: str, target_indices, timeout_s: float, install_channel
                 return json.dumps(
                     {"error": "produced channels are not available in this context"}
                 ).encode("utf-8")
-            if not isinstance(values, dict) or not isinstance(values.get("values"), list):
+            vseq = values.get("values") if isinstance(values, dict) else None
+            # Accept a flat Python list OR a numpy array (anything array-like).
+            # A full-size per_point_per_frame channel as a boxed Python list is a
+            # ~1 GB transient at scale; a numpy array avoids the boxing. The real
+            # length/finite/shape validation lives in install_channel.
+            if not isinstance(values, dict) or not (isinstance(vseq, list) or hasattr(vseq, "__array__")):
                 return json.dumps(
-                    {"error": "a channel mod must return a dict carrying a 'values' list {values, components, min?, max?}"}
+                    {"error": "a channel mod must return a dict carrying a 'values' list or numpy array {values, components, min?, max?}"}
                 ).encode("utf-8")
             if "name" in values:
                 return json.dumps({"error": (
@@ -359,13 +364,30 @@ def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO) -> None:
             raise ContractError(f"channel {name!r}: components must be 1 or 3, got {components!r}")
         n, t = header.n_points, header.n_frames
         expected = n * t * components
-        if not isinstance(vals, list) or len(vals) != expected:
+        # Accept a flat Python list OR a numpy array. A full-size channel
+        # (n*t*components) as a boxed Python list costs ~28 bytes/element — a
+        # ~1 GB transient at scale (the offset channel a smoothing mod produces
+        # is exactly this size); an ndarray is 4 bytes/element and np.asarray is
+        # a zero-copy view when it is already little-endian float32. The LENGTH
+        # rule is identical either way: a flat frame-major sequence of `expected`
+        # values. An ndarray may arrive already shaped (t, n, components) — only
+        # its total size is checked here; the reshape below pins the layout.
+        if isinstance(vals, np.ndarray):
+            arr = np.ascontiguousarray(vals, dtype="<f4")
+            size = arr.size
+        elif isinstance(vals, list):
+            arr = np.asarray(vals, dtype="<f4")
+            size = arr.size
+        else:
+            raise ContractError(
+                f"channel {name!r}: values must be a flat frame-major list or numpy array, "
+                f"got {type(vals).__name__}"
+            )
+        if size != expected:
             raise ContractError(
                 f"channel {name!r}: values must be a flat frame-major list of length "
-                f"n_frames*n_points*components ({t}*{n}*{components} = {expected}), got "
-                f"{len(vals) if isinstance(vals, list) else type(vals).__name__}"
+                f"n_frames*n_points*components ({t}*{n}*{components} = {expected}), got {size}"
             )
-        arr = np.asarray(vals, dtype="<f4")
         if not np.all(np.isfinite(arr)):
             raise ContractError(f"channel {name!r}: values must all be finite")
         arr = arr.reshape(t, n, components)

@@ -232,6 +232,50 @@ def main() -> int:
     check("a channel return without 'values' is refused with the channel shape",
           "{values, components" in values_err, values_err[:160])
 
+    # -- a channel mod may return a NUMPY ARRAY, not just a boxed list (the
+    # install_channel loosening: a full-size N*T*3 offset channel as a Python
+    # list is a ~1 GB transient at scale). Both a flat array and one already
+    # shaped (T, N, 3) are accepted; only the total size is checked. --------------
+    src7 = SyntheticSource(n_points=N, n_frames=T, seed=5)
+    np_flat = (
+        "def compute(data, target_indices):\n"
+        "    import numpy as np\n"
+        "    h = data.give_header(); N, T = h.n_points, h.n_frames\n"
+        "    return {'components': 1, 'values': np.full(T * N, 4.0, dtype='<f4')}\n"
+    )
+    np_shaped = (
+        "def compute(data, target_indices):\n"
+        "    import numpy as np\n"
+        "    h = data.give_header(); N, T = h.n_points, h.n_frames\n"
+        "    a = np.zeros((T, N, 3), dtype='<f4'); a[:, :, 0] = 1.5\n"
+        "    return {'components': 3, 'values': a}\n"  # already (T, N, 3), not flat
+    )
+    r7 = _run(src7, [
+        _crun("np_scalar", np_flat),
+        _crun("np_vec", np_shaped),
+        {"type": "header"},
+        {"type": "frames", "start": 0, "count": 2},
+    ])
+    np_scalar_reply = json.loads(r7[0].decode("utf-8"))
+    np_vec_reply = json.loads(r7[1].decode("utf-8"))
+    header7 = header_from_json(r7[2].decode("utf-8"))
+    chunk7 = decode_frame_chunk(r7[3])
+    check("a channel mod returning a flat numpy array declares (no boxed list)",
+          np_scalar_reply.get("values", {}).get("channel", {}).get("name") == "np_scalar",
+          str(np_scalar_reply)[:150])
+    check("a channel mod returning an ALREADY-SHAPED (T,N,3) numpy array declares",
+          np_vec_reply.get("values", {}).get("channel", {}).get("name") == "np_vec"
+          and channel_components(
+              next(c for c in header7.channels if c.name == "np_vec")) == 3,
+          str(np_vec_reply)[:150])
+    np_scalar_block = np.frombuffer(chunk7.channels["np_scalar"], dtype="<f4")
+    np_vec_block = np.frombuffer(chunk7.channels["np_vec"], dtype="<f4").reshape(2, N, 3)
+    check("the numpy-array channels stored the right values",
+          np.all(np_scalar_block == 4.0) and np.all(np_vec_block[:, :, 0] == 1.5)
+          and np.all(np_vec_block[:, :, 1:] == 0.0),
+          f"scalar[0]={float(np_scalar_block[0])} vec[0,0]={np_vec_block[0, 0].tolist()}")
+    validate_frame_chunk(chunk7, header7)
+
     print("ALL PASS" if failures == 0 else f"{failures} FAILURES")
     return 0 if failures == 0 else 1
 

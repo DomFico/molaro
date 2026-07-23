@@ -2802,9 +2802,23 @@ async function main(): Promise<void> {
             asyncLine("error", `${mod.name}: provider "${dep.provider}" is not runnable`);
             return;
           }
-          // A provider that itself REQUIRES a parameter can't be auto-run — say so
-          // instead of surfacing a cryptic producer arity error.
-          const pp = resolveParameters(provider.params ?? [], new Map());
+          // Forward the CONSUMER's parameter values to the provider for any name
+          // the provider also declares, so a level like `?window=N` reaches the
+          // provider's computation rather than being silently replaced by the
+          // provider's default. Names the provider does not declare are dropped;
+          // provider parameters the consumer did not pass fall back to their
+          // defaults. This is what lets a one-command macro (`smooth <region>
+          // ?window=N`) carry its level down to the channel it depends on.
+          const forwarded = new Map<string, unknown>();
+          for (const p of provider.params ?? []) {
+            if (params && Object.prototype.hasOwnProperty.call(params, p.name)) {
+              forwarded.set(p.name, params[p.name]);
+            }
+          }
+          // A provider that itself REQUIRES a parameter the consumer cannot supply
+          // can't be auto-run — say so instead of surfacing a cryptic producer
+          // arity error.
+          const pp = resolveParameters(provider.params ?? [], forwarded);
           if (!pp.ok) {
             asyncLine("error",
               `${mod.name}: its channel "${mod.requiresChannel}"'s provider "${dep.provider}" needs parameters (${pp.error}) — run it yourself first`);
