@@ -156,6 +156,7 @@ class MdtrajSource(DataSource):
         # standalone, and the frame path is chosen separately below.
         self._topology = md.load_topology(topology_path) if trajectory_path else None
         self._traj_path = trajectory_path
+        self._topology_path = topology_path   # for the streaming path's lazy full-load
         self._handle = None
 
         # Decide streaming vs resident (decision D3). Stream ONLY a seekable,
@@ -235,8 +236,13 @@ class MdtrajSource(DataSource):
         raw header fields. The two coordinate views are the 2a display/measure
         split — see the module docstring.
         """
-        # (1) resident CENTERED copy for the mods (2a crutch; 2c makes it lazy).
-        #     Doubles as the atom-count consistency gate before we stream.
+        # (1) The centering verdict + the resident _xyz the mods' second engine
+        #     reads are (2c step 1) still produced here by a TRANSIENT whole load,
+        #     but the traj OBJECT is no longer retained — `trajectory` is lazy now
+        #     (see the property). Doubles as the atom-count consistency gate.
+        #     2c step 2 moves the verdict into the startup sweep and deletes this
+        #     load and _xyz outright.
+        self._trajectory = None                     # materialised lazily on first access
         traj = md.load(self._traj_path, top=topology_path)
         if traj.n_atoms != self.n_points:
             raise ValueError(
@@ -245,7 +251,7 @@ class MdtrajSource(DataSource):
             )
         self.centering = self._center_on_solute(traj)
         self._xyz = np.ascontiguousarray(traj.xyz, dtype="<f4")
-        self._trajectory = traj
+        del traj
 
         # (2) ONE out-of-core sweep over the RAW streamed coordinates for the
         #     header's frame-derived fields (raw bbox + edge PBC sample). This
@@ -616,7 +622,25 @@ class MdtrajSource(DataSource):
         column ``i`` in ``trajectory.xyz`` — so a mod given ``target_indices``
         in header order can slice the trajectory with those same indices. See
         the mod-facing API in docs/COMMANDS.md.
+
+        A STREAMING source materialises this LAZILY (2c): the full trajectory is
+        loaded and centered — byte-identically to the frames ``give_frames``
+        streams — only on first access, then cached. A source no mod ever
+        analyses therefore never holds the whole trajectory resident; the
+        streaming display path uses only the per-chunk ``give_frames`` hook. The
+        resident path sets ``self._trajectory`` at load, so this returns it
+        directly there.
         """
+        traj = self._trajectory
+        if traj is None and self._streaming:
+            traj = md.load(self._traj_path, top=self._topology_path)
+            if traj.n_atoms != self.n_points:
+                raise ValueError(
+                    f"atom-count mismatch: topology has {self.n_points}, "
+                    f"trajectory has {traj.n_atoms}"
+                )
+            self._center_on_solute(traj)     # center to match the streamed bytes
+            self._trajectory = traj
         return self._trajectory
 
     # -- Header construction ---------------------------------------------------
