@@ -311,9 +311,12 @@ assert about:
 
 - **Non-selection mutations.** Writes land in the representation layer's
   buffers — one per primitive per axis: `rep.state.color` / `.size` /
-  `.opacity` (per-point), `.edgeColor` / `.edgeSize` / `.edgeOpacity`
+  `.opacity` (per-point), the `.edgeColorA`/`.edgeColorB` endpoint pair /
+  `.edgeSize` / `.edgeOpacity` / `.edgeDash`
   (per-EDGE, header edge order — each shared by BOTH edge verbs of its
-  axis, composing by last-write-wins per edge), `.traceColor` /
+  axis, composing by last-write-wins per edge; the color pair renders a
+  bicolor gradient along the edge and collapses to a solid when both
+  halves are equal, `.edgeDash` 0 = solid), `.traceColor` /
   `.traceSize` / `.traceOpacity` (per-POLYLINE-VERTEX, header vertex order
   = the flattened `header.polylines`). Alpha is a SEPARATE buffer per
   primitive — the RGB color buffers stay RGB, so the independence matrix
