@@ -1,8 +1,8 @@
-"""Byte-exact gate for the Phase 2a streaming spine.
+"""Byte-exact gate for the producer streaming spine — the risk sink of Phase 2b.
 
 The decisive check of the producer-streaming refactor: for every SEEKABLE corpus
-system, the RAW coordinates ``MdtrajSource.give_frames`` streams from disk must be
-BYTE-IDENTICAL (not merely allclose) to the RAW whole-trajectory ``md.load`` — for
+system, the CENTERED coordinates ``MdtrajSource.give_frames`` streams from disk
+must be BYTE-IDENTICAL (not merely allclose) to WHOLE-TRAJECTORY centering — for
 every chunking that matters:
 
   * count = 1              every frame requested on its own
@@ -10,10 +10,17 @@ every chunking that matters:
   * count = T              the whole trajectory in one request
   * a misaligned start     an odd offset + odd length, and a tail chunk
 
-Because Phase 2a serves the streamed coordinates RAW (no periodic-image centering —
-that is Phase 2b), the reference is a plain ``md.load`` with no transform. The
-resident systems (single-frame / non-seekable, e.g. the membrane restart and the CG
-snapshot) are asserted to take the resident path and to serve their in-RAM ``_xyz``
+This is the whole point of Phase 2b: per-chunk centering (``_apply_centering`` at
+the give_frames hook) must equal whole-trajectory centering to the byte, so the
+solute never jumps at a chunk boundary and a chunk that never contains frame 0
+still lands on the same target. The reference is therefore a plain ``md.load``
+run through the SAME ``_center_on_solute`` the resident path uses — a DIFFERENT
+code path (whole-trajectory, all frames at once) from the per-chunk hook under
+test. A centering-OFF system (no unit cell / no anchor) has ``_center_on_solute``
+as a no-op, so its reference is the raw load and its stream stays raw — that
+branch is exercised too (adk, macrocycle, tip4p). The resident systems
+(single-frame / non-seekable, e.g. the membrane restart and the CG snapshot) are
+asserted to take the resident path and to serve their in-RAM ``_xyz``
 byte-for-byte — unchanged from before.
 
 Run with the mdbench interpreter + a corpus checkout:
@@ -44,7 +51,7 @@ SYSTEMS = [
 ]
 
 
-def _raw_bytes(full_xyz: np.ndarray, start: int, count: int) -> bytes:
+def _gold_bytes(full_xyz: np.ndarray, start: int, count: int) -> bytes:
     block = np.ascontiguousarray(full_xyz[start : start + count], dtype="<f4")
     return block.tobytes()
 
@@ -59,16 +66,26 @@ def check_streaming_system(sid: str):
     src = MdtrajSource(spec["topology"], spec["trajectory"], spec["name"], spec["ligand_residues"])
     T = src.n_frames
 
-    # RAW reference: a plain whole-trajectory load, no transform, LE float32.
+    # CENTERED reference: a fresh whole-trajectory load run through the SAME
+    # _center_on_solute the resident path uses (a no-op for centering-OFF systems)
+    # — a DIFFERENT code path (all frames at once) from the per-chunk hook. LE f4.
     full = md.load(spec["trajectory"], top=spec["topology"])
-    raw = np.ascontiguousarray(full.xyz, dtype="<f4")
+    raw = np.ascontiguousarray(full.xyz, dtype="<f4")  # keep the pre-centering bytes
+    src._center_on_solute(full)                        # whole-trajectory centering, in place
+    gold = np.ascontiguousarray(full.xyz, dtype="<f4")
 
     checks = []
     checks.append(("takes streaming path", src._streaming is True, f"_streaming={src._streaming}"))
+    # Guard the golden is genuinely centered for an ON system (so the byte-exact
+    # comparison below is not a vacuous raw-vs-raw): centered iff the verdict says on.
+    centered = not np.array_equal(gold, raw)
+    checks.append(("golden centered iff verdict on",
+                   centered == src.centering.startswith("on"),
+                   f"centered={centered} verdict={src.centering[:34]!r}"))
 
     # count = 1 — every frame on its own, concatenated in order.
     got = b"".join(_streamed_bytes(src, i, 1) for i in range(T))
-    checks.append(("count=1 (per-frame)", got == raw.tobytes(), f"{len(got)} vs {raw.nbytes} bytes"))
+    checks.append(("count=1 (per-frame)", got == gold.tobytes(), f"{len(got)} vs {gold.nbytes} bytes"))
 
     # count = 7 — a boundary-crossing chunk size that does not divide T.
     parts = []
@@ -77,21 +94,23 @@ def check_streaming_system(sid: str):
         c = min(7, T - start)
         parts.append(_streamed_bytes(src, start, c))
         start += c
-    checks.append(("count=7 (boundary-crosser)", b"".join(parts) == raw.tobytes(),
+    checks.append(("count=7 (boundary-crosser)", b"".join(parts) == gold.tobytes(),
                    f"chunks of 7 over T={T}"))
 
     # count = T — the whole trajectory in one request.
     whole = _streamed_bytes(src, 0, T)
-    checks.append(("count=T (whole)", whole == raw.tobytes(), f"T={T} in one chunk"))
+    checks.append(("count=T (whole)", whole == gold.tobytes(), f"T={T} in one chunk"))
 
     # misaligned starts — an odd interior offset + odd length, and a tail chunk.
+    # (The interior/tail starts are the boundary-crosser proof: a chunk that never
+    # contains frame 0 must still pin the solute to the GLOBAL frame-0 target.)
     interior_start, interior_count = 3, min(5, T - 3)
-    ok_interior = _streamed_bytes(src, interior_start, interior_count) == _raw_bytes(raw, interior_start, interior_count)
+    ok_interior = _streamed_bytes(src, interior_start, interior_count) == _gold_bytes(gold, interior_start, interior_count)
     checks.append((f"misaligned start={interior_start} count={interior_count}", ok_interior, ""))
 
     tail_count = min(3, T)
     tail_start = T - tail_count
-    ok_tail = _streamed_bytes(src, tail_start, tail_count) == _raw_bytes(raw, tail_start, tail_count)
+    ok_tail = _streamed_bytes(src, tail_start, tail_count) == _gold_bytes(gold, tail_start, tail_count)
     checks.append((f"tail start={tail_start} count={tail_count}", ok_tail, ""))
 
     # re-seek determinism — the same frame served in two different chunkings must

@@ -15,15 +15,21 @@ by ONE out-of-core startup sweep over the same handle rather than from a full
 in-RAM copy. Non-seekable or single-frame inputs (PDB/GRO/single-frame restart/
 multi-model) keep the resident ``md.load`` path unchanged.
 
-Phase 2a serves the STREAMED coordinates RAW (no periodic-image centering) —
-per-chunk centering is Phase 2b. To keep the analysis mods (``rg``/``rmsd``/
-``rmsf``/``smoothing``) and the corpus byte-for-byte unchanged in the meantime, a
-resident CENTERED copy is still loaded and exposed as ``trajectory``/``_xyz``
-(the 2a crutch; 2c makes ``trajectory`` lazy and realizes the full memory win).
-So in 2a the DISPLAY side (``give_frames`` + header bbox/edges) is raw while the
-MEASURE side (``trajectory``) is centered; 2b re-merges them into one truth by
-centering the streamed chunks with the inputs this file already prepares
-(``_center_centroid0``/``_center_anchor``/``_center_wrappable_groups``).
+Phase 2b centers the STREAMED coordinates per chunk (``_apply_centering`` at the
+``give_frames`` hook), BYTE-IDENTICALLY to whole-trajectory centering, so the
+solute never jumps at a chunk boundary and ``give_frames`` output ==
+``trajectory.xyz`` == ONE TRUTH again (2a's interim display-raw/measure-centered
+split is re-merged). It reuses the inputs this file prepares at load
+(``_center_centroid0``/``_center_anchor``/``_center_wrappable_groups``) and
+respects the GLOBAL split verdict ``self.centering`` (decided once over all
+frames) — a centering-OFF system still streams raw exactly as 2a did.
+
+Two things are still resident, both cleared in 2c: (1) the header's bbox is built
+from the RAW startup sweep (a display-only sample; the edge PBC sample is
+centering-invariant because centering preserves every bonded pair's distance);
+(2) a CENTERED copy is exposed as ``trajectory``/``_xyz`` for the analysis mods
+(``rg``/``rmsd``/``rmsf``/``smoothing``). 2c makes ``trajectory`` lazy, moves the
+split-decision into the startup sweep, drops ``_xyz``, and realizes the memory win.
 
 Requires mdtraj + numpy (the benchmark `mdbench` conda env). The synthetic
 source has no such dependency; this one is only imported when a real dataset is
@@ -98,11 +104,13 @@ SCAN_CHUNK_FRAMES = 64
 # way). Only one of them is free.
 #
 # ONE TRUTH (Phases 0–1, and again from 2b): the shift is applied to the
-# trajectory BEFORE `_xyz` is copied out of it, so the bytes give_frames streams
-# and the `trajectory` mods analyse are the same coordinates. Phase 2a is the
-# single deliberate exception — the streamed display is raw while the resident
-# `trajectory` stays centered (see the module docstring) — and 2b restores the
-# single truth by centering the streamed chunks.
+# coordinates BEFORE they are emitted, so the bytes give_frames streams and the
+# `trajectory` mods analyse are the same coordinates. In the resident path the
+# shift is applied in-place to `traj` before `_xyz` is copied out; in the
+# streaming path `_apply_centering` applies the identical arithmetic to each
+# chunk at the give_frames hook (byte-exact — see that method). Phase 2a was the
+# single deliberate exception (streamed display raw while `trajectory` stayed
+# centered); 2b closes it.
 #
 # WHEN IT IS SKIPPED — always loudly, never silently:
 #   - no unit-cell information (not a periodic system; drift may be real);
@@ -320,8 +328,18 @@ class MdtrajSource(DataSource):
             np.asarray(frame0_xyz)[anchor].mean(axis=0).astype("<f4")
             if anchor.size else None
         )
-        self._center_wrappable_groups = (
-            self._wrappable_groups(anchor) if anchor.size else []
+        groups = self._wrappable_groups(anchor) if anchor.size else []
+        self._center_wrappable_groups = groups
+        # Flat atom index list + per-atom owning-group id, concatenated ONCE the
+        # exact way _wrap_loose_molecules builds them per call, so the streaming
+        # hook's per-chunk re-image can skip the union-find/group rebuild (which
+        # cost ~15 ms/frame on the nucleic system) yet stay byte-identical to it.
+        self._center_flat = (
+            np.concatenate(groups) if groups else np.asarray([], dtype=int)
+        )
+        self._center_owner = (
+            np.concatenate([np.full(len(g), i) for i, g in enumerate(groups)])
+            if groups else np.asarray([], dtype=int)
         )
 
     # -- Periodic-image centering ---------------------------------------------
@@ -416,6 +434,59 @@ class MdtrajSource(DataSource):
                 f"(was {before:.3f} nm) — the grouping tore a molecule apart"
             )
         return f"{len(groups)} loose molecules re-imaged around it"
+
+    def _apply_centering(self, chunk_traj) -> None:
+        """Phase 2b: center a streamed chunk EXACTLY as the resident
+        ``_center_on_solute``/``_wrap_loose_molecules`` center the whole
+        trajectory, so per-chunk output is BYTE-IDENTICAL to whole-trajectory
+        centering and the solute never jumps at a chunk boundary. Mutates
+        ``chunk_traj`` in place; a NO-OP when the GLOBAL verdict ``self.centering``
+        (decided once over all frames — R1) is OFF, so an off system streams raw
+        exactly as Phase 2a did.
+
+        Byte-exactness is by CONSTRUCTION, not coincidence (R3): every step
+        mirrors the resident path's dtype flow atom-for-atom, and a per-frame
+        reduction is independent of how many frames surround it —
+
+          * the solute is pinned to the GLOBAL frame-0 centroid
+            ``self._center_centroid0`` (proven byte-equal to the resident
+            ``centroid[0]``), NOT the chunk's own frame 0, so a chunk that never
+            contains frame 0 still lands on the same target;
+          * the shift is ``(centroid0 - chunk_centroid).astype(f4)`` added as
+            ``xyz + shift[:, None, :]`` — the same expression, precision and
+            rounding ``_center_on_solute`` uses;
+          * the loose-molecule re-image reuses the SAME arithmetic as
+            ``_wrap_loose_molecules`` — ``round((group_centroid - solute_centroid)
+            / box)``, subtract ``image·box`` — on the SHIFTED coordinates, with
+            ``box`` from this chunk's own ``unitcell_lengths`` and the group
+            layout (``_center_flat``/``_center_owner``) precomputed at load.
+
+        ``_wrap_loose_molecules``'s tear-detection assertion is NOT re-run per
+        chunk: the grouping is topology-only (identical here), and the resident
+        copy already asserted no tear over EVERY frame at load while this reads
+        the same frames from the same file. (2c, which drops the resident copy,
+        must move that one-time check into the startup sweep.)
+        """
+        if not self.centering.startswith("on"):
+            return                              # global verdict OFF → stream raw (R1)
+        anchor = self._center_anchor
+        xyz = chunk_traj.xyz                     # (c, N, 3) float32, nm
+        sub = xyz[:, anchor, :]
+        centroid = sub.mean(axis=1)              # (c, 3) float32
+        shift = (self._center_centroid0 - centroid).astype(np.float32)
+        xyz = xyz + shift[:, None, :]            # float32 + float32 → float32
+
+        groups = self._center_wrappable_groups
+        if groups:
+            flat, owner = self._center_flat, self._center_owner
+            box = chunk_traj.unitcell_lengths    # (c, 3) float32
+            centre = xyz[:, anchor, :].mean(axis=1)          # from SHIFTED xyz
+            cents = np.empty((chunk_traj.n_frames, len(groups), 3), dtype=np.float32)
+            for i, g in enumerate(groups):
+                cents[:, i, :] = xyz[:, g, :].mean(axis=1)
+            image = np.round((cents - centre[:, None, :]) / box[:, None, :])
+            xyz[:, flat, :] -= (image[:, owner, :] * box[:, None, :]).astype(np.float32)
+        chunk_traj.xyz = xyz
 
     def _wrappable_groups(self, anchor: np.ndarray) -> List[np.ndarray]:
         """Connected components of (bonds ∪ residues) that hold no anchor atom."""
@@ -728,16 +799,16 @@ class MdtrajSource(DataSource):
         # Streaming path (decision D7 — seek every time, no chunk cache): read
         # exactly [start, start+count) from disk through the persistent handle.
         # The serve loop is single-threaded FIFO, so the shared handle needs no
-        # lock. Coordinates are served RAW in Phase 2a.
+        # lock.
         self._handle.seek(start)
         chunk = self._handle.read_as_traj(self._topology, n_frames=count)
-        xyz = np.ascontiguousarray(chunk.xyz, dtype="<f4")  # (count, N, 3) raw, LE f4
-        # --- Phase 2b hook -------------------------------------------------
-        # Per-chunk periodic-image centering lands HERE: transform `xyz` in
-        # place (rigid solute shift to self._center_centroid0 + re-image
-        # self._center_wrappable_groups, using chunk.unitcell_lengths as the
-        # per-frame box) before it is emitted, restoring the ONE-TRUTH merge.
-        # 2a emits raw.
+        # --- Phase 2b: per-chunk periodic-image centering (ONE TRUTH restored) --
+        # Center the chunk in place, byte-identically to whole-trajectory
+        # centering (so the solute never jumps at a chunk boundary), THEN copy out
+        # the contiguous LE-f4 block — the same center-then-copy flow the resident
+        # path uses. A no-op when the global verdict is centering OFF (streams raw).
+        self._apply_centering(chunk)
+        xyz = np.ascontiguousarray(chunk.xyz, dtype="<f4")  # (count, N, 3) centered, LE f4
         return FrameChunk(
             start=start,
             count=count,

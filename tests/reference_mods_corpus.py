@@ -143,24 +143,21 @@ def check_system(sid: str):
     nF, nA = src.n_frames, src.n_points
 
     # ---- index alignment: point i == atom i == frame-byte column i ----
-    # Phase 2a introduces a DISPLAY/MEASURE split: give_frames streams the RAW
-    # coordinates (per-chunk centering is 2b), while `trajectory` stays the
-    # CENTERED resident copy the mods analyse. So the streamed columns are
-    # verified against a RAW frame-0 load (proving no permutation in the stream —
-    # a column swap still fails against the file's own atom order), NOT against
-    # the centered trajectory. Element-order and count guarantees are unchanged.
-    # 2b re-merges these into one truth (give_frames centered == trajectory) and
-    # this reference reverts to `traj.xyz[0]`.
+    # ONE TRUTH (restored in Phase 2b): give_frames now streams the SAME centered
+    # coordinates the mods analyse via `trajectory`, so the streamed frame-0
+    # columns are verified directly against `traj.xyz[0]` — a column swap or a
+    # display/measure divergence both fail this. (In the 2a interim this was
+    # temporarily checked against a RAW frame-0 load, because the stream was raw
+    # while `trajectory` stayed centered; 2b merges them and this reverts.)
     header = src.give_header()
     pos0 = np.frombuffer(src.give_frames(0, 1).positions, dtype="<f4").reshape(nA, 3)
-    raw0 = md.load(spec["trajectory"], top=spec["topology"]).xyz[0]  # RAW (no centering)
-    coords_aligned = np.allclose(pos0, raw0, atol=1e-6)
+    coords_aligned = np.array_equal(pos0, np.ascontiguousarray(traj.xyz[0], dtype="<f4"))
     order_aligned = all(
         header.points.type[i] == (a.element.symbol if a.element is not None else a.name)
         for i, a in enumerate(traj.topology.atoms)
     )
     checks.append(("index-align", coords_aligned and order_aligned and traj.n_atoms == nA,
-                   f"coords(vs raw)={coords_aligned} order={order_aligned} nA={nA}"))
+                   f"coords(vs traj, byte-exact)={coords_aligned} order={order_aligned} nA={nA}"))
 
     # ---- Rg: whole system, mass-weighted, vs stored rg_mean ----
     if "rg_mean" in ref:
