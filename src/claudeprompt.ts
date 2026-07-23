@@ -50,8 +50,10 @@ A mod file defines exactly one function:
         ...
         return <values>
 
-- \`data.trajectory\` is a live **mdtraj Trajectory** object, already loaded in memory.
-  Use mdtraj freely. This is the real trajectory — not a copy, not a summary. But it can
+- \`data.trajectory\` is a live **mdtraj Trajectory** — the real, full trajectory, not a
+  copy or a summary. It is materialized on first access; for a long trajectory, loading
+  every frame is a real one-time cost, so reach for it only when you need the coordinates.
+  Once you have it, use mdtraj freely. But it can
   be \`None\` (the synthetic source has no trajectory): a mod that needs coordinates or
   topology MUST check \`if data.trajectory is None:\` and fail closed with a clear message,
   never assume it exists.
