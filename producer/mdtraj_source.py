@@ -6,9 +6,24 @@ downstream — transport, playback, renderer — is unchanged and never learns t
 is molecular data. All domain vocabulary is confined to this file and
 ``domain_rules.py``.
 
-Frame access: the full coordinate set is loaded once and ranges are sliced from
-it (fine for the benchmark corpus; genuinely huge real trajectories would want
-out-of-core seeking reads — noted as a future optimization, not built here).
+Frame access (Phase 2a — streaming spine). A seekable multi-frame trajectory
+(DCD/XTC/TRR/NetCDF) is opened ONCE (``md.open``) and kept open for the source's
+lifetime; ``give_frames(start, count)`` ``seek``s and ``read_as_traj``s exactly
+that range from disk, so the coordinate block is never held resident for the
+stream. The header's frame-derived fields (bbox, the edge PBC sample) are built
+by ONE out-of-core startup sweep over the same handle rather than from a full
+in-RAM copy. Non-seekable or single-frame inputs (PDB/GRO/single-frame restart/
+multi-model) keep the resident ``md.load`` path unchanged.
+
+Phase 2a serves the STREAMED coordinates RAW (no periodic-image centering) —
+per-chunk centering is Phase 2b. To keep the analysis mods (``rg``/``rmsd``/
+``rmsf``/``smoothing``) and the corpus byte-for-byte unchanged in the meantime, a
+resident CENTERED copy is still loaded and exposed as ``trajectory``/``_xyz``
+(the 2a crutch; 2c makes ``trajectory`` lazy and realizes the full memory win).
+So in 2a the DISPLAY side (``give_frames`` + header bbox/edges) is raw while the
+MEASURE side (``trajectory``) is centered; 2b re-merges them into one truth by
+centering the streamed chunks with the inputs this file already prepares
+(``_center_centroid0``/``_center_anchor``/``_center_wrappable_groups``).
 
 Requires mdtraj + numpy (the benchmark `mdbench` conda env). The synthetic
 source has no such dependency; this one is only imported when a real dataset is
@@ -49,6 +64,16 @@ PBC_BOND_CUTOFF_NM = 0.3
 # some frames and not others). Cheap and robust for corpus-scale data.
 PBC_SAMPLE_FRAMES = 8
 
+# Trajectory container formats mdtraj can SEEK, so give_frames can read a range
+# from disk without a resident copy: DCD/NetCDF are O(1) frame arithmetic; XTC/
+# TRR are O(1) after a frame-offset index, which the startup sweep builds as a
+# side effect of reading through the file once (decision D6). Anything else
+# (PDB/GRO/single-frame restart/multi-model) takes the resident md.load path
+# (decision D3). Extensions match mdtraj's own lowercased dispatch.
+_STREAMABLE_EXTS = {".dcd", ".xtc", ".trr", ".nc", ".ncdf", ".netcdf"}
+# Frames read per chunk during the one-pass startup sweep (≤1 chunk resident).
+SCAN_CHUNK_FRAMES = 64
+
 # Periodic-image centering ----------------------------------------------------
 #
 # A solvated trajectory wraps its solute back into the primary box, so the
@@ -72,9 +97,12 @@ PBC_SAMPLE_FRAMES = 8
 # corrections fix the display equally well (jump/frame max 0.0140 nm either
 # way). Only one of them is free.
 #
-# ONE TRUTH: the shift is applied to the trajectory BEFORE `_xyz` is copied out
-# of it, so the bytes give_frames streams and the `trajectory` mods analyse are
-# the same coordinates. There is no displayed-vs-measured split.
+# ONE TRUTH (Phases 0–1, and again from 2b): the shift is applied to the
+# trajectory BEFORE `_xyz` is copied out of it, so the bytes give_frames streams
+# and the `trajectory` mods analyse are the same coordinates. Phase 2a is the
+# single deliberate exception — the streamed display is raw while the resident
+# `trajectory` stays centered (see the module docstring) — and 2b restores the
+# single truth by centering the streamed chunks.
 #
 # WHEN IT IS SKIPPED — always loudly, never silently:
 #   - no unit-cell information (not a periodic system; drift may be real);
@@ -114,11 +142,53 @@ class MdtrajSource(DataSource):
         # mdtraj normalizes every container format's length unit to nm on read,
         # so positions and the emitted units are always nm — no hand conversion,
         # no 10x trap (CONTRACT_FIT_AUDIT.md, hard case 1).
+        #
+        # The topology alone fixes every per-point/grouping/edge/polyline field
+        # of the header (decision D1) — no frames needed — so it is loaded once,
+        # standalone, and the frame path is chosen separately below.
+        self._topology = md.load_topology(topology_path) if trajectory_path else None
+        self._traj_path = trajectory_path
+        self._handle = None
+
+        # Decide streaming vs resident (decision D3). Stream ONLY a seekable,
+        # multi-frame trajectory; a single frame (T=1 restart or CG snapshot) or
+        # a non-seekable container loads resident and is served exactly as before.
+        ext = os.path.splitext(trajectory_path)[1].lower() if trajectory_path else ""
+        handle = None
+        if trajectory_path and ext in _STREAMABLE_EXTS:
+            handle = md.open(trajectory_path)          # persistent, source lifetime
+            n_frames = int(len(handle))                # O(1); builds XTC/TRR offsets (D6)
+            if n_frames < 2:
+                handle.close()                          # single frame → resident
+                handle = None
+
+        if handle is not None:
+            self._streaming = True
+            self._handle = handle
+            self.n_frames = int(len(handle))
+            self.n_points = int(self._topology.n_atoms)
+            self._build_streaming(topology_path)
+        else:
+            self._streaming = False
+            self._build_resident(topology_path, trajectory_path, center)
+
+    # -- Build paths -----------------------------------------------------------
+
+    def _build_resident(
+        self, topology_path: str, trajectory_path: Optional[str], center: bool
+    ) -> None:
+        """The original in-RAM path: load every frame, center, slice from _xyz.
+
+        Unchanged behaviour — this is what a non-seekable or single-frame input
+        (PDB/GRO/restart/CG snapshot, e.g. the corpus membrane and CG systems)
+        takes, so those datasets are byte-for-byte identical to before.
+        """
         if trajectory_path:
             traj = md.load(trajectory_path, top=topology_path)
         else:
             traj = md.load(topology_path)
-        top = md.load_topology(topology_path) if trajectory_path else traj.topology
+        top = self._topology if self._topology is not None else traj.topology
+        self._topology = top
 
         # Count consistency: topology atoms vs trajectory atoms must agree
         # (hard case 10) — reject loudly rather than render garbage.
@@ -128,7 +198,6 @@ class MdtrajSource(DataSource):
                 f"trajectory has {traj.n_atoms}"
             )
 
-        self._topology = top
         # Periodic-image centering, BEFORE _xyz is copied out of the trajectory
         # — that ordering is what makes the streamed bytes and the mod-facing
         # `trajectory` the same coordinates (see the note at the top of this
@@ -146,7 +215,114 @@ class MdtrajSource(DataSource):
         # docstring — mdtraj normalizes every container to nm on read).
         self._trajectory = traj
 
+        self._prepare_center_inputs(self._xyz[0])
         self._build_header_fields()
+
+    def _build_streaming(self, topology_path: str) -> None:
+        """The Phase 2a spine: header from a one-pass out-of-core sweep, frames
+        streamed on demand; a resident CENTERED copy kept only for the mods.
+
+        Order: load the resident copy FIRST (it is also the atom-count gate and
+        the mod-facing `trajectory`), THEN sweep the handle out-of-core for the
+        raw header fields. The two coordinate views are the 2a display/measure
+        split — see the module docstring.
+        """
+        # (1) resident CENTERED copy for the mods (2a crutch; 2c makes it lazy).
+        #     Doubles as the atom-count consistency gate before we stream.
+        traj = md.load(self._traj_path, top=topology_path)
+        if traj.n_atoms != self.n_points:
+            raise ValueError(
+                f"atom-count mismatch: topology has {self.n_points}, "
+                f"trajectory has {traj.n_atoms}"
+            )
+        self.centering = self._center_on_solute(traj)
+        self._xyz = np.ascontiguousarray(traj.xyz, dtype="<f4")
+        self._trajectory = traj
+
+        # (2) ONE out-of-core sweep over the RAW streamed coordinates for the
+        #     header's frame-derived fields (raw bbox + edge PBC sample). This
+        #     is the path 2c keeps after the resident copy above is dropped.
+        self._startup_scan()
+
+        # (3) 2b centering inputs, prepared now (NOT applied in 2a). centroid0 is
+        #     taken from the RAW frame 0 the scan captured, so it lives in the
+        #     same coordinate frame give_frames streams.
+        self._prepare_center_inputs(self._scan_frame0)
+
+        # (4) header (topology fields + the scan's raw bbox/edges).
+        self._build_header_fields()
+
+    def _startup_scan(self) -> None:
+        """ONE streaming sweep over the RAW coordinates via the persistent handle
+        (decision D1), ≤1 chunk resident. Reads every frame once and accumulates
+        the header's frame-derived fields plus the raw frame 0 that Phase 2b
+        needs for the centering target. Populates:
+
+          self._bbox_lo / self._bbox_hi   raw running min/max over all points+frames
+          self._edge_sample               (S, N, 3) raw coords at the PBC sample frames
+          self._scan_frame0               (N, 3) raw frame-0 coords (2b centroid input)
+        """
+        handle = self._handle
+        n = self.n_points
+        T = self.n_frames
+
+        # Same PBC edge-sample frames the resident path uses (linspace over T).
+        n_sample = min(T, PBC_SAMPLE_FRAMES)
+        sample_idx = np.linspace(0, T - 1, n_sample).astype(int)
+        wanted = set(int(i) for i in sample_idx)
+        sample_pos: Dict[int, np.ndarray] = {}
+
+        lo = np.full(3, np.inf, dtype=np.float64)
+        hi = np.full(3, -np.inf, dtype=np.float64)
+        frame0: Optional[np.ndarray] = None
+
+        handle.seek(0)
+        start = 0
+        while start < T:
+            count = min(SCAN_CHUNK_FRAMES, T - start)
+            chunk = handle.read_as_traj(self._topology, n_frames=count)
+            xyz = np.ascontiguousarray(chunk.xyz, dtype="<f4")   # (c, N, 3) raw, LE
+            c = xyz.shape[0]
+            if c == 0:
+                break                                            # defensive: short read
+            if xyz.shape[1] != n:
+                raise ValueError(
+                    f"atom-count mismatch: topology has {n}, "
+                    f"trajectory frame has {xyz.shape[1]}"
+                )
+            flat = xyz.reshape(-1, 3)
+            lo = np.minimum(lo, flat.min(axis=0))
+            hi = np.maximum(hi, flat.max(axis=0))
+            for gi in wanted:
+                if start <= gi < start + c:
+                    sample_pos[gi] = xyz[gi - start].copy()
+            if start == 0:
+                frame0 = xyz[0].copy()
+            start += c
+
+        self._bbox_lo = lo
+        self._bbox_hi = hi
+        self._edge_sample = np.stack(
+            [sample_pos[int(gi)] for gi in sample_idx], axis=0
+        ).astype("<f4")
+        self._scan_frame0 = frame0
+
+    def _prepare_center_inputs(self, frame0_xyz: np.ndarray) -> None:
+        """Stash the inputs Phase 2b's ``_apply_centering`` will consume — the
+        solute anchor, its raw frame-0 centroid (the translation target), and the
+        loose-molecule groups to re-image around it. The split DECISION is global
+        (``_center_on_solute`` already ran ``_anchor_is_split`` over ALL frames of
+        the resident copy and recorded the verdict in ``self.centering``). Cheap,
+        topology-only apart from the one frame-0 read; NOT applied in 2a."""
+        anchor = self._solute_indices()
+        self._center_anchor = anchor
+        self._center_centroid0 = (
+            np.asarray(frame0_xyz)[anchor].mean(axis=0).astype("<f4")
+            if anchor.size else None
+        )
+        self._center_wrappable_groups = (
+            self._wrappable_groups(anchor) if anchor.size else []
+        )
 
     # -- Periodic-image centering ---------------------------------------------
 
@@ -378,6 +554,17 @@ class MdtrajSource(DataSource):
         top = self._topology
         n = self.n_points
 
+        # Frame-derived sample/bbox source: the streaming path already filled
+        # _edge_sample/_bbox_lo/_bbox_hi from the RAW startup sweep; the resident
+        # path fills them here from the in-RAM _xyz (identical to before).
+        if not self._streaming:
+            n_sample = min(self.n_frames, PBC_SAMPLE_FRAMES)
+            idx = np.linspace(0, self.n_frames - 1, n_sample).astype(int)
+            self._edge_sample = self._xyz[idx]
+            flat = self._xyz.reshape(-1, 3)
+            self._bbox_lo = flat.min(axis=0)
+            self._bbox_hi = flat.max(axis=0)
+
         atom_type: List[str] = []
         category: List[int] = []
         subgroup_id: List[int] = [0] * n  # residue index per atom
@@ -460,10 +647,10 @@ class MdtrajSource(DataSource):
         pairs_arr = np.asarray(pairs, dtype=np.int64)
 
         # Suppress cross-box PBC bonds: any pair exceeding the cutoff in any
-        # sampled frame (hard case 2).
-        n_sample = min(self.n_frames, PBC_SAMPLE_FRAMES)
-        idx = np.linspace(0, self.n_frames - 1, n_sample).astype(int)
-        deltas = self._xyz[idx][:, pairs_arr[:, 0], :] - self._xyz[idx][:, pairs_arr[:, 1], :]
+        # sampled frame (hard case 2). The sample frames come from either the
+        # resident _xyz or the streaming startup sweep — same linspace over T.
+        sample = self._edge_sample  # (S, N, 3)
+        deltas = sample[:, pairs_arr[:, 0], :] - sample[:, pairs_arr[:, 1], :]
         max_len = np.sqrt((deltas ** 2).sum(axis=2)).max(axis=0)  # per bond
         keep = max_len <= PBC_BOND_CUTOFF_NM
         return [(int(i), int(j)) for (i, j), k in zip(pairs, keep) if k]
@@ -495,9 +682,10 @@ class MdtrajSource(DataSource):
         return polylines
 
     def _bbox(self) -> BBox:
-        lo = self._xyz.reshape(-1, 3).min(axis=0)
-        hi = self._xyz.reshape(-1, 3).max(axis=0)
-        return BBox(min=tuple(float(v) for v in lo), max=tuple(float(v) for v in hi))
+        return BBox(
+            min=tuple(float(v) for v in self._bbox_lo),
+            max=tuple(float(v) for v in self._bbox_hi),
+        )
 
     # -- DataSource interface --------------------------------------------------
 
@@ -528,10 +716,42 @@ class MdtrajSource(DataSource):
                 f"requested frames [{start}, {start + count}) outside "
                 f"[0, {self.n_frames})"
             )
-        block = self._xyz[start : start + count]  # (count, N, 3) contiguous LE f4
+        if not self._streaming:
+            block = self._xyz[start : start + count]  # (count, N, 3) contiguous LE f4
+            return FrameChunk(
+                start=start,
+                count=count,
+                positions=np.ascontiguousarray(block, dtype="<f4").tobytes(),
+                channels={},
+            )
+
+        # Streaming path (decision D7 — seek every time, no chunk cache): read
+        # exactly [start, start+count) from disk through the persistent handle.
+        # The serve loop is single-threaded FIFO, so the shared handle needs no
+        # lock. Coordinates are served RAW in Phase 2a.
+        self._handle.seek(start)
+        chunk = self._handle.read_as_traj(self._topology, n_frames=count)
+        xyz = np.ascontiguousarray(chunk.xyz, dtype="<f4")  # (count, N, 3) raw, LE f4
+        # --- Phase 2b hook -------------------------------------------------
+        # Per-chunk periodic-image centering lands HERE: transform `xyz` in
+        # place (rigid solute shift to self._center_centroid0 + re-image
+        # self._center_wrappable_groups, using chunk.unitcell_lengths as the
+        # per-frame box) before it is emitted, restoring the ONE-TRUTH merge.
+        # 2a emits raw.
         return FrameChunk(
             start=start,
             count=count,
-            positions=np.ascontiguousarray(block, dtype="<f4").tobytes(),
+            positions=xyz.tobytes(),
             channels={},
         )
+
+    def close(self) -> None:
+        """Release the streaming file handle. Optional — the serve process is
+        single-shot per dataset, so the OS reclaims it on exit; provided for
+        callers (tests) that build many sources in one process."""
+        handle = getattr(self, "_handle", None)
+        if handle is not None:
+            try:
+                handle.close()
+            finally:
+                self._handle = None

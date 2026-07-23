@@ -143,15 +143,24 @@ def check_system(sid: str):
     nF, nA = src.n_frames, src.n_points
 
     # ---- index alignment: point i == atom i == frame-byte column i ----
+    # Phase 2a introduces a DISPLAY/MEASURE split: give_frames streams the RAW
+    # coordinates (per-chunk centering is 2b), while `trajectory` stays the
+    # CENTERED resident copy the mods analyse. So the streamed columns are
+    # verified against a RAW frame-0 load (proving no permutation in the stream —
+    # a column swap still fails against the file's own atom order), NOT against
+    # the centered trajectory. Element-order and count guarantees are unchanged.
+    # 2b re-merges these into one truth (give_frames centered == trajectory) and
+    # this reference reverts to `traj.xyz[0]`.
     header = src.give_header()
     pos0 = np.frombuffer(src.give_frames(0, 1).positions, dtype="<f4").reshape(nA, 3)
-    coords_aligned = np.allclose(pos0, traj.xyz[0], atol=1e-6)
+    raw0 = md.load(spec["trajectory"], top=spec["topology"]).xyz[0]  # RAW (no centering)
+    coords_aligned = np.allclose(pos0, raw0, atol=1e-6)
     order_aligned = all(
         header.points.type[i] == (a.element.symbol if a.element is not None else a.name)
         for i, a in enumerate(traj.topology.atoms)
     )
     checks.append(("index-align", coords_aligned and order_aligned and traj.n_atoms == nA,
-                   f"coords={coords_aligned} order={order_aligned} nA={nA}"))
+                   f"coords(vs raw)={coords_aligned} order={order_aligned} nA={nA}"))
 
     # ---- Rg: whole system, mass-weighted, vs stored rg_mean ----
     if "rg_mean" in ref:
