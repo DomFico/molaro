@@ -35,11 +35,14 @@ export interface ChannelDecl {
  *   point axes — the element's own value;
  *   trace axes — the vertex's OWN point's value (the orientation map);
  *   edge axes  — the ENDPOINT MEAN of the edge's two points (the ruled
- *                combining rule; mean of raws, THEN the lens).
+ *                combining rule; mean of raws, THEN the lens) — EXCEPT
+ *                `bondcolorends`, which is PER-ENDPOINT by definition:
+ *                each half of the edge takes its OWN endpoint's value
+ *                through the lens (no mean — the whole point of the axis).
  * Edge axis tokens say "bond" because that is the verb family's
  * established vocabulary (colorbonds/bondsize/bondopacity). */
 export const BIND_AXES = ["color", "size", "opacity"] as const;
-export const EDGE_AXES = ["bondcolor", "bondsize", "bondopacity"] as const;
+export const EDGE_AXES = ["bondcolor", "bondcolorends", "bondsize", "bondopacity"] as const;
 export const TRACE_AXES = ["tracecolor", "tracesize", "traceopacity"] as const;
 export const SCALAR_AXES = [...BIND_AXES, ...EDGE_AXES, ...TRACE_AXES] as const;
 export type ScalarAxis = (typeof SCALAR_AXES)[number];
@@ -68,7 +71,7 @@ export type BindAxis = ScalarAxis | VectorAxis;
  * alone. */
 export const AXIS_DOMAIN: Record<BindAxis, "point" | "edge" | "vertex"> = {
   color: "point", size: "point", opacity: "point",
-  bondcolor: "edge", bondsize: "edge", bondopacity: "edge",
+  bondcolor: "edge", bondcolorends: "edge", bondsize: "edge", bondopacity: "edge",
   tracecolor: "vertex", tracesize: "vertex", traceopacity: "vertex",
   orientation: "vertex",
   offset: "point",

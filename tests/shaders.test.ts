@@ -89,7 +89,29 @@ test("edge tube: ONE depth write behind the same define; same uProjZ row", () =>
 test("edge tube: collapsed instances leave the clip volume; zero alpha discards", () => {
   const { vertex, fragment } = edgeTubeShaders();
   assert.match(vertex, /iVisible < 0\.5 \|\| radius <= 0\.0/);
-  assert.match(fragment, /vColor\.a <= 0\.0/);
+  assert.match(fragment, /col\.a <= 0\.0/);
+});
+
+// -- the bicolor pair (per-endpoint edge color) --------------------------------
+
+test("edge tube: declares the per-end color PAIR and mixes by the along-axis coordinate", () => {
+  const { vertex, fragment } = edgeTubeShaders();
+  assert.match(vertex, /attribute vec4 iColorA; attribute vec4 iColorB;/);
+  assert.match(vertex, /vColorA = iColorA; vColorB = iColorB;/);
+  // the ONE split rule: s = clamp(vT/vLen, 0, 1) picks the half — the same
+  // world coordinate the depth interpolation rides, so caps and trim zones
+  // take their end's color whole and equal halves collapse (mix(a,a,s)==a)
+  assert.match(fragment, /float s = clamp\(vT \/ vLen, 0\.0, 1\.0\);/);
+  assert.match(fragment, /vec4 col = mix\(vColorA, vColorB, s\);/);
+  // no residual single-color plumbing anywhere in the pass
+  assert.doesNotMatch(vertex, /\biColor\b|\bvColor\b/);
+  assert.doesNotMatch(fragment, /\bvColor\b/);
+  // still exactly ONE depth write behind the define (the bicolor split adds none)
+  assert.equal(fragment.split("gl_FragDepth").length - 1, 1);
+});
+
+test("edge tube: the collapse classifies by the DIMMEST end, like every two-ended pass", () => {
+  assert.match(edgeTubeShaders().vertex, /inAlphaPass\(min\(iColorA\.a, iColorB\.a\)\)/);
 });
 
 // -- the junction trim (B′ §2) ------------------------------------------------
@@ -160,7 +182,7 @@ test("shading is single-sourced: every geometry fragment embeds THE shade chunk,
   assert.equal(ef.split(IMPOSTOR_SHADE_CHUNK).length - 1, 1, "edge fragment embeds the chunk once");
   assert.equal(tf.split(IMPOSTOR_SHADE_CHUNK).length - 1, 1, "trace fragment embeds the chunk once");
   assert.match(pf, /impostorShade\(vColor, nz\)/);
-  assert.match(ef, /impostorShade\(vColor\.rgb, nz\)/);
+  assert.match(ef, /impostorShade\(col\.rgb, nz\)/); // the mixed bicolor value
   assert.match(tf, /impostorShade\(vColor\.rgb, nz\)/);
   // The shading NUMBERS arrive per element via the style varying (A-2:
   // per-target style — the vertex stage looks up `uniform vec4 uStyles[8]`

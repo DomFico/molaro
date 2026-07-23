@@ -92,6 +92,10 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
   const modRunCode: string[] = [];
   const rmArms: string[][] = [];
   const edgeOps: { edgeIds: number[]; rgb: [number, number, number] }[] = [];
+  const endsOps: { ids: number[]; a: number[]; b: number[] }[] = [];
+  // the endpoint-snapshot READ source: three distinct per-point RGBs so a
+  // half-swap (A read from B's endpoint) is detectable
+  const pointColorBuf = Float32Array.from([0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]);
   // a chain over the 3 points: edge 0 sits inside c0 ({0,1}); edge 1 crosses
   // the category boundary (point 1 in c0, point 2 in c1) — the contained-vs-
   // incident distinction is decidable from these two alone
@@ -313,6 +317,17 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
       elemEachOps.push({ axis: "bondcolor", ids: [...ids], values: [...rgb] });
       return ids.length;
     },
+    colorEdgesEnds: (ids, aFlat, bFlat) => {
+      endsOps.push({ ids: [...ids], a: [...aFlat], b: [...bFlat] });
+      return ids.length;
+    },
+    colorEdgesEndsEach: (ids, aFlat, bFlat) => {
+      // records into the SAME log as the snapshot writer — one spine in the
+      // real wiring, so the stub keeps one log too
+      endsOps.push({ ids: [...ids], a: [...aFlat], b: [...bFlat] });
+      return ids.length;
+    },
+    pointColors: () => pointColorBuf,
     sizeEdgesEach: (ids, values) => {
       elemEachOps.push({ axis: "bondsize", ids: [...ids], values: [...values] });
       return ids.length;
@@ -414,7 +429,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     registry: createCommandRegistry(ctx),
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
-    colorOps, colorEachOps, eachOps, edgeOps, traceOps, sizeOps, opacityOps, modRuns, modRunCode, rmArms, sels,
+    colorOps, colorEachOps, eachOps, edgeOps, endsOps, traceOps, sizeOps, opacityOps, modRuns, modRunCode, rmArms, sels,
     bindCalls, bindingReg, orientationOps, offsetOps, elemEachOps, styleOps, shapeOps, shapeActive, bgOps,
   };
 }
@@ -942,6 +957,78 @@ test("the edge verbs: nomatch / bad color / usage / parse errors write NOTHING",
     assert.equal(parseErr.status, "error", verb);
   }
   assert.equal(edgeOps.length, 0, "no path wrote anything");
+});
+
+// -- the bicolor pair: bicolorbonds / bicolorbondsof (endpoint-color snapshot) -----
+
+test("bicolorbonds: contained edges take their endpoints' CURRENT colors, per half", () => {
+  const { registry, endsOps, edgeOps, colorOps } = makeRegistry();
+  // c0 = {0,1}: edge 0 (0,1) contained. The snapshot source is the fake
+  // point-color buffer: point 0 = [.1,.2,.3] → the A half; point 1 =
+  // [.4,.5,.6] → the B half. A half-swap would be loud here.
+  const res = registry.runCommand("bicolorbonds c0");
+  assert.equal(res.status, "ok");
+  assert.equal(res.message, "bicolored 1 edges from their endpoints' colors");
+  assert.equal(endsOps.length, 1);
+  assert.deepEqual(endsOps[0].ids, [0]);
+  assert.deepEqual(endsOps[0].a.map((x) => Math.round(x * 10) / 10), [0.1, 0.2, 0.3]);
+  assert.deepEqual(endsOps[0].b.map((x) => Math.round(x * 10) / 10), [0.4, 0.5, 0.6]);
+  assert.equal(edgeOps.length + colorOps.length, 0,
+    "neither the constant edge writer nor the point buffer is touched");
+});
+
+test("bicolorbondsof: the incident reach — the out-of-set endpoint supplies ITS half", () => {
+  const { registry, endsOps } = makeRegistry();
+  // c1 = {2}: edge 1 (1,2) is incident; point 1 is OUTSIDE the target yet
+  // supplies the A half (reading one hop out is the verb's contract).
+  const res = registry.runCommand("bicolorbondsof c1");
+  assert.equal(res.status, "ok");
+  assert.equal(res.message, "bicolored 1 edges from their endpoints' colors");
+  assert.deepEqual(endsOps[0].ids, [1]);
+  assert.deepEqual(endsOps[0].a.map((x) => Math.round(x * 10) / 10), [0.4, 0.5, 0.6]);
+  assert.deepEqual(endsOps[0].b.map((x) => Math.round(x * 10) / 10), [0.7, 0.8, 0.9]);
+});
+
+test("bicolorbonds: single-point pin — contained nomatches, incident snapshots", () => {
+  const { registry, endsOps } = makeRegistry();
+  const bonds = registry.runCommand("bicolorbonds c1");
+  assert.equal(bonds.status, "nomatch");
+  assert.equal(bonds.message, `no edges with both endpoints in "c1"`);
+  assert.equal(endsOps.length, 0, "a no-edge nomatch writes nothing");
+  const bondsof = registry.runCommand("bicolorbondsof c0.g0.s0.a");
+  assert.equal(bondsof.status, "ok");
+  assert.deepEqual(endsOps[0].ids, [0]);
+});
+
+test("the bicolor verbs: nomatch / usage / parse / trailing-junk paths write NOTHING", () => {
+  const { registry, endsOps } = makeRegistry();
+  for (const verb of ["bicolorbonds", "bicolorbondsof"]) {
+    const nomatch = registry.runCommand(`${verb} nothere`);
+    assert.equal(nomatch.status, "nomatch", verb);
+    assert.match(nomatch.message, /nothing matches "nothere"/);
+    const bare = registry.runCommand(verb);
+    assert.equal(bare.status, "error", verb);
+    assert.match(bare.message, new RegExp(`${verb} <target>`));
+    const parseErr = registry.runCommand(`${verb} c0.[x]`); // [ reserved
+    assert.equal(parseErr.status, "error", verb);
+    // NO two-argument color form exists — a trailing color token is target
+    // text, and unquoted space-separated terms are a grammar parse error
+    // (locked design: snapshot only, never a passed color)
+    const withColor = registry.runCommand(`${verb} c0 red`);
+    assert.equal(withColor.status, "error", verb);
+  }
+  assert.equal(endsOps.length, 0, "no path wrote anything");
+});
+
+test("bicolor verbs are sealed built-ins with help lines", () => {
+  const { registry } = makeRegistry();
+  for (const verb of ["bicolorbonds", "bicolorbondsof"]) {
+    assert.ok(registry.verbs().includes(verb), verb);
+    assert.ok(registry.isBuiltin(verb), `${verb} is sealed as a built-in`);
+    assert.match(registry.runCommand(`help ${verb}`).message, new RegExp(`^${verb} — `));
+  }
+  assert.match(HELP_TEXT, /bicolorbonds <expr>/);
+  assert.match(HELP_TEXT, /bicolorbondsof <expr>/);
 });
 
 test("colortrace: active subgroups → vertices, with the map-up to subgroup grain", () => {
@@ -1585,6 +1672,48 @@ test("A-1 bake: edge axes use the ENDPOINT MEAN, contained edges only", () => {
   const none = registry.runCommand("bake c1 energy bondsize 0 2.5");
   assert.equal(none.status, "nomatch");
   assert.match(none.message, /no edges contained in "c1"/);
+});
+
+test("bondcolorends bake: PER-ENDPOINT scalars (no mean) reach the ends writer", () => {
+  const { registry, endsOps, elemEachOps } = makeRegistry();
+  // mass raw [1,2,3], declared 1..3 → per-point t [0, 0.5, 1]. Edges
+  // [[0,1],[1,2]]: edge0 halves t (0, 0.5); edge1 halves t (0.5, 1) —
+  // NEVER a mean. Colormapped: t0 → red [1,0,0]; t1 → magenta [1,0,1];
+  // both t=0.5 halves must agree with each other.
+  const r = registry.runCommand("bake all mass bondcolorends");
+  assert.equal(r.status, "ok");
+  assert.equal(r.message,
+    'baked "mass" → bondcolorends on 2 edges of "all" (static, range 1..3, per endpoint)');
+  assert.equal(endsOps.length, 1);
+  assert.deepEqual(endsOps[0].ids, [0, 1]);
+  assert.deepEqual(endsOps[0].a.slice(0, 3), [1, 0, 0], "edge0's A half is t=0 red");
+  assert.deepEqual(endsOps[0].b.slice(3, 6), [1, 0, 1], "edge1's B half is t=1 magenta");
+  assert.deepEqual(endsOps[0].b.slice(0, 3), endsOps[0].a.slice(3, 6),
+    "edge0's B half == edge1's A half (both t=0.5 — the same colormap)");
+  assert.equal(elemEachOps.length, 0, "the mean-rule writers are never touched");
+  // contained rule is colorbonds' — one-endpoint targets nomatch
+  const none = registry.runCommand("bake c1 mass bondcolorends");
+  assert.equal(none.status, "nomatch");
+  assert.match(none.message, /no edges contained in "c1"/);
+});
+
+test("bondcolorends bind: registers in the EDGE id space, lists per endpoint, gate-shared", () => {
+  const { registry, bindingReg, bindCalls } = makeRegistry();
+  const r = registry.runCommand("bind all mass bondcolorends");
+  assert.equal(r.status, "ok");
+  assert.match(r.message, /bound "mass" → bondcolorends on 2 edges of "all" .*per endpoint.*live/);
+  assert.deepEqual(
+    bindingReg.all().map((b) => ({ axis: b.axis, points: b.points })),
+    [{ axis: "bondcolorends", points: [0, 1] }],
+  );
+  // the composite received the INTERLEAVED per-endpoint scalars [A0,B0,A1,B1]
+  assert.deepEqual(bindCalls[0].scalars, [0, 0.5, 0.5, 1]);
+  const list = registry.runCommand("bindings").message;
+  assert.match(list, /mass → bondcolorends on "all" — 2 edges · range 1\.\.3 · per endpoint/);
+  // and the gate is THE shared one: vector channels refuse by width
+  const bad = registry.runCommand("bake all flow bondcolorends");
+  assert.equal(bad.status, "error");
+  assert.match(bad.message, /components: 3/);
 });
 
 test("A-1 bake: trace axes read each vertex's OWN point (the orientation map)", () => {

@@ -12,6 +12,7 @@ import {
   AXIS_DOMAIN,
   BIND_AXES,
   BIND_SIZE_MAX,
+  EDGE_AXES,
   gateChannelBind,
   normalizeScalars,
   VECTOR_AXES,
@@ -35,6 +36,22 @@ test("the vector axes: orientation (vertex) and offset (point) — two entries, 
   assert.deepEqual([...VECTOR_AXES], ["orientation", "offset"]);
   assert.equal(AXIS_DOMAIN.orientation, "vertex");
   assert.equal(AXIS_DOMAIN.offset, "point");
+});
+
+test("bondcolorends: an ordinary scalar EDGE axis at the gate (per-endpoint is the consumer's rule)", () => {
+  assert.ok((EDGE_AXES as readonly string[]).includes("bondcolorends"));
+  assert.equal(AXIS_DOMAIN.bondcolorends, "edge");
+  // 1-wide channels pass through the ordinary scalar gate with a range…
+  const ok = gateChannelBind(scalar({ min: 0, max: 2.5 }), "bondcolorends", null, VALUES);
+  assert.deepEqual(ok, { range: [0, 2.5] });
+  const explicit = gateChannelBind(scalar(), "bondcolorends", [0, 1], VALUES);
+  assert.deepEqual(explicit, { range: [0, 1] });
+  // …vector (3-wide) channels refuse by width, exactly like every scalar axis
+  const wide = gateChannelBind(scalar({ components: 3 }), "bondcolorends", null, [1, 0, 0]);
+  assert.ok("error" in wide && wide.error.includes("components: 3"), JSON.stringify(wide));
+  // and a per-frame series refuses before anything else
+  const series = gateChannelBind(scalar({ scope: "per_frame", min: 0, max: 1 }), "bondcolorends", null, VALUES);
+  assert.ok("error" in series && series.error.includes("per-frame"), JSON.stringify(series));
 });
 
 // The vector-arm matrix runs over BOTH vector axes: the gate's vector arm is

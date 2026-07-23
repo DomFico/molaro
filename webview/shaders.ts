@@ -169,8 +169,8 @@ export function pointShaders(): { vertex: string; fragment: string } {
  * Edge tube pass: instanced camera-facing quads with real world thickness.
  * One quad (4 static corner vertices, 6 indices) instanced per edge; the
  * per-instance attributes split by update cadence (iStart/iEnd every
- * displayed-frame flip; iVisible on visibility change; iRadius/iColor on
- * representation writes only). Instance slot ≡ header edge index — never
+ * displayed-frame flip; iVisible on visibility change; iRadius/iColorA/
+ * iColorB on representation writes only). Instance slot ≡ header edge index — never
  * compacted, so the GPU arrays share the rep buffers' element order with no
  * remap anywhere.
  *
@@ -189,7 +189,12 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
       // EDGE TUBE static per-corner: x = side (-1 | +1 across width), y = end (0 | 1)
       attribute vec2 aCorner;
       attribute vec3 iStart; attribute vec3 iEnd;
-      attribute float iVisible; attribute float iRadius; attribute vec4 iColor;
+      attribute float iVisible; attribute float iRadius;
+      // per-END RGBA (the bicolor pair): both are flat per instance — every
+      // corner carries both values and the FRAGMENT picks its half by the
+      // along-axis coordinate, so the split is a world-space plane through
+      // the tube's midpoint, not a corner interpolation
+      attribute vec4 iColorA; attribute vec4 iColorB;
       attribute float iStyle;
       // endpoint SPHERE sizes (rep-write cadence, like iRadius): the tube is
       // trimmed analytically to the sphere it meets — see the fragment shader
@@ -197,7 +202,7 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
       uniform float uWorldPerSize;
       ${STYLE_VERTEX_CHUNK}
       ${ALPHA_PASS_CHUNK}
-      varying vec4 vColor; varying float vU;
+      varying vec4 vColorA; varying vec4 vColorB; varying float vU;
       varying float vRadius;
       varying float vT; varying float vLen;
       varying float vDA; varying float vDB;
@@ -222,9 +227,9 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
         // belonging to the OTHER alpha half) leave the clip volume entirely —
         // no fragments, no depth writes
         if (iVisible < 0.5 || radius <= 0.0 || len * len < 1e-16 || dA + dB >= len
-            || !inAlphaPass(iColor.a)) {
+            || !inAlphaPass(min(iColorA.a, iColorB.a))) {
           gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
-          vColor = vec4(0.0); vU = 0.0; vRadius = 0.0;
+          vColorA = vec4(0.0); vColorB = vec4(0.0); vU = 0.0; vRadius = 0.0;
           vT = 0.0; vLen = 1.0; vDA = 0.0; vDB = 0.0;
           vDepthA = 1.0; vDepthB = 1.0; vRsA = 0.0; vRsB = 0.0;
           return;
@@ -241,7 +246,7 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
         // covered ends discard there, exposed ends grow a cap there)
         float t = aCorner.y < 0.5 ? (dA - radius) : (len - dB + radius);
         vec3 pos = mvA + axis * t + side * (aCorner.x * radius);
-        vColor = iColor;
+        vColorA = iColorA; vColorB = iColorB;
         vU = aCorner.x;
         vRadius = radius;
         vT = t; vLen = len; vDA = dA; vDB = dB;
@@ -252,15 +257,22 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
     fragment: `
       uniform vec2 uProjZ;
       ${IMPOSTOR_SHADE_CHUNK}
-      varying vec4 vColor; varying float vU;
+      varying vec4 vColorA; varying vec4 vColorB; varying float vU;
       varying float vRadius;
       varying float vT; varying float vLen;
       varying float vDA; varying float vDB;
       varying float vDepthA; varying float vDepthB;
       varying float vRsA; varying float vRsB;
       void main() {
+        // BICOLOR: the fragment's half is decided by the SAME along-axis
+        // world coordinate the depth mix already rides — s=0 at end A, 1 at
+        // B, clamped so trim zones and caps take their end's color whole.
+        // Equal halves collapse exactly (mix(a,a,s)==a): the solid-color
+        // edge renders byte-identically to the former single-buffer pass.
+        float s = clamp(vT / vLen, 0.0, 1.0);
+        vec4 col = mix(vColorA, vColorB, s);
         // zero alpha is a literal zero: no fragment, no depth hole
-        if (vColor.a <= 0.0) discard;
+        if (col.a <= 0.0) discard;
         float u2 = vU * vU;
         float nz; float depthBase;
         if (vT < vDA || vT > vLen - vDB) {
@@ -278,16 +290,16 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
           nz = sqrt(1.0 - q2);
           depthBase = startEnd ? vDepthA : vDepthB;
         } else {
-          // cylinder wall
+          // cylinder wall — the SAME s the color mix rides
           nz = sqrt(max(1.0 - u2, 0.0));
-          depthBase = mix(vDepthA, vDepthB, clamp(vT / vLen, 0.0, 1.0));
+          depthBase = mix(vDepthA, vDepthB, s);
         }
       #ifdef ${IMPOSTOR_DEPTH_DEFINE}
         // analytic surface depth: nearer than the axis/centre by nz*radius
         float zView = -(depthBase - vRadius * nz);
         gl_FragDepth = 0.5 * ((uProjZ.x * zView + uProjZ.y) / -zView) + 0.5;
       #endif
-        gl_FragColor = vec4(impostorShade(vColor.rgb, nz), vColor.a);
+        gl_FragColor = vec4(impostorShade(col.rgb, nz), col.a);
       }`,
   };
 }

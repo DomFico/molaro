@@ -456,7 +456,7 @@ try {
     JSON.stringify(lastLine));
   check("…and the edge buffer carries steelblue on exactly the contained edges",
     await d.evaluate<boolean>(`(()=>{
-      const v=window.__viewer; const ec=v.rep.state.edgeColor;
+      const v=window.__viewer; const ec=v.rep.state.edgeColorA;
       const want=[0x46,0x82,0xb4].map(x=>Math.fround(x/255));
       const pts=new Set(v.debug.resolvePoints("alpha.group-0.subgroup-0"));
       let hits=0;

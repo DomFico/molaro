@@ -223,6 +223,19 @@ export interface CommandContext {
    * writers, for the channel consumers (bake/bind) and any future
    * per-element scalar source. Same one-stroke capture/LWW discipline. */
   colorEdgesEach(edgeIds: readonly number[], rgb: readonly number[]): number;
+  /** The PER-ENDPOINT edge-color writer pair (the bicolor primitive):
+   * aFlat/bFlat are flat 3×ids.length RGBs in the ids' order — each edge's
+   * A half from aFlat, B half from bFlat. ONE composed stroke (both halves'
+   * captures fold; one Ctrl+Z restores both), LWW per edge, releases the
+   * edge-color binding coverage. `colorEdgesEnds` is the verb's snapshot
+   * writer; `colorEdgesEndsEach` the bake/bind sibling — one spine behind
+   * both names (the value shape is identical: per-edge A/B triples). */
+  colorEdgesEnds(edgeIds: readonly number[], aFlat: readonly number[], bFlat: readonly number[]): number;
+  colorEdgesEndsEach(edgeIds: readonly number[], aFlat: readonly number[], bFlat: readonly number[]): number;
+  /** READ surface: the live per-point RGB buffer (rep.state.color, length
+   * 3N) — the endpoint-color SNAPSHOT source bicolorbonds reads. Real in
+   * the validation context too (reads stay real; writes are stubbed). */
+  pointColors(): ArrayLike<number>;
   sizeEdgesEach(edgeIds: readonly number[], values: readonly number[]): number;
   opacityEdgesEach(edgeIds: readonly number[], values: readonly number[]): number;
   colorTraceEach(vertexIds: readonly number[], rgb: readonly number[]): number;
@@ -291,7 +304,7 @@ export interface CommandContext {
    * extent and never touches visibility. Return the count written. */
   sizePoints(points: readonly number[], size: number): number;
   /** bondsize/bondsizeof share the ONE edge-size buffer (as the edge verbs
-   * share edgeColor). State-only pending impostor geometry — the commands,
+   * share the edge-color pair). State-only pending impostor geometry — the commands,
    * undo, and buffers are complete; visible thickness lags the renderer. */
   sizeEdges(edgeIds: readonly number[], size: number): number;
   sizeTrace(vertexIds: readonly number[], size: number): number;
@@ -887,6 +900,58 @@ export function makeColorBondsHandler(
 }
 
 /**
+ * `bicolorbonds <target>` / `bicolorbondsof <target>` — the endpoint-color
+ * SNAPSHOT pair: each matched edge's two halves take their endpoint points'
+ * CURRENT `color` values (read at execution time — a later colorpoints does
+ * NOT retro-update the edge; run the verb again to re-snapshot). No color
+ * token by design (rainbow's shape: the values are computed, not passed) —
+ * and no two-argument color form exists. Targeting is the colorbonds pair's
+ * exactly: same resolver, same edgesMatching predicates (contained vs
+ * incident), same nomatch wording. Writes the edgeColorA/edgeColorB PAIR in
+ * one stroke (LWW per edge; colorbonds and bicolorbonds compose by
+ * last-write-wins, since both write the same pair).
+ */
+export function makeBicolorBondsHandler(
+  ctx: CommandContext,
+  verb: "bicolorbonds" | "bicolorbondsof",
+): CommandHandler {
+  const both = verb === "bicolorbonds";
+  return (args: string): CommandResult => {
+    const expr = args.trim();
+    if (expr === "") {
+      return {
+        status: "error",
+        message: `${verb} needs a target — ${verb} <target> (e.g. ${verb} alpha.group-0)`,
+      };
+    }
+    const r = resolveTargetPoints(ctx, expr);
+    if ("status" in r) return r;
+    const edgeIds = edgesMatching(ctx.edges, r.points, both);
+    if (edgeIds.length === 0) {
+      return {
+        status: "nomatch",
+        message: both
+          ? `no edges with both endpoints in "${expr}"`
+          : `no edges touching "${expr}"`,
+      };
+    }
+    // The snapshot: each half from ITS endpoint's current point color.
+    const colors = ctx.pointColors();
+    const aFlat = new Array<number>(edgeIds.length * 3);
+    const bFlat = new Array<number>(edgeIds.length * 3);
+    for (let i = 0; i < edgeIds.length; i++) {
+      const [a, b] = ctx.edges[edgeIds[i]];
+      for (let c = 0; c < 3; c++) {
+        aFlat[i * 3 + c] = colors[a * 3 + c];
+        bFlat[i * 3 + c] = colors[b * 3 + c];
+      }
+    }
+    const n = ctx.colorEdgesEnds(edgeIds, aFlat, bFlat);
+    return { status: "ok", message: `bicolored ${n} edges from their endpoints' colors` };
+  };
+}
+
+/**
  * `colortrace <target> <color>` — the POLYLINE member of the family,
  * completing it (four verbs: point / edge-both / edge-either /
  * subgroup-vertex). Per-VERTEX color, mapped UP to the subgroup level: the
@@ -1110,7 +1175,9 @@ export function makeRainbowHandler(ctx: CommandContext): CommandHandler {
  * the bake verb and the typed-result binding (claudebind.ts) both land here:
  * color through the built-in colormap, size through the fixed 0..BIND_SIZE_MAX
  * visual range, opacity as-is. One per-element writer stroke; the caller owns
- * normalization. */
+ * normalization. `bondcolorends` alone takes TWO scalars per element
+ * (interleaved [A0,B0,A1,B1,…] — resolveChannelAxis's per-endpoint carry);
+ * every other axis takes one. */
 export function applyScalarsToAxis(
   ctx: CommandContext,
   axis: ScalarAxis,
@@ -1132,6 +1199,22 @@ export function applyScalarsToAxis(
     case "size": return ctx.sizePointsEach(ids, scalars.map((t) => t * BIND_SIZE_MAX));
     case "opacity": return ctx.opacityPointsEach(ids, scalars);
     case "bondcolor": return ctx.colorEdgesEach(ids, rgbOf(scalars));
+    case "bondcolorends": {
+      // de-interleave the per-endpoint pairs into the two halves' colormapped RGBs
+      const aFlat = new Array<number>(ids.length * 3);
+      const bFlat = new Array<number>(ids.length * 3);
+      for (let i = 0; i < ids.length; i++) {
+        const [ar, ag, ab] = rainbow.colormap(scalars[i * 2]);
+        aFlat[i * 3] = ar;
+        aFlat[i * 3 + 1] = ag;
+        aFlat[i * 3 + 2] = ab;
+        const [br, bg, bb] = rainbow.colormap(scalars[i * 2 + 1]);
+        bFlat[i * 3] = br;
+        bFlat[i * 3 + 1] = bg;
+        bFlat[i * 3 + 2] = bb;
+      }
+      return ctx.colorEdgesEndsEach(ids, aFlat, bFlat);
+    }
     case "bondsize": return ctx.sizeEdgesEach(ids, scalars.map((t) => t * BIND_SIZE_MAX));
     case "bondopacity": return ctx.opacityEdgesEach(ids, scalars);
     case "tracecolor": return ctx.colorTraceEach(ids, rgbOf(scalars));
@@ -1190,7 +1273,8 @@ function parseChannelAxisArgs(
  *     trace verbs' subgroup map-up is a constant-write convenience, not a
  *     data read); edge axes → the ENDPOINT MEAN over CONTAINED edge ids
  *     (both endpoints resolved — colorbonds' rule; mean of raws, THEN the
- *     lens).
+ *     lens) — EXCEPT `bondcolorends`, which carries BOTH endpoint scalars
+ *     per edge (interleaved [A,B]; no mean — the per-endpoint axis).
  *   "vector" — a vector axis, RAW 3-vectors over the axis's OWN domain
  *     (AXIS_DOMAIN): orientation → VERTEX ids, each vertex its point's
  *     vector (the map-up); offset → POINT ids, each point its own vector.
@@ -1302,12 +1386,26 @@ function resolveChannelAxis(
         message: `no edges contained in "${p.expr}" — ${axis} lives on the edge domain (both endpoints must resolve)`,
       };
     }
-    // The ruled combining rule: the edge's raw value is the MEAN of its two
-    // endpoints' channel values, then the normalization lens.
-    scalars = ids.map((e) => {
-      const [a, b] = ctx.edges[e];
-      return mapScalar((Number(src[a]) + Number(src[b])) / 2, range[0], range[1]);
-    });
+    if (axis === "bondcolorends") {
+      // PER-ENDPOINT (no mean — the axis's whole point): carry BOTH endpoint
+      // scalars per contained edge, interleaved [A,B] in edge order; the
+      // apply half de-interleaves into the two color halves.
+      scalars = [];
+      for (const e of ids) {
+        const [a, b] = ctx.edges[e];
+        scalars.push(
+          mapScalar(Number(src[a]), range[0], range[1]),
+          mapScalar(Number(src[b]), range[0], range[1]),
+        );
+      }
+    } else {
+      // The ruled combining rule: the edge's raw value is the MEAN of its two
+      // endpoints' channel values, then the normalization lens.
+      scalars = ids.map((e) => {
+        const [a, b] = ctx.edges[e];
+        return mapScalar((Number(src[a]) + Number(src[b])) / 2, range[0], range[1]);
+      });
+    }
   } else {
     ids = r.points;
     scalars = normalizeScalars(src, ids, range);
@@ -1495,7 +1593,7 @@ export function makeStylesHandler(ctx: CommandContext): CommandHandler {
  */
 export function makeBakeHandler(ctx: CommandContext): CommandHandler {
   const usage =
-    "bake <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondsize|bondopacity · polyline tracecolor|tracesize|traceopacity · orientation; e.g. bake all energy color 0 2.5)";
+    "bake <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondcolorends|bondsize|bondopacity · polyline tracecolor|tracesize|traceopacity · orientation; e.g. bake all energy color 0 2.5)";
   return (args: string): CommandResult => {
     const r = resolveChannelAxis(ctx, "bake", usage, args);
     if ("status" in r) return r;
@@ -1519,7 +1617,9 @@ export function makeBakeHandler(ctx: CommandContext): CommandHandler {
     }
     const n = applyScalarsToAxis(ctx, r.axis, r.ids, r.scalars);
     const at = r.frame === null ? "static" : `frame ${r.frame}`;
-    const rule = r.domain === "edge" ? ", endpoint mean" : "";
+    const rule = r.domain === "edge"
+      ? (r.axis === "bondcolorends" ? ", per endpoint" : ", endpoint mean")
+      : "";
     return {
       status: "ok",
       message: `baked "${r.channel}" → ${r.axis} on ${n} ${domainNoun(r.domain)} of "${r.expr}" (${at}, range ${r.range[0]}..${r.range[1]}${rule})`,
@@ -1542,7 +1642,7 @@ export function makeBakeHandler(ctx: CommandContext): CommandHandler {
  */
 export function makeBindHandler(ctx: CommandContext): CommandHandler {
   const usage =
-    "bind <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondsize|bondopacity · polyline tracecolor|tracesize|traceopacity · orientation · offset; e.g. bind all energy color 0 2.5)";
+    "bind <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondcolorends|bondsize|bondopacity · polyline tracecolor|tracesize|traceopacity · orientation · offset; e.g. bind all energy color 0 2.5)";
   return (args: string): CommandResult => {
     const r = resolveChannelAxis(ctx, "bind", usage, args);
     if ("status" in r) return r;
@@ -1581,7 +1681,9 @@ export function makeBindHandler(ctx: CommandContext): CommandHandler {
       released.points > 0
         ? `; took ${released.points} elements from ${released.touched} earlier binding${released.touched === 1 ? "" : "s"}`
         : "";
-    const rule = r.domain === "edge" ? ", endpoint mean" : "";
+    const rule = r.domain === "edge"
+      ? (r.axis === "bondcolorends" ? ", per endpoint" : ", endpoint mean")
+      : "";
     return {
       status: "ok",
       message:
@@ -1707,7 +1809,7 @@ export function makeBindingsHandler(ctx: CommandContext): CommandHandler {
             ? "vertices · raw vectors"
             : b.axis === OFFSET_AXIS
               ? "points · raw vectors"
-              : `${domainNoun(AXIS_DOMAIN[b.axis])} · range ${b.range![0]}..${b.range![1]}${AXIS_DOMAIN[b.axis] === "edge" ? " · endpoint mean" : ""}`
+              : `${domainNoun(AXIS_DOMAIN[b.axis])} · range ${b.range![0]}..${b.range![1]}${b.axis === "bondcolorends" ? " · per endpoint" : AXIS_DOMAIN[b.axis] === "edge" ? " · endpoint mean" : ""}`
         }`,
     );
     return {
@@ -2335,6 +2437,11 @@ export const HELP_TEXT = [
   "  colorbonds <expr> <color>   color edges with BOTH endpoints in the target",
   "  colorbondsof <expr> <color> color edges TOUCHING the target (either",
   "               endpoint — deliberately reaches one hop outside it)",
+  "  bicolorbonds <expr>         split-color contained edges: each HALF takes",
+  "               its endpoint point's CURRENT color (a snapshot — no color",
+  "               token; re-run after recoloring points; one undo stroke)",
+  "  bicolorbondsof <expr>       the incident sibling (either endpoint —",
+  "               reaches one hop outside, like colorbondsof)",
   "  colortrace <expr> <color>   color polyline vertices whose SUBGROUP holds",
   "               a resolved point (maps up; boundary segments blend)",
   "  pointsize <expr> <n>        size those points (0 is legal and never hides;",
@@ -2359,7 +2466,9 @@ export const HELP_TEXT = [
   "               a later direct write CLEARS its overlap, same stroke)",
   "               axes cover all three domains: point color|size|opacity,",
   "               edge bondcolor|bondsize|bondopacity (value = ENDPOINT MEAN,",
-  "               contained edges), polyline tracecolor|tracesize|traceopacity",
+  "               contained edges) and bondcolorends (PER-ENDPOINT color:",
+  "               each half of the edge reads its own endpoint — no mean),",
+  "               polyline tracecolor|tracesize|traceopacity",
   "               (each vertex reads ITS point); axis `orientation` takes a",
   "               VECTOR (3-wide) channel, raw (no range), onto polyline",
   "               vertices — it drives the oriented shapes (shape traces",
@@ -2447,6 +2556,16 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "colorbondsof",
     makeColorBondsHandler(ctx, "colorbondsof"),
     "color every edge with AT LEAST ONE endpoint in the target (incident — reaches one hop outside): colorbondsof <target> <color>",
+  );
+  registry.register(
+    "bicolorbonds",
+    makeBicolorBondsHandler(ctx, "bicolorbonds"),
+    "split-color every contained edge (both endpoints in the target): each half takes its endpoint point's CURRENT color — a snapshot, no color token: bicolorbonds <target>",
+  );
+  registry.register(
+    "bicolorbondsof",
+    makeBicolorBondsHandler(ctx, "bicolorbondsof"),
+    "split-color every edge with AT LEAST ONE endpoint in the target (incident — reaches one hop outside): each half takes its endpoint point's CURRENT color: bicolorbondsof <target>",
   );
   registry.register(
     "colortrace",

@@ -2987,9 +2987,9 @@ async function S16(): Promise<void> {
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
-    const snap = (slot: string, buf: "color" | "edgeColor") =>
+    const snap = (slot: string, buf: "color" | "edgeColorA") =>
       d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.${buf}))`);
-    const equalsSnap = (slot: string, buf: "color" | "edgeColor") =>
+    const equalsSnap = (slot: string, buf: "color" | "edgeColorA") =>
       d.evaluate<boolean>(`(()=>{
         const c=${V}.rep.state.${buf}, s=window.${slot};
         if (c.length !== s.length) return false;
@@ -3003,10 +3003,10 @@ async function S16(): Promise<void> {
      * (must be 0 for colorbonds; >0 proves colorbondsof's incident reach).
      * Fresh color per audit so "changed" can't undercount. */
     const paintE = async (verb: "colorbonds" | "colorbondsof", expr: string, tok: string) => {
-      await snap("__preEdge", "edgeColor");
+      await snap("__preEdge", "edgeColorA");
       const r = await cmd(`${verb} ${expr} ${tok}`);
       const parity = await d.evaluate<{ changed: number; match: boolean; reach: number }>(`(()=>{
-        const v=${V}; const ec=v.rep.state.edgeColor; const s=window.__preEdge;
+        const v=${V}; const ec=v.rep.state.edgeColorA; const s=window.__preEdge;
         const changed=[];
         for (let e=0;e<v.edges.length;e++) {
           if (ec[3*e]!==s[3*e]||ec[3*e+1]!==s[3*e+1]||ec[3*e+2]!==s[3*e+2]) changed.push(e);
@@ -3031,7 +3031,7 @@ async function S16(): Promise<void> {
     /** Every edge matching (expr, mode) carries exactly this RGB (0..255). */
     const edgesColored = (expr: string, both: boolean, rgb: [number, number, number]) =>
       d.evaluate<boolean>(`(()=>{
-        const v=${V}; const ec=v.rep.state.edgeColor;
+        const v=${V}; const ec=v.rep.state.edgeColorA;
         const w=[${rgb.join(",")}].map(x=>Math.fround(x/255));
         const pts=new Set(v.debug.resolvePoints(${JSON.stringify(expr)}));
         for (let e=0;e<v.edges.length;e++) {
@@ -3042,7 +3042,7 @@ async function S16(): Promise<void> {
         return true;
       })()`);
 
-    await snap("__pristineE", "edgeColor");
+    await snap("__pristineE", "edgeColorA");
     const baseDepth = await undoDepth();
 
     // -- (a) colorbonds parity: contained edges only, across target kinds --------
@@ -3080,7 +3080,7 @@ async function S16(): Promise<void> {
     }
 
     // -- (c) the single-point pin: contained nomatches, incident reaches ---------
-    await snap("__quietE", "edgeColor");
+    await snap("__quietE", "edgeColorA");
     const depthQuiet1 = await undoDepth();
     const single = await cmd("colorbonds #124 red");
     check("S16: colorbonds on a one-point set is a nomatch (no contained edge exists)",
@@ -3088,7 +3088,7 @@ async function S16(): Promise<void> {
         single.message === `no edges with both endpoints in "#124"`,
       JSON.stringify(single));
     check("S16: ...byte- and depth-identical no-op",
-      (await equalsSnap("__quietE", "edgeColor")) && (await undoDepth()) === depthQuiet1);
+      (await equalsSnap("__quietE", "edgeColorA")) && (await undoDepth()) === depthQuiet1);
     const incident = await paintE("colorbondsof", "#124", "#818283");
     check("S16: colorbondsof #124 colors exactly the edges incident to that point",
       incident.r.status === "ok" && incident.parity.match && incident.parity.changed > 0 &&
@@ -3097,10 +3097,10 @@ async function S16(): Promise<void> {
     check("S16: ...one stroke", (await undoDepth()) === depthQuiet1 + 1);
 
     // -- (d) independence: each verb writes ITS primitive's buffer only ----------
-    await snap("__indepE", "edgeColor");
+    await snap("__indepE", "edgeColorA");
     await cmd("colorpoints beta #0a0b0c");
     check("S16: colorpoints leaves the edge buffer untouched",
-      await equalsSnap("__indepE", "edgeColor"));
+      await equalsSnap("__indepE", "edgeColorA"));
     await snap("__indepP", "color");
     await cmd("colorbonds beta #0d0e0f");
     check("S16: colorbonds leaves the point buffer untouched",
@@ -3112,7 +3112,7 @@ async function S16(): Promise<void> {
       await sleep(60);
     }
     check("S16: unwinding every stroke restores the pristine edge buffer",
-      await equalsSnap("__pristineE", "edgeColor"));
+      await equalsSnap("__pristineE", "edgeColorA"));
     await cmd("colorbonds alpha red");
     await cmd("colorbonds alpha.group-0.subgroup-0 blue");
     check("S16: re-coloring an edge overlap overwrites those edges (LWW)",
@@ -3139,11 +3139,11 @@ async function S16(): Promise<void> {
     await d.ctrlZ();
     await sleep(120);
     check("S16: one Ctrl+Z pops ONLY the edge-color stroke — the hide stands",
-      (await equalsSnap("__preEdge", "edgeColor")) &&
+      (await equalsSnap("__preEdge", "edgeColorA")) &&
         (await undoDepth()) === depthHidden && (await visibleCount(d)) === visHidden);
 
     // -- (g) the remaining quiet paths for the edge verbs -------------------------
-    await snap("__quiet2E", "edgeColor");
+    await snap("__quiet2E", "edgeColorA");
     const depthQuiet2 = await undoDepth();
     const quiet: [string, string][] = [
       ["colorbonds nothere red", "nomatch"],
@@ -3157,7 +3157,7 @@ async function S16(): Promise<void> {
       check(`S16: ${text} → ${status}`, r.status === status, JSON.stringify(r));
     }
     check("S16: ...none of them wrote a single component",
-      await equalsSnap("__quiet2E", "edgeColor"));
+      await equalsSnap("__quiet2E", "edgeColorA"));
     check("S16: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet2);
 
     await d.screenshot(`${REPORT}/S16_colorbonds.png`);
@@ -3171,9 +3171,9 @@ async function S17(): Promise<void> {
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
-    const snap = (slot: string, buf: "color" | "edgeColor" | "traceColor") =>
+    const snap = (slot: string, buf: "color" | "edgeColorA" | "traceColor") =>
       d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.${buf}))`);
-    const equalsSnap = (slot: string, buf: "color" | "edgeColor" | "traceColor") =>
+    const equalsSnap = (slot: string, buf: "color" | "edgeColorA" | "traceColor") =>
       d.evaluate<boolean>(`(()=>{
         const c=${V}.rep.state.${buf}, s=window.${slot};
         if (c.length !== s.length) return false;
@@ -3265,10 +3265,10 @@ async function S17(): Promise<void> {
 
     // -- (d) independence: four verbs, three buffers, no cross-talk ---------------
     await snap("__indepP", "color");
-    await snap("__indepE", "edgeColor");
+    await snap("__indepE", "edgeColorA");
     await cmd("colortrace beta #0a0b0c");
     check("S17: colortrace leaves the point AND edge buffers untouched",
-      (await equalsSnap("__indepP", "color")) && (await equalsSnap("__indepE", "edgeColor")));
+      (await equalsSnap("__indepP", "color")) && (await equalsSnap("__indepE", "edgeColorA")));
     await snap("__indepT", "traceColor");
     await cmd("colorpoints beta #0d0e0f");
     await cmd("colorbonds beta #101112");
@@ -3339,7 +3339,7 @@ async function S17(): Promise<void> {
 
 async function S18(): Promise<void> {
   console.log("S18 — the size family: pointsize/bondsize/bondsizeof/tracesize (size ⊥ hide)");
-  const BUFS = ["color", "edgeColor", "traceColor", "size", "edgeSize", "traceSize"] as const;
+  const BUFS = ["color", "edgeColorA", "edgeColorB", "traceColor", "size", "edgeSize", "traceSize"] as const;
   await withDriver(async (d) => {
     await seedSolvent(d); // the committed @solvent in the verb matrix
     const cmd = (text: string) =>
@@ -3496,7 +3496,7 @@ async function S18(): Promise<void> {
       ["bondsizeof gamma 1.25", `["edgeSize"]`], // the SHARED edge-size buffer
       ["tracesize gamma 2.25", `["traceSize"]`],
       ["colorpoints gamma #111213", `["color"]`],
-      ["colorbonds gamma #141516", `["edgeColor"]`],
+      ["colorbonds gamma #141516", `["edgeColorA","edgeColorB"]`],
       ["colortrace gamma #171819", `["traceColor"]`],
     ];
     for (const [text, want] of grid) {
@@ -3565,7 +3565,7 @@ async function S18(): Promise<void> {
 async function S19(): Promise<void> {
   console.log("S19 — the opacity family: the third axis (opacity ⊥ hide, naive blending)");
   const BUFS = [
-    "color", "edgeColor", "traceColor",
+    "color", "edgeColorA", "edgeColorB", "traceColor",
     "size", "edgeSize", "traceSize",
     "opacity", "edgeOpacity", "traceOpacity",
   ] as const;
@@ -3754,7 +3754,7 @@ async function S19(): Promise<void> {
       ["traceopacity gamma 0.6", `["traceOpacity"]`],
       ["colorpoints gamma #212223", `["color"]`],
       ["pointsize gamma 2.6", `["size"]`],
-      ["colorbonds gamma #242526", `["edgeColor"]`],
+      ["colorbonds gamma #242526", `["edgeColorA","edgeColorB"]`],
       ["bondsize gamma 1.6", `["edgeSize"]`],
       ["colortrace gamma #272829", `["traceColor"]`],
       ["tracesize gamma 2.4", `["traceSize"]`],
@@ -3836,7 +3836,7 @@ async function S20(): Promise<void> {
   // packaged VSIX by the real-VS-Code probe — the harness has no panel
   // lifecycle to drive.)
   const BUFS = [
-    "color", "edgeColor", "traceColor",
+    "color", "edgeColorA", "edgeColorB", "traceColor",
     "size", "edgeSize", "traceSize",
     "opacity", "edgeOpacity", "traceOpacity",
   ] as const;
@@ -3927,15 +3927,18 @@ async function S20(): Promise<void> {
           if (tc[3*i]!==base[0]||tc[3*i+1]!==base[1]||tc[3*i+2]!==base[2]) return false;
         }
         return true;
-      })()`)) && (await equalsSnap("__pre_edgeColor", "edgeColor")),
-      "traceColor back to base; edgeColor still written");
+      })()`)) && (await equalsSnap("__pre_edgeColorA", "edgeColorA")) &&
+        (await equalsSnap("__pre_edgeColorB", "edgeColorB")),
+      "traceColor back to base; the edge-color pair still written");
     await d.ctrlZ(); // pops the colorbonds stroke
     await sleep(120);
     check("S20: a second Ctrl+Z pops the NEXT stroke (colorbonds), in order",
       await d.evaluate<boolean>(`(()=>{
-        const ec=${V}.rep.state.edgeColor; const base=[0x5a,0x7a,0x9a].map(x=>Math.fround(x/255));
-        for (let e=0;e<ec.length/3;e++) {
-          if (ec[3*e]!==base[0]||ec[3*e+1]!==base[1]||ec[3*e+2]!==base[2]) return false;
+        const base=[0x5a,0x7a,0x9a].map(x=>Math.fround(x/255));
+        for (const ec of [${V}.rep.state.edgeColorA, ${V}.rep.state.edgeColorB]) {
+          for (let e=0;e<ec.length/3;e++) {
+            if (ec[3*e]!==base[0]||ec[3*e+1]!==base[1]||ec[3*e+2]!==base[2]) return false;
+          }
         }
         return true;
       })()`));
@@ -5479,7 +5482,7 @@ async function S31(): Promise<void> {
     };
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
     const edgeChanged = (slot: string) => d.evaluate<number>(`(()=>{
-      const c=${V}.rep.state.edgeColor, s=window.${slot}; let n=0;
+      const c=${V}.rep.state.edgeColorA, s=window.${slot}; let n=0;
       for (let i=0;i<c.length;i++) if (Math.abs(c[i]-s[i])>1e-6) n++; return n;
     })()`);
 
@@ -5488,7 +5491,7 @@ async function S31(): Promise<void> {
     check("S31: color_ab appears in `mods` with produces: commands",
       listing.includes(" color_ab — analysis · commands"), listing);
 
-    await d.evaluate(`void (window.__preE = Float32Array.from(${V}.rep.state.edgeColor))`);
+    await d.evaluate(`void (window.__preE = Float32Array.from(${V}.rep.state.edgeColorA))`);
     const depth0 = await undoDepth();
 
     // run the macro BARE (a commands mod may ignore target_indices)
@@ -5914,7 +5917,7 @@ async function S33(): Promise<void> {
 
 // ==================== S34: edge tubes (increment B) ==========================
 // The headline of the impostor brief: `bondsize` moves PIXELS. Instanced tube
-// quads read the existing edgeSize/edgeColor/edgeOpacity buffers; run under
+// quads read the existing edgeSize/edgeColorA+B/edgeOpacity buffers; run under
 // both depth variants — only the junction-interpenetration check separates
 // them, with expectations derived from measured depths.
 async function S34(): Promise<void> {
@@ -6193,11 +6196,12 @@ async function S34(): Promise<void> {
       await sleep(300);
       const pristine = await d.evaluate<{ size: boolean; color: boolean }>(`(()=>{
         const es = ${V}.rep.state.edgeSize;
-        const ec = ${V}.rep.state.edgeColor;
         const f = [Math.fround(0x5a/255), Math.fround(0x7a/255), Math.fround(0x9a/255)];
         let size = true, color = true;
         for (let e = 0; e < es.length; e++) if (es[e] !== 1) { size = false; break; }
-        for (let i = 0; i < ec.length; i++) if (ec[i] !== f[i % 3]) { color = false; break; }
+        for (const ec of [${V}.rep.state.edgeColorA, ${V}.rep.state.edgeColorB]) {
+          for (let i = 0; i < ec.length; i++) if (ec[i] !== f[i % 3]) { color = false; break; }
+        }
         return { size, color };
       })()`);
       const final = await counts(await snap("unwound"));
@@ -8940,7 +8944,197 @@ async function S53(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53 };
+// ==================== S54: bicolorbonds — the endpoint-color snapshot ========
+// The per-endpoint edge-color primitive: the edgeColorA/edgeColorB PAIR is the
+// one edge-color truth (colorbonds writes the same constant into both halves —
+// byte-identical to the retired single buffer), and bicolorbonds/bicolorbondsof
+// SNAPSHOT each matched edge's halves from its endpoints' CURRENT point colors
+// (read at execution time — never a live link; re-run to re-snapshot).
+async function S54(): Promise<void> {
+  console.log("S54 — bicolorbonds/bicolorbondsof: per-endpoint edge color (endpoint snapshot)");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const snap = (slot: string, buf: "color" | "edgeColorA" | "edgeColorB" | "traceColor") =>
+      d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.${buf}))`);
+    const equalsSnap = (slot: string, buf: "color" | "edgeColorA" | "edgeColorB" | "traceColor") =>
+      d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.${buf}, s=window.${slot};
+        if (c.length !== s.length) return false;
+        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) return false;
+        return true;
+      })()`);
+    /** A==B on every edge of the scene (the solid-color identity). */
+    const pairIdentical = () =>
+      d.evaluate<boolean>(`(()=>{
+        const a=${V}.rep.state.edgeColorA, b=${V}.rep.state.edgeColorB;
+        for (let i=0;i<a.length;i++) if (a[i]!==b[i]) return false;
+        return true;
+      })()`);
+    /** Run a bicolor verb and audit the SNAPSHOT PARITY in-page: every edge
+     * matching the endpoint predicate must carry A == color[endA] and
+     * B == color[endB] (the two halves from the two endpoints); every other
+     * edge must be byte-untouched vs the pre-snap. `split` counts matched
+     * edges whose two halves DIFFER (endpoint colors differ); `reach` counts
+     * matched edges leaning on an out-of-set endpoint. */
+    const paintEnds = async (verb: "bicolorbonds" | "bicolorbondsof", expr: string) => {
+      await snap("__preA", "edgeColorA");
+      await snap("__preB", "edgeColorB");
+      const r = await cmd(`${verb} ${expr}`);
+      const audit = await d.evaluate<{
+        matched: number; wrongSnap: number; touchedOutside: number; split: number; reach: number;
+      }>(`(()=>{
+        const v=${V};
+        const pts=new Set(v.debug.resolvePoints(${JSON.stringify(expr)}));
+        const both=${verb === "bicolorbonds"};
+        const A=v.rep.state.edgeColorA, B=v.rep.state.edgeColorB, C=v.rep.state.color;
+        const preA=window.__preA, preB=window.__preB;
+        let matched=0, wrongSnap=0, touchedOutside=0, split=0, reach=0;
+        for (let e=0;e<v.edges.length;e++) {
+          const a=v.edges[e][0], b=v.edges[e][1];
+          const want=both ? (pts.has(a)&&pts.has(b)) : (pts.has(a)||pts.has(b));
+          if (want) {
+            matched++;
+            if (!pts.has(a)||!pts.has(b)) reach++;
+            let ok=true, eq=true;
+            for (let c=0;c<3;c++) {
+              if (A[3*e+c]!==C[3*a+c] || B[3*e+c]!==C[3*b+c]) ok=false;
+              if (A[3*e+c]!==B[3*e+c]) eq=false;
+            }
+            if (!ok) wrongSnap++;
+            if (!eq) split++;
+          } else {
+            for (let c=0;c<3;c++) {
+              if (A[3*e+c]!==preA[3*e+c] || B[3*e+c]!==preB[3*e+c]) { touchedOutside++; break; }
+            }
+          }
+        }
+        return { matched, wrongSnap, touchedOutside, split, reach };
+      })()`);
+      return { r, audit };
+    };
+
+    // -- (0) the seed identity: both halves boot byte-identical ------------------
+    check("S54: at boot the pair is byte-identical (the single-buffer look, promoted)",
+      await pairIdentical());
+    await snap("__pristineA", "edgeColorA");
+    await snap("__pristineB", "edgeColorB");
+    const baseDepth = await undoDepth();
+
+    // -- (a) the snapshot, contained: upstream rainbow → split halves ------------
+    // rainbow gives every point its OWN color, so adjacent endpoints differ and
+    // nearly every matched edge must come out split (A != B).
+    await cmd("rainbow all");
+    const contained = await paintEnds("bicolorbonds", "alpha");
+    check("S54: bicolorbonds alpha — every contained edge's halves = its endpoints' CURRENT colors",
+      contained.r.status === "ok" && contained.audit.matched > 0 &&
+        contained.audit.wrongSnap === 0 && contained.audit.reach === 0,
+      JSON.stringify(contained));
+    check("S54: ...unmatched edges are byte-untouched", contained.audit.touchedOutside === 0,
+      `touched=${contained.audit.touchedOutside}`);
+    check("S54: ...the rainbow upstream makes them SPLIT (A != B on most matched edges)",
+      contained.audit.split > contained.audit.matched * 0.5,
+      `split=${contained.audit.split}/${contained.audit.matched}`);
+    check("S54: ...message reports the action and count",
+      contained.r.message === `bicolored ${contained.audit.matched} edges from their endpoints' colors`,
+      contained.r.message);
+    check("S54: ...as exactly ONE undo stroke", (await undoDepth()) === baseDepth + 2,
+      `depth=${await undoDepth()}`); // rainbow + bicolorbonds
+
+    // -- (b) SNAPSHOT means snapshot: upstream recolor does NOT retro-update -----
+    await snap("__snapA", "edgeColorA");
+    await snap("__snapB", "edgeColorB");
+    await cmd("colorpoints alpha white");
+    check("S54: recoloring the points afterwards leaves the snapshot untouched",
+      (await equalsSnap("__snapA", "edgeColorA")) && (await equalsSnap("__snapB", "edgeColorB")));
+    const resnap = await paintEnds("bicolorbonds", "alpha");
+    check("S54: re-running bicolorbonds tracks the NEW point colors (and now A==B: one constant upstream)",
+      resnap.r.status === "ok" && resnap.audit.wrongSnap === 0 && resnap.audit.split === 0,
+      JSON.stringify(resnap.audit));
+
+    // -- (c) the incident variant reaches out, reading the out-of-set endpoint ---
+    const incident = await paintEnds("bicolorbondsof", "beta.group-*.*.t1");
+    check("S54: bicolorbondsof beta.group-*.*.t1 — incident snapshot, ALL reaching out",
+      incident.r.status === "ok" && incident.audit.matched > 0 &&
+        incident.audit.wrongSnap === 0 && incident.audit.reach === incident.audit.matched,
+      JSON.stringify(incident.audit));
+
+    // -- (d) independence: the pair only — point and trace buffers untouched -----
+    await snap("__indepP", "color");
+    await snap("__indepT", "traceColor");
+    await paintEnds("bicolorbonds", "gamma");
+    check("S54: bicolorbonds touches NEITHER the point nor the trace buffer",
+      (await equalsSnap("__indepP", "color")) && (await equalsSnap("__indepT", "traceColor")));
+
+    // -- (e) byte-identical backward compat: colorbonds writes A==B --------------
+    const depthCB = await undoDepth();
+    const cb = await cmd("colorbonds alpha red");
+    check("S54: colorbonds alpha red still lands", cb.status === "ok", JSON.stringify(cb));
+    check("S54: ...and edgeColorA==edgeColorB on EVERY matched edge (assert per edge)",
+      await d.evaluate<boolean>(`(()=>{
+        const v=${V};
+        const pts=new Set(v.debug.resolvePoints("alpha"));
+        const A=v.rep.state.edgeColorA, B=v.rep.state.edgeColorB;
+        const red=[Math.fround(1),0,0];
+        for (let e=0;e<v.edges.length;e++) {
+          const a=v.edges[e][0], b=v.edges[e][1];
+          if (!(pts.has(a)&&pts.has(b))) continue;
+          for (let c=0;c<3;c++) {
+            if (A[3*e+c]!==red[c] || B[3*e+c]!==red[c]) return false;
+          }
+        }
+        return true;
+      })()`));
+    check("S54: ...one stroke for the composed pair write", (await undoDepth()) === depthCB + 1);
+
+    // -- (f) LWW + undo: strokes over the pair unwind in order -------------------
+    const lww = await paintEnds("bicolorbonds", "alpha.group-0.subgroup-0");
+    check("S54: bicolorbonds over a colorbonds overlap overwrites those edges (LWW)",
+      lww.r.status === "ok" && lww.audit.wrongSnap === 0, JSON.stringify(lww.audit));
+    await d.evaluate(`void document.activeElement?.blur?.()`);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S54: one Ctrl+Z restores the PREVIOUS pair (the red constant), not the base look",
+      (await equalsSnap("__preA", "edgeColorA")) && (await equalsSnap("__preB", "edgeColorB")));
+    while ((await undoDepth()) > baseDepth) {
+      await d.ctrlZ();
+      await sleep(60);
+    }
+    check("S54: unwinding every stroke restores the pristine pair",
+      (await equalsSnap("__pristineA", "edgeColorA")) && (await equalsSnap("__pristineB", "edgeColorB")) &&
+        (await pairIdentical()));
+
+    // -- (g) quiet paths: nomatch / pin / usage write nothing --------------------
+    await snap("__quietA", "edgeColorA");
+    await snap("__quietB", "edgeColorB");
+    const depthQuiet = await undoDepth();
+    const quiet: [string, string][] = [
+      ["bicolorbonds nothere", "nomatch"],
+      ["bicolorbondsof nothere", "nomatch"],
+      ["bicolorbonds #124", "nomatch"], // one-point set: no contained edge
+      ["bicolorbonds", "error"],
+      ["bicolorbondsof", "error"],
+      ["bicolorbonds alpha.[x]", "error"], // [ reserved
+    ];
+    for (const [text, status] of quiet) {
+      const r = await cmd(text);
+      check(`S54: ${text} → ${status}`, r.status === status, JSON.stringify(r));
+    }
+    check("S54: ...none of them wrote a single component",
+      (await equalsSnap("__quietA", "edgeColorA")) && (await equalsSnap("__quietB", "edgeColorB")));
+    check("S54: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet);
+    const pin = await paintEnds("bicolorbondsof", "#124");
+    check("S54: bicolorbondsof #124 snapshots exactly the incident edges",
+      pin.r.status === "ok" && pin.audit.wrongSnap === 0 &&
+        pin.audit.reach === pin.audit.matched && pin.audit.touchedOutside === 0,
+      JSON.stringify(pin.audit));
+
+    await d.screenshot(`${REPORT}/S54_bicolor.png`);
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -8979,7 +9173,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
   S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
-  S53: "full",
+  S53: "full", S54: "full",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

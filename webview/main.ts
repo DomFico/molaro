@@ -640,7 +640,8 @@ const spherePointsGenerator: ShapeGenerator = {
  * split by UPDATE CADENCE — endpoints (iStart/iEnd) re-copy on every
  * displayed-frame flip (6 floats/edge, unconditional, branch-free);
  * visibility (iVisible) only on hide/show; radius (iRadius) only on
- * bondsize writes; RGBA (iColor) only on colorbonds/bondopacity writes.
+ * bondsize writes; per-END RGBA (iColorA/iColorB — the bicolor pair) only
+ * on colorbonds/bicolorbonds/bondopacity writes.
  * Instance slot ≡ HEADER EDGE INDEX, never compacted: the GPU arrays
  * share the rep buffers' element order with no remap anywhere (hidden or
  * zero-radius edges collapse in the vertex shader instead). Blending
@@ -674,20 +675,24 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
     const iEnd = new THREE.InstancedBufferAttribute(new Float32Array(nEdges * 3), 3);
     const iVisible = new THREE.InstancedBufferAttribute(new Float32Array(nEdges).fill(1), 1);
     const iRadius = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
-    const iColor = new THREE.InstancedBufferAttribute(new Float32Array(nEdges * 4), 4);
+    // per-END RGBA (the bicolor pair) — the trace tube's iColorA/iColorB
+    // treatment on the edge pass; rep-write cadence only, like iRadius
+    const iColorA = new THREE.InstancedBufferAttribute(new Float32Array(nEdges * 4), 4);
+    const iColorB = new THREE.InstancedBufferAttribute(new Float32Array(nEdges * 4), 4);
     // endpoint sphere sizes for the analytic junction trim — REP-WRITE
     // cadence (pointsize writes only), exactly like iRadius; never per flip
     const iSizeA = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
     const iSizeB = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
     const iStyle = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
-    for (const a of [iStart, iEnd, iVisible, iRadius, iColor, iSizeA, iSizeB, iStyle]) {
+    for (const a of [iStart, iEnd, iVisible, iRadius, iColorA, iColorB, iSizeA, iSizeB, iStyle]) {
       a.setUsage(THREE.DynamicDrawUsage);
     }
     edgeGeo.setAttribute("iStart", iStart);
     edgeGeo.setAttribute("iEnd", iEnd);
     edgeGeo.setAttribute("iVisible", iVisible);
     edgeGeo.setAttribute("iRadius", iRadius);
-    edgeGeo.setAttribute("iColor", iColor);
+    edgeGeo.setAttribute("iColorA", iColorA);
+    edgeGeo.setAttribute("iColorB", iColorB);
     edgeGeo.setAttribute("iSizeA", iSizeA);
     edgeGeo.setAttribute("iSizeB", iSizeB);
     edgeGeo.setAttribute("iStyle", iStyle);
@@ -714,21 +719,29 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
       iStart.needsUpdate = true;
       iEnd.needsUpdate = true;
     };
-    /** write iColor (RGBA) for these edge ids from rep.state.edgeColor +
-     * edgeOpacity — representation-write cadence only (undefined = all). */
+    /** write iColorA/iColorB (RGBA) for these edge ids from the edgeColorA/
+     * edgeColorB pair + the ONE per-edge edgeOpacity (alpha rides both
+     * halves) — representation-write cadence only (undefined = all). */
     const fillEdgeColors = (ids?: readonly number[]): void => {
-      const ec = rep.state.edgeColor;
+      const ecA = rep.state.edgeColorA;
+      const ecB = rep.state.edgeColorB;
       const eo = rep.state.edgeOpacity;
-      const c = iColor.array as Float32Array;
+      const cA = iColorA.array as Float32Array;
+      const cB = iColorB.array as Float32Array;
       const write = (e: number): void => {
-        c[e * 4] = ec[e * 3];
-        c[e * 4 + 1] = ec[e * 3 + 1];
-        c[e * 4 + 2] = ec[e * 3 + 2];
-        c[e * 4 + 3] = eo[e];
+        cA[e * 4] = ecA[e * 3];
+        cA[e * 4 + 1] = ecA[e * 3 + 1];
+        cA[e * 4 + 2] = ecA[e * 3 + 2];
+        cA[e * 4 + 3] = eo[e];
+        cB[e * 4] = ecB[e * 3];
+        cB[e * 4 + 1] = ecB[e * 3 + 1];
+        cB[e * 4 + 2] = ecB[e * 3 + 2];
+        cB[e * 4 + 3] = eo[e];
       };
       if (ids) for (const e of ids) write(e);
       else for (let e = 0; e < nEdges; e++) write(e);
-      iColor.needsUpdate = true;
+      iColorA.needsUpdate = true;
+      iColorB.needsUpdate = true;
     };
     /** write iRadius for these edge ids from rep.state.edgeSize — the hook
      * that makes stored widths DRAW (undefined = all). */
@@ -769,8 +782,9 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
       objects: [new THREE.Mesh(edgeGeo, env.materials.edges)],
       onFrameFlip: fillEdges,
       onRepWrite: {
-        edgeColor: fillEdgeColors,
-        edgeOpacity: fillEdgeColors, // one RGBA interleave serves both axes
+        edgeColorA: fillEdgeColors,
+        edgeColorB: fillEdgeColors,
+        edgeOpacity: fillEdgeColors, // one RGBA interleave serves color + opacity
         edgeSize: fillEdgeSizes,
         edgeStyle: (ids) => {
           const buf = iStyle.array as Float32Array;
@@ -2464,10 +2478,37 @@ async function main(): Promise<void> {
         return (block[off + ea] + block[off + eb]) / 2;
       };
       const t = (id: number): number => mapScalar(raw(id), lo, hi);
+      if (b.axis === "bondcolor" || b.axis === "bondcolorends") {
+        // The edge COLOR arms write the PAIR. bondcolor: the ruled endpoint-
+        // MEAN value into BOTH halves (one solid color per edge — the
+        // pre-pair look, unchanged). bondcolorends: each half from ITS OWN
+        // endpoint's raw value — no mean, the per-endpoint axis. Derived
+        // state, unrecorded (the flip discipline); GPU sync through both
+        // halves' write-cadence dispatch (one fill serves both, and a future
+        // single-half subscriber still hears its own key).
+        const cA = rep.state.edgeColorA;
+        const cB = rep.state.edgeColorB;
+        const ends = b.axis === "bondcolorends";
+        for (const e of b.points) {
+          const [ea, eb] = header.edges[e];
+          const tA = ends ? mapScalar(block[off + ea], lo, hi) : t(e);
+          const tB = ends ? mapScalar(block[off + eb], lo, hi) : t(e);
+          const [rA, gA, blA] = rainbow.colormap(tA);
+          cA[e * 3] = rA;
+          cA[e * 3 + 1] = gA;
+          cA[e * 3 + 2] = blA;
+          const [rB, gB, blB] = rainbow.colormap(tB);
+          cB[e * 3] = rB;
+          cB[e * 3 + 1] = gB;
+          cB[e * 3 + 2] = blB;
+        }
+        registry.repWrite("edgeColorA", b.points);
+        registry.repWrite("edgeColorB", b.points);
+        continue;
+      }
       switch (b.axis) {
-        case "color": case "bondcolor": case "tracecolor": {
-          const buf = b.axis === "color" ? rep.state.color
-            : b.axis === "bondcolor" ? rep.state.edgeColor : rep.state.traceColor;
+        case "color": case "tracecolor": {
+          const buf = b.axis === "color" ? rep.state.color : rep.state.traceColor;
           for (const id of b.points) {
             const [r, g, bl] = rainbow.colormap(t(id));
             buf[id * 3] = r;
@@ -2490,7 +2531,7 @@ async function main(): Promise<void> {
       }
       const repChannel = (
         { color: "color", size: "size", opacity: "opacity",
-          bondcolor: "edgeColor", bondsize: "edgeSize", bondopacity: "edgeOpacity",
+          bondsize: "edgeSize", bondopacity: "edgeOpacity",
           tracecolor: "traceColor", tracesize: "traceSize", traceopacity: "traceOpacity",
         } as const
       )[b.axis];
@@ -2578,7 +2619,20 @@ async function main(): Promise<void> {
   // direct write (broadcast verb or per-element consumer) releases
   // overlapping same-axis binding coverage in its own id space (edge ids /
   // vertex ids — the axis names key the spaces via AXIS_DOMAIN).
-  const colorEdges = withBindingClear("bondcolor", makeRepWriter(rep.state.edgeColor, 3, repWrite("edgeColor")));
+  // The edge-color PAIR shares one buffer family across TWO axes (bondcolor
+  // = one value both halves; bondcolorends = per-endpoint halves), so every
+  // direct edge-color write releases BOTH axes' coverage — a landed write
+  // must stop the elements being channel-driven on EITHER color axis, or the
+  // next flip would silently repaint it. The nested withBindingClear folds
+  // into ONE reentrant stroke (values + both coverages under one Ctrl+Z).
+  const colorEdgesARaw = makeRepWriter(rep.state.edgeColorA, 3, repWrite("edgeColorA"));
+  const colorEdgesBRaw = makeRepWriter(rep.state.edgeColorB, 3, repWrite("edgeColorB"));
+  const colorEdges = withBindingClear("bondcolor", withBindingClear("bondcolorends",
+    (ids: readonly number[], rgb: [number, number, number]): number => {
+      const n = colorEdgesARaw(ids, rgb);
+      colorEdgesBRaw(ids, rgb);
+      return n;
+    }));
   const sizeEdges = withBindingClear("bondsize", makeRepWriter(rep.state.edgeSize, 1, repWrite("edgeSize")));
   const opacityEdges = withBindingClear("bondopacity", makeRepWriter(rep.state.edgeOpacity, 1, repWrite("edgeOpacity")));
   const colorTrace = withBindingClear("tracecolor", makeRepWriter(rep.state.traceColor, 3, repWrite("traceColor")));
@@ -2590,7 +2644,25 @@ async function main(): Promise<void> {
   const stylePoints = makeRepWriter(rep.state.style, 1, repWrite("style"));
   const styleEdges = makeRepWriter(rep.state.edgeStyle, 1, repWrite("edgeStyle"));
   const styleTrace = makeRepWriter(rep.state.traceStyle, 1, repWrite("traceStyle"));
-  const colorEdgesEach = withBindingClear("bondcolor", makeRepEachWriter(rep.state.edgeColor, 3, repWrite("edgeColor")));
+  const colorEdgesAEachRaw = makeRepEachWriter(rep.state.edgeColorA, 3, repWrite("edgeColorA"));
+  const colorEdgesBEachRaw = makeRepEachWriter(rep.state.edgeColorB, 3, repWrite("edgeColorB"));
+  const colorEdgesEach = withBindingClear("bondcolor", withBindingClear("bondcolorends",
+    (ids: readonly number[], rgb: readonly number[]): number => {
+      const n = colorEdgesAEachRaw(ids, rgb);
+      colorEdgesBEachRaw(ids, rgb);
+      return n;
+    }));
+  /** The PER-ENDPOINT edge-color writer (the bondcolorends axis' spine and
+   * bicolorbonds' snapshot writer — one function, both callers: the value
+   * shape is identical, per-edge A/B triples). aFlat/bFlat are flat
+   * 3×ids.length in the ids' order. One composed reentrant stroke; releases
+   * BOTH edge-color axes' coverage (shared buffers — see colorEdges). */
+  const colorEdgesEnds = withBindingClear("bondcolorends", withBindingClear("bondcolor",
+    (ids: readonly number[], aFlat: readonly number[], bFlat: readonly number[]): number => {
+      const n = colorEdgesAEachRaw(ids, aFlat);
+      colorEdgesBEachRaw(ids, bFlat);
+      return n;
+    }));
   const sizeEdgesEach = withBindingClear("bondsize", makeRepEachWriter(rep.state.edgeSize, 1, repWrite("edgeSize")));
   const opacityEdgesEach = withBindingClear("bondopacity", makeRepEachWriter(rep.state.edgeOpacity, 1, repWrite("edgeOpacity")));
   const colorTraceEach = withBindingClear("tracecolor", makeRepEachWriter(rep.state.traceColor, 3, repWrite("traceColor")));
@@ -3059,6 +3131,11 @@ async function main(): Promise<void> {
     orientationVerticesEach,
     offsetPointsEach,
     colorEdgesEach,
+    colorEdgesEnds,
+    colorEdgesEndsEach: colorEdgesEnds, // ONE spine — identical value shape
+    // READ surface: the live per-point RGB buffer, for the endpoint-color
+    // snapshot verbs (bicolorbonds reads each endpoint's CURRENT color).
+    pointColors: () => rep.state.color,
     sizeEdgesEach,
     opacityEdgesEach,
     colorTraceEach,
@@ -3197,7 +3274,8 @@ async function main(): Promise<void> {
     releaseBindings: () => ({ touched: 0, removed: 0, points: 0, offsetZeroed: 0 }),
     orientationVerticesEach: () => 0,
     offsetPointsEach: () => 0,
-    colorEdgesEach: () => 0, sizeEdgesEach: () => 0, opacityEdgesEach: () => 0,
+    colorEdgesEach: () => 0, colorEdgesEnds: () => 0, colorEdgesEndsEach: () => 0,
+    sizeEdgesEach: () => 0, opacityEdgesEach: () => 0,
     colorTraceEach: () => 0, sizeTraceEach: () => 0, opacityTraceEach: () => 0,
     stylePoints: () => 0, styleEdges: () => 0, styleTrace: () => 0,
     setShape: (domain, label) =>

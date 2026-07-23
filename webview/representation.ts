@@ -40,10 +40,18 @@ export interface RepresentationState {
   size: Float32Array;
   /** length N — 1 = drawn, 0 = hidden (driven by the hidden set). */
   visible: Float32Array;
-  /** length 3E — per-EDGE RGB, indexed by the header's edge order. The base
-   * look is the initial value (like `color`), so an edge never written keeps
-   * the uniform look with no sentinel/override machinery. */
-  edgeColor: Float32Array;
+  /** length 3E — per-EDGE RGB at the edge's A END (the header pair's first
+   * point), indexed by the header's edge order. One of the PAIR that is the
+   * edge-color truth: the renderer mixes A→B along the tube axis, so an edge
+   * whose two halves agree draws exactly as one solid color (mix(a,a,s)==a).
+   * The base look is the initial value (like `color`) — an edge never
+   * written keeps the uniform look with no sentinel/override machinery.
+   * colorbonds writes the SAME constant into both halves; bicolorbonds
+   * snapshots each endpoint point's current color into its half. */
+  edgeColorA: Float32Array;
+  /** length 3E — the B-END half of the pair (the header pair's second
+   * point). Same base look, same no-sentinel pattern; see edgeColorA. */
+  edgeColorB: Float32Array;
   /** length 3V — per-POLYLINE-VERTEX RGB, in header vertex order (the
    * flattened `header.polylines`). Same no-sentinel pattern: the base look
    * is the initial value. The renderer interpolates between vertex colors
@@ -51,7 +59,7 @@ export interface RepresentationState {
    * gradient — inherent to per-vertex color, and intended. */
   traceColor: Float32Array;
   /** length E — per-EDGE width, header edge order (bondsize/bondsizeof both
-   * write it — LWW per edge, like edgeColor). Size and hide are ORTHOGONAL:
+   * write it — LWW per edge, like the edge-color pair). Size and hide are ORTHOGONAL:
    * 0 is a literal extent, never a hide. State-only pending an impostor
    * pass (see DEFAULT_EDGE_SIZE note). */
   edgeSize: Float32Array;
@@ -107,11 +115,16 @@ export class RepresentationLayer {
       size[p] = DEFAULT_SIZE;
       visible[p] = 1;
     }
-    const edgeColor = new Float32Array(nEdges * 3);
+    // The two edge-color halves seed IDENTICAL (the uniform base look), so
+    // the mixed render is byte-identical to the former single buffer.
+    const edgeColorA = new Float32Array(nEdges * 3);
+    const edgeColorB = new Float32Array(nEdges * 3);
     for (let e = 0; e < nEdges; e++) {
-      edgeColor[e * 3] = DEFAULT_EDGE_COLOR[0];
-      edgeColor[e * 3 + 1] = DEFAULT_EDGE_COLOR[1];
-      edgeColor[e * 3 + 2] = DEFAULT_EDGE_COLOR[2];
+      for (const buf of [edgeColorA, edgeColorB]) {
+        buf[e * 3] = DEFAULT_EDGE_COLOR[0];
+        buf[e * 3 + 1] = DEFAULT_EDGE_COLOR[1];
+        buf[e * 3 + 2] = DEFAULT_EDGE_COLOR[2];
+      }
     }
     const traceColor = new Float32Array(nTraceVertices * 3);
     for (let v = 0; v < nTraceVertices; v++) {
@@ -139,7 +152,7 @@ export class RepresentationLayer {
     const edgeStyle = new Float32Array(nEdges);
     const traceStyle = new Float32Array(nTraceVertices);
     this.state = {
-      color, size, visible, edgeColor, traceColor, edgeSize, traceSize,
+      color, size, visible, edgeColorA, edgeColorB, traceColor, edgeSize, traceSize,
       opacity, edgeOpacity, traceOpacity, orientation, offset, style, edgeStyle, traceStyle,
     };
   }
