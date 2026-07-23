@@ -42,7 +42,7 @@ export interface ChannelDecl {
  * Edge axis tokens say "bond" because that is the verb family's
  * established vocabulary (colorbonds/bondsize/bondopacity). */
 export const BIND_AXES = ["color", "size", "opacity"] as const;
-export const EDGE_AXES = ["bondcolor", "bondcolorends", "bondsize", "bondopacity"] as const;
+export const EDGE_AXES = ["bondcolor", "bondcolorends", "bondsize", "bondopacity", "bonddash"] as const;
 export const TRACE_AXES = ["tracecolor", "tracesize", "traceopacity"] as const;
 export const SCALAR_AXES = [...BIND_AXES, ...EDGE_AXES, ...TRACE_AXES] as const;
 export type ScalarAxis = (typeof SCALAR_AXES)[number];
@@ -72,6 +72,7 @@ export type BindAxis = ScalarAxis | VectorAxis;
 export const AXIS_DOMAIN: Record<BindAxis, "point" | "edge" | "vertex"> = {
   color: "point", size: "point", opacity: "point",
   bondcolor: "edge", bondcolorends: "edge", bondsize: "edge", bondopacity: "edge",
+  bonddash: "edge",
   tracecolor: "vertex", tracesize: "vertex", traceopacity: "vertex",
   orientation: "vertex",
   offset: "point",
@@ -82,6 +83,11 @@ export const AXIS_DOMAIN: Record<BindAxis, "point" | "edge" | "vertex"> = {
  * axis needs no mapping: [0,1] IS its full range. Single-sourced here for
  * every scalar→axis consumer (claudebind re-exports it). */
 export const BIND_SIZE_MAX = 6;
+/** bonddash axis: scalar 0..1 → dash scale 0..BIND_DASH_MAX (BIND_SIZE_MAX's
+ * exact pattern — a fixed visual range, NOT an interpretation of the
+ * values). 0 = solid; the top of the range is a long, unmistakable period
+ * (dash units are k-anchored world lengths — see DASH_SCALE, shaders.ts). */
+export const BIND_DASH_MAX = 4;
 
 /** `range` is the scalar normalization lens; NULL means a vector axis
  * (vectors are consumed raw — there is no range, by ruling). */

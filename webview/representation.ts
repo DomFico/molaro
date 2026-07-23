@@ -73,6 +73,13 @@ export interface RepresentationState {
   opacity: Float32Array;
   /** length E — per-EDGE alpha (bondopacity/bondopacityof both write it). */
   edgeOpacity: Float32Array;
+  /** length E — per-EDGE dash scale, header edge order (dashbonds/
+   * dashbondsof both write it — LWW per edge, like edgeSize). 0 = SOLID,
+   * the byte-identical default (the shader's dash block is skipped
+   * entirely); >0 dashes the tube with a world-length period proportional
+   * to the value (anchored to the scene's k, zoom-stable). Dash ⊥ hide and
+   * dash ⊥ opacity: it discards fragments by pattern, never by presence. */
+  edgeDash: Float32Array;
   /** length V — per-POLYLINE-VERTEX alpha; boundary segments interpolate. */
   traceOpacity: Float32Array;
   /** length 3V — per-POLYLINE-VERTEX raw 3-vector (the orientation axis: a
@@ -133,6 +140,9 @@ export class RepresentationLayer {
       traceColor[v * 3 + 2] = DEFAULT_TRACE_COLOR[2];
     }
     const edgeSize = new Float32Array(nEdges).fill(DEFAULT_EDGE_SIZE);
+    // Dash: zero = solid — the honest, byte-identical default (the shader
+    // skips the pattern entirely at 0).
+    const edgeDash = new Float32Array(nEdges);
     const traceSize = new Float32Array(nTraceVertices).fill(DEFAULT_TRACE_SIZE);
     const opacity = new Float32Array(nPoints).fill(DEFAULT_OPACITY);
     const edgeOpacity = new Float32Array(nEdges).fill(DEFAULT_OPACITY);
@@ -153,7 +163,7 @@ export class RepresentationLayer {
     const traceStyle = new Float32Array(nTraceVertices);
     this.state = {
       color, size, visible, edgeColorA, edgeColorB, traceColor, edgeSize, traceSize,
-      opacity, edgeOpacity, traceOpacity, orientation, offset, style, edgeStyle, traceStyle,
+      opacity, edgeOpacity, edgeDash, traceOpacity, orientation, offset, style, edgeStyle, traceStyle,
     };
   }
 }

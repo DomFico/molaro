@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import {
   AXIS_DOMAIN,
   BIND_AXES,
+  BIND_DASH_MAX,
   BIND_SIZE_MAX,
   EDGE_AXES,
   gateChannelBind,
@@ -36,6 +37,19 @@ test("the vector axes: orientation (vertex) and offset (point) — two entries, 
   assert.deepEqual([...VECTOR_AXES], ["orientation", "offset"]);
   assert.equal(AXIS_DOMAIN.orientation, "vertex");
   assert.equal(AXIS_DOMAIN.offset, "point");
+});
+
+test("bonddash: an ordinary scalar EDGE axis with a size-style fixed visual range", () => {
+  assert.ok((EDGE_AXES as readonly string[]).includes("bonddash"));
+  assert.equal(AXIS_DOMAIN.bonddash, "edge");
+  // the size-axis pattern: normalized [0,1] → 0..BIND_DASH_MAX (0 = solid)
+  assert.equal(BIND_DASH_MAX, 4);
+  const ok = gateChannelBind(scalar({ min: 0, max: 2.5 }), "bonddash", null, VALUES);
+  assert.deepEqual(ok, { range: [0, 2.5] });
+  const wide = gateChannelBind(scalar({ components: 3 }), "bonddash", null, [1, 0, 0]);
+  assert.ok("error" in wide && wide.error.includes("components: 3"), JSON.stringify(wide));
+  const series = gateChannelBind(scalar({ scope: "per_frame", min: 0, max: 1 }), "bonddash", null, VALUES);
+  assert.ok("error" in series && series.error.includes("per-frame"), JSON.stringify(series));
 });
 
 test("bondcolorends: an ordinary scalar EDGE axis at the gate (per-endpoint is the consumer's rule)", () => {

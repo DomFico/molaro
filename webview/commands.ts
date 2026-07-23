@@ -31,6 +31,7 @@ import type { TreeModel } from "./classification.ts";
 import {
   AXIS_DOMAIN,
   BIND_AXES,
+  BIND_DASH_MAX,
   BIND_SIZE_MAX,
   gateChannelBind,
   mapScalar,
@@ -308,6 +309,13 @@ export interface CommandContext {
    * undo, and buffers are complete; visible thickness lags the renderer. */
   sizeEdges(edgeIds: readonly number[], size: number): number;
   sizeTrace(vertexIds: readonly number[], size: number): number;
+  /** dashbonds/dashbondsof share the ONE edge-dash buffer (sizeEdges' exact
+   * shape): a constant dash scale per edge, 0 = solid. LWW per edge, one
+   * stroke, releases bonddash binding coverage. RENDERS today (the edge
+   * tube's dash block). */
+  dashEdges(edgeIds: readonly number[], dash: number): number;
+  /** The per-element sibling for the channel consumers (bake/bind). */
+  dashEdgesEach(edgeIds: readonly number[], values: readonly number[]): number;
   /** The OPACITY axis — the third scalar axis on the same writer/predicate
    * machinery. OPACITY ⊥ HIDE: 0 is invisible-but-present (in the scene,
    * pickable), never a hide. Alpha is a SEPARATE buffer per primitive — the
@@ -1047,6 +1055,46 @@ export function makeTraceSizeHandler(ctx: CommandContext): CommandHandler {
   };
 }
 
+/**
+ * `dashbonds <target> <scale>` / `dashbondsof <target> <scale>` — the DASH
+ * pair, cloning the bondsize pair verb-for-verb: same shared front half
+ * (resolveRepArgs; the value token rides parseSize — a non-negative number,
+ * negatives clamping to 0 with the clamp reported), same edgesMatching
+ * predicates (contained vs incident), same one-stroke/LWW/own-buffer
+ * discipline on the edgeDash buffer. 0 = SOLID (the base look, and a
+ * literal legal value — never a hide); >0 dashes the tube with a
+ * world-length period proportional to the scale (zoom-stable: zooming
+ * magnifies dashes with the geometry). Dash ⊥ color/size/opacity: it
+ * composes with all three on the same edge.
+ */
+export function makeDashBondsHandler(
+  ctx: CommandContext,
+  verb: "dashbonds" | "dashbondsof",
+): CommandHandler {
+  const both = verb === "dashbonds";
+  return (args: string): CommandResult => {
+    const r = resolveRepArgs(ctx, verb, args, "dash scale", "1.5", parseSize,
+      (w) => `not a dash scale: "${w}" — use a non-negative number (0 = solid, e.g. 1.5)`);
+    if ("status" in r) return r;
+    const edgeIds = edgesMatching(ctx.edges, r.points, both);
+    if (edgeIds.length === 0) {
+      return {
+        status: "nomatch",
+        message: both
+          ? `no edges with both endpoints in "${r.expr}"`
+          : `no edges touching "${r.expr}"`,
+      };
+    }
+    const n = ctx.dashEdges(edgeIds, r.value.size);
+    return {
+      status: "ok",
+      message: `set ${n} edges to dash ${r.value.size}${
+        r.value.clamped ? " (clamped to 0)" : ""
+      }${r.value.size === 0 ? " (solid)" : ""}`,
+    };
+  };
+}
+
 /** `set N <noun> to opacity A`, with the bound named when a clamp fired. */
 function opacityMsg(n: number, noun: string, v: { opacity: number; clampedTo: 0 | 1 | null }): string {
   return `set ${n} ${noun} to opacity ${v.opacity}${
@@ -1216,6 +1264,7 @@ export function applyScalarsToAxis(
       return ctx.colorEdgesEndsEach(ids, aFlat, bFlat);
     }
     case "bondsize": return ctx.sizeEdgesEach(ids, scalars.map((t) => t * BIND_SIZE_MAX));
+    case "bonddash": return ctx.dashEdgesEach(ids, scalars.map((t) => t * BIND_DASH_MAX));
     case "bondopacity": return ctx.opacityEdgesEach(ids, scalars);
     case "tracecolor": return ctx.colorTraceEach(ids, rgbOf(scalars));
     case "tracesize": return ctx.sizeTraceEach(ids, scalars.map((t) => t * BIND_SIZE_MAX));
@@ -1593,7 +1642,7 @@ export function makeStylesHandler(ctx: CommandContext): CommandHandler {
  */
 export function makeBakeHandler(ctx: CommandContext): CommandHandler {
   const usage =
-    "bake <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondcolorends|bondsize|bondopacity · polyline tracecolor|tracesize|traceopacity · orientation; e.g. bake all energy color 0 2.5)";
+    "bake <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondcolorends|bondsize|bondopacity|bonddash · polyline tracecolor|tracesize|traceopacity · orientation; e.g. bake all energy color 0 2.5)";
   return (args: string): CommandResult => {
     const r = resolveChannelAxis(ctx, "bake", usage, args);
     if ("status" in r) return r;
@@ -1642,7 +1691,7 @@ export function makeBakeHandler(ctx: CommandContext): CommandHandler {
  */
 export function makeBindHandler(ctx: CommandContext): CommandHandler {
   const usage =
-    "bind <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondcolorends|bondsize|bondopacity · polyline tracecolor|tracesize|traceopacity · orientation · offset; e.g. bind all energy color 0 2.5)";
+    "bind <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondcolorends|bondsize|bondopacity|bonddash · polyline tracecolor|tracesize|traceopacity · orientation · offset; e.g. bind all energy color 0 2.5)";
   return (args: string): CommandResult => {
     const r = resolveChannelAxis(ctx, "bind", usage, args);
     if ("status" in r) return r;
@@ -2448,6 +2497,10 @@ export const HELP_TEXT = [
   "               negatives clamp to 0; one undo stroke)",
   "  bondsize / bondsizeof / tracesize <expr> <n>   the same shapes on the",
   "               SIZE axis (edge/trace width stored; not yet drawn)",
+  "  dashbonds <expr> <scale>    dash contained edges: 0 = solid (the",
+  "               default), >0 sets a world-length dash period (zoom-",
+  "               stable; negatives clamp to 0; one undo stroke)",
+  "  dashbondsof <expr> <scale>  the incident sibling (either endpoint)",
   "  pointopacity <expr> <a>     fade those points (0..1; 0 is invisible-but-",
   "               PRESENT, never a hide; out-of-range clamps to 0/1)",
   "  bondopacity / bondopacityof / traceopacity <expr> <a>   the same shapes",
@@ -2465,9 +2518,10 @@ export const HELP_TEXT = [
   "               WITHIN an axis, axes coexist; one undo stroke;",
   "               a later direct write CLEARS its overlap, same stroke)",
   "               axes cover all three domains: point color|size|opacity,",
-  "               edge bondcolor|bondsize|bondopacity (value = ENDPOINT MEAN,",
-  "               contained edges) and bondcolorends (PER-ENDPOINT color:",
-  "               each half of the edge reads its own endpoint — no mean),",
+  "               edge bondcolor|bondsize|bondopacity|bonddash (value =",
+  "               ENDPOINT MEAN, contained edges) and bondcolorends",
+  "               (PER-ENDPOINT color: each half of the edge reads its own",
+  "               endpoint — no mean),",
   "               polyline tracecolor|tracesize|traceopacity",
   "               (each vertex reads ITS point); axis `orientation` takes a",
   "               VECTOR (3-wide) channel, raw (no range), onto polyline",
@@ -2591,6 +2645,16 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "tracesize",
     makeTraceSizeHandler(ctx),
     "size polyline vertices whose subgroup contains a resolved point (contained at subgroup grain): tracesize <target> <size>",
+  );
+  registry.register(
+    "dashbonds",
+    makeDashBondsHandler(ctx, "dashbonds"),
+    "dash every edge with BOTH endpoints in the target (contained; 0 = solid, >0 = world-length dash period): dashbonds <target> <scale>",
+  );
+  registry.register(
+    "dashbondsof",
+    makeDashBondsHandler(ctx, "dashbondsof"),
+    "dash every edge with AT LEAST ONE endpoint in the target (incident — reaches one hop outside): dashbondsof <target> <scale>",
   );
   registry.register(
     "pointopacity",

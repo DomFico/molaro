@@ -9134,7 +9134,227 @@ async function S54(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54 };
+// ==================== S55: dashbonds — per-edge solid/dashed =================
+// The dash primitive's STATE story (S18's paintSize shape on the edgeDash
+// buffer): contained/incident parity, 0 = solid as a literal legal value,
+// clamp, independence, LWW, undo, and the bonddash channel seam (bake/bind
+// through the shared gate, endpoint mean, size-style fixed range). The
+// PIXEL story (dashed < solid lit fraction) is the stage-3 prove-render.
+async function S55(): Promise<void> {
+  console.log("S55 — dashbonds/dashbondsof: per-edge dash scale (0 = solid; bonddash axis)");
+  const BUFS = ["edgeDash", "edgeSize", "edgeColorA", "edgeColorB", "edgeOpacity", "size", "color"] as const;
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const snap = (slot: string, buf: string) =>
+      d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.${buf}))`);
+    const equalsSnap = (slot: string, buf: string) =>
+      d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.${buf}, s=window.${slot};
+        if (c.length !== s.length) return false;
+        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) return false;
+        return true;
+      })()`);
+    const snapAll = async () => {
+      for (const b of BUFS) await snap(`__all_${b}`, b);
+    };
+    const changedBuffers = async (): Promise<string> => {
+      const out: string[] = [];
+      for (const b of BUFS) if (!(await equalsSnap(`__all_${b}`, b))) out.push(b);
+      return JSON.stringify(out);
+    };
+    /** Dash parity (S18's paintSize on the edgeDash buffer): the changed
+     * slot set must equal the verb's endpoint predicate over resolvePoints;
+     * `reach` counts changed edges leaning on an out-of-set endpoint. */
+    const paintDash = async (verb: "dashbonds" | "dashbondsof", expr: string, scale: string) => {
+      await snap("__preDash", "edgeDash");
+      const r = await cmd(`${verb} ${expr} ${scale}`);
+      const parity = await d.evaluate<{ changed: number; match: boolean; reach: number; value: boolean }>(`(()=>{
+        const v=${V}; const c=v.rep.state.edgeDash; const s=window.__preDash;
+        const changed=[];
+        for (let e=0;e<c.length;e++) if (c[e]!==s[e]) changed.push(e);
+        const pts=new Set(v.debug.resolvePoints(${JSON.stringify(expr)}));
+        const both=${verb === "dashbonds"};
+        const want=[]; let reach=0;
+        for (let e=0;e<v.edges.length;e++) {
+          const a=v.edges[e][0], b=v.edges[e][1];
+          if (both ? (pts.has(a)&&pts.has(b)) : (pts.has(a)||pts.has(b))) want.push(e);
+        }
+        for (const e of changed) {
+          const a=v.edges[e][0], b=v.edges[e][1];
+          if (!pts.has(a)||!pts.has(b)) reach++;
+        }
+        const w=Math.fround(${JSON.stringify(scale)});
+        const value=changed.every(e=>c[e]===Math.max(0,w));
+        return { changed: changed.length, reach, value,
+                 match: changed.length===want.length && changed.every((e,i)=>e===want[i]) };
+      })()`);
+      return { r, parity };
+    };
+    /** Every matched contained edge of expr carries exactly this dash. */
+    const edgesDashed = (expr: string, val: number) =>
+      d.evaluate<boolean>(`(()=>{
+        const v=${V}; const c=v.rep.state.edgeDash; const w=Math.fround(${val});
+        const pts=new Set(v.debug.resolvePoints(${JSON.stringify(expr)}));
+        for (let e=0;e<v.edges.length;e++) {
+          const a=v.edges[e][0], b=v.edges[e][1];
+          if (pts.has(a)&&pts.has(b) && c[e]!==w) return false;
+        }
+        return true;
+      })()`);
+
+    // -- (0) the base look: every edge solid (dash 0) ----------------------------
+    check("S55: at boot every edge is SOLID (edgeDash all zero — the byte-identical default)",
+      await d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.edgeDash;
+        for (let e=0;e<c.length;e++) if (c[e]!==0) return false;
+        return true;
+      })()`));
+    await snap("__pristineDash", "edgeDash");
+    const baseDepth = await undoDepth();
+
+    // -- (a) contained parity across target kinds --------------------------------
+    const bonds = await paintDash("dashbonds", "alpha", "1.5");
+    check("S55: dashbonds alpha 1.5 — dashes EXACTLY the both-endpoints edges (reach 0)",
+      bonds.r.status === "ok" && bonds.parity.match && bonds.parity.changed > 0 &&
+        bonds.parity.reach === 0 && bonds.parity.value,
+      JSON.stringify(bonds));
+    check("S55: ...message reports the action and count",
+      bonds.r.message === `set ${bonds.parity.changed} edges to dash 1.5`, bonds.r.message);
+    check("S55: ...as exactly ONE undo stroke", (await undoDepth()) === baseDepth + 1);
+
+    // -- (b) the incident reach ---------------------------------------------------
+    const bondsof = await paintDash("dashbondsof", "beta.group-*.*.t1", "2.5");
+    check("S55: dashbondsof beta.group-*.*.t1 — the either-endpoint set, ALL reaching out",
+      bondsof.r.status === "ok" && bondsof.parity.match && bondsof.parity.reach > 0 &&
+        bondsof.parity.value,
+      `${JSON.stringify(bondsof.r)} reach=${bondsof.parity.reach}`);
+
+    // -- (c) the single-point pin -------------------------------------------------
+    await snap("__quietDash", "edgeDash");
+    const depthPin = await undoDepth();
+    const pin = await cmd("dashbonds #124 2");
+    check("S55: dashbonds #124 → nomatch (no contained edge in a one-point set)",
+      pin.status === "nomatch" && pin.message === `no edges with both endpoints in "#124"`,
+      JSON.stringify(pin));
+    check("S55: ...byte- and depth-identical no-op",
+      (await equalsSnap("__quietDash", "edgeDash")) && (await undoDepth()) === depthPin);
+    const pinOf = await paintDash("dashbondsof", "#124", "2.25");
+    check("S55: dashbondsof #124 dashes exactly the incident edges",
+      pinOf.r.status === "ok" && pinOf.parity.match && pinOf.parity.reach > 0 &&
+        pinOf.r.message === "set 2 edges to dash 2.25",
+      JSON.stringify(pinOf));
+
+    // -- (d) 0 = SOLID, a literal legal write; dash ⊥ hide ------------------------
+    await snap("__preZeroVis", "visible");
+    const visBefore = await visibleCount(d);
+    const zero = await cmd("dashbonds alpha 0");
+    check("S55: dashbonds alpha 0 — a literal write, reported as solid (never a hide)",
+      zero.status === "ok" && /^set \d+ edges to dash 0 \(solid\)$/.test(zero.message),
+      JSON.stringify(zero));
+    check("S55: ...the dash buffer really is 0 there", await edgesDashed("alpha", 0));
+    check("S55: ...hide-state is BYTE-IDENTICAL and the scene count unchanged",
+      (await equalsSnap("__preZeroVis", "visible")) && (await visibleCount(d)) === visBefore);
+
+    // -- (e) the negative clamp ---------------------------------------------------
+    const neg = await cmd("dashbonds gamma -2");
+    check("S55: a negative scale clamps to 0 and the message says both things",
+      neg.status === "ok" && /^set \d+ edges to dash 0 \(clamped to 0\) \(solid\)$/.test(neg.message),
+      JSON.stringify(neg));
+
+    // -- (f) independence: the dash verbs touch ONLY edgeDash --------------------
+    await snapAll();
+    await cmd("dashbonds gamma 1.75");
+    check("S55: dashbonds touches ONLY edgeDash", (await changedBuffers()) === `["edgeDash"]`,
+      await changedBuffers());
+    // and the OTHER edge verbs leave edgeDash alone
+    await snapAll();
+    await cmd("colorbonds gamma #313233");
+    await cmd("bondsize gamma 1.25");
+    await cmd("bondopacity gamma 0.7");
+    check("S55: color/size/opacity edge verbs leave edgeDash untouched",
+      await equalsSnap("__all_edgeDash", "edgeDash"));
+
+    // -- (g) LWW + undo -----------------------------------------------------------
+    while ((await undoDepth()) > baseDepth) {
+      await d.ctrlZ();
+      await sleep(60);
+    }
+    check("S55: unwinding every stroke restores the pristine (all-solid) buffer",
+      await equalsSnap("__pristineDash", "edgeDash"));
+    await cmd("dashbonds alpha 5");
+    await cmd("dashbonds alpha.group-0.subgroup-0 7");
+    check("S55: re-dashing an overlap overwrites those edges (LWW)",
+      await edgesDashed("alpha.group-0.subgroup-0", 7));
+    await d.evaluate(`void document.activeElement?.blur?.()`);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S55: undo restores the PREVIOUS scale (5), not the base look",
+      await edgesDashed("alpha.group-0.subgroup-0", 5));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S55: a second undo restores solid (0)", await edgesDashed("alpha", 0));
+
+    // -- (h) the bonddash channel seam: bake + bind through the shared gate ------
+    await snap("__preBake", "edgeDash");
+    const depthBake = await undoDepth();
+    const bake = await cmd("bake all energy bonddash 0 1");
+    check("S55: bake … bonddash lands through the shared gate (endpoint mean)",
+      bake.status === "ok" && /baked "energy" → bonddash on \d+ edges .*endpoint mean/.test(bake.message),
+      JSON.stringify(bake));
+    const baked = await d.evaluate<{ changed: number; inRange: boolean }>(`(()=>{
+      const c=${V}.rep.state.edgeDash, s=window.__preBake;
+      let changed=0, inRange=true;
+      for (let e=0;e<c.length;e++) {
+        if (c[e]!==s[e]) changed++;
+        if (c[e] < 0 || c[e] > 4) inRange=false;
+      }
+      return { changed, inRange };
+    })()`);
+    check("S55: ...the baked values land on edgeDash inside 0..BIND_DASH_MAX",
+      baked.changed > 0 && baked.inRange && (await undoDepth()) === depthBake + 1,
+      JSON.stringify(baked));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S55: one Ctrl+Z reverses the bake", await equalsSnap("__preBake", "edgeDash"));
+    const bind = await cmd("bind all energy bonddash 0 1");
+    check("S55: bind … bonddash registers and applies",
+      bind.status === "ok" && /bound "energy" → bonddash on \d+ edges .*live/.test(bind.message),
+      JSON.stringify(bind));
+    check("S55: ...the bindings listing carries it, endpoint mean",
+      /energy → bonddash on "all" — \d+ edges · range 0\.\.1 · endpoint mean/.test(
+        (await cmd("bindings")).message),
+      (await cmd("bindings")).message);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S55: one Ctrl+Z removes the binding AND restores the buffer",
+      (await equalsSnap("__preBake", "edgeDash")) &&
+        (await cmd("bindings")).message === "no bindings");
+
+    // -- (i) quiet paths ----------------------------------------------------------
+    await snapAll();
+    const depthQuiet = await undoDepth();
+    const quiet: [string, string][] = [
+      ["dashbonds nothere 2", "nomatch"],
+      ["dashbonds alpha abc", "error"],
+      ["dashbonds", "error"],
+      ["dashbondsof 2", "error"], // one chunk: a scale but no target
+      ["dashbonds alpha.[x] 2", "error"], // [ reserved
+    ];
+    for (const [text, status] of quiet) {
+      const r = await cmd(text);
+      check(`S55: ${text} → ${status}`, r.status === status, JSON.stringify(r));
+    }
+    check("S55: ...none of them wrote a single component anywhere",
+      (await changedBuffers()) === "[]");
+    check("S55: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet);
+
+    await d.screenshot(`${REPORT}/S55_dash.png`);
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -9173,7 +9393,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
   S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
-  S53: "full", S54: "full",
+  S53: "full", S54: "full", S55: "full",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

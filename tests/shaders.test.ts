@@ -10,6 +10,8 @@ import assert from "node:assert/strict";
 
 import {
   ALPHA_PASS_CHUNK,
+  DASH_DUTY,
+  DASH_SCALE,
   IMPOSTOR_DEPTH_DEFINE,
   IMPOSTOR_SHADE_CHUNK,
   STYLE_VERTEX_CHUNK,
@@ -112,6 +114,28 @@ test("edge tube: declares the per-end color PAIR and mixes by the along-axis coo
 
 test("edge tube: the collapse classifies by the DIMMEST end, like every two-ended pass", () => {
   assert.match(edgeTubeShaders().vertex, /inAlphaPass\(min\(iColorA\.a, iColorB\.a\)\)/);
+});
+
+// -- the dash primitive (per-edge solid/dashed) --------------------------------
+
+test("edge tube: the dash block is GUARDED (0 = solid skips it — byte-identical)", () => {
+  const { vertex, fragment } = edgeTubeShaders();
+  assert.match(vertex, /attribute float iDash;/);
+  // the dash unit is anchored to k in the VERTEX stage, so the fragment's
+  // period is a plain world length (zoom- and dataset-scale-stable)
+  assert.match(vertex, /vDash = iDash \* uWorldPerSize;/);
+  assert.match(fragment, /if \(vDash > 0\.0\) \{/);
+  assert.match(fragment, /fract\(vT \/ period\)/);
+  // the pattern is a discard — never a color change, never a depth write
+  const block = fragment.slice(fragment.indexOf("if (vDash > 0.0)"));
+  assert.match(block.slice(0, 220), /discard;/);
+  assert.equal(fragment.split("gl_FragDepth").length - 1, 1,
+    "still exactly one depth write — the dash adds none");
+  // period and duty are THE module constants, not shader-local numbers
+  assert.match(fragment, new RegExp(`vDash \\* ${DASH_SCALE.toFixed(1).replace(".", "\\.")}`));
+  assert.match(fragment, new RegExp(`> ${DASH_DUTY.toFixed(2).replace(".", "\\.")}\\) discard`));
+  assert.ok(DASH_DUTY > 0 && DASH_DUTY < 1, "duty is a fraction of the period");
+  assert.ok(DASH_SCALE > 0);
 });
 
 // -- the junction trim (B′ §2) ------------------------------------------------

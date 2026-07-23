@@ -109,6 +109,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
   // space-mixing regression is undetectable (a vacuous guard).
   const traceVertices: number[] = fixture?.traceVertices ?? [0];
   const sizeOps: { kind: "points" | "edges" | "trace"; ids: number[]; size: number }[] = [];
+  const dashOps: { ids: number[]; dash: number }[] = [];
   const opacityOps: { kind: "points" | "edges" | "trace"; ids: number[]; opacity: number }[] = [];
   const ctx: CommandContext = {
     hierarchy,
@@ -412,6 +413,14 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
       opacityOps.push({ kind: "trace", ids: [...vertexIds], opacity });
       return vertexIds.length;
     },
+    dashEdges: (edgeIds, dash) => {
+      dashOps.push({ ids: [...edgeIds], dash });
+      return edgeIds.length;
+    },
+    dashEdgesEach: (edgeIds, values) => {
+      elemEachOps.push({ axis: "bonddash", ids: [...edgeIds], values: [...values] });
+      return edgeIds.length;
+    },
     runAnalysisMod: (mod, points, expr, params) => {
       // params only appears on the pushed object when present, so existing
       // deepEqual assertions (which never pass params) stay unchanged.
@@ -429,7 +438,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     registry: createCommandRegistry(ctx),
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
-    colorOps, colorEachOps, eachOps, edgeOps, endsOps, traceOps, sizeOps, opacityOps, modRuns, modRunCode, rmArms, sels,
+    colorOps, colorEachOps, eachOps, edgeOps, endsOps, traceOps, sizeOps, dashOps, opacityOps, modRuns, modRunCode, rmArms, sels,
     bindCalls, bindingReg, orientationOps, offsetOps, elemEachOps, styleOps, shapeOps, shapeActive, bgOps,
   };
 }
@@ -1018,6 +1027,65 @@ test("the bicolor verbs: nomatch / usage / parse / trailing-junk paths write NOT
     assert.equal(withColor.status, "error", verb);
   }
   assert.equal(endsOps.length, 0, "no path wrote anything");
+});
+
+// -- the dash pair: dashbonds / dashbondsof (per-edge solid/dashed) ---------------
+
+test("dashbonds/dashbondsof: the bondsize pair's exact predicates on the dash buffer", () => {
+  const { registry, dashOps, sizeOps } = makeRegistry();
+  // contained: c0 = {0,1} → edge 0 only
+  const bonds = registry.runCommand("dashbonds c0 1.5");
+  assert.equal(bonds.status, "ok");
+  assert.equal(bonds.message, "set 1 edges to dash 1.5");
+  assert.deepEqual(dashOps[0], { ids: [0], dash: 1.5 });
+  // incident: edge 1 reaches out of c0
+  const bondsof = registry.runCommand("dashbondsof c0 2");
+  assert.equal(bondsof.message, "set 2 edges to dash 2");
+  assert.deepEqual(dashOps[1].ids, [0, 1]);
+  assert.equal(sizeOps.length, 0, "the size buffer is never touched (dash ⊥ size)");
+});
+
+test("dashbonds: 0 is SOLID (a literal legal value) and negatives clamp to 0", () => {
+  const { registry, dashOps } = makeRegistry();
+  const zero = registry.runCommand("dashbonds c0 0");
+  assert.equal(zero.status, "ok");
+  assert.equal(zero.message, "set 1 edges to dash 0 (solid)");
+  assert.deepEqual(dashOps[0], { ids: [0], dash: 0 });
+  const neg = registry.runCommand("dashbonds c0 -2");
+  assert.equal(neg.message, "set 1 edges to dash 0 (clamped to 0) (solid)");
+  assert.deepEqual(dashOps[1], { ids: [0], dash: 0 });
+});
+
+test("the dash verbs: nomatch / bad value / usage / parse errors write NOTHING", () => {
+  const { registry, dashOps } = makeRegistry();
+  for (const verb of ["dashbonds", "dashbondsof"]) {
+    const nomatch = registry.runCommand(`${verb} nothere 1`);
+    assert.equal(nomatch.status, "nomatch", verb);
+    const bad = registry.runCommand(`${verb} c0 notanumber`);
+    assert.equal(bad.status, "error", verb);
+    assert.match(bad.message, /not a dash scale: "notanumber"/);
+    const bare = registry.runCommand(verb);
+    assert.equal(bare.status, "error", verb);
+    assert.match(bare.message, new RegExp(`${verb} <target> <dash scale>`));
+    const parseErr = registry.runCommand(`${verb} c0.[x] 1`);
+    assert.equal(parseErr.status, "error", verb);
+  }
+  // contained pin: a one-point set holds no edge
+  const pin = registry.runCommand("dashbonds c0.g0.s0.a 2");
+  assert.equal(pin.status, "nomatch");
+  assert.equal(pin.message, `no edges with both endpoints in "c0.g0.s0.a"`);
+  assert.equal(dashOps.length, 0, "no path wrote anything");
+});
+
+test("dash verbs are sealed built-ins with help lines", () => {
+  const { registry } = makeRegistry();
+  for (const verb of ["dashbonds", "dashbondsof"]) {
+    assert.ok(registry.verbs().includes(verb), verb);
+    assert.ok(registry.isBuiltin(verb), `${verb} is sealed as a built-in`);
+    assert.match(registry.runCommand(`help ${verb}`).message, new RegExp(`^${verb} — `));
+  }
+  assert.match(HELP_TEXT, /dashbonds <expr> <scale>/);
+  assert.match(HELP_TEXT, /dashbondsof <expr> <scale>/);
 });
 
 test("bicolor verbs are sealed built-ins with help lines", () => {
@@ -1672,6 +1740,25 @@ test("A-1 bake: edge axes use the ENDPOINT MEAN, contained edges only", () => {
   const none = registry.runCommand("bake c1 energy bondsize 0 2.5");
   assert.equal(none.status, "nomatch");
   assert.match(none.message, /no edges contained in "c1"/);
+});
+
+test("bonddash bake/bind: endpoint MEAN through the size-style fixed range, edge id space", () => {
+  const { registry, elemEachOps, bindingReg } = makeRegistry();
+  // energy raw [0, 1.25, 2.5] over 0..2.5: edge0 mean t=0.25 → dash 1;
+  // edge1 mean t=0.75 → dash 3 (t × BIND_DASH_MAX — bondsize's pattern)
+  const r = registry.runCommand("bake all energy bonddash 0 2.5");
+  assert.equal(r.status, "ok");
+  assert.equal(r.message, 'baked "energy" → bonddash on 2 edges of "all" (frame 4, range 0..2.5, endpoint mean)');
+  assert.deepEqual(elemEachOps, [{ axis: "bonddash", ids: [0, 1], values: [1, 3] }]);
+  const b = registry.runCommand("bind all energy bonddash 0 2.5");
+  assert.equal(b.status, "ok");
+  assert.match(b.message, /bound "energy" → bonddash on 2 edges of "all" .*endpoint mean.*live/);
+  assert.deepEqual(
+    bindingReg.all().map((x) => ({ axis: x.axis, points: x.points })),
+    [{ axis: "bonddash", points: [0, 1] }],
+  );
+  const list = registry.runCommand("bindings").message;
+  assert.match(list, /energy → bonddash on "all" — 2 edges · range 0\.\.2\.5 · endpoint mean/);
 });
 
 test("bondcolorends bake: PER-ENDPOINT scalars (no mean) reach the ends writer", () => {

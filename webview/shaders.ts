@@ -24,6 +24,17 @@
 /** The define name selecting depth variant 2 (analytic gl_FragDepth). */
 export const IMPOSTOR_DEPTH_DEFINE = "IMPOSTOR_DEPTH";
 
+/** Dash period per stored dash unit, in multiples of the scene's k
+ * (uWorldPerSize — the ONE world-anchoring constant every radius already
+ * rides, so a dash unit means the same thing on every dataset scale).
+ * `edgeDash d` → period = d × DASH_SCALE × k world units: world-length,
+ * zoom-STABLE (zooming magnifies dashes with the geometry — it never
+ * changes how many fit along an edge). At d=1 the period is 6k — twice the
+ * default sphere radius (3k), so default-look dashes read at sphere scale. */
+export const DASH_SCALE = 6.0;
+/** Lit fraction of each dash period (the rest is gap). */
+export const DASH_DUTY = 0.6;
+
 /**
  * Shared vertex-shader chunk: the two sizing uniforms + the one projection
  * function. `uWorldPerSize` is `k` (world units per size-buffer unit);
@@ -195,6 +206,8 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
       // along-axis coordinate, so the split is a world-space plane through
       // the tube's midpoint, not a corner interpolation
       attribute vec4 iColorA; attribute vec4 iColorB;
+      // per-EDGE dash scale (0 = solid); rep-write cadence, like iRadius
+      attribute float iDash;
       attribute float iStyle;
       // endpoint SPHERE sizes (rep-write cadence, like iRadius): the tube is
       // trimmed analytically to the sphere it meets — see the fragment shader
@@ -208,6 +221,7 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
       varying float vDA; varying float vDB;
       varying float vDepthA; varying float vDepthB;
       varying float vRsA; varying float vRsB;
+      varying float vDash;
       void main() {
         vStyleParams = styleParams(iStyle);
         float radius = uWorldPerSize * iRadius;
@@ -232,6 +246,7 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
           vColorA = vec4(0.0); vColorB = vec4(0.0); vU = 0.0; vRadius = 0.0;
           vT = 0.0; vLen = 1.0; vDA = 0.0; vDB = 0.0;
           vDepthA = 1.0; vDepthB = 1.0; vRsA = 0.0; vRsB = 0.0;
+          vDash = 0.0;
           return;
         }
         vec3 axis = seg / len;
@@ -252,6 +267,9 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
         vT = t; vLen = len; vDA = dA; vDB = dB;
         vDepthA = -mvA.z; vDepthB = -mvB.z;
         vRsA = rsA; vRsB = rsB;
+        // the dash unit is ANCHORED to k here (world units per stored dash
+        // unit), so the fragment's period is a plain world length
+        vDash = iDash * uWorldPerSize;
         gl_Position = projectionMatrix * vec4(pos, 1.0);
       }`,
     fragment: `
@@ -263,6 +281,7 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
       varying float vDA; varying float vDB;
       varying float vDepthA; varying float vDepthB;
       varying float vRsA; varying float vRsB;
+      varying float vDash;
       void main() {
         // BICOLOR: the fragment's half is decided by the SAME along-axis
         // world coordinate the depth mix already rides — s=0 at end A, 1 at
@@ -293,6 +312,15 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
           // cylinder wall — the SAME s the color mix rides
           nz = sqrt(max(1.0 - u2, 0.0));
           depthBase = mix(vDepthA, vDepthB, s);
+        }
+        // DASH: a world-length on/off pattern over the SAME along-axis
+        // coordinate (vT is in view units = world lengths; vDash is already
+        // k-anchored by the vertex stage). Applied uniformly over vT — caps
+        // and trim zones included — AFTER the surface discards, so a solid
+        // edge (vDash == 0) skips the block entirely: byte-identical.
+        if (vDash > 0.0) {
+          float period = vDash * ${DASH_SCALE.toFixed(1)};
+          if (fract(vT / period) > ${DASH_DUTY.toFixed(2)}) discard;
         }
       #ifdef ${IMPOSTOR_DEPTH_DEFINE}
         // analytic surface depth: nearer than the axis/centre by nz*radius

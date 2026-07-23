@@ -47,7 +47,7 @@ import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
 import { DEFAULT_HOLD_COMMAND, applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
 import { BindingRegistry, type Binding } from "./bindings.ts";
-import { AXIS_DOMAIN, BIND_SIZE_MAX, mapScalar, OFFSET_AXIS, ORIENTATION_AXIS, SCALAR_AXES, VECTOR_AXES, type BindAxis } from "./channelmap.ts";
+import { AXIS_DOMAIN, BIND_DASH_MAX, BIND_SIZE_MAX, mapScalar, OFFSET_AXIS, ORIENTATION_AXIS, SCALAR_AXES, VECTOR_AXES, type BindAxis } from "./channelmap.ts";
 import { bindTypedResult } from "./claudebind.ts";
 import { PLOT_RESULT_KINDS } from "./claudemodel.ts";
 import { parseTypedResult } from "./claudemodel.ts";
@@ -679,12 +679,14 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
     // treatment on the edge pass; rep-write cadence only, like iRadius
     const iColorA = new THREE.InstancedBufferAttribute(new Float32Array(nEdges * 4), 4);
     const iColorB = new THREE.InstancedBufferAttribute(new Float32Array(nEdges * 4), 4);
+    // per-edge dash scale (0 = solid) — rep-write cadence, like iRadius
+    const iDash = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
     // endpoint sphere sizes for the analytic junction trim — REP-WRITE
     // cadence (pointsize writes only), exactly like iRadius; never per flip
     const iSizeA = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
     const iSizeB = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
     const iStyle = new THREE.InstancedBufferAttribute(new Float32Array(nEdges), 1);
-    for (const a of [iStart, iEnd, iVisible, iRadius, iColorA, iColorB, iSizeA, iSizeB, iStyle]) {
+    for (const a of [iStart, iEnd, iVisible, iRadius, iColorA, iColorB, iDash, iSizeA, iSizeB, iStyle]) {
       a.setUsage(THREE.DynamicDrawUsage);
     }
     edgeGeo.setAttribute("iStart", iStart);
@@ -693,6 +695,7 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
     edgeGeo.setAttribute("iRadius", iRadius);
     edgeGeo.setAttribute("iColorA", iColorA);
     edgeGeo.setAttribute("iColorB", iColorB);
+    edgeGeo.setAttribute("iDash", iDash);
     edgeGeo.setAttribute("iSizeA", iSizeA);
     edgeGeo.setAttribute("iSizeB", iSizeB);
     edgeGeo.setAttribute("iStyle", iStyle);
@@ -752,6 +755,15 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
       else for (let e = 0; e < nEdges; e++) r[e] = es[e];
       iRadius.needsUpdate = true;
     };
+    /** write iDash for these edge ids from rep.state.edgeDash — rep-write
+     * cadence only, exactly like iRadius (undefined = all). */
+    const fillEdgeDash = (ids?: readonly number[]): void => {
+      const ed = rep.state.edgeDash;
+      const dst = iDash.array as Float32Array;
+      if (ids) for (const e of ids) dst[e] = ed[e];
+      else for (let e = 0; e < nEdges; e++) dst[e] = ed[e];
+      iDash.needsUpdate = true;
+    };
     const fillEdgeVisibility = (): void => {
       const v = iVisible.array as Float32Array;
       for (let e = 0; e < nEdges; e++) {
@@ -777,6 +789,7 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
     };
     fillEdgeColors(); // seed the GPU arrays with the base look
     fillEdgeSizes();
+    fillEdgeDash();
     fillEdgeEndSizes();
     return {
       objects: [new THREE.Mesh(edgeGeo, env.materials.edges)],
@@ -785,6 +798,7 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
         edgeColorA: fillEdgeColors,
         edgeColorB: fillEdgeColors,
         edgeOpacity: fillEdgeColors, // one RGBA interleave serves color + opacity
+        edgeDash: fillEdgeDash,
         edgeSize: fillEdgeSizes,
         edgeStyle: (ids) => {
           const buf = iStyle.array as Float32Array;
@@ -2523,6 +2537,13 @@ async function main(): Promise<void> {
           for (const id of b.points) buf[id] = t(id) * BIND_SIZE_MAX;
           break;
         }
+        case "bonddash": {
+          // dash re-derives like a size: endpoint-MEAN raw through the lens
+          // (raw() above), then the fixed 0..BIND_DASH_MAX visual range
+          const buf = rep.state.edgeDash;
+          for (const id of b.points) buf[id] = t(id) * BIND_DASH_MAX;
+          break;
+        }
         default: {
           const buf = b.axis === "opacity" ? rep.state.opacity
             : b.axis === "bondopacity" ? rep.state.edgeOpacity : rep.state.traceOpacity;
@@ -2531,7 +2552,7 @@ async function main(): Promise<void> {
       }
       const repChannel = (
         { color: "color", size: "size", opacity: "opacity",
-          bondsize: "edgeSize", bondopacity: "edgeOpacity",
+          bondsize: "edgeSize", bondopacity: "edgeOpacity", bonddash: "edgeDash",
           tracecolor: "traceColor", tracesize: "traceSize", traceopacity: "traceOpacity",
         } as const
       )[b.axis];
@@ -2664,6 +2685,10 @@ async function main(): Promise<void> {
       return n;
     }));
   const sizeEdgesEach = withBindingClear("bondsize", makeRepEachWriter(rep.state.edgeSize, 1, repWrite("edgeSize")));
+  // The dash writers (bonddash axis): the size writers' exact shape on the
+  // edgeDash buffer — broadcast for the verbs, per-element for bake/bind.
+  const dashEdges = withBindingClear("bonddash", makeRepWriter(rep.state.edgeDash, 1, repWrite("edgeDash")));
+  const dashEdgesEach = withBindingClear("bonddash", makeRepEachWriter(rep.state.edgeDash, 1, repWrite("edgeDash")));
   const opacityEdgesEach = withBindingClear("bondopacity", makeRepEachWriter(rep.state.edgeOpacity, 1, repWrite("edgeOpacity")));
   const colorTraceEach = withBindingClear("tracecolor", makeRepEachWriter(rep.state.traceColor, 3, repWrite("traceColor")));
   const sizeTraceEach = withBindingClear("tracesize", makeRepEachWriter(rep.state.traceSize, 1, repWrite("traceSize")));
@@ -3225,6 +3250,8 @@ async function main(): Promise<void> {
     sizePoints,
     sizeEdges,
     sizeTrace,
+    dashEdges,
+    dashEdgesEach,
     opacityPoints,
     opacityEdges,
     opacityTrace,
@@ -3285,6 +3312,7 @@ async function main(): Promise<void> {
     setBackground: () => {},
     colorEdges: () => 0, colorTrace: () => 0,
     sizePoints: () => 0, sizeEdges: () => 0, sizeTrace: () => 0,
+    dashEdges: () => 0, dashEdgesEach: () => 0,
     opacityPoints: () => 0, opacityEdges: () => 0, opacityTrace: () => 0,
     runAnalysisMod: () => {}, // never reached — mod-invocation verbs refused first
     armRmDeletion: () => {}, // never reached — rm refused first
