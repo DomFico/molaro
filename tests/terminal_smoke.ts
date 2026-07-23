@@ -161,9 +161,11 @@ try {
     /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "focused 1 points",
     JSON.stringify(lastLine));
 
-  // @name.<leaf-pred>: filter the seeded selection through the real relay.
-  // The solvent seed at this harness's N=6000 holds 1,600 tiny subgroups,
-  // one anchor each; "solvent-bath" is its group label (match-anywhere).
+  // @name.<leaf-pred>: filter a committed bulk selection through the real
+  // relay. Boot commits NOTHING (the auto-seeded bulk selections are gone), so
+  // the selection is CREATED here through the terminal first — one category
+  // member. The bulk category at this harness's N=6000 holds 1,600 tiny
+  // subgroups, one anchor each; "solvent-bath" is its group label.
   const runLine = async (text: string) => {
     await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
     await clickInput();
@@ -173,7 +175,11 @@ try {
     const all = await logLines();
     return all[all.length - 1];
   };
-  // REVERSED: the filter sees the seed's stored MEMBERSHIP — one category
+  lastLine = await runLine("create_sele solvent [solvent]");
+  check("(setup) the bulk selection is created explicitly through the relay",
+    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === `created "solvent" — 4800 points`,
+    JSON.stringify(lastLine));
+  // the filter sees the selection's stored MEMBERSHIP — one category
   // member labeled "solvent"; descendant tokens beneath it match nothing
   lastLine = await runLine("view @solvent.anchor");
   check("a descendant token nomatches through the relay (membership-only)",
@@ -278,13 +284,25 @@ try {
     JSON.stringify(lastLine));
   await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
   await clickInput();
-  await d.key("Tab", "Tab", 9); // empty prompt → the verb list
+  await d.key("Tab", "Tab", 9); // empty prompt → the verb pool. The registry
+  // (built-ins + workspace mods) now exceeds COMPLETION_LIST_CAP, so the
+  // uniform display-volume rule prints the count-and-hint, not the full list
+  // (pre-existing red on main once the mod count crossed the cap).
   await sleep(400);
   lines2 = await logLines();
   lastLine = lines2[lines2.length - 1];
-  check("Tab at an empty prompt lists the verbs, help included",
+  check("Tab at an empty prompt applies the display-volume cap (count-and-hint)",
+    /term-echo/.test(lastLine?.cls ?? "") &&
+      /^\d+ matches\s+— type to narrow$/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  await d.insertText("h"); // a typed prefix narrows to a listable verb set
+  await d.key("Tab", "Tab", 9);
+  await sleep(400);
+  lines2 = await logLines();
+  lastLine = lines2[lines2.length - 1];
+  check("…and a typed prefix lists the narrowed verbs, help included",
     /term-echo/.test(lastLine?.cls ?? "") && /\bhelp\b/.test(lastLine?.text ?? "") &&
-      /\bview\b/.test(lastLine?.text ?? ""),
+      /\bhide\b/.test(lastLine?.text ?? ""),
     JSON.stringify(lastLine));
 
   // create_sele through the real relay: commit, top-section block, collision

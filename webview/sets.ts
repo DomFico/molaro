@@ -890,9 +890,10 @@ export class SelectionModel {
     return sel.set.resolvedPoints();
   }
 
-  /** Startup prefab: a pre-made VISIBLE committed selection (NOT undoable —
-   * it is initial state, e.g. one per bulk category so the user can hide the
-   * environment with one right-click; nothing is hidden by default). */
+  /** Prefab: a pre-made VISIBLE committed selection (NOT undoable — it is
+   * initial state, not a user edit). Boot no longer calls this (no selections
+   * are auto-committed at startup); it remains the API for constructing a
+   * prefab selection outside the undo history (e.g. harness setup). */
   seed(name: string, entries: Entry[]): CommittedSelection {
     const set = new NodeSet(this.hierarchy);
     set.addMany(entries);

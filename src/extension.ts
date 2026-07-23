@@ -20,6 +20,7 @@ import * as vscode from "vscode";
 import { randomBytes } from "node:crypto";
 import { buildWebviewCsp } from "./webviewcsp.ts";
 import { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { ProducerBroker } from "./broker.ts";
@@ -181,13 +182,22 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
-/** The workspace mod directory (persistence lives here; nothing else does). */
-function modsDir(): string | null {
-  const ws = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
-  return ws ? join(ws, ".molaro", "mods") : null;
+/** The mods directory (persistence lives here; nothing else does): the
+ * `molaro.modsDir` setting when set (a leading `~` expands to the home
+ * directory), else the GLOBAL default `~/.molaro/mods`. Never null — a global
+ * directory exists independent of any workspace folder, so mods survive
+ * across workspaces and opening a bare file still has somewhere to save. */
+function modsDir(): string {
+  const configured = vscode.workspace.getConfiguration("molaro").get<string>("modsDir")?.trim();
+  if (configured) {
+    if (configured === "~") return homedir();
+    if (configured.startsWith("~/")) return join(homedir(), configured.slice(2));
+    return configured;
+  }
+  return join(homedir(), ".molaro", "mods");
 }
 
-/** Startup scan of `.molaro/mods/*.py` — parse each with the shared pure
+/** Startup scan of `<modsDir()>/*.py` — parse each with the shared pure
  * parser; a malformed file is SKIPPED with a reported warning (one bad mod
  * must never break startup or the registry). Loaded files get origin
  * "workspace" (assigned here, never read from the file). */
@@ -196,12 +206,12 @@ function loadWorkspaceMods(
   modPaths?: Map<string, string>,
 ): AnalysisMod[] {
   const dir = modsDir();
-  if (!dir) return [];
   let files: string[];
   try {
+    mkdirSync(dir, { recursive: true }); // the global dir always exists
     files = readdirSync(dir).filter((f) => f.endsWith(".py")).sort();
   } catch {
-    return []; // no .molaro/mods — nothing to load
+    return []; // unreadable/uncreatable mods dir — nothing to load
   }
   modPaths?.clear();
   const mods: AnalysisMod[] = [];
@@ -246,14 +256,14 @@ function rgbToHex([r, g, b]: readonly [number, number, number]): string {
 }
 
 /** The save path a later authoring step writes through: serialize a mod to
- * `.molaro/mods/<name>.py`. Analysis mods only (serializeMod refuses R
+ * `<modsDir()>/<name>.py`. Analysis mods only (serializeMod refuses R
  * mods — they are code, not files). The write itself lives in src/modfile.ts,
- * which is vscode-free and therefore testable — it preserves any prior file
- * rather than clobbering it, and reports what it displaced. */
+ * which is vscode-free and therefore testable — it creates the directory if
+ * missing, preserves any prior file rather than clobbering it, and reports
+ * what it displaced. modsDir() is never null (a global dir always exists), so
+ * there is no "no workspace folder" failure mode any more. */
 export function saveWorkspaceMod(mod: Mod): ModWriteResult {
-  const dir = modsDir();
-  if (!dir) throw new Error("no workspace folder — nowhere to save mods");
-  return saveModFile(dir, mod.name, serializeMod(mod));
+  return saveModFile(modsDir(), mod.name, serializeMod(mod));
 }
 
 async function pickFile(): Promise<vscode.Uri | undefined> {
@@ -773,7 +783,39 @@ function openPanel(
     }
   });
 
+  // -- mod hot-reload: watch <modsDir()>/*.py so a hand-edit to a mod file
+  // lands without reopening the panel (mods were previously parsed+registered
+  // only at panel creation; the run path never re-reads disk). Create/change/
+  // delete each re-scan (debounced — an editor save can fire several events)
+  // and re-post through the EXISTING modsLoaded re-push: the webview's install
+  // path REPLACES a re-pushed mod's recipe entry and its command handler (the
+  // handler closes over the mod object), so the next run uses the new code.
+  // A file deleted on disk stays registered until rm/delete_mod or reload —
+  // deletion keeps its own gated reconcile path; the watcher only refreshes
+  // what the scan finds. The dir is ensured first: a watcher on a not-yet-
+  // existing directory would never fire.
+  mkdirSync(modsDir(), { recursive: true });
+  const modsWatcher = vscode.workspace.createFileSystemWatcher(
+    new vscode.RelativePattern(vscode.Uri.file(modsDir()), "*.py"),
+  );
+  let modsReloadTimer: ReturnType<typeof setTimeout> | null = null;
+  const scheduleModsReload = (): void => {
+    if (modsReloadTimer) clearTimeout(modsReloadTimer);
+    modsReloadTimer = setTimeout(() => {
+      modsReloadTimer = null;
+      void panel.webview.postMessage({
+        type: "modsLoaded",
+        mods: loadWorkspaceMods(producerLog, modPaths),
+      });
+    }, 200);
+  };
+  modsWatcher.onDidCreate(scheduleModsReload);
+  modsWatcher.onDidChange(scheduleModsReload);
+  modsWatcher.onDidDelete(scheduleModsReload);
+
   panel.onDidDispose(() => {
+    if (modsReloadTimer) clearTimeout(modsReloadTimer);
+    modsWatcher.dispose();
     broker.dispose();
     terminal?.dispose();
     plot?.dispose();

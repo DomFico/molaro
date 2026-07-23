@@ -41,7 +41,7 @@ import {
   RepresentationLayer,
   type RepresentationState,
 } from "./representation.ts";
-import { bulkCategories, buildTree } from "./classification.ts";
+import { buildTree } from "./classification.ts";
 import { HOLD_MS, flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
@@ -3210,12 +3210,8 @@ async function main(): Promise<void> {
   });
   updateCommitBtn();
 
-  // -- convenience default: one PRE-MADE committed selection per bulk category
-  // (neutral name = the category's label) so the environment can be hidden
-  // with one right-click. NOTHING is hidden initially — the user decides.
-  for (const c of bulkCategories(header)) {
-    model.seed(header.categories[c] ?? `category ${c}`, [{ level: "category", id: c }]);
-  }
+  // No selections are auto-committed at boot — the user (or a command) creates
+  // every selection explicitly.
   registry.visibilityChange();
 
   // -- picking + 3D gestures + keys --------------------------------------------

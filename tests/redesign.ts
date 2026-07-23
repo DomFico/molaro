@@ -4,7 +4,7 @@ import { DEFAULT_HOLD_COMMAND } from "../webview/commands.ts";
  * Interaction-redesign validation — drives the REAL webview over the REAL
  * synthetic producer via CDP and asserts the new model end-to-end:
  *
- *   S0  startup: pre-hidden bulk selection + mirrored top section (shared tree)
+ *   S0  startup: no auto-committed selections + mirrored top section (shared tree)
  *   S1  bottom section: build pending (click/paint/backtrack), right-click focus
  *   S2  commit + top section operate: focus, hide (purple), edit mode, rename
  *   S3  3D: plain-click focus; Ctrl+left subgroup / Ctrl+right point select;
@@ -144,6 +144,24 @@ const expandBottomCategory = (d: E2EDriver, re: string) =>
   })()`);
 const pause = (d: E2EDriver) =>
   d.evaluate(`(()=>{const p=document.getElementById('playpause'); if(p && p.textContent==='pause')p.click();})()`);
+/** Boot no longer auto-commits ANY selection (the auto-seeded bulk-category
+ * prefabs are gone) — a scenario that exercises a committed "solvent"
+ * selection creates it EXPLICITLY here, reproducing the old prefab shape
+ * exactly: a visible committed selection named after the bulk category,
+ * holding ONE category-level entry, NOT on the undo stack (model.seed is the
+ * retained prefab API). The category id is read off the rendered tree row by
+ * label, never hardcoded. */
+const seedSolvent = async (d: E2EDriver): Promise<void> => {
+  const ok = await d.evaluate<boolean>(`(()=>{
+    const row=[...document.querySelectorAll('#tree-host .tree-row.selectable')]
+      .find(r=>r.dataset.level==='category' && /solvent/.test(r.textContent));
+    if(!row) return false;
+    ${V}.model.seed('solvent', [{level:'category', id:Number(row.dataset.id)}]);
+    return true;
+  })()`);
+  if (!ok) throw new Error("seedSolvent: no solvent category row in the tree");
+  await sleep(120); // the committed section re-renders on the model's emit
+};
 /** Count decidedly-green pixels within the 3D CANVAS region of a base64 PNG
  * (green-overlay evidence; excludes the panel's green row highlights). */
 const greenCount = (d: E2EDriver, b64: string) =>
@@ -200,24 +218,29 @@ async function withDriver(
 
 // ============================ S0: startup & mirror ===========================
 async function S0(): Promise<void> {
-  console.log("S0 — startup: all visible, pre-made bulk selection, flat top section");
+  console.log("S0 — startup: all visible, NO auto-committed selections, flat top section");
   await withDriver(async (d) => {
     const list = await committed(d);
-    check("S0: one pre-made committed selection at startup", list.length === 1, JSON.stringify(list));
-    check("S0: it is the bulk category, VISIBLE, neutral category name",
-      list[0]?.name === "solvent" && list[0]?.hidden === false, JSON.stringify(list[0]));
+    check("S0: NO committed selections at startup (nothing auto-seeded)",
+      list.length === 0, JSON.stringify(list));
     const vis = await visibleCount(d);
     check("S0: nothing is hidden by default — the user decides", vis === 6000, `visible=${vis}`);
     check("S0: pending target starts empty", (await pendingEntries(d)) === 0);
     check("S0: commit button disabled while pending is empty",
       await d.evaluate<boolean>(`document.getElementById('commit-btn').disabled`));
 
-    // one right-click on the pre-made selection hides the environment
+    // create the bulk selection EXPLICITLY (boot no longer seeds it) —
+    // then one right-click on it hides the environment
+    await seedSolvent(d);
+    const seeded = await committed(d);
+    check("S0: the explicitly created bulk selection commits, VISIBLE, category name",
+      seeded.length === 1 && seeded[0]?.name === "solvent" && seeded[0]?.hidden === false,
+      JSON.stringify(seeded));
     const head0 = (await selHead(d, "/solvent/"))!;
     await d.rightClick(head0.x, head0.y);
     await sleep(150);
     check("S0: one action hides the bulk environment",
-      (await visibleCount(d)) === 6000 - list[0].pts, `visible=${await visibleCount(d)}`);
+      (await visibleCount(d)) === 6000 - seeded[0].pts, `visible=${await visibleCount(d)}`);
     const head = await selHead(d, "/solvent/");
     check("S0: hidden selection turns purple",
       head !== null && /hidden-sel/.test(head.cls), head?.cls ?? "missing");
@@ -403,6 +426,7 @@ async function S1(): Promise<void> {
 async function S2(): Promise<void> {
   console.log("S2 — commit; top section: focus / hide / edit / rename");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the bulk selection the scenario's indices assume
     // build + commit
     const alpha = (await bottomRow(d, "/alpha/"))!;
     await d.click(alpha.x, alpha.y);
@@ -541,6 +565,7 @@ async function S2(): Promise<void> {
 async function S3(): Promise<void> {
   console.log("S3 — 3D: click-focus; Ctrl+left subgroup / Ctrl+right point; commit button");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the bulk selection the framing detour hides
     const pIdx = await d.evaluate<number>(`${V}.hierarchy.pointsOf({level:'category',id:0})[0]`);
     const proj = await d.evaluate<{ x: number; y: number; front: boolean }>(
       `${V}.debug.projectPoint(${pIdx})`);
@@ -729,6 +754,7 @@ async function S3(): Promise<void> {
 async function S4(): Promise<void> {
   console.log("S4 — system-wide undo (Ctrl+Z) and Escape");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the bulk selection the scenario's indices assume
     const alpha = (await bottomRow(d, "/alpha/"))!;
     const beta = (await bottomRow(d, "/beta/"))!;
 
@@ -793,6 +819,7 @@ async function S4(): Promise<void> {
 async function S5(): Promise<void> {
   console.log("S5 — pulses, hidden-wins, brackets");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the bulk selection hidden-wins right-clicks
     // green pulse breathes: uStrength swings over half a period
     const alpha = (await bottomRow(d, "/alpha/"))!;
     await d.click(alpha.x, alpha.y);
@@ -1038,6 +1065,7 @@ async function S6(): Promise<void> {
 async function S8(): Promise<void> {
   console.log("S8 — split brackets, per-member hide, clear button, relayout");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the bulk selection the scenario's indices assume
     const alpha = (await bottomRow(d, "/alpha/"))!;
     const beta = (await bottomRow(d, "/beta/"))!;
     const gamma = (await bottomRow(d, "/gamma/"))!;
@@ -1339,6 +1367,7 @@ async function S8(): Promise<void> {
 async function S9(): Promise<void> {
   console.log("S9 — command layer: view <expr> ≡ the equivalent focus gesture");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the committed @solvent the parity checks address
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     // camera pose = position + target (6 numbers); parity compares both
@@ -1828,6 +1857,7 @@ async function S9(): Promise<void> {
 async function S10(): Promise<void> {
   console.log("S10 — flash-parity: flashed rows == mounted rows ∩ resolved set, all shapes");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the second committed selection the final count assumes
     // -- setup: a committed selection with MIXED-LEVEL members (a subgroup
     // entry + two point entries of different types), its member list open,
     // and the bottom tree expanded alpha → group-0 → subgroup-0 drilled —
@@ -1977,6 +2007,7 @@ async function S10(): Promise<void> {
 async function S11(): Promise<void> {
   console.log("S11 — create_sele: the mutation template (parity with the gesture commit)");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the "solvent" name the collision check clashes with
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
@@ -2145,6 +2176,7 @@ async function S11(): Promise<void> {
 async function S12(): Promise<void> {
   console.log("S12 — hide/show: the mutating pair over per-selection hidden state");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the committed @solvent the hide/show pair drives
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
@@ -2450,6 +2482,7 @@ async function S12(): Promise<void> {
 async function S13(): Promise<void> {
   console.log("S13 — all/@all, hide's commit rule (principle 3), ls, rename");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the visible bulk selection the setup builds on
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
@@ -2599,6 +2632,7 @@ async function S13(): Promise<void> {
 async function S14(): Promise<void> {
   console.log("S14 — add/remove: membership mutation at whole-member granularity");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the untargeted "solvent" selection the edit checks use
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
@@ -2803,6 +2837,7 @@ async function S14(): Promise<void> {
 async function S15(): Promise<void> {
   console.log("S15 — colorpoints: the first representation verb (constant per-point color)");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the committed @solvent in the parity matrix
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
@@ -2948,6 +2983,7 @@ async function S15(): Promise<void> {
 async function S16(): Promise<void> {
   console.log("S16 — colorbonds/colorbondsof: the edge verbs (contained vs incident)");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the committed @solvent in the parity matrix
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
@@ -3131,6 +3167,7 @@ async function S16(): Promise<void> {
 async function S17(): Promise<void> {
   console.log("S17 — colortrace: per-vertex polyline color, mapped up to subgroup grain");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the committed @solvent the nomatch case targets
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
@@ -3304,6 +3341,7 @@ async function S18(): Promise<void> {
   console.log("S18 — the size family: pointsize/bondsize/bondsizeof/tracesize (size ⊥ hide)");
   const BUFS = ["color", "edgeColor", "traceColor", "size", "edgeSize", "traceSize"] as const;
   await withDriver(async (d) => {
+    await seedSolvent(d); // the committed @solvent in the verb matrix
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
@@ -3532,6 +3570,7 @@ async function S19(): Promise<void> {
     "opacity", "edgeOpacity", "traceOpacity",
   ] as const;
   await withDriver(async (d) => {
+    await seedSolvent(d); // the committed @solvent in the verb matrix
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
@@ -3911,6 +3950,7 @@ async function S20(): Promise<void> {
 async function S21(): Promise<void> {
   console.log("S21 — rainbow: the first recipe (per-element values through the recipe registry)");
   await withDriver(async (d) => {
+    await seedSolvent(d); // the @solvent the pixel proof hides to clear the bulk
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
@@ -4252,6 +4292,7 @@ async function S24(): Promise<void> {
   // mapping, error paths, and the MANDATORY pixel proof. claude-bind messages
   // are injected through the same message path the relay delivers them on.
   await withDriver(async (d) => {
+    await seedSolvent(d); // the @solvent the pixel proof hides to clear the bulk
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
@@ -4785,6 +4826,7 @@ async function S27(): Promise<void> {
   // ---- part 1, the "/" route: the per-point mod end-to-end — index
   // alignment, the fail-closed no-write, one-stroke undo, and the pixel proof.
   await withDriver(async (d) => {
+    await seedSolvent(d); // the @solvent the pixel proof hides to clear the bulk
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
@@ -8051,9 +8093,10 @@ async function S49(): Promise<void> {
       (await d.evaluate<string>(`String((window.__VIEWER__ && window.__VIEWER__.holdCommand) ?? "(absent)")`)) === "(absent)");
 
     // -- a point in NO committed selection refuses, visibly --------------------
-    // Boot seeds one committed selection per bulk category, so "no selection" has
-    // to be CONSTRUCTED — the naive version of this check passed for the wrong
-    // reason, resolving to a seeded selection nobody made.
+    // Boot commits NOTHING now (the auto-seeded bulk selections are gone), so
+    // "no selection" is already true at startup; the delete-all sweep stays as
+    // defensive construction — this check must never again pass by resolving
+    // to a selection nobody made.
     await d.evaluate(`(() => {
       const m = ${V}.model;
       for (const c of [...m.committed()]) m.deleteSelection(c.id);

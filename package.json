@@ -22,6 +22,11 @@
           "default": "claude-sonnet-5",
           "description": "Anthropic model the analysis assistant uses."
         },
+        "molaro.modsDir": {
+          "type": "string",
+          "default": "",
+          "description": "Directory where mods (*.py) are stored, loaded from, and saved to. A leading ~ expands to your home directory. Empty (the default) means the global ~/.molaro/mods, shared across all workspaces. The directory is created on first use."
+        },
         "molaro.assistant.useStub": {
           "type": "boolean",
           "default": false,
