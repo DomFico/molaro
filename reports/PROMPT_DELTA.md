@@ -17,6 +17,18 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
 
 ## Since the last prompt pass
 
+### `data.trajectory` is LAZY after streaming (Phase 2c / incr 50, prompt fix `d225c11`)
+> **STATUS: CONSUMED 2026-07-23** — folded directly (not deferred): `claudeprompt.ts`
+> line ~53 no longer says `data.trajectory` is "already loaded in memory".
+- **What changed under the prompt:** Phase 2 streams seekable trajectories; `data.trajectory`
+  is now materialized on FIRST access (full `md.load` + center, cached), not eagerly at
+  construction. The old wording ("already loaded in memory") was a truthfulness drift.
+- **Teach (done):** it is the real, full trajectory, materialized on first access; for a long
+  trajectory loading every frame is a real one-time cost, so reach for it only when you need
+  the coordinates. The `if data.trajectory is None:` fail-closed guidance is unchanged.
+- **No API alternative for mods** — a mod that needs coordinates has only `data.trajectory`,
+  so this is a cost note, not a "prefer X instead" redirect. Kept to one clause.
+
 ### `smooth` / `delay` — offset-axis temporal-position mods (commits a46165a, 00b0301)
 > **STATUS: CONSUMED 2026-07-23** — now in claudeprompt.ts (the "## Moving positions over
 > time — the `offset` axis" section: the mechanism `shown = raw + offset`, `smooth`/`delay`,
