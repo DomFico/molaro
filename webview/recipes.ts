@@ -125,6 +125,14 @@ export interface AnalysisMod extends ModCommon {
    * (the mod that declares `# channel:` this name) runs first — ONE level only.
    * Resolved statically against the registry (resolveChannelDependency). */
   requiresChannel?: string;
+  /** Optional iff produces = edges: the produced-edge GROUP name an interactive
+   * run authors into (the `# edge-group:` header line). Defaults to the mod's
+   * own name at invocation — one group per mod unless the header says
+   * otherwise. Like `# channel:` this is the webview-side single source; it is
+   * threaded to the producer via the run_mod request (edge_group) and merely
+   * ECHOED back. A re-run of the same mod re-declares the SAME group (the
+   * recompute-and-see loop), never accumulates new ones. */
+  edgeGroup?: string;
   /** Python source defining `compute(data, target_indices)` — or
    * `compute(data, target_indices, params)` when the mod declares parameters.
    * Executed in the producer against the resident dataset handle. Returns a flat
@@ -216,6 +224,11 @@ const NAME_RE = /^[a-z][a-z0-9_-]*$/;
  * channel-name rule (contract.ts parseChannelDelta), which re-validates it
  * producer-side, so the two can never disagree. */
 const CHANNEL_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
+/** A produced-edge GROUP name: the same single-token shape as a channel name
+ * (a distinct rule that happens to coincide today — kept separate so tightening
+ * one never silently tightens the other). It must stay a clean token because a
+ * later increment addresses groups from the command grammar. */
+const EDGE_GROUP_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
 export type ModParseResult =
   | { ok: true; mod: AnalysisMod }
@@ -274,6 +287,17 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
   } else if (channel !== undefined) {
     return { ok: false, error: "channel is only valid on produces: channel mods" };
   }
+  // An optional produced-edge group name — edges mods only (the header would
+  // be dead weight anywhere else, and dead headers rot into misdirection).
+  // Absent ⟹ the invocation defaults the group to the mod's own name.
+  const edgeGroup = meta["edge-group"];
+  if (produces === "edges") {
+    if (edgeGroup !== undefined && !EDGE_GROUP_RE.test(edgeGroup)) {
+      return { ok: false, error: `edge-group must be a single token ${EDGE_GROUP_RE} (got "${edgeGroup}")` };
+    }
+  } else if (edgeGroup !== undefined) {
+    return { ok: false, error: "edge-group is only valid on produces: edges mods" };
+  }
   // P-3: an optional required channel (any produces kind may require one). Just
   // token-validated here; whether a PROVIDER exists (and is one level deep) is a
   // property of the whole registry, resolved by resolveChannelDependency.
@@ -306,6 +330,7 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
     produces: produces as ModProduces, // validated against MOD_PRODUCES above
     ...(produces === "per-point-scalar" ? { axis: axis as ModAxis } : {}),
     ...(produces === "channel" ? { channel } : {}),
+    ...(produces === "edges" && edgeGroup !== undefined ? { edgeGroup } : {}),
     ...(requiresChannel !== undefined ? { requiresChannel } : {}),
     code,
     ...(params.length ? { params } : {}),
@@ -331,6 +356,7 @@ export function serializeMod(mod: Mod): string {
     `# produces: ${mod.produces}`,
     ...(mod.axis ? [`# axis: ${mod.axis}`] : []),
     ...(mod.channel ? [`# channel: ${mod.channel}`] : []),
+    ...(mod.edgeGroup ? [`# edge-group: ${mod.edgeGroup}`] : []),
     ...(mod.requiresChannel ? [`# requires-channel: ${mod.requiresChannel}`] : []),
     ...(mod.params ?? []).map(
       (p) => `# param: ${p.name} ${p.type}${p.default !== undefined ? ` ${p.default}` : ""}`,
@@ -501,7 +527,7 @@ export function validateModValues(
   | { ok: true; commands: string[] }
   | { ok: true; figure: { png: string; width: number; height: number; axes: FigureAxes[] } }
   | { ok: true; channel: Channel; warning?: string }
-  | { ok: true; edges: [number, number][] }
+  | { ok: true; edges: [number, number][]; group?: string }
   | { ok: false; error: string } {
   if (expect.produces === "channel") {
     // The producer already DECLARED + stored the channel (its data rides
@@ -545,14 +571,41 @@ export function validateModValues(
     // (each must be in [0, nPoints)), and a self-loop (i === j — an edge needs
     // two distinct endpoints). The wire carries DATA only — an edge is [i, j],
     // NEVER appearance (contract/SPEC.md); styling stays one layer up in the
-    // existing colorbonds/dashbonds verbs. Never partial: any violation → error.
-    if (!Array.isArray(values)) {
-      return { ok: false, error: `an edges mod must return a list of [i, j] index pairs, not ${typeof values}` };
+    // existing verbs / the produced-edge writer family. Never partial: any
+    // violation → error.
+    //
+    // TWO accepted shapes, ONE pair rule:
+    //   - a bare list of pairs — the mod's COMPUTE-RETURN shape, judged
+    //     rule-for-rule identically to the producer's own gate
+    //     (tests/test_edge_validation_parity.py feeds both sides bare lists);
+    //   - the producer's run_mod ECHO `{group, pairs}` — the transport wrapper
+    //     around the same pairs, carrying back the group token the request
+    //     threaded (the webview name stays the single source; the echo lets
+    //     the caller assert nothing drifted in flight).
+    let group: string | undefined;
+    let list: unknown = values;
+    if (values && typeof values === "object" && !Array.isArray(values) &&
+        "pairs" in (values as Record<string, unknown>)) {
+      // ONLY a dict carrying `pairs` is the wrapper — any other dict falls
+      // through to the list check and gets the compute-return error, so a mod
+      // returning a stray dict hears the same refusal in both gates.
+      const m = values as Record<string, unknown>;
+      if (m.group !== undefined && m.group !== null) {
+        if (typeof m.group !== "string" || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(m.group)) {
+          return { ok: false, error: `edges group must be a single token (got "${String(m.group)}")` };
+        }
+        group = m.group;
+      }
+      list = m.pairs;
     }
+    if (!Array.isArray(list)) {
+      return { ok: false, error: `an edges mod must return a list of [i, j] index pairs, not ${typeof list}` };
+    }
+    const values_ = list;
     const n = expect.nPoints;
     const edges: [number, number][] = [];
-    for (let k = 0; k < values.length; k++) {
-      const e = values[k];
+    for (let k = 0; k < values_.length; k++) {
+      const e = values_[k];
       if (!Array.isArray(e) || e.length !== 2) {
         return { ok: false, error: `edges[${k}] must be a pair [i, j]` };
       }
@@ -570,7 +623,7 @@ export function validateModValues(
       }
       edges.push([a, b]);
     }
-    return { ok: true, edges };
+    return { ok: true, edges, ...(group !== undefined ? { group } : {}) };
   }
   if (expect.produces === "figure") {
     // THE one figure validator (plotmodel.validateFigure) — shared with the

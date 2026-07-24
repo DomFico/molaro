@@ -83,6 +83,7 @@ import {
   traceTubeShaders,
 } from "./shaders.ts";
 import { listStyles, styleIndex, stylesAsUniformArray } from "./styles.ts";
+import { ProducedEdgeLayer, PRODUCED_EDGE_INITIAL_CAPACITY } from "./producededges.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
 const PLAYBACK_FPS = 30;
@@ -216,6 +217,10 @@ interface PassEnv {
   };
   /** Polyline vertex → point index, header order (computed once in main). */
   traceVertices: readonly number[];
+  /** Host-owned truth for MID-SESSION AUTHORED edges (produces:edges run
+   * interactively) — drawn ONLY by the isolated produced-edge pass, never by
+   * EdgeTubePass; header.edges and the rep.state edge buffers never see it. */
+  producedEdges: ProducedEdgeLayer;
   /** The shared sizing uniform OBJECTS (one instance each — values can't fork). */
   sizing: SizingUniforms;
   /** The packed style array — ONE object, shared by every pass that shades. */
@@ -256,8 +261,12 @@ interface ShapeGenerator<B extends BuiltPass = BuiltPass> {
    * binding, so the honest empty picture never reads as a silent failure. */
   requiresAxis?: BindAxis;
   /** The element kind the pass draws over; "overlay" marks the two built-in
-   * decorations (never pluggable — they exist to shadow the point pass). */
-  elementKind: "point" | "edge" | "vertex" | "overlay";
+   * decorations (never pluggable — they exist to shadow the point pass).
+   * "produced-edge" is the mid-session-authored edge pass's OWN domain —
+   * deliberately NOT "edge", so `shape edges …` / setActive("edge", …) can
+   * never disable it (it is always-enabled and non-selectable, like the
+   * overlays but growable). */
+  elementKind: "point" | "edge" | "vertex" | "overlay" | "produced-edge";
   /** Build the pass, or null when the dataset has no such elements. */
   build(env: PassEnv): B | null;
 }
@@ -816,6 +825,182 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
         sizeA: iSizeA.version,
         sizeB: iSizeB.version,
       }),
+    };
+  },
+};
+
+/**
+ * The PRODUCED-EDGE pass — EdgeTubePass's growable, isolated sibling for
+ * MID-SESSION AUTHORED edges (a `produces: edges` mod run interactively).
+ *
+ * Same shader program (env.materials.edges — so the translucent twin, both
+ * depth variants, the junction trim, dash, and styles all come for free), the
+ * same 12 attribute names, the same slot ≡ id rule — but its instance
+ * attributes come from the ProducedEdgeLayer's buffers, not rep.state, and the
+ * geometry GROWS: when the layer's capacity crosses the GPU's, every instanced
+ * attribute is reallocated at the layer's (doubled) capacity, the old slots
+ * copied VERBATIM with `.set(old.array)` (no id remap), and `setAttribute`
+ * swaps them on the SHARED geometry object — which both the opaque mesh and
+ * its alpha twin draw, so a grow needs no twin re-registration. The count of
+ * attribute NAMES never changes on a grow, so the vertex-attribute budget
+ * (measured 14; this pass declares 12) needs no re-check.
+ *
+ * Registered ONCE at boot, ALWAYS-ENABLED, elementKind "produced-edge" — a
+ * non-selectable domain, so setActive("edge", …) never disables it. With
+ * instanceCount 0 (no active group) it draws nothing at zero cost, leaving
+ * the scene byte-identical to a viewer without this pass.
+ *
+ * onFrameFlip refills iStart/iEnd from the SHARED position attribute exactly
+ * like fillEdges — and because setPositionsFor combines the offset axis into
+ * that attribute BEFORE the flip dispatch, produced edges track offset-bound
+ * endpoints for free. The ONLY rep-channel subscription is the point `size`
+ * (the junction end-sizes — a real cross-pass point channel); it must never
+ * subscribe to any edge* key, or the covalent writers would leak in.
+ */
+type ProducedAttrName =
+  | "iStart" | "iEnd" | "iVisible" | "iRadius" | "iColorA" | "iColorB"
+  | "iDash" | "iSizeA" | "iSizeB" | "iStyle";
+/** The appearance slots fillAppearance copies 1:1 from the layer (iVisible is
+ * NOT here — it is DERIVED through fillVisibleMask, never copied raw). */
+type ProducedAppearance = "colorA" | "colorB" | "radius" | "dash" | "sizeA" | "sizeB" | "style";
+interface ProducedEdgePass extends BuiltPass {
+  /** Grow-if-needed + full refill + instanceCount reset — called after EVERY
+   * layer mutation that can change shape (declare/activate). */
+  sync(): void;
+  /** Targeted re-upload of one appearance slot from the CURRENT layer buffer
+   * (ids undefined = all allocated) — the produced writers' onWrite. */
+  fillAppearance(kind: ProducedAppearance, ids?: readonly number[]): void;
+  /** Re-derive the effective visibility mask (group-active ∧ per-edge slot ∧
+   * endpoint hidden-wins). */
+  fillVisibility(): void;
+  /** GPU instance capacity (test seam — the capacity-crossing guard). */
+  gpuCapacity(): number;
+  /** The drawn instance count (test seam). */
+  instanceCount(): number;
+  /** Raw attribute arrays (test seam): proves pre-grow slots survive a grow
+   * verbatim and post-grow writes land in the CURRENT allocation. */
+  attrArray(name: ProducedAttrName): Float32Array;
+}
+const producedEdgeTubesGenerator: ShapeGenerator<ProducedEdgePass> = {
+  name: "produced-edge-tubes",
+  elementKind: "produced-edge",
+  build(env): ProducedEdgePass {
+    const layer = env.producedEdges;
+    const rep = env.rep;
+    const positionAttr = env.positionAttr;
+    const edgeGeo = new THREE.InstancedBufferGeometry();
+    edgeGeo.instanceCount = 0; // nothing authored yet — draws nothing
+    // static base quad — identical to EdgeTubePass (same shader program)
+    edgeGeo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(4 * 3), 3));
+    edgeGeo.setAttribute("aCorner", new THREE.Float32BufferAttribute([-1, 0, 1, 0, -1, 1, 1, 1], 2));
+    edgeGeo.setIndex([0, 2, 1, 1, 2, 3]);
+    const STRIDES: Record<ProducedAttrName, number> = {
+      iStart: 3, iEnd: 3, iVisible: 1, iRadius: 1, iColorA: 4, iColorB: 4,
+      iDash: 1, iSizeA: 1, iSizeB: 1, iStyle: 1,
+    };
+    const NAMES = Object.keys(STRIDES) as ProducedAttrName[];
+    let cap = 0;
+    const attrs = {} as Record<ProducedAttrName, THREE.InstancedBufferAttribute>;
+    /** THE GPU RESIZE SEAM (the only one): fresh attributes at the layer's
+     * capacity, old slots copied verbatim, swapped on the shared geometry.
+     * (The replaced attributes' GL buffers linger until context teardown —
+     * bounded by the geometric doubling: O(log n) reallocations, ~2× peak.) */
+    const growTo = (n: number): void => {
+      if (n <= cap) return;
+      for (const name of NAMES) {
+        const next = new THREE.InstancedBufferAttribute(new Float32Array(n * STRIDES[name]), STRIDES[name]);
+        next.setUsage(THREE.DynamicDrawUsage);
+        const old = attrs[name];
+        if (old) (next.array as Float32Array).set(old.array as Float32Array); // verbatim — same offsets, no id remap
+        attrs[name] = next;
+        edgeGeo.setAttribute(name, next); // the SHARED geometry — mesh + alpha twin both see it
+      }
+      cap = n;
+    };
+    // Allocate the floor up front so the geometry always carries every named
+    // attribute the shader program declares (a program attribute with no
+    // buffer is exactly the silent-death class the budget note warns about).
+    growTo(PRODUCED_EDGE_INITIAL_CAPACITY);
+    /** endpoint re-copy from the CURRENT positions — flip cadence, exactly
+     * fillEdges but over the layer's pairs and allocated span. */
+    const fillEndpoints = (): void => {
+      const n = layer.allocated;
+      if (n === 0) return;
+      const pos = positionAttr.array as Float32Array;
+      const pairs = layer.pairs;
+      const s = attrs.iStart.array as Float32Array;
+      const t = attrs.iEnd.array as Float32Array;
+      for (let e = 0; e < n; e++) {
+        const a3 = pairs[e * 2] * 3;
+        const b3 = pairs[e * 2 + 1] * 3;
+        const e3 = e * 3;
+        s[e3] = pos[a3]; s[e3 + 1] = pos[a3 + 1]; s[e3 + 2] = pos[a3 + 2];
+        t[e3] = pos[b3]; t[e3 + 1] = pos[b3 + 1]; t[e3 + 2] = pos[b3 + 2];
+      }
+      attrs.iStart.needsUpdate = true;
+      attrs.iEnd.needsUpdate = true;
+    };
+    /** layer buffer → GPU attribute, 1:1 by slot. Reads the layer's CURRENT
+     * buffer through the map below at CALL time — never a captured array —
+     * so a post-grow fill can never touch a stale allocation. */
+    const LAYER_BUF: Record<ProducedAppearance, { attr: ProducedAttrName; buf: () => Float32Array; stride: number }> = {
+      colorA: { attr: "iColorA", buf: () => layer.colorA, stride: 4 },
+      colorB: { attr: "iColorB", buf: () => layer.colorB, stride: 4 },
+      radius: { attr: "iRadius", buf: () => layer.radius, stride: 1 },
+      dash: { attr: "iDash", buf: () => layer.dash, stride: 1 },
+      sizeA: { attr: "iSizeA", buf: () => layer.sizeA, stride: 1 },
+      sizeB: { attr: "iSizeB", buf: () => layer.sizeB, stride: 1 },
+      style: { attr: "iStyle", buf: () => layer.style, stride: 1 },
+    };
+    const fillAppearance = (kind: ProducedAppearance, ids?: readonly number[]): void => {
+      const { attr, buf, stride } = LAYER_BUF[kind];
+      const src = buf();
+      const dst = attrs[attr].array as Float32Array;
+      if (ids) {
+        for (const e of ids) {
+          for (let c = 0; c < stride; c++) dst[e * stride + c] = src[e * stride + c];
+        }
+      } else {
+        const n = layer.allocated * stride;
+        for (let i = 0; i < n; i++) dst[i] = src[i];
+      }
+      attrs[attr].needsUpdate = true;
+    };
+    const fillVisibility = (): void => {
+      layer.fillVisibleMask(rep.state.visible, attrs.iVisible.array as Float32Array);
+      attrs.iVisible.needsUpdate = true;
+    };
+    const sync = (): void => {
+      growTo(layer.capacity);
+      fillEndpoints();
+      for (const kind of Object.keys(LAYER_BUF) as ProducedAppearance[]) fillAppearance(kind);
+      fillVisibility();
+      // instanceCount = the active draw span, reset on EVERY declaration /
+      // (de)activation — always ≤ cap because growTo(layer.capacity) ran
+      // first and the layer never allocates an id beyond its capacity.
+      edgeGeo.instanceCount = layer.activeSpan();
+    };
+    return {
+      objects: [new THREE.Mesh(edgeGeo, env.materials.edges)],
+      onFrameFlip: fillEndpoints,
+      onRepWrite: {
+        // the junction trim's cross-pass POINT-size subscription — the ONLY
+        // rep channel this pass hears (never any edge* key: covalent edge
+        // writes must not reach produced slots)
+        size: (pointIds) => {
+          if (layer.allocated === 0) return;
+          layer.reseedEndSizes(rep.state.size, pointIds);
+          fillAppearance("sizeA");
+          fillAppearance("sizeB");
+        },
+      },
+      onVisibilityChange: fillVisibility,
+      sync,
+      fillAppearance,
+      fillVisibility,
+      gpuCapacity: () => cap,
+      instanceCount: () => edgeGeo.instanceCount,
+      attrArray: (name) => attrs[name].array as Float32Array,
     };
   },
 };
@@ -1635,8 +1820,13 @@ async function main(): Promise<void> {
   // instance each, across all three geometry materials
   const styleUniforms = makeStyleUniforms();
   const materials = makeGeometryMaterials(sizing, styleUniforms, depthVariant);
+  // Mid-session authored edges: the host-side layer is created EMPTY — until a
+  // produces:edges mod runs, the produced pass draws zero instances and the
+  // scene is byte-identical to a viewer without it.
+  const producedLayer = new ProducedEdgeLayer();
   const passEnv: PassEnv = {
-    header, rep, positionAttr, pointAttrs, traceVertices, sizing, styleUniforms, depthVariant, materials,
+    header, rep, positionAttr, pointAttrs, traceVertices, producedEdges: producedLayer,
+    sizing, styleUniforms, depthVariant, materials,
   };
   /**
    * THE VERTEX-ATTRIBUTE CEILING, which fails SILENTLY and therefore needs a voice.
@@ -1704,6 +1894,10 @@ async function main(): Promise<void> {
   // The RIBBON registers DISABLED: the tube stays the default; `shape
   // traces ribbon` swaps (A-3's machinery — onEnable re-fills the gap).
   const ribbonPass = registry.add(traceRibbonsGenerator, passEnv, false);
+  // The produced-edge pass: always-enabled, non-selectable domain
+  // ("produced-edge" — setActive("edge", …) can never disable it), zero
+  // instances until a produces:edges mod authors some.
+  const producedPass = registry.add(producedEdgeTubesGenerator, passEnv)!;
   const pendingPass = registry.add(pendingOverlayGenerator, passEnv)!;
   const flashPass = registry.add(focusFlashGenerator, passEnv)!;
   const scene = new THREE.Scene();
@@ -2716,6 +2910,86 @@ async function main(): Promise<void> {
   const sizeTraceEach = withBindingClear("tracesize", makeRepEachWriter(rep.state.traceSize, 1, repWrite("traceSize")));
   const opacityTraceEach = withBindingClear("traceopacity", makeRepEachWriter(rep.state.traceOpacity, 1, repWrite("traceOpacity")));
 
+  // -- the PRODUCED-EDGE writer family (grow-safe) ------------------------------
+  // makeRepWriter's sibling over the ProducedEdgeLayer buffers — the SAME
+  // capture/LWW/one-stroke/recordOp discipline (zero ids → no recordOp), with
+  // TWO deliberate differences:
+  //   1. it bypasses registry.repWrite entirely: produced appearance is NOT a
+  //      RepChannel — nothing else may ever hear these writes (isolation is
+  //      the design), so the onWrite goes STRAIGHT to the produced pass's
+  //      targeted attribute refill;
+  //   2. every buffer access — the write AND both recorded restore closures —
+  //      dereferences the CURRENT layer buffer through a GETTER (`getBuf()`),
+  //      never a captured Float32Array: ensureCapacity REPLACES the layer's
+  //      arrays on a grow, so a captured reference would be a write into a
+  //      dropped allocation (values silently lost, GPU shows stale state).
+  //      The E2E low-id-after-grow check pins this.
+  // These are PLUMBING for the coming %group verb arms — exposed on the
+  // CommandContext (producedEdges) and the test seam; no verb reaches them yet.
+  const writeProducedSlice = (
+    getBuf: () => Float32Array,
+    stride: number,
+    offset: number,
+    width: number,
+    onWrite: (ids: readonly number[]) => void,
+    ids: readonly number[],
+    valueAt: (i: number, c: number) => number,
+  ): number => {
+    if (ids.length === 0) return 0;
+    const list = [...ids];
+    const prev = new Float32Array(list.length * width);
+    const next = new Float32Array(list.length * width);
+    {
+      const buf = getBuf();
+      for (let i = 0; i < list.length; i++) {
+        const at = list[i] * stride + offset;
+        for (let c = 0; c < width; c++) {
+          prev[i * width + c] = buf[at + c];
+          const v = valueAt(i, c);
+          next[i * width + c] = v;
+          buf[at + c] = v;
+        }
+      }
+    }
+    onWrite(list);
+    const restore = (from: Float32Array): number[] => {
+      const buf = getBuf(); // re-dereferenced HERE — the layer may have grown since
+      for (let i = 0; i < list.length; i++) {
+        const at = list[i] * stride + offset;
+        for (let c = 0; c < width; c++) buf[at + c] = from[i * width + c];
+      }
+      onWrite(list);
+      return [];
+    };
+    model.recordOp(() => restore(prev), () => restore(next), prev.byteLength + next.byteLength);
+    return list.length;
+  };
+  const producedWrite = (kind: ProducedAppearance) =>
+    (ids: readonly number[]): void => producedPass.fillAppearance(kind, ids);
+  /** Color both halves the one constant (colorbonds' shape on produced ids):
+   * RGB only — alpha (the opacity slot) rides untouched in component 3. */
+  const producedColorEdges = (ids: readonly number[], rgb: [number, number, number]): number => {
+    model.beginStroke();
+    const n = writeProducedSlice(() => producedLayer.colorA, 4, 0, 3, producedWrite("colorA"), ids, (_i, c) => rgb[c]);
+    writeProducedSlice(() => producedLayer.colorB, 4, 0, 3, producedWrite("colorB"), ids, (_i, c) => rgb[c]);
+    model.endStroke();
+    return n;
+  };
+  /** Per-edge alpha — the covalent interleave (alpha rides BOTH halves). */
+  const producedOpacityEdges = (ids: readonly number[], opacity: number): number => {
+    model.beginStroke();
+    const n = writeProducedSlice(() => producedLayer.colorA, 4, 3, 1, producedWrite("colorA"), ids, () => opacity);
+    writeProducedSlice(() => producedLayer.colorB, 4, 3, 1, producedWrite("colorB"), ids, () => opacity);
+    model.endStroke();
+    return n;
+  };
+  const producedSizeEdges = (ids: readonly number[], size: number): number =>
+    writeProducedSlice(() => producedLayer.radius, 1, 0, 1, producedWrite("radius"), ids, () => size);
+  const producedDashEdges = (ids: readonly number[], dash: number): number =>
+    writeProducedSlice(() => producedLayer.dash, 1, 0, 1, producedWrite("dash"), ids, () => dash);
+  const producedStyleEdges = (ids: readonly number[], index: number): number =>
+    writeProducedSlice(() => producedLayer.style, 1, 0, 1, producedWrite("style"), ids, () => index);
+
   // -- Type A (analysis) mods: the async producer round-trip ---------------------
   // Follow-up terminal lines ride the commandResult channel — the terminal
   // prints every commandResult (ids are not used for printing), so an async
@@ -2816,6 +3090,56 @@ async function main(): Promise<void> {
     if (warning) asyncLine("ok", `⚠ ${warning}`);
   };
 
+  /**
+   * MID-SESSION AUTHORED EDGES (declareProducedChannel's edge sibling): a
+   * `produces: edges` mod's validated pairs enter the viewer as a named GROUP
+   * in the isolated produced-edge layer/pass — drawn LIVE, no reload.
+   * header.edges, its serialization, and every rep.state edge buffer stay
+   * byte-for-byte untouched; the producer stored nothing (the pairs are
+   * viewer-owned static topology).
+   *
+   * Undo model:
+   *   - a NEW group records ONE op: undo DEACTIVATES the group (its slots
+   *     collapse via the visibility mask; instanceCount recomputes), redo
+   *     re-activates. Capacity and ids never shrink, so every recorded
+   *     appearance op keeps valid slots either way. The closures capture the
+   *     group NAME, never ids — a later re-declaration may move the group.
+   *   - a RE-declared group (the recompute-and-see loop) replaces in place and
+   *     records NOTHING — like channel data, replaced pairs are not undoable —
+   *     but it DROPS the walked-back redo future: walked-back ops may
+   *     reference produced state computed over the old pairs, and replaying
+   *     them over the new ones would be the silent-wrongness this system
+   *     refuses (the declareProducedChannel precedent, verbatim).
+   */
+  const declareProducedEdges = (
+    mod: AnalysisMod,
+    edges: readonly (readonly [number, number])[],
+    group: string,
+  ): void => {
+    const existed = producedLayer.hasGroup(group);
+    producedLayer.setGroup(group, edges, (p) => rep.state.size[p]);
+    producedPass.sync();
+    if (existed) {
+      model.dropRedo(
+        `edge group "${group}" was re-declared by "${mod.name}", and produced edges are replaced ` +
+        `in place rather than undone — anything walked back may have referenced the old edges, so ` +
+        `it can no longer be replayed. Undo still works; redo starts again from here.`);
+    } else {
+      model.recordOp(() => {
+        producedLayer.setActive(group, false);
+        producedPass.sync();
+        return [];
+      }, () => {
+        producedLayer.setActive(group, true);
+        producedPass.sync();
+        return [];
+      });
+    }
+    asyncLine("ok",
+      `${mod.name} → authored ${edges.length} edges (computed over the whole system) as ` +
+      `group "${group}" — drawn live, no reload`);
+  };
+
   // ONE awaitable run of a mod through the producer round-trip — returns true if
   // it produced its result (a bind landed, a plot pushed, a macro launched, a
   // channel declared), false on any failure (it has already reported the error).
@@ -2849,10 +3173,13 @@ async function main(): Promise<void> {
           // the return no longer carries a name.
           ...(mod.produces === "channel" && mod.channel ? { channel_name: mod.channel } : {}),
           // produces:edges: tag the run so the producer dispatches the return as
-          // [i, j] index pairs (mirrors the channel_name threading). Interactive
-          // authoring is not yet live — the run still validates + reports a count
-          // below, but does NOT grow the scene (LOAD-TIME authoring is the path).
-          ...(mod.produces === "edges" ? { produces: "edges" as const } : {}),
+          // [i, j] index pairs, and thread the produced-edge GROUP the run
+          // authors into (the `# edge-group:` header, defaulting to the mod's
+          // name — the webview single source; mirrors the channel_name
+          // threading). The producer echoes the group beside the pairs.
+          ...(mod.produces === "edges"
+            ? { produces: "edges" as const, edge_group: mod.edgeGroup ?? mod.name }
+            : {}),
         });
         const reply = JSON.parse(new TextDecoder().decode(bytes)) as {
           values?: unknown;
@@ -2934,20 +3261,25 @@ async function main(): Promise<void> {
           declareProducedChannel(mod, checked.channel, points, checked.warning);
           return true;
         } else if ("edges" in checked) {
-          // produces: edges — LOAD-TIME authoring only (this increment). The
-          // returned pairs are validated fail-closed above, but the LIVE scene
-          // is NOT grown here: the edge rep buffers are sized once from
-          // header.edges.length at load, and mid-session live authoring is a
-          // later increment. Report HONESTLY (never a silent no-op): the run
-          // was computed over the WHOLE system (the targetIndices override
-          // above), so the count EQUALS what load-time --edge-mods would
-          // author — and the message promises no render this increment can't
-          // deliver (there is no --edge-mods UI wiring; a plain reload draws
-          // nothing). The run still counts as a success — it validated.
-          asyncLine("ok",
-            `${mod.name} → validated ${checked.edges.length} edges (computed over the whole system) — ` +
-            `nothing rendered: edges mods apply at load via the producer's --edge-mods; ` +
-            `live mid-session authoring is a later increment`);
+          // produces: edges — MID-SESSION LIVE AUTHORING (this ends the former
+          // honest defer). The validated pairs enter the ISOLATED produced-edge
+          // pass as a named group and DRAW NOW — header.edges, its
+          // serialization, and every rep.state edge buffer stay untouched
+          // (--edge-mods at load remains the header-baked sibling path). The
+          // run stays computed over the WHOLE system (the targetIndices
+          // override above): load-time apply has no selection either, so the
+          // interactive count and the load-time count are the SAME number —
+          // the truthful-count contract, now with pixels behind it. The group
+          // name is the webview's (header/default); the producer's echo is
+          // asserted equal so an in-flight drift can never be silent.
+          const group = mod.edgeGroup ?? mod.name;
+          if (checked.group !== undefined && checked.group !== group) {
+            asyncLine("error",
+              `${mod.name} failed: the producer echoed edge group "${checked.group}" for a run ` +
+              `requesting "${group}" — nothing authored`);
+            return false;
+          }
+          declareProducedEdges(mod, checked.edges, group);
           return true;
         }
         return true;
@@ -3311,6 +3643,19 @@ async function main(): Promise<void> {
     armRmDeletion: (names: string[]) => {
       pendingRm = names; // single slot — a newer rm replaces it
     },
+    // Produced-edge surface (mid-session authored edges): reads + the writer
+    // family. PLUMBING ONLY this increment — no verb resolves a %group target
+    // yet; the writers exist so the coming verb arms (and the tests proving
+    // grow-safety now) have one spine to reach.
+    producedEdges: {
+      groups: () => producedLayer.groups(),
+      groupIds: (name: string) => producedLayer.groupIds(name),
+      colorEdges: producedColorEdges,
+      sizeEdges: producedSizeEdges,
+      opacityEdges: producedOpacityEdges,
+      dashEdges: producedDashEdges,
+      styleEdges: producedStyleEdges,
+    },
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);
@@ -3368,6 +3713,13 @@ async function main(): Promise<void> {
     opacityPoints: () => 0, opacityEdges: () => 0, opacityTrace: () => 0,
     runAnalysisMod: () => {}, // never reached — mod-invocation verbs refused first
     armRmDeletion: () => {}, // never reached — rm refused first
+    // reads stay REAL (a macro may one day resolve a %group); writes no-op
+    producedEdges: {
+      groups: () => producedLayer.groups(),
+      groupIds: (name: string) => producedLayer.groupIds(name),
+      colorEdges: () => 0, sizeEdges: () => 0, opacityEdges: () => 0,
+      dashEdges: () => 0, styleEdges: () => 0,
+    },
   };
   const validationCommands = createCommandRegistry(validationContext);
 
@@ -3859,6 +4211,45 @@ async function main(): Promise<void> {
         ? tracePass.attrVersions
         : (): { start: number; radius: number; color: number } =>
             ({ start: 0, radius: 0, color: 0 }),
+      // Produced-edge seam (mid-session authored edges): layer reads, the GPU
+      // pass's capacity/instance-count/attribute reads (the capacity-crossing
+      // and writer-staleness guards), the writer family, and `declare` — the
+      // REAL declareProducedEdges path (records the group op, drops redo on a
+      // re-declare), so a test-driven declaration is indistinguishable from a
+      // mod-driven one.
+      produced: {
+        groups: () => producedLayer.groups(),
+        groupIds: (name: string) => producedLayer.groupIds(name),
+        capacity: () => producedLayer.capacity,
+        allocated: () => producedLayer.allocated,
+        activeSpan: () => producedLayer.activeSpan(),
+        layer: {
+          pairs: () => producedLayer.pairs,
+          colorA: () => producedLayer.colorA,
+          colorB: () => producedLayer.colorB,
+          radius: () => producedLayer.radius,
+          visible: () => producedLayer.visible,
+        },
+        pass: {
+          gpuCapacity: () => producedPass.gpuCapacity(),
+          instanceCount: () => producedPass.instanceCount(),
+          attrArray: (name: Parameters<typeof producedPass.attrArray>[0]) =>
+            producedPass.attrArray(name),
+        },
+        writers: {
+          colorEdges: producedColorEdges,
+          sizeEdges: producedSizeEdges,
+          opacityEdges: producedOpacityEdges,
+          dashEdges: producedDashEdges,
+          styleEdges: producedStyleEdges,
+        },
+        declare: (group: string, pairs: [number, number][]) =>
+          declareProducedEdges(
+            { name: "testhook", kind: "analysis", produces: "edges", origin: "workspace", code: "" },
+            pairs,
+            group,
+          ),
+      },
       geometryMaterials: materials,
       // C2's other half: each geometry material's translucent twin, so the
       // depth policy can be asserted on BOTH halves rather than on the one

@@ -132,7 +132,8 @@ def _accepts_third_positional(fn) -> Optional[bool]:
 
 
 def run_mod(source, code: str, target_indices, timeout_s: float, install_channel=None,
-            parameters=None, channel_name=None, produces=None, n_points=None) -> bytes:
+            parameters=None, channel_name=None, produces=None, n_points=None,
+            edge_group=None) -> bytes:
     """Execute a mod's `compute(data, target_indices)` against the RESIDENT
     dataset handle and return the response payload (JSON bytes).
 
@@ -228,8 +229,13 @@ def run_mod(source, code: str, target_indices, timeout_s: float, install_channel
         # a list of strings nor a flat float list, so it would otherwise fall
         # through to the finite-floats error. Coerce + validate FAIL-CLOSED: pair
         # shape, integer indices, range [0, n_points), and no self-loop (i != j).
-        # The wire carries DATA only (an edge is [i, j], never appearance); the
-        # producer appends these to header.edges at LOAD time (apply_edge_mods).
+        # The wire carries DATA only (an edge is [i, j], never appearance).
+        # The reply ECHOES {group, pairs}: `edge_group` is the produced-edge
+        # group the webview threaded on the request (its single source, like
+        # channel_name — None on the load path, where apply_edge_mods appends
+        # the pairs to header.edges and no group exists). The producer never
+        # stores or acts on the group; interactive pairs are VIEWER-owned
+        # static topology (no header mutation, no frame-chunk augmentation).
         if produces == "edges":
             if n_points is None:
                 return json.dumps(
@@ -259,7 +265,7 @@ def run_mod(source, code: str, target_indices, timeout_s: float, install_channel
                         {"error": f"edges[{k}] is a self-loop ({i}) — an edge needs two distinct points"}
                     ).encode("utf-8")
                 pairs.append([i, j])
-            return json.dumps({"values": pairs}).encode("utf-8")
+            return json.dumps({"values": {"group": edge_group, "pairs": pairs}}).encode("utf-8")
         if isinstance(values, dict) and isinstance(values.get("png"), str):
             # a FIGURE reply: {png, width, height, axes} — a light structural
             # pass keeps the wire well-formed; the client runs THE deep
@@ -418,7 +424,11 @@ def apply_edge_mods(source, header, edge_mods, timeout_s: float = DEFAULT_MOD_TI
         if "error" in reply:
             log.warning("edge-mod %s failed: %s — skipped", path, reply["error"])
             continue
-        pairs = reply.get("values") or []
+        # run_mod's edges arm replies {"values": {"group", "pairs"}} — the
+        # group is the INTERACTIVE path's token (None here); load-apply
+        # consumes only the validated pairs.
+        vals = reply.get("values") or {}
+        pairs = (vals.get("pairs") if isinstance(vals, dict) else vals) or []
         # (2) collect this mod's VALIDATED pairs into a local first, so a
         # defensive coercion failure contributes nothing (all-or-nothing per mod)
         try:
@@ -581,11 +591,14 @@ def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO,
                     float(timeout_s), install_channel=install_channel,
                     parameters=request.get("parameters"),
                     channel_name=request.get("channel_name"),
-                    # produces:edges — an interactive run still VALIDATES + reports
-                    # a count (the viewer honestly defers rather than growing the
-                    # live scene); n_points is the authoritative range bound.
+                    # produces:edges — an interactive run validates fail-closed
+                    # and echoes {group, pairs}; the VIEWER owns the live pairs
+                    # (its isolated produced-edge pass — header.edges and the
+                    # frame stream are untouched). n_points is the
+                    # authoritative range bound; edge_group is echoed verbatim.
                     produces=request.get("produces"),
                     n_points=header.n_points,
+                    edge_group=request.get("edge_group"),
                 )
                 log.debug("run_mod -> %d bytes", len(payload))
             else:

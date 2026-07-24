@@ -38,10 +38,15 @@ export type ProducerRequest =
       channel_name?: string;
       /** produces:edges only: tags the run as an edge-authoring run so the
        * producer dispatches its return as [i, j] INTEGER index pairs (not a
-       * flat float list). Present ⟺ an edges run. LOAD-TIME authoring is the
-       * mechanism; run interactively the viewer honestly defers (it still runs
-       * so the count can be reported), so the tag is threaded either way. */
+       * flat float list). Present ⟺ an edges run. At LOAD the pairs append to
+       * header.edges (--edge-mods); run INTERACTIVELY they enter the viewer's
+       * isolated produced-edge pass live (declareProducedEdges). */
       produces?: "edges";
+      /** produces:edges only: the produced-edge GROUP the run authors into
+       * (the mod's `# edge-group:` header, defaulting to the mod name —
+       * filled webview-side, the single source, mirroring channel_name). The
+       * producer only ECHOES it back beside the validated pairs. */
+      edge_group?: string;
     };
 
 export type HostMessage =

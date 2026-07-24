@@ -434,6 +434,17 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     armRmDeletion: (names) => {
       rmArms.push([...names]);
     },
+    // Produced-edge plumbing (mid-session authored edges): no verb reaches it
+    // yet — a structural stub keeps the mock honest against the interface.
+    producedEdges: {
+      groups: () => [],
+      groupIds: () => null,
+      colorEdges: () => 0,
+      sizeEdges: () => 0,
+      opacityEdges: () => 0,
+      dashEdges: () => 0,
+      styleEdges: () => 0,
+    },
   };
   return {
     registry: createCommandRegistry(ctx),

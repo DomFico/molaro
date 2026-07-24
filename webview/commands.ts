@@ -348,6 +348,27 @@ export interface CommandContext {
    * so the registry re-derives from disk truth. NOT undoable and NOT on
    * the undo stack — the filesystem is outside the undo model. */
   armRmDeletion(names: string[]): void;
+  /** MID-SESSION AUTHORED EDGES (the isolated produced-edge pass): the read
+   * surface over the group registry plus the writer family — the covalent
+   * edge writers' grow-safe siblings over the ProducedEdgeLayer buffers.
+   * Ids are PRODUCED-edge ids (the layer's append-only slot space, one per
+   * authored edge — enumerated via groupIds), NEVER header edge ids: the two
+   * spaces are disjoint by design, which is what keeps every covalent edge
+   * buffer byte-identical under produced writes and vice versa. Same
+   * one-stroke capture/LWW/recordOp discipline as the rep writers; opacity is
+   * the alpha half of both color slots (the covalent RGBA interleave).
+   * PLUMBING ONLY this increment: no verb resolves a produced-edge target yet
+   * (the %group arms are the next task) — the surface exists so those arms,
+   * and the tests proving grow-safety now, reach one spine. */
+  producedEdges: {
+    groups(): { name: string; baseId: number; count: number; active: boolean }[];
+    groupIds(name: string): number[] | null;
+    colorEdges(ids: readonly number[], rgb: [number, number, number]): number;
+    sizeEdges(ids: readonly number[], size: number): number;
+    opacityEdges(ids: readonly number[], opacity: number): number;
+    dashEdges(ids: readonly number[], dash: number): number;
+    styleEdges(ids: readonly number[], index: number): number;
+  };
 }
 
 export class CommandRegistry {
