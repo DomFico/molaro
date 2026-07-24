@@ -9539,19 +9539,35 @@ async function S56(): Promise<void> {
 // pairs are appended to header.edges at LOAD (they render as ordinary edge
 // tubes and style through the existing verbs), while an INTERACTIVE run honestly
 // defers (mid-session live authoring is a later increment). Default OFF → the
-// served header is byte-identical. Proven two ways on synthetic data:
-//   Part A (mod OFF, default load) — the control: the authored pair is not
-//     already an edge; addressing that not-yet-existent edge by #e nomatches and
-//     draws nothing; and a produces:edges mod run interactively reports its count
-//     and says "reload", WITHOUT growing the live scene.
-//   Part B (mod ON, spawned with --edge-mods) — the edge is appended at load, is
-//     unique, and DRAWS as pixels where none was, addressable by #e.
+// served header is byte-identical. The mod is TARGET-RESPECTING (it reads
+// target_indices; its count DEPENDS on the target size), which pins the
+// truthfulness contract: an interactive run is computed over the WHOLE system —
+// even when invoked on a subset — so the count it reports EQUALS what load-time
+// --edge-mods authors (a constant-return mod would mask a subset-vs-whole
+// divergence). Proven two ways on synthetic data:
+//   Part A (mod OFF, default load) — the control: the first authored pair is not
+//     already an edge; addressing a not-yet-existent edge by #e nomatches and
+//     draws nothing; and the mod run interactively ON A SUBSET reports the
+//     WHOLE-SYSTEM count with the no-render truth, WITHOUT growing the scene.
+//   Part B (mod ON, spawned with --edge-mods) — the header grows by EXACTLY the
+//     interactively-reported count, the pairs are the mod's, and the first
+//     authored edge DRAWS as pixels where none was, addressable by #e.
 async function S57(): Promise<void> {
   console.log("S57 — produces:edges: a load-time-authored edge draws; an interactive run honestly defers");
-  // Two STRUCTURED points (both on the rings, reliably on-screen at frame 0) in
-  // DIFFERENT subgroups, so the synthetic chain never already links them — the
-  // authored edge is genuinely new.
-  const AUTH_A = 0, AUTH_B = 250;
+  // The TARGET-RESPECTING mod: link t[i] → t[i + len//2] for the first half —
+  // count = len(target)//2, so a subset target would yield a DIFFERENT count
+  // than the whole system (the discrimination the constant mod lacked). On the
+  // whole system (6000): 3000 pairs [i, i+3000] — none pre-exist (the synthetic
+  // chain links consecutive points only).
+  const MOD_CODE =
+    "def compute(data, target_indices):\n" +
+    "    t = target_indices\n" +
+    "    h = len(t) // 2\n" +
+    "    return [[t[i], t[i + h]] for i in range(h)]";
+  const N = 6000;
+  const WANT = N / 2; // the whole-system count the mod must yield
+  // the FIRST authored pair (point 0 structured, 3000 bulk — never chain-linked)
+  const AUTH_A = 0, AUTH_B = N / 2;
   // the red-pixel classifier (S56's), as a JS-expression builder over a b64
   const redCountJs = (b64: string) => `(async () => {
     const app = document.getElementById('app').getBoundingClientRect();
@@ -9567,6 +9583,7 @@ async function S57(): Promise<void> {
   })()`;
 
   let L0 = 0; // the OFF scene's edge count — shared across the two drivers
+  let interactiveCount = -1; // the count an interactive run reported (Part A)
 
   // -- Part A: the mod OFF (default load) — control + interactive honest defer --
   await withDriver(async (d) => {
@@ -9605,32 +9622,46 @@ async function S57(): Promise<void> {
     const offRed = await d.evaluate<number>(redCountJs(await snap("off")));
     check("S57: (control) nothing draws for that index with the mod OFF", offRed === 0, `red=${offRed}`);
 
-    // -- interactive honest-defer: register a produces:edges mod, run it -------
+    // -- interactive honest-defer: register the TARGET-RESPECTING mod, run it
+    //    ON A SUBSET, and prove the reported count is the WHOLE-SYSTEM count ---
+    // JSON.stringify escapes the newlines in the Python source correctly.
     await d.evaluate(`window.postMessage({ type: "modsLoaded", mods: [{
       name: "link_defer", kind: "analysis", produces: "edges", origin: "workspace",
-      code: "def compute(data, target_indices):\\n    return [[${AUTH_A}, ${AUTH_B}]]"
+      code: ${JSON.stringify(MOD_CODE)}
     }] }, "*")`);
     await sleep(200);
     const before = await edgeCount();
-    const run = await cmd("link_defer all");
+    // invoke on a small SUBSET ("alpha") — a target-DEPENDENT mod would author
+    // len(alpha)//2 pairs here; the whole-system override must make it 3000
+    const subsetPts = (await d.evaluate<number[]>(`${V}.debug.resolvePoints("alpha")`)).length;
+    const run = await cmd("link_defer alpha");
     check("S57: the produces:edges mod is invokable and acknowledges", run.status === "ok", JSON.stringify(run));
-    await d.waitFor(`window.__lines.some(l => /authored 1 edges/.test(l.message))`, 20000)
+    await d.waitFor(`window.__lines.some(l => /validated \\d+ edges \\(computed over the whole system\\)/.test(l.message))`, 20000)
       .catch(() => { /* timeout → the check below goes red */ });
     const line = await d.evaluate<{ status: string; message: string } | null>(`window.__lines.at(-1) ?? null`);
-    check("S57: an interactive edges run HONESTLY DEFERS (reports the count, says reload)",
+    const mCount = line ? /validated (\d+) edges/.exec(line.message) : null;
+    interactiveCount = mCount ? Number(mCount[1]) : -1;
+    check("S57: an interactive run reports the WHOLE-SYSTEM count, not the subset (truthful)",
+      interactiveCount === WANT && subsetPts < WANT,
+      `reported=${interactiveCount} want=${WANT} subsetPts=${subsetPts}`);
+    check("S57: ...the message promises NO render this increment can't deliver (no 'reload to render')",
       !!line && line.status === "ok" &&
-        /authored 1 edges — reload to render \(live mid-session authoring is not yet enabled\)/.test(line.message),
+        /computed over the whole system/.test(line.message) &&
+        /apply at load via the producer's --edge-mods/.test(line.message) &&
+        !/reload to render/.test(line.message),
       JSON.stringify(line));
-    check("S57: ...and does NOT grow the live scene (edge count unchanged)",
+    check("S57: ...and the interactive run does NOT grow the live scene (edge count unchanged)",
       (await edgeCount()) === before, `${before} → ${await edgeCount()}`);
   });
 
-  // -- Part B: the mod ON (spawned with --edge-mods) → the edge RENDERS --------
+  // -- Part B: the mod ON (spawned with --edge-mods) → the edges RENDER --------
+  // The SAME target-respecting mod, at load time (whole system) — so the count
+  // it authors must EQUAL the whole-system count the interactive run reported.
   const tmp = mkdtempSync(join(tmpdir(), "s57-edges-"));
   const modPath = join(tmp, "link_load.py");
   writeFileSync(modPath,
     "# molaro-mod\n# name: link_load\n# kind: analysis\n# produces: edges\n\n" +
-    `def compute(data, target_indices):\n    return [[${AUTH_A}, ${AUTH_B}]]\n`);
+    `${MOD_CODE}\n`);
   try {
     await withDriver(async (d) => {
       await d.evaluate(`${V}.player.seek(0)`);
@@ -9638,7 +9669,7 @@ async function S57(): Promise<void> {
       const cmd = (text: string) =>
         d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
       const edgeCount = () => d.evaluate<number>(`${V}.edges.length`);
-      const lastPair = () => d.evaluate<[number, number]>(`(()=>{const e=${V}.edges; return e[e.length-1];})()`);
+      const pairAt = (i: number) => d.evaluate<[number, number]>(`${V}.edges[${i}]`);
       const pairMatches = (a: number, b: number) =>
         d.evaluate<number>(`${V}.edges.filter(e => (e[0]===${a}&&e[1]===${b})||(e[0]===${b}&&e[1]===${a})).length`);
       const snap = async (tag: string): Promise<string> => {
@@ -9647,16 +9678,21 @@ async function S57(): Promise<void> {
       };
 
       const L = await edgeCount();
-      check("S57: the authored edge is APPENDED at load (edge count grew by exactly one)",
-        L === L0 + 1, `off=${L0} on=${L}`);
-      const pair = await lastPair();
-      check("S57: the appended edge is exactly the authored pair, at the end",
-        pair[0] === AUTH_A && pair[1] === AUTH_B, JSON.stringify(pair));
+      check("S57: load-time --edge-mods appends EXACTLY the whole-system count",
+        L === L0 + WANT, `off=${L0} on=${L} want+${WANT}`);
+      check("S57: ...which EQUALS the interactive run's reported count (truthful: same set)",
+        L - L0 === interactiveCount, `grew=${L - L0} reported=${interactiveCount}`);
+      // the FIRST appended pair sits at index L0 (load appends original + pairs,
+      // in the mod's return order — pair 0 = [t[0], t[3000]] = [AUTH_A, AUTH_B])
+      const first = await pairAt(L0);
+      check("S57: the first appended edge is exactly the mod's first pair",
+        first[0] === AUTH_A && first[1] === AUTH_B, JSON.stringify(first));
       check("S57: the authored edge is UNIQUE (a real new edge, not a duplicate)",
         (await pairMatches(AUTH_A, AUTH_B)) === 1, `matches=${await pairMatches(AUTH_A, AUTH_B)}`);
 
       // pixel proof: isolate, collapse every edge, then fatten + color ONLY the
-      // authored edge — addressed by #e<L0> (== the last edge with the mod ON).
+      // first authored edge — addressed by #e<L0> (the same index that OFF drew
+      // nothing for, because with the mod OFF it was one past the last edge).
       await cmd("pointopacity all 0");
       await cmd("traceopacity all 0");
       await cmd("bondsize all 0");
