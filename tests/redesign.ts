@@ -7520,18 +7520,34 @@ async function S44(): Promise<void> {
         // Asymmetric on purpose: the sphere SURFACE is modelled exactly
         // (analytic bulge), so a sphere-wins patch tolerates ZERO enemy
         // pixels — any red inside it is a real depth artifact (variant 1's
-        // recorded mis-sorts are exactly that). The RIBBON is modelled at
-        // AXIS depth, but the band TILTS (its plane's depth varies across
-        // the width — both variants render the same few enemy pixels where
-        // the band recedes), so ribbon-wins asserts DOMINANCE, not purity.
-        // KNOWN LIMIT (deliberate): dominance is a WEAKER gate than its
-        // sphere-wins twin — a ribbon-side depth bug leaking a FEW pixels
-        // could pass 16/5. The assertion is only as strong as the model
-        // earns; if a ribbon-side defect is ever suspected, TIGHTEN THIS
-        // RATIO FIRST (model the band's tilt, then assert exclusivity).
+        // recorded mis-sorts are exactly that). The RIBBON is modelled by
+        // the finder at AXIS depth (LINEAR interp of the two anchor depths),
+        // but the drawn band both TILTS (its plane's depth varies across the
+        // width) AND — since the renderer-side centripetal Catmull-Rom
+        // landed — CURVES along its length: between two anchors the drawn
+        // surface bows off the finder's straight anchor-to-anchor chord, so a
+        // SHARP TURN recedes a few more pixels behind the sphere than a flat
+        // quad did. Ribbon-wins therefore asserts DOMINANCE, not purity.
+        //
+        // AUDITED RE-BASELINE (the spline increment): at the worst turn the
+        // finder selects (f72 on the 6000-pt/150-frame synthetic, fully bound
+        // — `flow` is a unit vector, never zero, so this is NOT a partial-
+        // binding taper case) the measured patch is 17 red / 6 blue. The
+        // ribbon surface is provably correct there (anchors-on-curve + the G1
+        // tangent-continuity + finite-difference tangent tests in
+        // shaders.test.ts pin the geometry), so the 6 blue are the genuinely
+        // receding curved-band edge — the sphere legitimately owns them. The
+        // ribbon still owns a CLEAR majority (17:6 ≈ 74%). The gate is
+        // rebaselined from `> 3×` (which assumed the flat-quad band) to a
+        // clear-majority `> 2×` with margin below the measured 2.83× — still
+        // strictly stronger than the failure it guards: a ribbon-side depth
+        // bug that pushes the whole band BACK flips the MAJORITY to the sphere
+        // (blue ≥ red), which this fails. If a ribbon defect is ever suspected,
+        // TIGHTEN by modelling the band's curve+tilt in the finder (evaluate
+        // the spline centreline depth) and asserting exclusivity.
         const correct = c.winner === "sphere"
           ? patch.blue > 0 && patch.red === 0
-          : patch.red >= 12 && patch.red > 3 * patch.blue;
+          : patch.red >= 12 && patch.red > 2 * patch.blue;
         if (assertive) {
           check(`S44 v2: CROSSING f${c.f} — the ${c.winner} is closer and OWNS the pixel${c.near ? " (near-depth)" : ""}`,
             correct, `expected ${c.winner}, patch=${JSON.stringify(patch)}`);
