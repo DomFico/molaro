@@ -83,6 +83,10 @@ const { values: args } = parseArgs({
     // contract) — drives the viewer's loud scene-scale fallback (C1) without
     // touching the producer or the wire format. Test-infra only.
     "strip-bbox": { type: "boolean", default: false },
+    // produces:edges load-time authoring (S57): forward each path to serve.py's
+    // --edge-mods so its [i, j] pairs are appended to the synthetic header at
+    // load. Synthetic-source only. Repeatable.
+    "edge-mods": { type: "string", multiple: true },
   },
 });
 
@@ -95,7 +99,13 @@ const producerArgs = args.open
   ? ["--open", args.open]
   : args.system
     ? ["--system", args.system]
-    : ["--n-points", args["n-points"]!, "--n-frames", args["n-frames"]!];
+    : [
+        "--n-points", args["n-points"]!, "--n-frames", args["n-frames"]!,
+        // forward any --edge-mods paths to serve.py (synthetic source only)
+        ...((args["edge-mods"] as string[] | undefined) ?? []).flatMap(
+          (p) => ["--edge-mods", p],
+        ),
+      ];
 
 const broker = new ProducerBroker(
   {

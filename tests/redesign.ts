@@ -191,11 +191,16 @@ async function withDriver(
   w = 1180,
   h = 780,
   route = "/", // "/terminal" serves the REAL terminal bundle over the viewer (S23)
+  // The producer/bridge CLI args. Default: the 6000-point synthetic scene every
+  // scenario uses. A scenario may override to add e.g. `--edge-mods <path>`
+  // (S57 loads a produces:edges mod at load time) — the bridge forwards the
+  // synthetic-source flags to serve.py verbatim.
+  producerArgs: string[] = ["--n-points", "6000", "--n-frames", "150"],
 ): Promise<void> {
   portBase += 2;
   const d = new E2EDriver({
     bridgePort: portBase, cdpPort: portBase + 300, width: w, height: h,
-    producerArgs: ["--n-points", "6000", "--n-frames", "150"],
+    producerArgs,
   });
   try {
     await d.start();
@@ -9529,7 +9534,147 @@ async function S56(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56 };
+// ============ S57: produces:edges — load-time authoring + honest defer =======
+// The neutral SPINE for authorable edges: a `produces: edges` mod's [i, j]
+// pairs are appended to header.edges at LOAD (they render as ordinary edge
+// tubes and style through the existing verbs), while an INTERACTIVE run honestly
+// defers (mid-session live authoring is a later increment). Default OFF → the
+// served header is byte-identical. Proven two ways on synthetic data:
+//   Part A (mod OFF, default load) — the control: the authored pair is not
+//     already an edge; addressing that not-yet-existent edge by #e nomatches and
+//     draws nothing; and a produces:edges mod run interactively reports its count
+//     and says "reload", WITHOUT growing the live scene.
+//   Part B (mod ON, spawned with --edge-mods) — the edge is appended at load, is
+//     unique, and DRAWS as pixels where none was, addressable by #e.
+async function S57(): Promise<void> {
+  console.log("S57 — produces:edges: a load-time-authored edge draws; an interactive run honestly defers");
+  // Two STRUCTURED points (both on the rings, reliably on-screen at frame 0) in
+  // DIFFERENT subgroups, so the synthetic chain never already links them — the
+  // authored edge is genuinely new.
+  const AUTH_A = 0, AUTH_B = 250;
+  // the red-pixel classifier (S56's), as a JS-expression builder over a b64
+  const redCountJs = (b64: string) => `(async () => {
+    const app = document.getElementById('app').getBoundingClientRect();
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+    const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+    const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+    const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+      Math.round(app.width), Math.round(app.height) - 60).data;
+    let n = 0;
+    for (let i = 0; i < px.length; i += 4) if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) n++;
+    return n;
+  })()`;
+
+  let L0 = 0; // the OFF scene's edge count — shared across the two drivers
+
+  // -- Part A: the mod OFF (default load) — control + interactive honest defer --
+  await withDriver(async (d) => {
+    await d.evaluate(`${V}.player.seek(0)`); // deterministic frame-0 positions
+    await sleep(400);
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const edgeCount = () => d.evaluate<number>(`${V}.edges.length`);
+    const hasPair = (a: number, b: number) =>
+      d.evaluate<boolean>(`${V}.edges.some(e => (e[0]===${a}&&e[1]===${b})||(e[0]===${b}&&e[1]===${a}))`);
+    const snap = async (tag: string): Promise<string> => {
+      await d.evaluate(`(async () => { for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r)); })()`);
+      return d.captureB64(`${REPORT}/S57_${tag}.png`);
+    };
+    // async mod outcome lines ride the commandResult id:-1 channel (S46's idiom)
+    await d.evaluate(`void (window.__lines = [],
+      window.addEventListener('message', (e) => {
+        if (e.data?.type === 'commandResult' && e.data.id === -1) window.__lines.push(e.data);
+      }))`);
+
+    L0 = await edgeCount();
+    check("S57: (control) the authored pair is NOT already an edge (genuinely new)",
+      !(await hasPair(AUTH_A, AUTH_B)), `${AUTH_A},${AUTH_B}`);
+
+    // isolate the edge layer and collapse every edge, then address #e<L0> — one
+    // PAST the last edge, so with the mod OFF it is out of range → nomatch.
+    await cmd("pointopacity all 0");
+    await cmd("traceopacity all 0");
+    await cmd("bondsize all 0");
+    const offColor = await cmd(`colorbonds #e${L0} red`);
+    const offSize = await cmd(`bondsize #e${L0} 8`);
+    check("S57: (control) #e past the last edge nomatches with the mod OFF (no such edge)",
+      offColor.status === "nomatch" && offSize.status === "nomatch",
+      JSON.stringify({ offColor, offSize }));
+    await sleep(300);
+    const offRed = await d.evaluate<number>(redCountJs(await snap("off")));
+    check("S57: (control) nothing draws for that index with the mod OFF", offRed === 0, `red=${offRed}`);
+
+    // -- interactive honest-defer: register a produces:edges mod, run it -------
+    await d.evaluate(`window.postMessage({ type: "modsLoaded", mods: [{
+      name: "link_defer", kind: "analysis", produces: "edges", origin: "workspace",
+      code: "def compute(data, target_indices):\\n    return [[${AUTH_A}, ${AUTH_B}]]"
+    }] }, "*")`);
+    await sleep(200);
+    const before = await edgeCount();
+    const run = await cmd("link_defer all");
+    check("S57: the produces:edges mod is invokable and acknowledges", run.status === "ok", JSON.stringify(run));
+    await d.waitFor(`window.__lines.some(l => /authored 1 edges/.test(l.message))`, 20000)
+      .catch(() => { /* timeout → the check below goes red */ });
+    const line = await d.evaluate<{ status: string; message: string } | null>(`window.__lines.at(-1) ?? null`);
+    check("S57: an interactive edges run HONESTLY DEFERS (reports the count, says reload)",
+      !!line && line.status === "ok" &&
+        /authored 1 edges — reload to render \(live mid-session authoring is not yet enabled\)/.test(line.message),
+      JSON.stringify(line));
+    check("S57: ...and does NOT grow the live scene (edge count unchanged)",
+      (await edgeCount()) === before, `${before} → ${await edgeCount()}`);
+  });
+
+  // -- Part B: the mod ON (spawned with --edge-mods) → the edge RENDERS --------
+  const tmp = mkdtempSync(join(tmpdir(), "s57-edges-"));
+  const modPath = join(tmp, "link_load.py");
+  writeFileSync(modPath,
+    "# molaro-mod\n# name: link_load\n# kind: analysis\n# produces: edges\n\n" +
+    `def compute(data, target_indices):\n    return [[${AUTH_A}, ${AUTH_B}]]\n`);
+  try {
+    await withDriver(async (d) => {
+      await d.evaluate(`${V}.player.seek(0)`);
+      await sleep(400);
+      const cmd = (text: string) =>
+        d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+      const edgeCount = () => d.evaluate<number>(`${V}.edges.length`);
+      const lastPair = () => d.evaluate<[number, number]>(`(()=>{const e=${V}.edges; return e[e.length-1];})()`);
+      const pairMatches = (a: number, b: number) =>
+        d.evaluate<number>(`${V}.edges.filter(e => (e[0]===${a}&&e[1]===${b})||(e[0]===${b}&&e[1]===${a})).length`);
+      const snap = async (tag: string): Promise<string> => {
+        await d.evaluate(`(async () => { for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r)); })()`);
+        return d.captureB64(`${REPORT}/S57_${tag}.png`);
+      };
+
+      const L = await edgeCount();
+      check("S57: the authored edge is APPENDED at load (edge count grew by exactly one)",
+        L === L0 + 1, `off=${L0} on=${L}`);
+      const pair = await lastPair();
+      check("S57: the appended edge is exactly the authored pair, at the end",
+        pair[0] === AUTH_A && pair[1] === AUTH_B, JSON.stringify(pair));
+      check("S57: the authored edge is UNIQUE (a real new edge, not a duplicate)",
+        (await pairMatches(AUTH_A, AUTH_B)) === 1, `matches=${await pairMatches(AUTH_A, AUTH_B)}`);
+
+      // pixel proof: isolate, collapse every edge, then fatten + color ONLY the
+      // authored edge — addressed by #e<L0> (== the last edge with the mod ON).
+      await cmd("pointopacity all 0");
+      await cmd("traceopacity all 0");
+      await cmd("bondsize all 0");
+      const onColor = await cmd(`colorbonds #e${L0} red`);
+      const onSize = await cmd(`bondsize #e${L0} 8`);
+      check("S57: the load-authored edge is addressable by #e and styles (mod ON)",
+        onColor.status === "ok" && onSize.status === "ok", JSON.stringify({ onColor, onSize }));
+      await sleep(300);
+      const onRed = await d.evaluate<number>(redCountJs(await snap("on")));
+      check("S57: the load-authored edge DRAWS as pixels where none was (mod ON, #e OFF drew 0)",
+        onRed > 20, `red=${onRed}`);
+    }, 1180, 780, "/", ["--n-points", "6000", "--n-frames", "150", "--edge-mods", modPath]);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -9568,7 +9713,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
   S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
-  S53: "full", S54: "full", S55: "full", S56: "fast",
+  S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {
