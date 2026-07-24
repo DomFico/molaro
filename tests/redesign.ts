@@ -10040,7 +10040,172 @@ async function S58(): Promise<void> {
   await S16body(true);
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58 };
+// ==== S59: %group addressing — the edge verbs style PRODUCED edges ==========
+// Stage 2A of authored edges: the existing edge verbs reach the produced pass.
+//   (a) `%group` targets style EXACTLY that group's produced edges — pixels
+//       appear on them while every header-edge rep buffer stays byte-identical;
+//   (b) LWW: re-styling a group overwrites (green over red), and ONE Ctrl+Z
+//       restores the previous produced look;
+//   (c) a POINT-target verb reaches BOTH id spaces — header edges and the
+//       produced edges contained in the target — as ONE undo stroke (depth +1,
+//       one Ctrl+Z reverses both), with the truthful combined count;
+//   (d) contained-vs-incident applies to produced pairs identically (the
+//       crossing group is reached by `of`, not by the contained verb);
+//   (e) `%unknown` / an undone group are honest nomatches; `%<TAB>` completes
+//       live group names.
+async function S59(): Promise<void> {
+  console.log("S59 — %group addressing: the edge verbs style produced edges");
+  const redCountJs = (b64: string) => `(async () => {
+    const app = document.getElementById('app').getBoundingClientRect();
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+    const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+    const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+    const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+      Math.round(app.width), Math.round(app.height) - 60).data;
+    let n = 0;
+    for (let i = 0; i < px.length; i += 4) if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) n++;
+    return n;
+  })()`;
+  await withDriver(async (d) => {
+    await d.evaluate(`${V}.player.seek(0)`);
+    await sleep(400);
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const snap = async (tag: string): Promise<string> => {
+      await d.evaluate(`(async () => { for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r)); })()`);
+      return d.captureB64(`${REPORT}/S59_${tag}.png`);
+    };
+    const redAt = async (tag: string): Promise<number> =>
+      d.evaluate<number>(redCountJs(await snap(tag)));
+
+    // isolate: only produced edges can put edge pixels up from here on
+    await cmd("pointopacity all 0");
+    await cmd("traceopacity all 0");
+    await cmd("bondsize all 0");
+    const HEADER_EDGE_BUFS = `["edgeColorA","edgeColorB","edgeSize","edgeOpacity","edgeDash"]`;
+    await d.evaluate(
+      `void (window.__hdrE = ${HEADER_EDGE_BUFS}.map(k => Float32Array.from(${V}.rep.state[k])))`);
+    const headerEdgeIntact = () => d.evaluate<boolean>(`(()=>{
+      return ${HEADER_EDGE_BUFS}.every((k, i) => {
+        const c = ${V}.rep.state[k], s = window.__hdrE[i];
+        if (c.length !== s.length) return false;
+        for (let j = 0; j < c.length; j++) if (c[j] !== s[j]) return false;
+        return true;
+      });
+    })()`);
+
+    // two groups over VERIFIED point sets: gx CROSSES out of alpha (pixel
+    // carrier + the incident-only case); gin sits CONTAINED inside alpha
+    const ok = await d.evaluate<boolean>(`(()=>{
+      const alpha = ${V}.debug.resolvePoints("alpha");
+      const inAlpha = new Set(alpha);
+      if (alpha.length < 70 || inAlpha.has(3000)) return false; // fixture sanity
+      ${V}.produced.declare("gx", Array.from({ length: 6 }, (_, i) => [alpha[i], 3000 + i]));
+      ${V}.produced.declare("gin", Array.from({ length: 4 }, (_, i) => [alpha[10 + i], alpha[60 + i]]));
+      return true;
+    })()`);
+    check("S59: (arrange) two groups declared over verified alpha membership", ok);
+
+    // -- (a) %group styles exactly that group ---------------------------------
+    const r1 = await cmd("bondsize %gx 7");
+    const r2 = await cmd("colorbonds %gx red");
+    check("S59: %group verbs acknowledge with the produced-only truthful counts",
+      r1.status === "ok" && r1.message === "set 6 produced edges to size 7" &&
+      r2.status === "ok" && r2.message === "colored 6 produced edges red",
+      JSON.stringify({ r1, r2 }));
+    const d1 = await cmd("dashbonds %gx 1.2");
+    check("S59: dashbonds %group writes the produced dash (host + GPU)",
+      d1.message === "set 6 produced edges to dash 1.2" &&
+      await d.evaluate<boolean>(`(()=>{
+        const ids = ${V}.produced.groupIds("gx");
+        const dash = ${V}.produced.layer.dash();
+        const gpu = ${V}.produced.pass.attrArray("iDash");
+        return ids.every(id => Math.abs(dash[id] - 1.2) < 1e-6 && Math.abs(gpu[id] - 1.2) < 1e-6);
+      })()`), JSON.stringify(d1));
+    await sleep(300);
+    const redA = await redAt("group_red");
+    check("S59: ...and the styled group DRAWS (red pixels on produced tubes)", redA > 40, `red=${redA}`);
+    check("S59: ISOLATION — all five header-edge rep buffers byte-identical after %group writes",
+      await headerEdgeIntact());
+
+    // -- (b) LWW + one Ctrl+Z on a %group write -------------------------------
+    await cmd("colorbonds %gx green");
+    await sleep(300);
+    const redGone = await redAt("group_green");
+    check("S59: re-styling the group OVERWRITES (LWW — red pixels vanish)", redGone < 5, `red=${redGone}`);
+    await d.ctrlZ();
+    await sleep(300);
+    const redBack = await redAt("group_undo");
+    check("S59: ONE Ctrl+Z restores the previous produced look (red returns)",
+      redBack > 40 && await d.evaluate<boolean>(`(()=>{
+        const c = ${V}.produced.layer.colorA();
+        const id = ${V}.produced.groupIds("gx")[0];
+        return c[id*4] === 1 && c[id*4+1] === 0;
+      })()`), `red=${redBack}`);
+
+    // -- (c) a POINT target reaches BOTH id spaces as ONE stroke --------------
+    await d.evaluate(`void (window.__preDash = Float32Array.from(${V}.rep.state.edgeDash))`);
+    const depth0 = await undoDepth();
+    const combo = await cmd("dashbonds alpha 3");
+    const mCombo = /^set (\d+) edges \+ (\d+) produced edges to dash 3$/.exec(combo.message);
+    check("S59: dashbonds <target> reports the truthful COMBINED count",
+      combo.status === "ok" && mCombo !== null && Number(mCombo![1]) > 0 && mCombo![2] === "4",
+      JSON.stringify(combo));
+    check("S59: ...as exactly ONE undo stroke", (await undoDepth()) === depth0 + 1);
+    check("S59: ...gin (contained) dashed, gx (crossing) untouched — contained-vs-incident on produced",
+      await d.evaluate<boolean>(`(()=>{
+        const dash = ${V}.produced.layer.dash();
+        const gin = ${V}.produced.groupIds("gin");
+        const gx = ${V}.produced.groupIds("gx");
+        return gin.every(id => dash[id] === 3) && gx.every(id => Math.abs(dash[id] - 1.2) < 1e-6);
+      })()`));
+    await d.ctrlZ();
+    await sleep(200);
+    check("S59: ONE Ctrl+Z reverses BOTH families (header dash byte-restored, gin dash back to 0)",
+      (await undoDepth()) === depth0 &&
+      await d.evaluate<boolean>(`(()=>{
+        const c = ${V}.rep.state.edgeDash, s = window.__preDash;
+        for (let j = 0; j < c.length; j++) if (c[j] !== s[j]) return false;
+        const dash = ${V}.produced.layer.dash();
+        return ${V}.produced.groupIds("gin").every(id => dash[id] === 0);
+      })()`));
+
+    // -- (d) incident reach: the crossing group is reached by `of` only -------
+    const inc = await cmd("bondopacity alpha 0.5");
+    check("S59: bondopacity alpha (contained) touches gin only",
+      /\+ 4 produced edges to opacity 0\.5$/.test(inc.message), JSON.stringify(inc));
+    const incOf = await cmd("bondopacityof alpha 0.5");
+    check("S59: bondopacityof alpha (incident) reaches gin AND the crossing gx",
+      /\+ 10 produced edges to opacity 0\.5$/.test(incOf.message), JSON.stringify(incOf));
+
+    // -- (e) honest misses + completion ---------------------------------------
+    const miss = await cmd("colorbonds %nope red");
+    check("S59: %unknown is an honest nomatch naming the declared groups",
+      miss.status === "nomatch" && /^no group %nope — declared groups: %gx, %gin$/.test(miss.message),
+      JSON.stringify(miss));
+    const comp = await d.evaluate<{ candidates: string[]; kind?: string }>(
+      `${V}.complete("colorbonds %g", "colorbonds %g".length)`);
+    check("S59: %<TAB> completes live group names (kind 'group')",
+      comp.kind === "group" && comp.candidates.length === 2 &&
+        comp.candidates.includes("gx") && comp.candidates.includes("gin"),
+      JSON.stringify(comp));
+    check("S59: FINAL isolation sweep — header-edge buffers byte-identical except the undone dash",
+      await d.evaluate<boolean>(`(()=>{
+        // edgeDash was written and undone; opacity writes above DID touch
+        // header edges (deliberately) — so assert the never-touched buffers
+        return ["edgeColorA","edgeColorB","edgeSize"].every((k) => {
+          const c = ${V}.rep.state[k], i = ${HEADER_EDGE_BUFS}.indexOf(k);
+          const s = window.__hdrE[i];
+          for (let j = 0; j < c.length; j++) if (c[j] !== s[j]) return false;
+          return true;
+        });
+      })()`));
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -10080,7 +10245,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
   S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
-  S58: "fast",
+  S58: "fast", S59: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

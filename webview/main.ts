@@ -4253,6 +4253,7 @@ async function main(): Promise<void> {
           colorA: () => producedLayer.colorA,
           colorB: () => producedLayer.colorB,
           radius: () => producedLayer.radius,
+          dash: () => producedLayer.dash,
           visible: () => producedLayer.visible,
         },
         pass: {
