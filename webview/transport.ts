@@ -36,6 +36,12 @@ export type ProducerRequest =
        * source). Present ⟺ a channel run; the producer installs under it and the
        * return carries no name. */
       channel_name?: string;
+      /** produces:edges only: tags the run as an edge-authoring run so the
+       * producer dispatches its return as [i, j] INTEGER index pairs (not a
+       * flat float list). Present ⟺ an edges run. LOAD-TIME authoring is the
+       * mechanism; run interactively the viewer honestly defers (it still runs
+       * so the count can be reported), so the tag is threaded either way. */
+      produces?: "edges";
     };
 
 export type HostMessage =

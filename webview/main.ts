@@ -2840,6 +2840,11 @@ async function main(): Promise<void> {
           // the single source) — threaded so the producer installs under it and
           // the return no longer carries a name.
           ...(mod.produces === "channel" && mod.channel ? { channel_name: mod.channel } : {}),
+          // produces:edges: tag the run so the producer dispatches the return as
+          // [i, j] index pairs (mirrors the channel_name threading). Interactive
+          // authoring is not yet live — the run still validates + reports a count
+          // below, but does NOT grow the scene (LOAD-TIME authoring is the path).
+          ...(mod.produces === "edges" ? { produces: "edges" as const } : {}),
         });
         const reply = JSON.parse(new TextDecoder().decode(bytes)) as {
           values?: unknown;
@@ -2857,6 +2862,7 @@ async function main(): Promise<void> {
           produces: mod.produces,
           targetCount: points.length,
           frameCount: nFrames,
+          nPoints: header.n_points,
         });
         if (!checked.ok) {
           asyncLine("error", `${mod.name} failed: ${checked.error} — nothing bound`);
@@ -2918,6 +2924,17 @@ async function main(): Promise<void> {
           // with no reload — the conversational property. Declaring is not
           // binding; the user binds it to an axis afterwards.
           declareProducedChannel(mod, checked.channel, points, checked.warning);
+          return true;
+        } else if ("edges" in checked) {
+          // produces: edges — LOAD-TIME authoring only (this increment). The
+          // returned pairs are validated fail-closed above, but the LIVE scene
+          // is NOT grown here: the edge rep buffers are sized once from
+          // header.edges.length at load, and mid-session live authoring is a
+          // later increment. Report the count HONESTLY (never a silent no-op)
+          // and count the run a success — the mod ran and produced valid edges.
+          asyncLine("ok",
+            `${mod.name} → authored ${checked.edges.length} edges — reload to render ` +
+            `(live mid-session authoring is not yet enabled)`);
           return true;
         }
         return true;
