@@ -320,6 +320,20 @@ class MdtrajSource(DataSource):
         # frame 0 (a container either carries a box for every frame or none).
         anchor = self._solute_indices()
         anchor_sorted = np.sort(anchor)
+        # The centered-bbox parity is byte-exact ONLY because the served centering
+        # path reduces the float32 solute centroid over the UNSORTED anchor
+        # (`_center_anchor`, `_center_centroid0`) while this sweep reduces it over
+        # `anchor_sorted` — and those two orders coincide, so the two float32 means
+        # are bit-identical. That coincidence holds solely because
+        # `_solute_indices()` returns ASCENDING indices. Assert it here so a future
+        # reordering of that classifier fails loud rather than silently drifting the
+        # streaming bbox off the served coordinates (a 1-ULP centroid split).
+        if anchor.size and not np.array_equal(anchor, anchor_sorted):
+            raise RuntimeError(
+                "_solute_indices() must return ascending atom indices — the "
+                "streaming centered-bbox parity reduces the solute centroid over "
+                "sorted vs unsorted anchors and relies on them coinciding"
+            )
         groups = self._wrappable_groups(anchor) if anchor.size else []
         grp_flat = np.concatenate(groups) if groups else np.asarray([], dtype=int)
         grp_owner = (
