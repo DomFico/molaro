@@ -45,6 +45,7 @@ from contract.contract import (  # noqa: E402
     channel_delta_to_obj,
     encode_frame_chunk,
     header_to_json,
+    validate_header,
 )
 from producer.synthetic import SyntheticSource  # noqa: E402
 
@@ -366,7 +367,7 @@ def log_mdtraj_preflight() -> None:
 
 def apply_edge_mods(source, header, edge_mods, timeout_s: float = DEFAULT_MOD_TIMEOUT_S) -> None:
     """Run each `produces: edges` mod file and APPEND its returned [i, j] pairs
-    to header.edges, IN PLACE, before the header is serialized.
+    to header.edges before the header is serialized.
 
     Called ONCE at load, between give_header() and header_to_json(): the appended
     edges then render as ordinary edge tubes on (re)load and can be styled by the
@@ -376,14 +377,28 @@ def apply_edge_mods(source, header, edge_mods, timeout_s: float = DEFAULT_MOD_TI
     Each mod runs under the SAME SIGALRM run_mod timeout (run_mod owns the alarm)
     and its return is coerced + validated there (pair shape, integer indices,
     range [0, n_points), i != j). FAIL-CLOSED per mod: on ANY failure — unreadable
-    file, exec error, timeout, a bad pair — ROLL BACK what THIS mod appended and
-    skip it, so one bad mod can neither corrupt the header nor abort the load
-    (mirrors the produced-channel discipline's fail-closed spirit).
+    file, exec error, timeout, a bad pair — that mod contributes NOTHING, so one
+    bad mod can neither corrupt the header nor abort the load (mirrors the
+    produced-channel discipline's fail-closed spirit).
+
+    ALIASING DISCIPLINE: a real source's give_header may return a Header whose
+    `edges` IS the source's own list (not a copy) — and a mod receives the source
+    as `data`, so it could MUTATE that list in place, which a tail-only in-place
+    rollback cannot see. Therefore: (1) `original` is SNAPSHOTTED before any mod
+    runs; (2) only each mod's VALIDATED RETURN is trusted — never the in-place
+    header state after it ran; (3) header.edges is REASSIGNED to
+    `original + collected pairs` (a fresh list — de-aliased, so any in-place
+    mutation a mod made is discarded); (4) BELT: the contract's own
+    validate_header runs on the result, and on ANY failure the original edges
+    are restored fail-closed.
     """
     if not edge_mods:
         return
+    # (1) snapshot BEFORE any mod runs — the one rollback truth
+    original = list(header.edges)
     # edges span the whole system; the mod sees every point as its target set.
     target = list(range(header.n_points))
+    new_pairs = []
     for path in edge_mods:
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -404,14 +419,27 @@ def apply_edge_mods(source, header, edge_mods, timeout_s: float = DEFAULT_MOD_TI
             log.warning("edge-mod %s failed: %s — skipped", path, reply["error"])
             continue
         pairs = reply.get("values") or []
-        before = len(header.edges)
+        # (2) collect this mod's VALIDATED pairs into a local first, so a
+        # defensive coercion failure contributes nothing (all-or-nothing per mod)
         try:
-            header.edges.extend((int(a), int(b)) for a, b in pairs)
+            mod_pairs = [(int(a), int(b)) for a, b in pairs]
         except (TypeError, ValueError) as exc:  # defensive — run_mod already validated
-            del header.edges[before:]  # roll back this mod's partial append
-            log.warning("edge-mod %s: bad pairs (%s) — rolled back, skipped", path, exc)
+            log.warning("edge-mod %s: bad pairs (%s) — skipped", path, exc)
             continue
-        log.info("edge-mod %s: appended %d edges", path, len(pairs))
+        new_pairs.extend(mod_pairs)
+        log.info("edge-mod %s: authored %d edges", path, len(mod_pairs))
+    # (3) REASSIGN — never extend in place: de-aliases from the source's list and
+    # discards any in-place mutation a mod made to it (only validated returns land)
+    header.edges = original + new_pairs
+    # (4) BELT: the contract's own validation on the final header; any failure
+    # (including one a mod smuggled in by mutating other header state through the
+    # source) restores the original edges and fails closed.
+    try:
+        validate_header(header)
+    except ContractError as exc:
+        log.warning(
+            "edge-mods left a contract-invalid header (%s) — ALL edge mods rolled back", exc)
+        header.edges = original
 
 
 def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO,

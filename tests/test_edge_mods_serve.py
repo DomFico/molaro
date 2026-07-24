@@ -26,7 +26,13 @@ import tempfile
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from contract.contract import header_from_json  # noqa: E402
+from contract.contract import (  # noqa: E402
+    VERSION,
+    Header,
+    Points,
+    header_from_json,
+    validate_header,
+)
 from producer.serve import apply_edge_mods, serve  # noqa: E402
 from producer.synthetic import SyntheticSource  # noqa: E402
 
@@ -86,6 +92,98 @@ def _edge_mod_file(tmp: str, name: str, body: str) -> str:
     with open(path, "w", encoding="utf-8") as f:
         f.write(text)
     return path
+
+
+class AliasingSource:
+    """A fake DataSource that mirrors the REAL-source aliasing hazard: its
+    give_header returns Header(edges=self.edges) — the SAME list object every
+    call (never a copy) — and a mod receives the source as `data`, so it can
+    MUTATE data.edges in place. apply_edge_mods must trust ONLY a mod's
+    validated RETURN, never the in-place header state after it ran."""
+
+    def __init__(self, n_points: int = 20, n_frames: int = 2) -> None:
+        self.n_points = n_points
+        self.n_frames = n_frames
+        # the persistent, aliased edge list (a small valid chain)
+        self.edges = [(0, 1), (1, 2)]
+
+    def give_header(self) -> Header:
+        n = self.n_points
+        return Header(
+            version=VERSION,
+            name="aliasing",
+            n_points=n,
+            n_frames=self.n_frames,
+            units="meters",
+            points=Points(
+                type=["t"] * n,
+                group_id=[0] * n,
+                subgroup_id=[0] * n,
+                category=[0] * n,
+            ),
+            categories=["a"],
+            groups={0: "g"},
+            subgroups={0: "s"},
+            edges=self.edges,  # ALIASED on purpose — the hazard under test
+            polylines=[],
+            channels=[],
+        )
+
+
+def _aliasing_checks(tmp: str) -> None:
+    """The aliasing matrix: in-place mutations of data.edges never reach the
+    served header; only validated returns do; the result is always contract-valid."""
+    # (a) a mod that MUTATES data.edges with an INVALID pair and returns [] —
+    # the tail-only in-place rollback could not see this; the reassignment must
+    # discard it (only the validated return, [], lands).
+    mutate_bad = _edge_mod_file(
+        tmp, "alias_mutate_bad",
+        "(data.edges.append([0, 999]) or [])")
+    src = AliasingSource()
+    h = src.give_header()
+    original = [tuple(e) for e in h.edges]
+    apply_edge_mods(src, h, [mutate_bad])
+    check("aliasing: an in-place INVALID mutation of data.edges never reaches the header",
+          [tuple(e) for e in h.edges] == original, str(h.edges))
+    try:
+        validate_header(h)
+        valid = True
+    except Exception:
+        valid = False
+    check("aliasing: ...and the served header is contract-valid", valid)
+    check("aliasing: ...header.edges is DE-ALIASED from the source (reassigned, not shared)",
+          h.edges is not src.edges)
+
+    # (b) a mod that CLEARS data.edges in place and returns a valid pair — the
+    # cleared aliased list must not destroy the original edges; the result is
+    # original + the validated return.
+    clear_ret = _edge_mod_file(
+        tmp, "alias_clear_ret",
+        "(data.edges.clear() or [[0, 3]])")
+    src2 = AliasingSource()
+    h2 = src2.give_header()
+    original2 = [tuple(e) for e in h2.edges]
+    apply_edge_mods(src2, h2, [clear_ret])
+    check("aliasing: a mod that CLEARS data.edges cannot destroy the original (snapshot wins)",
+          [tuple(e) for e in h2.edges] == original2 + [(0, 3)], str(h2.edges))
+
+    # (c) a mod whose RETURN is invalid is skipped entirely, even though it also
+    # mutated the aliased list — rollback restores the original exactly.
+    mutate_and_bad_ret = _edge_mod_file(
+        tmp, "alias_bad_ret",
+        "(data.edges.append([5, 999]) or [[7, 7]])")  # self-loop return
+    src3 = AliasingSource()
+    h3 = src3.give_header()
+    original3 = [tuple(e) for e in h3.edges]
+    apply_edge_mods(src3, h3, [mutate_and_bad_ret])
+    check("aliasing: an invalid RETURN is skipped and the mutation rolled back (original restored)",
+          [tuple(e) for e in h3.edges] == original3, str(h3.edges))
+    try:
+        validate_header(h3)
+        valid3 = True
+    except Exception:
+        valid3 = False
+    check("aliasing: ...and that header too is contract-valid", valid3)
 
 
 def main() -> int:
@@ -174,6 +272,9 @@ def main() -> int:
         apply_edge_mods(src2, h2, [os.path.join(tmp, "does_not_exist.py")])
         check("a missing edge-mod file is skipped fail-closed (edges unchanged)",
               len(h2.edges) == before2)
+
+        # -- real-source aliasing: give_header hands out the SAME list object ---
+        _aliasing_checks(tmp)
 
     print(f"\n{'ALL PASS' if failures == 0 else f'{failures} FAILURE(S)'}")
     return 1 if failures else 0
