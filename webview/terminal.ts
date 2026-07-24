@@ -13,6 +13,7 @@
  * terminalhud.ts.
  */
 
+import type { CompletionKind } from "./address.ts";
 import { mountClaudeLayout } from "./claudelayout.ts";
 import { parseClaudeCommand, parseClaudeEvent } from "./claudemodel.ts";
 import { mountClaudePanel } from "./claudepanel.ts";
@@ -39,13 +40,16 @@ interface CompleteResultMsg {
   start: number;
   candidates: string[];
   applied: string;
-  kind?: "filter" | "param" | "channel" | "axis" | "value";
+  /** The ONE source: address.ts's Completion.kind (type-only import — the
+   * terminal stays runtime-dumb). Never re-declared here. */
+  kind?: CompletionKind;
 }
 
 /** The candidate-list header per completion kind — names WHAT vocabulary the
- * candidates are (path completions carry no kind and stay headerless). The
- * closed list mirrors Completion.kind (webview/address.ts). */
-const COMPLETION_HEADERS: Record<NonNullable<CompleteResultMsg["kind"]>, string> = {
+ * candidates are (path completions carry no kind and stay headerless). Keyed
+ * by the imported CompletionKind, so a kind added in address.ts fails THIS
+ * map's typecheck until its header exists — one source of truth. */
+const COMPLETION_HEADERS: Record<CompletionKind, string> = {
   filter: "filter by (type or label):",
   param: "parameters (name=value):",
   channel: "channels:",

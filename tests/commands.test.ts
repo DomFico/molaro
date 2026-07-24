@@ -2742,6 +2742,8 @@ test("completeCommand: color-family value slot — named CSS colors (hex stays o
     assert.deepEqual(comp("colorpoints c0 ste"),
       { start: 15, candidates: ["steelblue"], applied: "elblue", kind: "value" });
     assert.deepEqual(comp("colorbonds c0 re").candidates, ["rebeccapurple", "red"]);
+    assert.deepEqual(comp("colorbondsof c0 ste"),
+      { start: 16, candidates: ["steelblue"], applied: "elblue", kind: "value" });
     assert.deepEqual(comp("colortrace c0 gol"),
       { start: 14, candidates: ["gold", "goldenrod"], applied: "d", kind: "value" });
     // the FULL color table overflows the display cap — count-and-hint, the

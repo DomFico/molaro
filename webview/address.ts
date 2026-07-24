@@ -578,6 +578,12 @@ export interface Completion {
   kind?: "filter" | "param" | "channel" | "axis" | "value";
 }
 
+/** The closed completion-kind vocabulary, as its own name — the SINGLE
+ * source every consumer keys off (the terminal's header map is a
+ * `Record<CompletionKind, string>`, so adding a kind here fails its
+ * typecheck until the header exists — never two lists to keep agreeing). */
+export type CompletionKind = NonNullable<Completion["kind"]>;
+
 /** Token characters end at these; the scan-back from the cursor stops here. */
 const TOKEN_DELIMS = new Set([".", ",", "+", "@", '"']);
 
