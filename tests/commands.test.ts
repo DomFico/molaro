@@ -112,6 +112,18 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
   const sizeOps: { kind: "points" | "edges" | "trace"; ids: number[]; size: number }[] = [];
   const dashOps: { ids: number[]; dash: number }[] = [];
   const opacityOps: { kind: "points" | "edges" | "trace"; ids: number[]; opacity: number }[] = [];
+  // Produced-edge fixture: tests push groups/pairs in, the mock serves the
+  // SAME read surface main.ts wires (groups/groupIds/activePairs), and every
+  // produced write is recorded — so the verbs' produced arms are assertable
+  // without a renderer. Empty by default: the legacy scenes' byte-identity
+  // tests run over exactly this default.
+  const produced = {
+    groups: [] as { name: string; baseId: number; count: number; active: boolean }[],
+    pairs: new Map<number, [number, number]>(),
+  };
+  const producedOps: { kind: string; ids: number[]; value?: unknown; a?: number[]; b?: number[] }[] = [];
+  // ctx.beginStroke/endStroke markers — the ONE-stroke composition proof
+  const strokeEvents: ("begin" | "end")[] = [];
   const ctx: CommandContext = {
     hierarchy,
     tree: buildTree(header),
@@ -434,16 +446,55 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     armRmDeletion: (names) => {
       rmArms.push([...names]);
     },
-    // Produced-edge plumbing (mid-session authored edges): no verb reaches it
-    // yet — a structural stub keeps the mock honest against the interface.
+    // Produced-edge surface: reads over the test fixture, writes recorded.
     producedEdges: {
-      groups: () => [],
-      groupIds: () => null,
-      colorEdges: () => 0,
-      sizeEdges: () => 0,
-      opacityEdges: () => 0,
-      dashEdges: () => 0,
-      styleEdges: () => 0,
+      groups: () => produced.groups.map((g) => ({ ...g })),
+      groupIds: (name) => {
+        const g = produced.groups.find((x) => x.name === name);
+        return g ? Array.from({ length: g.count }, (_, i) => g.baseId + i) : null;
+      },
+      activePairs: () => {
+        const out: { id: number; a: number; b: number }[] = [];
+        for (const g of produced.groups) {
+          if (!g.active) continue;
+          for (let i = 0; i < g.count; i++) {
+            const id = g.baseId + i;
+            const [a, b] = produced.pairs.get(id) ?? [0, 0];
+            out.push({ id, a, b });
+          }
+        }
+        return out;
+      },
+      colorEdges: (ids, rgb) => {
+        producedOps.push({ kind: "color", ids: [...ids], value: rgb });
+        return ids.length;
+      },
+      colorEdgesEnds: (ids, aFlat, bFlat) => {
+        producedOps.push({ kind: "ends", ids: [...ids], a: [...aFlat], b: [...bFlat] });
+        return ids.length;
+      },
+      sizeEdges: (ids, size) => {
+        producedOps.push({ kind: "size", ids: [...ids], value: size });
+        return ids.length;
+      },
+      opacityEdges: (ids, opacity) => {
+        producedOps.push({ kind: "opacity", ids: [...ids], value: opacity });
+        return ids.length;
+      },
+      dashEdges: (ids, dash) => {
+        producedOps.push({ kind: "dash", ids: [...ids], value: dash });
+        return ids.length;
+      },
+      styleEdges: (ids, index) => {
+        producedOps.push({ kind: "style", ids: [...ids], value: index });
+        return ids.length;
+      },
+    },
+    beginStroke: () => {
+      strokeEvents.push("begin");
+    },
+    endStroke: () => {
+      strokeEvents.push("end");
     },
   };
   return {
@@ -452,6 +503,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     calls, commits, hiddenState, refOps, memberOps,
     colorOps, colorEachOps, eachOps, edgeOps, endsOps, traceOps, sizeOps, dashOps, opacityOps, modRuns, modRunCode, rmArms, sels,
     bindCalls, bindingReg, orientationOps, offsetOps, elemEachOps, styleOps, shapeOps, shapeActive, bgOps,
+    produced, producedOps, strokeEvents,
   };
 }
 

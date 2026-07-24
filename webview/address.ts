@@ -275,6 +275,53 @@ export function isEdgeIndexExpr(expr: string): boolean {
   return r !== null && "specs" in r;
 }
 
+/**
+ * The `%group` PRODUCED-EDGE-GROUP axis — names a produced-edge GROUP (the
+ * mid-session authored edges a `produces: edges` mod declared) directly by its
+ * group name, symmetric to the `#e` edge-index axis: a THIRD namespace (the
+ * produced pass's own id space — not header edges, not points), living OUTSIDE
+ * parseTarget's entries grammar and recognized only by the edge-verb family.
+ * Grammar:
+ *
+ *   group-expr := group-spec (("," | "+") group-spec)*
+ *   group-spec := "%" NAME          (NAME = the mod-header edge-group token)
+ *
+ * `%contacts` = that group's produced edges; `%a + %b` unions groups (`,` and
+ * `+` both union, the `#e` rule — a flat id set has no term structure). The
+ * NAME token mirrors the `# edge-group:` header rule (recipes.ts), so every
+ * declarable group is addressable. Whether a named group EXISTS is a live
+ * question the resolver answers (an unknown group is a nomatch, never a parse
+ * error) — this parser only judges shape.
+ *
+ * Returns the names, an error (a `%`-leading expr whose parts don't all
+ * match), or `null` when the text is not a `%group` expression at all (the
+ * caller falls through to `#e`, then to a POINT target). Total — never throws.
+ */
+export function parseGroupExpr(
+  expr: string,
+): { names: string[] } | { error: string } | null {
+  const t = expr.trim();
+  if (!t.startsWith("%")) return null; // not a %group expression → try #e / points
+  const parts = t.split(/[,+]/).map((p) => p.trim());
+  const names: string[] = [];
+  for (const p of parts) {
+    const m = /^%([A-Za-z][A-Za-z0-9_-]*)$/.exec(p);
+    if (!m) {
+      return { error: `invalid %group "${p}" — use %<group-name> (a produced-edge group, e.g. %contacts)` };
+    }
+    names.push(m[1]);
+  }
+  return { names };
+}
+
+/** True iff `expr` is a well-formed `%group` expression — the completion
+ * dispatcher's gate, exactly isEdgeIndexExpr's: a `%name` chunk counts as a
+ * completed target (edge verbs only), so a value slot after it completes. */
+export function isGroupExpr(expr: string): boolean {
+  const r = parseGroupExpr(expr);
+  return r !== null && "names" in r;
+}
+
 /** Internal parse failure — caught by parseTarget and returned as ParseError. */
 class Failure extends Error {}
 
@@ -636,7 +683,7 @@ export interface Completion {
    *   "axis"    bindable axis tokens (bake/bind/unbind)
    *   "value"   a fixed value vocabulary (booleans, styles, shapes,
    *             colors, mod selectors, verb names for help) */
-  kind?: "filter" | "param" | "channel" | "axis" | "value";
+  kind?: "filter" | "param" | "channel" | "axis" | "value" | "group";
 }
 
 /** The closed completion-kind vocabulary, as its own name — the SINGLE

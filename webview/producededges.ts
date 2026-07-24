@@ -238,6 +238,25 @@ export class ProducedEdgeLayer {
     }
   }
 
+  /** Every ACTIVE group's edges with their endpoint POINT indices — the
+   * matching surface for the edge verbs' point-target arm (the produced
+   * sibling of walking header.edges). Inactive (walked-back) groups and
+   * retired spans are excluded: what a broad target styles is exactly what
+   * is drawable. Groups come in registration order, each span contiguous (a
+   * re-declared group may sit at higher ids than a younger one — callers
+   * treat the ids as a SET, exactly like edgesMatching's). */
+  activePairs(): { id: number; a: number; b: number }[] {
+    const out: { id: number; a: number; b: number }[] = [];
+    for (const g of this.byName.values()) {
+      if (!g.active) continue;
+      for (let i = 0; i < g.count; i++) {
+        const id = g.baseId + i;
+        out.push({ id, a: this.pairs[id * 2], b: this.pairs[id * 2 + 1] });
+      }
+    }
+    return out;
+  }
+
   /** Re-seed the junction-trim end sizes from the CURRENT point sizes — the
    * point `size` rep-channel subscription's target. `pointIds` scopes the
    * write (undefined = every allocated edge), mirroring fillEdgeEndSizes. */

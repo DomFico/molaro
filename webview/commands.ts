@@ -19,7 +19,9 @@ import {
   completeTargetExpr,
   completeToken,
   isEdgeIndexExpr,
+  isGroupExpr,
   parseEdgeIndexExpr,
+  parseGroupExpr,
   parseTarget,
   resolveTarget,
   splitLeadingRef,
@@ -357,18 +359,33 @@ export interface CommandContext {
    * buffer byte-identical under produced writes and vice versa. Same
    * one-stroke capture/LWW/recordOp discipline as the rep writers; opacity is
    * the alpha half of both color slots (the header-edge RGBA interleave).
-   * PLUMBING ONLY this increment: no verb resolves a produced-edge target yet
-   * (the %group arms are the next task) — the surface exists so those arms,
-   * and the tests proving grow-safety now, reach one spine. */
+   * CONSUMED by the edge-verb family's produced arms: the `%group` target
+   * resolves through groups()/groupIds(); a POINT target's produced matching
+   * walks activePairs() with the same contained/incident predicate the
+   * header edges use; the writers land the values. */
   producedEdges: {
     groups(): { name: string; baseId: number; count: number; active: boolean }[];
     groupIds(name: string): number[] | null;
+    /** Every ACTIVE group's edges with endpoint POINT indices — the
+     * point-target matching surface (inactive/retired slots excluded). */
+    activePairs(): { id: number; a: number; b: number }[];
     colorEdges(ids: readonly number[], rgb: [number, number, number]): number;
+    /** bicolorbonds' produced arm: per-edge A/B triples (colorEdgesEnds'
+     * exact value shape), alpha untouched, one composed stroke. */
+    colorEdgesEnds(ids: readonly number[], aFlat: readonly number[], bFlat: readonly number[]): number;
     sizeEdges(ids: readonly number[], size: number): number;
     opacityEdges(ids: readonly number[], opacity: number): number;
     dashEdges(ids: readonly number[], dash: number): number;
     styleEdges(ids: readonly number[], index: number): number;
   };
+  /** Reentrant undo-stroke brackets (the model's beginStroke/endStroke): an
+   * edge verb whose one invocation writes BOTH families (header-edge +
+   * produced) folds them into ONE Ctrl+Z. Opened only when both sides
+   * actually write — the zero-produced path never calls them, so a scene
+   * with no produced edges runs the exact legacy code path (byte- and
+   * undo-identical). */
+  beginStroke(): void;
+  endStroke(): void;
 }
 
 export class CommandRegistry {
@@ -895,39 +912,148 @@ function resolveEdgeSpecs(specs: readonly EdgeIndexSpec[], nEdges: number): numb
   return ids;
 }
 
-/** THE edge-verb resolver: turn a target expression into EDGE ids by EITHER of
- * two axes, tried in order —
- *   1. `#e` EDGE-INDEX — `#e5` / `#e5-10` / `#e*` names edges DIRECTLY by their
- *      contract edge index (validated against ctx.edges.length). `both` is
- *      irrelevant here: you named the edges, so there is no endpoint predicate.
- *   2. otherwise a POINT target — view's exact grammar, resolved to points then
- *      mapped to edges via edgesMatching (both = contained vs incident).
- * `viaIndex` tells the caller which axis fired so it can word an empty result
- * (a `#e` miss is "no edges match", a point miss is the endpoint wording). A
- * malformed `#e...` expr is a loud error; a point nomatch propagates. */
+/** edgesMatching's PRODUCED sibling: the same contained/incident predicate
+ * over the ACTIVE produced edges' endpoint pairs (ctx.producedEdges.
+ * activePairs()) — one predicate, two id spaces. Returns PRODUCED ids. */
+function producedEdgesMatching(
+  ctx: CommandContext,
+  points: readonly number[],
+  both: boolean,
+): number[] {
+  const inSet = new Set(points);
+  const ids: number[] = [];
+  for (const { id, a, b } of ctx.producedEdges.activePairs()) {
+    if (both ? inSet.has(a) && inSet.has(b) : inSet.has(a) || inSet.has(b)) ids.push(id);
+  }
+  return ids;
+}
+
+/** What an edge-verb target resolved to: HEADER edge ids and/or PRODUCED
+ * edge ids (two disjoint id spaces — never mixed in one list), plus which
+ * axis fired (the empty-result wording needs it). */
+interface EdgeResolution {
+  edgeIds: number[];
+  producedIds: number[];
+  via: "index" | "group" | "points";
+}
+
+/** THE edge-verb resolver: turn a target expression into edge ids by ONE of
+ * three axes, tried in order —
+ *   1. `%group` PRODUCED-GROUP — `%name` names a produced-edge group's edges
+ *      DIRECTLY (the mid-session authored pass's own id space). `both` is
+ *      irrelevant (you named the edges); header edges are NEVER touched. An
+ *      unknown / inactive / empty group is an HONEST nomatch here — the
+ *      resolver knows WHICH group failed and why, the callers only that
+ *      nothing matched.
+ *   2. `#e` EDGE-INDEX — `#e5` / `#e5-10` / `#e*` names HEADER edges by their
+ *      contract edge index (validated against ctx.edges.length). Header-only
+ *      by design: the produced id space has its own axis (%group), and
+ *      S57 pins that `#e` past the last header edge stays a nomatch.
+ *   3. otherwise a POINT target — view's exact grammar, resolved to points,
+ *      then mapped onto BOTH id spaces with the SAME predicate:
+ *      edgesMatching over header.edges AND producedEdgesMatching over the
+ *      active produced pairs (both = contained vs incident, identically).
+ * A malformed `%…`/`#e…` expr is a loud error; a point nomatch propagates. */
 function resolveEdgeIds(
   ctx: CommandContext,
   expr: string,
   both: boolean,
-): { edgeIds: number[]; viaIndex: boolean } | CommandResult {
+): EdgeResolution | CommandResult {
+  const g = parseGroupExpr(expr);
+  if (g !== null) {
+    if ("error" in g) return { status: "error", message: g.error };
+    const seen = new Set<number>();
+    const producedIds: number[] = [];
+    for (const name of g.names) {
+      const info = ctx.producedEdges.groups().find((x) => x.name === name);
+      if (!info) {
+        const declared = ctx.producedEdges.groups().map((x) => `%${x.name}`);
+        return {
+          status: "nomatch",
+          message: `no group %${name}${declared.length > 0 ? ` — declared groups: ${declared.join(", ")}` : " — no produced-edge groups are declared"}`,
+        };
+      }
+      if (!info.active) {
+        return {
+          status: "nomatch",
+          message: `group %${name} is inactive (its declaration was undone — redo restores it)`,
+        };
+      }
+      for (const id of ctx.producedEdges.groupIds(name) ?? []) {
+        if (!seen.has(id)) {
+          seen.add(id);
+          producedIds.push(id);
+        }
+      }
+    }
+    if (producedIds.length === 0) {
+      return { status: "nomatch", message: `group ${g.names.map((n) => `%${n}`).join(" + ")} has no edges` };
+    }
+    return { edgeIds: [], producedIds, via: "group" };
+  }
   const parsed = parseEdgeIndexExpr(expr);
   if (parsed !== null) {
     if ("error" in parsed) return { status: "error", message: parsed.error };
-    return { edgeIds: resolveEdgeSpecs(parsed.specs, ctx.edges.length), viaIndex: true };
+    return { edgeIds: resolveEdgeSpecs(parsed.specs, ctx.edges.length), producedIds: [], via: "index" };
   }
   const r = resolveTargetPoints(ctx, expr);
   if ("status" in r) return r;
-  return { edgeIds: edgesMatching(ctx.edges, r.points, both), viaIndex: false };
+  return {
+    edgeIds: edgesMatching(ctx.edges, r.points, both),
+    producedIds: producedEdgesMatching(ctx, r.points, both),
+    via: "points",
+  };
 }
 
 /** The "no matching edges" wording, shared by the whole edge-verb family: a
  * `#e` miss names the index expression; a point-target miss keeps the endpoint
- * wording (contained vs incident) the verbs shipped with. */
-function noEdgesMsg(expr: string, both: boolean, viaIndex: boolean): string {
-  if (viaIndex) return `no edges match "${expr}"`;
+ * wording (contained vs incident) the verbs shipped with — the point wording
+ * covers BOTH id spaces truthfully now (neither header nor produced edges
+ * matched). A `%group` miss never reaches here (resolveEdgeIds words it). */
+function noEdgesMsg(expr: string, both: boolean, via: EdgeResolution["via"]): string {
+  if (via === "index") return `no edges match "${expr}"`;
   return both
     ? `no edges with both endpoints in "${expr}"`
     : `no edges touching "${expr}"`;
+}
+
+/** How the family reports what it touched: exactly the historic `${n} edges`
+ * when nothing produced matched (S16/S54/S55's pinned messages stay
+ * byte-identical), the produced count alone for a `%group` write, and the
+ * explicit sum when one invocation styled both id spaces. Never claims edges
+ * it did not write. */
+function edgeCountPhrase(nHeader: number, nProduced: number): string {
+  if (nProduced === 0) return `${nHeader} edges`;
+  if (nHeader === 0) return `${nProduced} produced edges`;
+  return `${nHeader} edges + ${nProduced} produced edges`;
+}
+
+/** Run the header-edge write and the produced arm as ONE undo stroke — the
+ * combined write every edge verb's two-space resolution lands through:
+ *   - no produced ids → EXACTLY the legacy call (no stroke opened, no
+ *     produced op recorded — a scene without produced edges is byte- and
+ *     undo-identical to before the produced arm existed);
+ *   - no header ids (a `%group` write, or a point target matching only
+ *     produced edges) → only the produced write (its own internal stroke
+ *     discipline stands);
+ *   - both → ctx.beginStroke/endStroke fold the two writers' recorded ops
+ *     (each internally stroked/recorded) into ONE Ctrl+Z, reentrantly.
+ * Zero-id sides are SKIPPED, never called-with-[] — the zero-write no-op
+ * discipline at this seam rather than trusted one layer down. */
+function writeEdgeFamilies(
+  ctx: CommandContext,
+  edgeIds: readonly number[],
+  producedIds: readonly number[],
+  writeHeader: () => number,
+  writeProduced: () => number,
+): { nHeader: number; nProduced: number } {
+  if (producedIds.length === 0) return { nHeader: writeHeader(), nProduced: 0 };
+  if (edgeIds.length === 0) return { nHeader: 0, nProduced: writeProduced() };
+  ctx.beginStroke();
+  const nHeader = writeHeader();
+  const nProduced = writeProduced();
+  ctx.endStroke();
+  return { nHeader, nProduced };
 }
 
 /** The edge families' shared argument front half — parallel to resolveRepArgs
@@ -945,15 +1071,17 @@ function resolveEdgeRepArgs<T>(
   parse: (word: string) => T | null,
   badValue: (word: string) => string,
   both: boolean,
-): { edgeIds: number[]; value: T; expr: string; word: string } | CommandResult {
+): { edgeIds: number[]; producedIds: number[]; value: T; expr: string; word: string } | CommandResult {
   const v = splitAndParseValue(verb, args, noun, example, parse, badValue);
   if ("status" in v) return v;
   const e = resolveEdgeIds(ctx, v.expr, both);
   if ("status" in e) return e;
-  if (e.edgeIds.length === 0) {
-    return { status: "nomatch", message: noEdgesMsg(v.expr, both, e.viaIndex) };
+  // empty means NEITHER id space matched (a %group's own empty/unknown
+  // wording never reaches here — resolveEdgeIds returns it directly)
+  if (e.edgeIds.length === 0 && e.producedIds.length === 0) {
+    return { status: "nomatch", message: noEdgesMsg(v.expr, both, e.via) };
   }
-  return { edgeIds: e.edgeIds, value: v.value, expr: v.expr, word: v.word };
+  return { edgeIds: e.edgeIds, producedIds: e.producedIds, value: v.value, expr: v.expr, word: v.word };
 }
 
 function resolveEdgeColorArgs(ctx: CommandContext, verb: string, args: string, both: boolean) {
@@ -1024,6 +1152,12 @@ export function makeColorPointsHandler(ctx: CommandContext): CommandHandler {
  * edge) and touch no other primitive. A well-formed target that matches
  * points but no edges is a nomatch (e.g. colorbonds on a single point — no
  * edge has both endpoints in a one-point set) — nothing written, no stroke.
+ *
+ * PRODUCED ARM (every edge verb's shape): a point target ALSO matches the
+ * ACTIVE produced edges under the same endpoint predicate, written through
+ * the produced writer family in the SAME undo stroke (writeEdgeFamilies);
+ * a `%group` target writes ONLY that group's produced edges. With no
+ * produced match the call is byte-identical to the pre-produced verb.
  */
 export function makeColorBondsHandler(
   ctx: CommandContext,
@@ -1033,8 +1167,10 @@ export function makeColorBondsHandler(
   return (args: string): CommandResult => {
     const r = resolveEdgeColorArgs(ctx, verb, args, both);
     if ("status" in r) return r;
-    const n = ctx.colorEdges(r.edgeIds, r.value);
-    return { status: "ok", message: `colored ${n} edges ${r.word}` };
+    const { nHeader, nProduced } = writeEdgeFamilies(ctx, r.edgeIds, r.producedIds,
+      () => ctx.colorEdges(r.edgeIds, r.value),
+      () => ctx.producedEdges.colorEdges(r.producedIds, r.value));
+    return { status: "ok", message: `colored ${edgeCountPhrase(nHeader, nProduced)} ${r.word}` };
   };
 }
 
@@ -1065,23 +1201,42 @@ export function makeBicolorBondsHandler(
     }
     const e = resolveEdgeIds(ctx, expr, both);
     if ("status" in e) return e;
-    if (e.edgeIds.length === 0) {
-      return { status: "nomatch", message: noEdgesMsg(expr, both, e.viaIndex) };
+    if (e.edgeIds.length === 0 && e.producedIds.length === 0) {
+      return { status: "nomatch", message: noEdgesMsg(expr, both, e.via) };
     }
     const edgeIds = e.edgeIds;
-    // The snapshot: each half from ITS endpoint's current point color.
+    // The snapshot: each half from ITS endpoint's current point color —
+    // header edges read their pair from ctx.edges, produced edges from the
+    // active-pairs surface (the SAME read the matching used), both at
+    // execution time (a later colorpoints does NOT retro-update either).
     const colors = ctx.pointColors();
-    const aFlat = new Array<number>(edgeIds.length * 3);
-    const bFlat = new Array<number>(edgeIds.length * 3);
-    for (let i = 0; i < edgeIds.length; i++) {
-      const [a, b] = ctx.edges[edgeIds[i]];
-      for (let c = 0; c < 3; c++) {
-        aFlat[i * 3 + c] = colors[a * 3 + c];
-        bFlat[i * 3 + c] = colors[b * 3 + c];
+    const snapFlat = (pairAt: (i: number) => readonly [number, number], n: number) => {
+      const aFlat = new Array<number>(n * 3);
+      const bFlat = new Array<number>(n * 3);
+      for (let i = 0; i < n; i++) {
+        const [a, b] = pairAt(i);
+        for (let c = 0; c < 3; c++) {
+          aFlat[i * 3 + c] = colors[a * 3 + c];
+          bFlat[i * 3 + c] = colors[b * 3 + c];
+        }
       }
-    }
-    const n = ctx.colorEdgesEnds(edgeIds, aFlat, bFlat);
-    return { status: "ok", message: `bicolored ${n} edges from their endpoints' colors` };
+      return { aFlat, bFlat };
+    };
+    const writeProduced = (): number => {
+      const byId = new Map(ctx.producedEdges.activePairs().map((p) => [p.id, [p.a, p.b] as const]));
+      const s = snapFlat((i) => byId.get(e.producedIds[i]) ?? [0, 0], e.producedIds.length);
+      return ctx.producedEdges.colorEdgesEnds(e.producedIds, s.aFlat, s.bFlat);
+    };
+    const { nHeader, nProduced } = writeEdgeFamilies(ctx, edgeIds, e.producedIds,
+      () => {
+        const s = snapFlat((i) => ctx.edges[edgeIds[i]], edgeIds.length);
+        return ctx.colorEdgesEnds(edgeIds, s.aFlat, s.bFlat);
+      },
+      writeProduced);
+    return {
+      status: "ok",
+      message: `bicolored ${edgeCountPhrase(nHeader, nProduced)} from their endpoints' colors`,
+    };
   };
 }
 
@@ -1154,8 +1309,15 @@ export function makeBondSizeHandler(
   return (args: string): CommandResult => {
     const r = resolveEdgeSizeArgs(ctx, verb, args, both);
     if ("status" in r) return r;
-    const n = ctx.sizeEdges(r.edgeIds, r.value.size);
-    return { status: "ok", message: sizedMsg(n, "edges", r.value) };
+    const { nHeader, nProduced } = writeEdgeFamilies(ctx, r.edgeIds, r.producedIds,
+      () => ctx.sizeEdges(r.edgeIds, r.value.size),
+      () => ctx.producedEdges.sizeEdges(r.producedIds, r.value.size));
+    return {
+      status: "ok",
+      message: `set ${edgeCountPhrase(nHeader, nProduced)} to size ${r.value.size}${
+        r.value.clamped ? " (clamped to 0)" : ""
+      }`,
+    };
   };
 }
 
@@ -1193,10 +1355,12 @@ export function makeDashBondsHandler(
     const r = resolveEdgeRepArgs(ctx, verb, args, "dash scale", "1.5", parseSize,
       (w) => `not a dash scale: "${w}" — use a non-negative number (0 = solid, e.g. 1.5)`, both);
     if ("status" in r) return r;
-    const n = ctx.dashEdges(r.edgeIds, r.value.size);
+    const { nHeader, nProduced } = writeEdgeFamilies(ctx, r.edgeIds, r.producedIds,
+      () => ctx.dashEdges(r.edgeIds, r.value.size),
+      () => ctx.producedEdges.dashEdges(r.producedIds, r.value.size));
     return {
       status: "ok",
-      message: `set ${n} edges to dash ${r.value.size}${
+      message: `set ${edgeCountPhrase(nHeader, nProduced)} to dash ${r.value.size}${
         r.value.clamped ? " (clamped to 0)" : ""
       }${r.value.size === 0 ? " (solid)" : ""}`,
     };
@@ -1244,8 +1408,15 @@ export function makeBondOpacityHandler(
   return (args: string): CommandResult => {
     const r = resolveEdgeOpacityArgs(ctx, verb, args, both);
     if ("status" in r) return r;
-    const n = ctx.opacityEdges(r.edgeIds, r.value.opacity);
-    return { status: "ok", message: opacityMsg(n, "edges", r.value) };
+    const { nHeader, nProduced } = writeEdgeFamilies(ctx, r.edgeIds, r.producedIds,
+      () => ctx.opacityEdges(r.edgeIds, r.value.opacity),
+      () => ctx.producedEdges.opacityEdges(r.producedIds, r.value.opacity));
+    return {
+      status: "ok",
+      message: `set ${edgeCountPhrase(nHeader, nProduced)} to opacity ${r.value.opacity}${
+        r.value.clampedTo === null ? "" : ` (clamped to ${r.value.clampedTo})`
+      }`,
+    };
   };
 }
 
@@ -3129,12 +3300,13 @@ function targetChunkCount(
   for (let k = prior.length; k >= 1; k--) {
     // A prefix is a completed target if it parses as a point target — or, for
     // the EDGE-verb family only (allowEdgeIndex), if it is a well-formed `#e`
-    // edge-index expression, so a value slot after a `#e` target completes
-    // exactly as it does after `#N`. Gated because only the edge verbs accept
-    // `#e` at runtime — `colorpoints #e0` errors, so offering its value slot
-    // would complete a command that cannot run.
+    // edge-index or `%group` expression, so a value slot after those targets
+    // completes exactly as it does after `#N`. Gated because only the edge
+    // verbs accept `#e`/`%group` at runtime — `colorpoints #e0` errors, so
+    // offering its value slot would complete a command that cannot run.
     const chunk = argsHead.slice(prior[0].start, prior[k - 1].end);
-    if (parseTarget(chunk).kind !== "error" || (allowEdgeIndex && isEdgeIndexExpr(chunk))) return k;
+    if (parseTarget(chunk).kind !== "error" ||
+        (allowEdgeIndex && (isEdgeIndexExpr(chunk) || isGroupExpr(chunk)))) return k;
   }
   return 0;
 }
@@ -3335,6 +3507,26 @@ export function completeCommand(
   const argsStart = m[1].length;
   const argsHead = m[2];
 
+  /** The EDGE-verb family's target slot: a `%`-leading token completes LIVE
+   * produced-group names (active groups only — an inactive group nomatches
+   * at runtime, so offering it would complete a command that cannot run);
+   * anything else is the ordinary target slot. The `%` scan starts after
+   * the last unquoted `,`/`+` so a union's newest spec completes
+   * (`%a+%co<TAB>` completes `co`). Gated to the edge verbs exactly like
+   * `#e` — `%` means nothing to the other families. */
+  const edgeTargetSlot = (): Completion => {
+    const { token, tokenStart } = argPosition(argsHead);
+    const segAt = Math.max(token.lastIndexOf("+"), token.lastIndexOf(",")) + 1;
+    const seg = token.slice(segAt);
+    if (!seg.startsWith("%")) return targetSlot();
+    return completeToken(
+      argsStart + tokenStart + segAt + 1, // after the "%"
+      seg.slice(1),
+      ctx.producedEdges.groups().filter((g) => g.active).map((g) => g.name),
+      { kind: "group" },
+    );
+  };
+
   // the built-in verbs with enumerable non-target slots
   switch (verb) {
     case "bake":
@@ -3357,8 +3549,21 @@ export function completeCommand(
       return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [colorSlot()]);
     case "colorbonds":
     case "colorbondsof":
-      // edge verbs: a `#e` edge-index chunk is a completed target too
-      return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [colorSlot()], true);
+      // edge verbs: a `#e`/`%group` chunk is a completed target too, and the
+      // target slot itself completes `%`-led produced-group names
+      return completeSlotsAfterTarget(argsStart, argsHead, edgeTargetSlot, [colorSlot()], true);
+    case "bicolorbonds":
+    case "bicolorbondsof":
+    case "bondsize":
+    case "bondsizeof":
+    case "dashbonds":
+    case "dashbondsof":
+    case "bondopacity":
+    case "bondopacityof":
+      // the rest of the edge family: same %-aware target slot; their value
+      // slots are numeric (or absent — bicolor), so the table is empty and
+      // post-target positions stay unenumerable no-ops by design
+      return completeSlotsAfterTarget(argsStart, argsHead, edgeTargetSlot, [], true);
     case "stylepoints":
     case "styletrace":
       return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [styleSlot(ctx)]);

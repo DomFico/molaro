@@ -2983,6 +2983,20 @@ async function main(): Promise<void> {
     model.endStroke();
     return n;
   };
+  /** The PER-ENDPOINT pair (bicolorbonds' produced arm): each edge's A half
+   * from aFlat, B half from bFlat (flat 3×ids.length, the colorEdgesEnds
+   * value shape) — alpha untouched in component 3, one composed stroke. */
+  const producedColorEdgesEnds = (
+    ids: readonly number[],
+    aFlat: readonly number[],
+    bFlat: readonly number[],
+  ): number => {
+    model.beginStroke();
+    const n = writeProducedSlice(() => producedLayer.colorA, 4, 0, 3, producedWrite("colorA"), ids, (i, c) => aFlat[i * 3 + c]);
+    writeProducedSlice(() => producedLayer.colorB, 4, 0, 3, producedWrite("colorB"), ids, (i, c) => bFlat[i * 3 + c]);
+    model.endStroke();
+    return n;
+  };
   const producedSizeEdges = (ids: readonly number[], size: number): number =>
     writeProducedSlice(() => producedLayer.radius, 1, 0, 1, producedWrite("radius"), ids, () => size);
   const producedDashEdges = (ids: readonly number[], dash: number): number =>
@@ -3643,19 +3657,28 @@ async function main(): Promise<void> {
     armRmDeletion: (names: string[]) => {
       pendingRm = names; // single slot — a newer rm replaces it
     },
-    // Produced-edge surface (mid-session authored edges): reads + the writer
-    // family. PLUMBING ONLY this increment — no verb resolves a %group target
-    // yet; the writers exist so the coming verb arms (and the tests proving
-    // grow-safety now) have one spine to reach.
+    // Produced-edge surface (mid-session authored edges): the reads the
+    // %group axis and the point-target produced arm resolve through, plus
+    // the writer family the edge verbs' produced arms write through.
     producedEdges: {
       groups: () => producedLayer.groups(),
       groupIds: (name: string) => producedLayer.groupIds(name),
+      activePairs: () => producedLayer.activePairs(),
       colorEdges: producedColorEdges,
+      colorEdgesEnds: producedColorEdgesEnds,
       sizeEdges: producedSizeEdges,
       opacityEdges: producedOpacityEdges,
       dashEdges: producedDashEdges,
       styleEdges: producedStyleEdges,
     },
+    // Reentrant undo-stroke brackets (model.beginStroke/endStroke): a verb
+    // whose ONE invocation writes through two writer families (the
+    // header-edge write + the produced arm) folds both into ONE Ctrl+Z.
+    // Opened by the verbs ONLY when both sides actually write — the
+    // zero-produced path never touches them, so a scene without produced
+    // edges runs the exact legacy code path.
+    beginStroke: () => model.beginStroke(),
+    endStroke: () => model.endStroke(),
   };
   const commands = createCommandRegistry(commandContext);
   runCommand = (text: string) => commands.runCommand(text);
@@ -3713,13 +3736,15 @@ async function main(): Promise<void> {
     opacityPoints: () => 0, opacityEdges: () => 0, opacityTrace: () => 0,
     runAnalysisMod: () => {}, // never reached — mod-invocation verbs refused first
     armRmDeletion: () => {}, // never reached — rm refused first
-    // reads stay REAL (a macro may one day resolve a %group); writes no-op
+    // reads stay REAL (a macro resolves %groups for pre-validation); writes no-op
     producedEdges: {
       groups: () => producedLayer.groups(),
       groupIds: (name: string) => producedLayer.groupIds(name),
-      colorEdges: () => 0, sizeEdges: () => 0, opacityEdges: () => 0,
-      dashEdges: () => 0, styleEdges: () => 0,
+      activePairs: () => producedLayer.activePairs(),
+      colorEdges: () => 0, colorEdgesEnds: () => 0, sizeEdges: () => 0,
+      opacityEdges: () => 0, dashEdges: () => 0, styleEdges: () => 0,
     },
+    beginStroke: () => {}, endStroke: () => {},
   };
   const validationCommands = createCommandRegistry(validationContext);
 

@@ -55,6 +55,7 @@ const COMPLETION_HEADERS: Record<CompletionKind, string> = {
   channel: "channels:",
   axis: "axes:",
   value: "values:",
+  group: "produced-edge groups:",
 };
 
 function main(): void {
