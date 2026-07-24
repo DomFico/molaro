@@ -15,7 +15,9 @@ import {
   completeToken,
   globMatch,
   isEdgeIndexExpr,
+  isGroupExpr,
   parseEdgeIndexExpr,
+  parseGroupExpr,
   parseTarget,
   resolveTarget,
   splitLeadingRef,
@@ -1030,4 +1032,31 @@ test("isEdgeIndexExpr: true only for a well-formed #e expression", () => {
   for (const notEdge of ["alpha", "#5", "#eq", "#e", "#e0+alpha"]) {
     assert.ok(!isEdgeIndexExpr(notEdge), notEdge);
   }
+});
+
+test("parseGroupExpr: %name names a produced-edge group; unions via ',' and '+'", () => {
+  assert.deepEqual(parseGroupExpr("%contacts"), { names: ["contacts"] });
+  // the mod-header edge-group token rule: letters/digits/_/-, letter-led
+  assert.deepEqual(parseGroupExpr("%h-bonds_2"), { names: ["h-bonds_2"] });
+  assert.deepEqual(parseGroupExpr("%a,%b"), { names: ["a", "b"] });
+  assert.deepEqual(parseGroupExpr("%a + %b"), { names: ["a", "b"] });
+  // shape-only: a repeated name parses (the resolver dedupes ids)
+  assert.deepEqual(parseGroupExpr("%a+%a"), { names: ["a", "a"] });
+});
+
+test("parseGroupExpr: NOT-% returns null (fall through to #e / a point target); malformed errors", () => {
+  assert.equal(parseGroupExpr("alpha.g0"), null);
+  assert.equal(parseGroupExpr("#e5"), null, "a #e expression is not a %group");
+  assert.equal(parseGroupExpr("all"), null);
+  // a %-leading expr whose parts don't all match is a loud error
+  for (const bad of ["%", "%1abc", "%a b", "%a+alpha", "%a.", '%"x"']) {
+    const r = parseGroupExpr(bad);
+    assert.ok(r !== null && "error" in r, bad);
+    if (r !== null && "error" in r) assert.match(r.error, /invalid %group/, bad);
+  }
+});
+
+test("isGroupExpr: true only for a well-formed %group expression", () => {
+  for (const good of ["%a", "%contacts", "%a,%b", "%a + %b"]) assert.ok(isGroupExpr(good), good);
+  for (const not of ["alpha", "#e0", "%", "%1x", "%a+alpha"]) assert.ok(!isGroupExpr(not), not);
 });

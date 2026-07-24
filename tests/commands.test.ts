@@ -2652,6 +2652,161 @@ test("a malformed entry in a push is skipped WITH a reason, never silently dropp
   assert.ok(outcome.skipped.every((s) => /well-formed/.test(s.reason)));
 });
 
+// -- the produced arm: %group targets + point-target produced matching -------------
+
+/** makeRegistry plus a PRODUCED fixture over the same 3-point scene:
+ *   %hb   ids [0,1] — pairs [0,1] (inside c0) and [1,2] (crossing into c1)
+ *   %far  id  [2]   — pair  [0,2] (crossing; no header edge links 0-2)
+ *   %off  id  [3]   — INACTIVE (its declaration walked back)
+ *   %none          — declared but EMPTY (count 0)
+ * The header edges stay [[0,1],[1,2]], so every contained/incident case is
+ * decidable across BOTH id spaces from this one scene. */
+function makeProducedFixture() {
+  const fx = makeRegistry();
+  fx.produced.groups.push(
+    { name: "hb", baseId: 0, count: 2, active: true },
+    { name: "far", baseId: 2, count: 1, active: true },
+    { name: "off", baseId: 3, count: 1, active: false },
+    { name: "none", baseId: 4, count: 0, active: true },
+  );
+  fx.produced.pairs.set(0, [0, 1]);
+  fx.produced.pairs.set(1, [1, 2]);
+  fx.produced.pairs.set(2, [0, 2]);
+  fx.produced.pairs.set(3, [0, 1]);
+  return fx;
+}
+
+test("%group: styles EXACTLY that group's produced edges — header edges untouched", () => {
+  const fx = makeProducedFixture();
+  const res = fx.registry.runCommand("colorbonds %hb red");
+  assert.equal(res.status, "ok");
+  assert.equal(res.message, "colored 2 produced edges red");
+  assert.deepEqual(fx.producedOps, [{ kind: "color", ids: [0, 1], value: [1, 0, 0] }]);
+  assert.deepEqual(fx.edgeOps, [], "no header-edge write");
+  assert.deepEqual(fx.strokeEvents, [], "one family wrote — no combined stroke opened");
+});
+
+test("%group: the whole family writes through its produced writer", () => {
+  const fx = makeProducedFixture();
+  assert.equal(fx.registry.runCommand("bondsize %far 4").message, "set 1 produced edges to size 4");
+  assert.equal(fx.registry.runCommand("dashbonds %hb 0.6").message, "set 2 produced edges to dash 0.6");
+  assert.equal(fx.registry.runCommand("bondopacity %hb 0.25").message, "set 2 produced edges to opacity 0.25");
+  assert.deepEqual(fx.producedOps.map((o) => [o.kind, o.ids, o.value]), [
+    ["size", [2], 4],
+    ["dash", [0, 1], 0.6],
+    ["opacity", [0, 1], 0.25],
+  ]);
+  assert.deepEqual(fx.sizeOps, [], "no header write anywhere");
+  assert.deepEqual(fx.dashOps, []);
+  assert.deepEqual(fx.opacityOps, []);
+});
+
+test("%group: unions via '+'/',' dedupe ids; a repeated group counts once", () => {
+  const fx = makeProducedFixture();
+  assert.equal(fx.registry.runCommand("colorbonds %hb + %far red").message, "colored 3 produced edges red");
+  assert.deepEqual(fx.producedOps[0].ids, [0, 1, 2]);
+  fx.producedOps.length = 0;
+  assert.equal(fx.registry.runCommand("colorbonds %hb,%hb red").message, "colored 2 produced edges red");
+  assert.deepEqual(fx.producedOps[0].ids, [0, 1]);
+});
+
+test("%group: unknown / inactive / empty groups are HONEST nomatches, nothing written", () => {
+  const fx = makeProducedFixture();
+  const unknown = fx.registry.runCommand("colorbonds %nope red");
+  assert.equal(unknown.status, "nomatch");
+  assert.match(unknown.message, /^no group %nope — declared groups: %hb, %far, %off, %none$/);
+  const inactive = fx.registry.runCommand("dashbonds %off 1");
+  assert.equal(inactive.status, "nomatch");
+  assert.match(inactive.message, /%off is inactive .*undone.*redo/);
+  const empty = fx.registry.runCommand("bondsize %none 2");
+  assert.equal(empty.status, "nomatch");
+  assert.equal(empty.message, "group %none has no edges");
+  // and with NO groups declared, the unknown wording says so
+  const bare = makeRegistry();
+  assert.match(bare.registry.runCommand("colorbonds %x red").message,
+    /^no group %x — no produced-edge groups are declared$/);
+  assert.deepEqual(fx.producedOps, []);
+  assert.deepEqual(fx.edgeOps, []);
+});
+
+test("point target: ONE invocation styles both id spaces in ONE combined stroke", () => {
+  const fx = makeProducedFixture();
+  // c0 = {0,1}: contained header edge 0 ([0,1]); contained produced id 0
+  const res = fx.registry.runCommand("dashbonds c0 2");
+  assert.equal(res.status, "ok");
+  assert.equal(res.message, "set 1 edges + 1 produced edges to dash 2");
+  assert.deepEqual(fx.dashOps, [{ ids: [0], dash: 2 }]);
+  assert.deepEqual(fx.producedOps, [{ kind: "dash", ids: [0], value: 2 }]);
+  assert.deepEqual(fx.strokeEvents, ["begin", "end"], "both families → ONE ctx stroke");
+});
+
+test("point target: contained vs incident applies to produced edges IDENTICALLY", () => {
+  const fx = makeProducedFixture();
+  // contained in c0={0,1}: produced id 0 only
+  fx.registry.runCommand("colorbonds c0 red");
+  assert.deepEqual(fx.producedOps.at(-1)?.ids, [0]);
+  // incident to c0: produced 0 ([0,1]), 1 ([1,2] via 1), 2 ([0,2] via 0) —
+  // and NEVER the inactive id 3, though its pair [0,1] would match
+  const res = fx.registry.runCommand("colorbondsof c0 red");
+  assert.equal(res.message, "colored 2 edges + 3 produced edges red");
+  assert.deepEqual(fx.producedOps.at(-1)?.ids, [0, 1, 2]);
+});
+
+test("point target: produced-ONLY matches write without a combined stroke", () => {
+  const fx = makeProducedFixture();
+  // {point 0} ∪ c1 = {0,2}: NO header edge is contained ([0,1] needs 1;
+  // [1,2] needs 1) but produced %far's [0,2] is — the produced-only branch
+  const res = fx.registry.runCommand("colorbonds c0.g0.s0.a + c1 red");
+  assert.equal(res.status, "ok");
+  assert.equal(res.message, "colored 1 produced edges red");
+  assert.deepEqual(fx.producedOps, [{ kind: "color", ids: [2], value: [1, 0, 0] }]);
+  assert.deepEqual(fx.edgeOps, []);
+  assert.deepEqual(fx.strokeEvents, [], "one family wrote — no combined stroke");
+});
+
+test("bicolorbonds: the produced arm snapshots endpoint colors via activePairs", () => {
+  const fx = makeProducedFixture();
+  // %far: pair [0,2] — A half from point 0's color, B from point 2's
+  const res = fx.registry.runCommand("bicolorbonds %far");
+  assert.equal(res.message, "bicolored 1 produced edges from their endpoints' colors");
+  assert.equal(fx.producedOps.length, 1);
+  const op = fx.producedOps[0];
+  assert.equal(op.kind, "ends");
+  assert.deepEqual(op.ids, [2]);
+  assert.deepEqual(op.a?.map((v) => Math.round(v * 10) / 10), [0.1, 0.2, 0.3]);
+  assert.deepEqual(op.b?.map((v) => Math.round(v * 10) / 10), [0.7, 0.8, 0.9]);
+  assert.deepEqual(fx.endsOps, [], "no header-edge ends write for a %group");
+  // a point target snapshots BOTH spaces in one stroke
+  const both = fx.registry.runCommand("bicolorbonds c0");
+  assert.equal(both.message, "bicolored 1 edges + 1 produced edges from their endpoints' colors");
+  assert.deepEqual(fx.strokeEvents, ["begin", "end"]);
+  assert.equal(fx.endsOps.length, 1);
+});
+
+test("no produced edges: every edge verb runs the EXACT legacy path (byte-identical message, no stroke)", () => {
+  const fx = makeRegistry(); // produced fixture EMPTY
+  assert.equal(fx.registry.runCommand("colorbonds c0 red").message, "colored 1 edges red");
+  assert.equal(fx.registry.runCommand("bondsize c0 3").message, "set 1 edges to size 3");
+  assert.equal(fx.registry.runCommand("dashbonds c0 1.5").message, "set 1 edges to dash 1.5");
+  assert.equal(fx.registry.runCommand("bondopacity c0 0.5").message, "set 1 edges to opacity 0.5");
+  assert.equal(fx.registry.runCommand("bicolorbonds c0").message,
+    "bicolored 1 edges from their endpoints' colors");
+  assert.deepEqual(fx.producedOps, [], "no produced write anywhere");
+  assert.deepEqual(fx.strokeEvents, [], "no combined stroke ever opened");
+});
+
+test("%group means nothing outside the edge family — a point verb nomatches, writes nothing", () => {
+  const fx = makeProducedFixture();
+  // "%hb" rides the point grammar as an ordinary (unmatched) label token, so
+  // the refusal is the standard nomatch — honest: nothing resolved, nothing
+  // written, and the produced ids were never consulted.
+  const r = fx.registry.runCommand("colorpoints %hb red");
+  assert.equal(r.status, "nomatch", JSON.stringify(r));
+  assert.equal(r.message, 'nothing matches "%hb"');
+  assert.deepEqual(fx.producedOps, []);
+  assert.deepEqual(fx.colorOps, []);
+});
+
 // -- completeCommand: the argument-aware completion dispatcher --------------------
 
 /** A registry + ctx with one PARAMIZED analysis mod installed under its own
@@ -2711,6 +2866,45 @@ test("completeCommand: a #e chunk completes the value slot for EDGE verbs only",
     // scoped to the #e chunk, not the verb's completion generally)
     assert.ok(comp("colorpoints c0 re").candidates.includes("red"));
   } finally { done(); }
+});
+
+test("completeCommand: %<TAB> offers LIVE produced-group names — edge verbs only, active only", () => {
+  const fx = makeProducedFixture();
+  const comp = (text: string, cursor = text.length) =>
+    completeCommand(fx.ctx, fx.registry, text, cursor);
+  // the bare % token: every ACTIVE group (inactive %off would nomatch at
+  // runtime, so it is never offered), kind "group", start after the %
+  const bare = comp("colorbonds %");
+  assert.equal(bare.kind, "group");
+  assert.deepEqual(bare.candidates, ["far", "hb", "none"]); // settled (sorted) pool
+  assert.equal(bare.start, "colorbonds %".length);
+  // a prefix narrows and settles
+  const pre = comp("dashbonds %f");
+  assert.deepEqual(pre.candidates, ["far"]);
+  assert.equal(pre.applied, "ar");
+  // a union's NEWEST spec completes (the scan starts after the last +/,)
+  assert.deepEqual(comp("colorbonds %hb+%f").candidates, ["far"]);
+  // the whole numeric/bicolor family routes the same %-aware target slot
+  assert.deepEqual(comp("bondsize %h").candidates, ["hb"]);
+  assert.deepEqual(comp("bicolorbonds %n").candidates, ["none"]);
+  // NON-edge verbs never offer group names — %group cannot run there
+  assert.ok(!comp("colorpoints %h").candidates.includes("hb"));
+});
+
+test("completeCommand: a %group chunk completes the value slot for EDGE verbs only", () => {
+  const fx = makeProducedFixture();
+  const comp = (text: string, cursor = text.length) =>
+    completeCommand(fx.ctx, fx.registry, text, cursor);
+  // colorbonds accepts %group at runtime → the color slot after it completes
+  const after = comp("colorbonds %hb re");
+  assert.ok(after.candidates.includes("red"), JSON.stringify(after));
+  // (a "%hb" chunk PARSES as an unmatched label token in the point grammar,
+  // so colorpoints' value slot completes after it exactly as after any
+  // parseable-but-unmatched word — the runtime nomatch is the honest gate,
+  // unlike "#e0" which does not parse as a point target at all)
+  assert.ok(comp("colorpoints %hb re").candidates.includes("red"));
+  // numeric slots after a %group chunk stay unenumerable no-ops
+  assert.deepEqual(comp("bondsize %hb 3").candidates, []);
 });
 
 test("completeCommand: ?param NAMES — pool, prefix extension, unique appends '='", () => {
