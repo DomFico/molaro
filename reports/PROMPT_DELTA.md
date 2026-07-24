@@ -17,6 +17,20 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
 
 ## Since the last prompt pass
 
+### Edge appearance surface grew: bicolor + dashed edges (incr 51)
+> **STATUS: PENDING** — new user-facing surface; a next-attended-pass decision whether to teach
+> it. NOT a blind spot: the prompt teaches grammar-by-shape + examples and get_context reports
+> live rep state, so the assistant can discover verbs via `help` and axes via `bind` usage.
+- **New verbs:** `bicolorbonds`/`bicolorbondsof <target>` — each bond-half takes its endpoint
+  point's CURRENT color (a snapshot; tracks upstream `colorpoints`/`rainbow`). `dashbonds`/
+  `dashbondsof <target> <scale>` — 0 = solid, world-length dashes.
+- **New bindable edge axes:** `bondcolorends` (per-endpoint color, NO mean — a per-point color
+  channel bound here yields a live A→B gradient along each edge; contrast `bondcolor` = endpoint
+  mean) and `bonddash` (scalar, `[0,1]→0..4`, endpoint mean).
+- **Why it may be worth teaching:** these are the hooks for the non-covalent-interaction
+  direction — an H-bond/π-stacking style becomes a mod that writes `bonddash`/`bondcolorends`.
+- **Point at:** `docs/COMMANDS.md` rows (updated) + the `bake`/`bind` axis lists.
+
 ### `data.trajectory` is LAZY after streaming (Phase 2c / incr 50, prompt fix `d225c11`)
 > **STATUS: CONSUMED 2026-07-23** — folded directly (not deferred): `claudeprompt.ts`
 > line ~53 no longer says `data.trajectory` is "already loaded in memory".
