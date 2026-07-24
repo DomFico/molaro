@@ -2735,3 +2735,110 @@ test("completeCommand: add/remove complete their SECOND-argument target (re-base
     assert.deepEqual(comp("add alpha c").candidates, []);
   } finally { done(); }
 });
+
+test("completeCommand: color-family value slot — named CSS colors (hex stays open input)", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    assert.deepEqual(comp("colorpoints c0 ste"),
+      { start: 15, candidates: ["steelblue"], applied: "elblue", kind: "value" });
+    assert.deepEqual(comp("colorbonds c0 re").candidates, ["rebeccapurple", "red"]);
+    assert.deepEqual(comp("colortrace c0 gol"),
+      { start: 14, candidates: ["gold", "goldenrod"], applied: "d", kind: "value" });
+    // the FULL color table overflows the display cap — count-and-hint, the
+    // same one rule path completion applies (pool unchanged, display capped)
+    const all = comp("colorpoints c0 ");
+    assert.match(all.candidates[0], /^\d+ matches$/);
+    assert.equal(all.candidates[1], "— type to narrow");
+    // a hex token is a no-op (open input, not enumerable)
+    assert.deepEqual(comp("colorpoints c0 #ff").candidates, []);
+  } finally { done(); }
+});
+
+test("completeCommand: the color slot's + union guard — 'be' completes as a TARGET term", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    // the trailing chunk after "c0 +" is MORE TARGET, never a color
+    assert.deepEqual(comp("colorpoints c0 + c"),
+      { start: 17, candidates: ["c0", "c1"], applied: "" });
+    assert.equal(comp("colorpoints c0 + c").kind, undefined);
+    // with the union complete, the next word IS the color again
+    assert.equal(comp("colorpoints c0 + c1 re").kind, "value");
+  } finally { done(); }
+});
+
+test("completeCommand: style verbs complete registered style names after the target", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    assert.deepEqual(comp("stylepoints c0 "),
+      { start: 15, candidates: ["matte", "standard"], applied: "", kind: "value" });
+    assert.deepEqual(comp("stylebonds c0 ma"),
+      { start: 14, candidates: ["matte"], applied: "tte", kind: "value" });
+    assert.deepEqual(comp("styletrace c0 stan"),
+      { start: 14, candidates: ["standard"], applied: "dard", kind: "value" });
+    // the target still completes ahead of the style word
+    assert.deepEqual(comp("stylepoints c").candidates, ["c0", "c1"]);
+  } finally { done(); }
+});
+
+test("completeCommand: shape completes its domain word, then that domain's registered names", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    // domain slot: the verb's own table (points | bonds | traces)
+    assert.deepEqual(comp("shape "),
+      { start: 6, candidates: ["bonds", "points", "traces"], applied: "", kind: "value" });
+    assert.deepEqual(comp("shape p"),
+      { start: 6, candidates: ["points"], applied: "oints ", kind: "value" });
+    // name slot: the registry's names FOR the typed domain
+    assert.deepEqual(comp("shape points "),
+      { start: 13, candidates: ["sphere"], applied: "sphere", kind: "value" });
+    assert.deepEqual(comp("shape traces ri"),
+      { start: 13, candidates: ["ribbon"], applied: "bbon", kind: "value" });
+    // unknown domain / beyond the name: inert
+    assert.deepEqual(comp("shape bogus ").candidates, []);
+    assert.deepEqual(comp("shape points sphere ").candidates, []);
+  } finally { done(); }
+});
+
+test("completeCommand: background completes a named color as its ONE argument", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    assert.deepEqual(comp("background nav"),
+      { start: 11, candidates: ["navajowhite", "navy"], applied: "", kind: "value" });
+    assert.deepEqual(comp("background navy").applied, "");
+    assert.deepEqual(comp("background midnightb"),
+      { start: 11, candidates: ["midnightblue"], applied: "lue", kind: "value" });
+    // background takes exactly one argument — nothing completes after it
+    assert.deepEqual(comp("background navy ").candidates, []);
+  } finally { done(); }
+});
+
+test("completeCommand: rm completes workspace mod names + 'all' (built-ins never offered)", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    const bare = comp("rm ");
+    assert.equal(bare.kind, "value");
+    assert.ok(bare.candidates.includes("compmod"));
+    assert.ok(bare.candidates.includes("all"));
+    assert.ok(!bare.candidates.includes("rainbow"), "built-ins are refused by rm — never offered");
+    assert.deepEqual(comp("rm comp"),
+      { start: 3, candidates: ["compmod"], applied: "mod", kind: "value" });
+    // selector terms split on '+', spaces optional
+    assert.deepEqual(comp("rm compmod+co"),
+      { start: 11, candidates: ["compmod"], applied: "mpmod", kind: "value" });
+    assert.deepEqual(comp("rm compmod + a"),
+      { start: 13, candidates: ["all"], applied: "ll", kind: "value" });
+  } finally { done(); }
+});
+
+test("completeCommand: help completes a registered verb name (mod verbs included)", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    assert.deepEqual(comp("help colorp"),
+      { start: 5, candidates: ["colorpoints"], applied: "oints", kind: "value" });
+    assert.deepEqual(comp("help compm"),
+      { start: 5, candidates: ["compmod"], applied: "od", kind: "value" });
+    assert.ok(comp("help ").candidates.includes("view"));
+    // one argument only
+    assert.deepEqual(comp("help view ").candidates, []);
+  } finally { done(); }
+});

@@ -3089,6 +3089,63 @@ function axisSlot(includeOffset: boolean): WordSlot {
   };
 }
 
+/** The color slot the color-family verbs and background share: the CSS
+ * NAMED colors only — hex stays open input (unenumerable, a no-op). */
+function colorSlot(): WordSlot {
+  return { pool: () => [...CSS_COLORS.keys()], kind: "value" };
+}
+
+/** The style slot the style verbs share: the registered style names. */
+function styleSlot(ctx: CommandContext): WordSlot {
+  return { pool: () => ctx.styleNames(), kind: "value" };
+}
+
+/** A verb whose FIRST argument is one enumerable word (background's color,
+ * help's verb name): complete it there; anything beyond is inert. */
+function completeFirstWord(argsStart: number, argsHead: string, slot: WordSlot): Completion {
+  const { prior, token, tokenStart } = argPosition(argsHead);
+  if (prior.length > 0) return { start: argsStart + tokenStart, candidates: [], applied: "" };
+  return completeToken(argsStart + tokenStart, token, slot.pool(), {
+    uniqueSuffix: slot.uniqueSuffix,
+    kind: slot.kind,
+  });
+}
+
+/** shape's two fixed word slots: the domain vocabulary (SHAPE_DOMAINS —
+ * the verb's own table, never a copy), then the registry's names FOR the
+ * already-typed domain. An unknown domain enumerates nothing. */
+function completeShapeSlots(ctx: CommandContext, argsStart: number, argsHead: string): Completion {
+  const { prior, token, tokenStart } = argPosition(argsHead);
+  const at = argsStart + tokenStart;
+  if (prior.length === 0) {
+    return completeToken(at, token, Object.keys(SHAPE_DOMAINS), {
+      uniqueSuffix: " ",
+      kind: "value",
+    });
+  }
+  if (prior.length === 1) {
+    const domain = (SHAPE_DOMAINS as Record<string, "point" | "edge" | "vertex">)[prior[0].text];
+    if (domain === undefined) return { start: at, candidates: [], applied: "" };
+    const info = ctx.shapesInfo().find((i) => i.domain === domain);
+    return completeToken(at, token, info?.names ?? [], { kind: "value" });
+  }
+  return { start: at, candidates: [], applied: "" };
+}
+
+/** rm's selector names MODS, not points: the deletable pool is the
+ * workspace mod names (rm refuses built-ins, so they never complete) plus
+ * the `all` keyword. Selector terms split on `+` with spaces optional, so
+ * the token runs back to the nearest `+` or whitespace. */
+function completeRmSelector(argsStart: number, argsHead: string): Completion {
+  let ts = argsHead.length;
+  while (ts > 0 && !/[\s+]/.test(argsHead[ts - 1])) ts--;
+  const pool = [
+    ...listRecipes().filter((mod) => mod.origin !== "built-in").map((mod) => mod.name),
+    "all",
+  ];
+  return completeToken(argsStart + ts, argsHead.slice(ts), pool, { kind: "value" });
+}
+
 /** add/remove: `<verb> @name <target-expr>` — the target is the SECOND
  * argument. Cursor still in the first chunk → the plain target slot
  * (completeTarget's @-handling already completes the leading reference);
@@ -3126,12 +3183,15 @@ function completeSecondArgTarget(
  * slot —
  *   · cursor still in the first word → verb-name completion (completeTarget's
  *     verb position, unchanged);
- *   · an enumerable NON-TARGET slot under the cursor (a mod's `?params`
- *     today; channel/axis/style/shape/color/… slots as the dispatcher
- *     grows) → that slot's vocabulary, settled through the ONE shared
- *     completeToken helper — never a second settle path;
- *   · anything else → target completion (completeTarget), the pre-dispatch
- *     behavior, so target-grammar completion is untouched.
+ *   · an enumerable NON-TARGET slot under the cursor — a mod's `?params`,
+ *     bake/bind's channel + axis, unbind's axis, the color/style value
+ *     words, shape's domain + name, background's color, rm's mod
+ *     selector, help's verb — → that slot's vocabulary, settled through
+ *     the ONE shared completeToken helper — never a second settle path;
+ *   · anything else → target completion (completeTarget — add/remove
+ *     re-based past their leading @name), so target-grammar completion is
+ *     untouched. Numeric slots (sizes, opacities, dashes, ranges) and hex
+ *     colors stay unenumerable no-ops.
  * Total like completeTarget: junk and unenumerable slots yield an empty
  * Completion, never a throw. Only `text[0..cursor)` is considered.
  */
@@ -3177,6 +3237,27 @@ export function completeCommand(
     case "add":
     case "remove":
       return completeSecondArgTarget(ctx, argsStart, argsHead, targetSlot);
+    case "colorpoints":
+    case "colorbonds":
+    case "colorbondsof":
+    case "colortrace":
+      return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [colorSlot()]);
+    case "stylepoints":
+    case "stylebonds":
+    case "styletrace":
+      return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [styleSlot(ctx)]);
+    case "shape":
+      return completeShapeSlots(ctx, argsStart, argsHead);
+    case "background":
+      return completeFirstWord(argsStart, argsHead, colorSlot());
+    case "rm":
+      return completeRmSelector(argsStart, argsHead);
+    case "help":
+    case "?":
+      return completeFirstWord(argsStart, argsHead, {
+        pool: () => registry.verbs(),
+        kind: "value",
+      });
   }
 
   // a mod's own verb: the ?parameter slots (the target slot falls through)
