@@ -976,7 +976,7 @@ function resolveEdgeIds(
       if (!info.active) {
         return {
           status: "nomatch",
-          message: `group %${name} is inactive (its declaration was undone — redo restores it)`,
+          message: `group %${name} is inactive (its declaration was undone — re-run the mod to restore it)`,
         };
       }
       for (const id of ctx.producedEdges.groupIds(name) ?? []) {

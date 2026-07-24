@@ -2717,7 +2717,7 @@ test("%group: unknown / inactive / empty groups are HONEST nomatches, nothing wr
   assert.match(unknown.message, /^no group %nope — declared groups: %hb, %far, %off, %none$/);
   const inactive = fx.registry.runCommand("dashbonds %off 1");
   assert.equal(inactive.status, "nomatch");
-  assert.match(inactive.message, /%off is inactive .*undone.*redo/);
+  assert.match(inactive.message, /%off is inactive .*undone.*re-run the mod/);
   const empty = fx.registry.runCommand("bondsize %none 2");
   assert.equal(empty.status, "nomatch");
   assert.equal(empty.message, "group %none has no edges");
