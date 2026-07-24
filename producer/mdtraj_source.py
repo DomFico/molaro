@@ -25,11 +25,15 @@ respects the GLOBAL split verdict ``self.centering`` (decided once over all
 frames) — a centering-OFF system still streams raw exactly as 2a did.
 
 Phase 2c makes the streaming path TRULY lazy: the eager resident copy 2a/2b kept
-is gone. The header's bbox is still built from the RAW startup sweep (a
-display-only sample; the edge PBC sample is centering-invariant because centering
-preserves every bonded pair's distance), and that same one-pass sweep now also
-decides the GLOBAL split/centering verdict and runs the one-time no-tear
-assertion — byte-identically to what a whole-trajectory load computed. The
+is gone. The header's bbox is built by the one-pass startup sweep in the SERVED
+coordinate frame — centered running min/max when the centering verdict is ON (so
+the camera, which targets the bbox centre, frames the molecule give_frames
+actually streams rather than aiming into a corner) and raw when OFF (raw ==
+served there). It matches the resident path's centered bbox to the byte. (The
+edge PBC sample stays raw — it is centering-invariant, because centering
+preserves every bonded pair's distance.) That same one-pass sweep also decides
+the GLOBAL split/centering verdict and runs the one-time no-tear assertion —
+byte-identically to what a whole-trajectory load computed. The
 CENTERED ``trajectory`` the analysis mods read (``rg``/``rmsd``/``rmsf``/
 ``smoothing``) is materialised lazily on first access and cached, and ``_xyz`` is
 gone on the streaming path, so a source no mod analyses never holds the whole
@@ -264,9 +268,17 @@ class MdtrajSource(DataSource):
         (decision D1), ≤1 chunk resident. In a single pass it accumulates THREE
         things (2c folds the last two off the now-deleted resident copy):
 
-          1. the header's raw frame-derived fields —
-             self._bbox_lo / self._bbox_hi   raw running min/max over points+frames
+          1. the header's frame-derived fields —
+             self._bbox_lo / self._bbox_hi   the CAMERA-framing bbox: running
+                                             min/max over points+frames in the
+                                             SERVED coordinate frame (centered
+                                             when the verdict is ON, raw when OFF)
+                                             — finalised in the reducer, after the
+                                             verdict is known, from the raw lo/hi
+                                             and centered clo/chi both swept here
              self._edge_sample               (S, N, 3) raw coords at the PBC frames
+                                             (centering-invariant: it preserves
+                                             every bonded pair's distance)
              self._scan_frame0               (N, 3) raw frame-0 coords (2b target);
           2. the GLOBAL centering DECISION — the anchor's per-frame coordinates and
              the internal-bond + projected-gap split tests, reduced afterward to
@@ -292,6 +304,14 @@ class MdtrajSource(DataSource):
 
         lo = np.full(3, np.inf, dtype=np.float64)
         hi = np.full(3, -np.inf, dtype=np.float64)
+        # CENTERED running min/max, in the coordinate frame give_frames actually
+        # SERVES when centering is ON (raw `lo`/`hi` are a different frame — see
+        # the reducer's bbox selection). Accumulated over the fully-centered
+        # `shifted` chunk below, which is already in RAM for the tear check; zero
+        # extra I/O. Stays ±inf when no anchor+unitcell chunk is ever seen (an OFF
+        # system), and is discarded there in favour of `lo`/`hi`.
+        clo = np.full(3, np.inf, dtype=np.float64)
+        chi = np.full(3, -np.inf, dtype=np.float64)
         frame0: Optional[np.ndarray] = None
 
         # Centering-decision scaffolding (2c). The anchor and the loose-molecule
@@ -338,22 +358,30 @@ class MdtrajSource(DataSource):
                 frame0 = xyz[0].copy()
                 has_unitcell = chunk.unitcell_lengths is not None
 
-            # ---- centering-decision accumulation (2c) ----
+            # ---- centering-decision + centered-bbox accumulation (2c) ----
             if anchor.size and has_unitcell:
                 anchor_chunks.append(xyz[:, anchor_sorted, :].copy())
                 box = np.asarray(chunk.unitcell_lengths, dtype=np.float32)
                 box_chunks.append(box)
+                # Speculatively center this chunk EXACTLY as give_frames will
+                # (assuming centering ON): pin the solute to the GLOBAL frame-0
+                # centroid, then re-image the loose groups. `tear_centroid0` (this
+                # chunk-0 anchor centroid) is byte-equal to `self._center_centroid0`
+                # `_apply_centering` uses, and the shift/wrap arithmetic mirrors it
+                # atom-for-atom, so `shifted` is byte-identical to the served chunk
+                # and the min/max below equals the resident CENTERED bbox. Built for
+                # EVERY anchor+unitcell chunk (the eventual verdict picks raw vs
+                # centered later — a split-anchor OFF simply discards this).
+                cc = xyz[:, anchor_sorted, :].mean(axis=1)          # (c,3)
+                if tear_centroid0 is None:
+                    tear_centroid0 = cc[0].copy()
+                shift = (tear_centroid0 - cc).astype(np.float32)
+                shifted = xyz + shift[:, None, :]                   # shift-only so far
                 if groups:
-                    # Speculatively shift+wrap this chunk EXACTLY as give_frames
-                    # will (assuming centering ON), accumulating the pre/post-wrap
-                    # max bond length. Asserted once, in the reducer, only if ON;
-                    # for an OFF (split) verdict the wrap is discarded unchecked,
+                    # Loose-molecule re-image, accumulating the pre/post-wrap max
+                    # bond length. Asserted once, in the reducer, only if ON; for
+                    # an OFF (split) verdict the wrap is discarded unchecked,
                     # matching the resident path (which never wraps a split anchor).
-                    cc = xyz[:, anchor_sorted, :].mean(axis=1)      # (c,3)
-                    if tear_centroid0 is None:
-                        tear_centroid0 = cc[0].copy()
-                    shift = (tear_centroid0 - cc).astype(np.float32)
-                    shifted = xyz + shift[:, None, :]
                     tear_before = max(
                         tear_before, self._max_bond_length_xyz(shifted, bond_ij))
                     centre = shifted[:, anchor_sorted, :].mean(axis=1)
@@ -365,20 +393,46 @@ class MdtrajSource(DataSource):
                         image[:, grp_owner, :] * box[:, None, :]).astype(np.float32)
                     tear_after = max(
                         tear_after, self._max_bond_length_xyz(shifted, bond_ij))
+                # CENTERED running min/max over the fully-centered chunk (points ×
+                # frames), the frame the camera must target when serving centered.
+                cpts = shifted.reshape(-1, 3)
+                clo = np.minimum(clo, cpts.min(axis=0))
+                chi = np.maximum(chi, cpts.max(axis=0))
             start += c
 
-        self._bbox_lo = lo
-        self._bbox_hi = hi
         self._edge_sample = np.stack(
             [sample_pos[int(gi)] for gi in sample_idx], axis=0
         ).astype("<f4")
         self._scan_frame0 = frame0
 
         # ---- reduce the swept accumulators to the GLOBAL centering verdict ----
+        # (sequenced BEFORE the bbox is finalised — the bbox frame choice depends
+        # on the ON/OFF answer, so the verdict must be known first.)
         self.centering = self._decide_centering_from_scan(
             anchor_sorted, has_unitcell, anchor_chunks, box_chunks, groups,
             tear_before, tear_after,
         )
+
+        # ---- camera-framing bbox: match the SERVED coordinate frame ----
+        # give_frames serves CENTERED coordinates when the verdict is ON, so the
+        # header bbox — which the camera targets (webview frameCamera) — must be
+        # taken over those CENTERED coords, not the raw sweep. The raw all-frames
+        # bbox aims the camera into a corner (the raw frame differs from the served
+        # one) and, when the solute wraps, unions both periodic images and inflates
+        # the scene. When OFF, served == raw, so the raw bbox is already correct.
+        if self.centering.startswith("on"):
+            if not (np.all(np.isfinite(clo)) and np.all(np.isfinite(chi))):
+                # An ON verdict guarantees an anchor+unitcell chunk was swept, so
+                # clo/chi are finite. Never silently ship a raw (misframing) bbox.
+                raise RuntimeError(
+                    "centering ON but no centered bbox was accumulated during the "
+                    "startup sweep — the camera-framing bbox would misframe"
+                )
+            self._bbox_lo = clo
+            self._bbox_hi = chi
+        else:
+            self._bbox_lo = lo
+            self._bbox_hi = hi
 
     def _decide_centering_from_scan(
         self, anchor_sorted: np.ndarray, has_unitcell: bool,
