@@ -280,6 +280,24 @@ test("validateModValues: the edges return — a list of in-range distinct intege
     "a list of pairs is still wrong for a series");
 });
 
+test("validateModValues: the edges {group, pairs} echo — same pair rules, the group carried through", () => {
+  const expect = { produces: "edges" as const, targetCount: 0, frameCount: 10, nPoints: 5 };
+  // the producer's transport wrapper: pairs validated IDENTICALLY, group carried
+  assert.deepEqual(validateModValues({ group: "contacts", pairs: [[0, 4]] }, expect),
+    { ok: true, edges: [[0, 4]], group: "contacts" });
+  // group null (the load path's echo) = no group — the bare-list return shape
+  assert.deepEqual(validateModValues({ group: null, pairs: [[0, 4]] }, expect),
+    { ok: true, edges: [[0, 4]] });
+  // pair violations inside the wrapper hear the SAME errors as a bare list
+  const bad = validateModValues({ group: "g", pairs: [[2, 2]] }, expect);
+  assert.ok(!bad.ok && /edges\[0\] is a self-loop/.test(bad.error), JSON.stringify(bad));
+  const nolist = validateModValues({ group: "g", pairs: "nope" }, expect);
+  assert.ok(!nolist.ok && /must return a list/.test(nolist.error), JSON.stringify(nolist));
+  // a malformed group token is refused (it must survive as a command token)
+  const badGroup = validateModValues({ group: "not a token", pairs: [[0, 1]] }, expect);
+  assert.ok(!badGroup.ok && /group must be a single token/.test(badGroup.error), JSON.stringify(badGroup));
+});
+
 test("parseModFile: produces edges is accepted (no axis, no channel)", () => {
   const ok = parseModFile(`${MOD_FILE_MAGIC}
 # name: link
@@ -302,6 +320,50 @@ def compute(data, target_indices):
     return [[0, 1]]
 `, "workspace");
   assert.ok(!bad.ok && /axis is only valid/.test(bad.error), JSON.stringify(bad));
+});
+
+test("parseModFile: # edge-group: — edges mods only, token-validated, round-trips", () => {
+  const src = `${MOD_FILE_MAGIC}
+# name: link
+# kind: analysis
+# produces: edges
+# edge-group: contacts
+
+def compute(data, target_indices):
+    return [[0, 1]]
+`;
+  const ok = parseModFile(src, "workspace");
+  assert.ok(ok.ok, JSON.stringify(ok));
+  if (ok.ok) {
+    assert.equal(ok.mod.edgeGroup, "contacts");
+    // serialize → parse round-trips the header line
+    const again = parseModFile(serializeMod(ok.mod), "workspace");
+    assert.ok(again.ok && again.mod.edgeGroup === "contacts", JSON.stringify(again));
+  }
+  // absent = undefined (the invocation defaults to the mod name — not here)
+  const bare = parseModFile(`${MOD_FILE_MAGIC}
+# name: link
+# kind: analysis
+# produces: edges
+
+def compute(data, target_indices):
+    return [[0, 1]]
+`, "workspace");
+  assert.ok(bare.ok && bare.mod.edgeGroup === undefined, JSON.stringify(bare));
+  // a malformed token is refused at parse time — loud, before any run
+  const badTok = parseModFile(src.replace("contacts", "not a token"), "workspace");
+  assert.ok(!badTok.ok && /edge-group must be a single token/.test(badTok.error), JSON.stringify(badTok));
+  // edge-group on a non-edges mod is dead weight — refused
+  const wrongKind = parseModFile(`${MOD_FILE_MAGIC}
+# name: series
+# kind: analysis
+# produces: per-frame-series
+# edge-group: contacts
+
+def compute(data, target_indices):
+    return [0.0]
+`, "workspace");
+  assert.ok(!wrongKind.ok && /edge-group is only valid/.test(wrongKind.error), JSON.stringify(wrongKind));
 });
 
 test("parseModFile: produces scatter is accepted; axis on a scatter is rejected", () => {

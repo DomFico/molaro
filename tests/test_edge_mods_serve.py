@@ -33,7 +33,7 @@ from contract.contract import (  # noqa: E402
     header_from_json,
     validate_header,
 )
-from producer.serve import apply_edge_mods, serve  # noqa: E402
+from producer.serve import apply_edge_mods, run_mod, serve  # noqa: E402
 from producer.synthetic import SyntheticSource  # noqa: E402
 
 failures = 0
@@ -275,6 +275,57 @@ def main() -> int:
 
         # -- real-source aliasing: give_header hands out the SAME list object ---
         _aliasing_checks(tmp)
+
+        # -- the INTERACTIVE (mid-session) half: run_mod ECHOES {group, pairs} --
+        # The webview threads edge_group on the request (its single source —
+        # the mod's `# edge-group:` header or the mod name); the producer only
+        # validates the pairs and echoes the token back beside them. The pairs
+        # are VIEWER-owned: nothing here mutates the header or the stream.
+        good_code = "def compute(data, target_indices):\n    return [[0, 5], [1, 6]]\n"
+        reply = json.loads(run_mod(
+            None, good_code, [0], 5.0,
+            produces="edges", n_points=N, edge_group="contacts").decode("utf-8"))
+        check("interactive edges run: the reply echoes {group, pairs}",
+              reply.get("values") == {"group": "contacts", "pairs": [[0, 5], [1, 6]]},
+              json.dumps(reply))
+        # the load path threads NO group — the echo carries None, pairs intact
+        reply_load = json.loads(run_mod(
+            None, good_code, [0], 5.0,
+            produces="edges", n_points=N).decode("utf-8"))
+        check("load-path edges run: group None, pairs intact",
+              reply_load.get("values") == {"group": None, "pairs": [[0, 5], [1, 6]]},
+              json.dumps(reply_load))
+        # bad pairs are rejected with the group threaded too (the token cannot
+        # rescue an invalid return — fail-closed is shape-independent)
+        for label, body in bad_cases.items():
+            bad_reply = json.loads(run_mod(
+                None, f"def compute(data, target_indices):\n    return {body}\n",
+                [0], 5.0, produces="edges", n_points=N,
+                edge_group="contacts").decode("utf-8"))
+            check(f"interactive edges run rejects bad pairs ({label})",
+                  "error" in bad_reply and "values" not in bad_reply,
+                  json.dumps(bad_reply))
+
+        # -- and through the REAL serve() loop: edge_group threads request→echo -
+        src3 = SyntheticSource(n_points=N, n_frames=T, seed=3)
+        served = _run(src3, [{
+            "type": "run_mod", "code": good_code, "target_indices": [0],
+            "produces": "edges", "edge_group": "wired",
+        }])
+        loop_reply = json.loads(served[0].decode("utf-8"))
+        check("serve() threads edge_group request → echo",
+              loop_reply.get("values") == {"group": "wired", "pairs": [[0, 5], [1, 6]]},
+              json.dumps(loop_reply))
+        # ...and an interactive run leaves the SERVED HEADER byte-identical —
+        # produced edges are viewer-owned; the producer stores nothing
+        src4 = SyntheticSource(n_points=N, n_frames=T, seed=3)
+        h_after = _run(src4, [
+            {"type": "run_mod", "code": good_code, "target_indices": [0],
+             "produces": "edges", "edge_group": "wired"},
+            {"type": "header"},
+        ])[1]
+        check("an interactive edges run leaves the served header byte-identical",
+              h_after == base, f"{len(h_after)} vs {len(base)} bytes")
 
     print(f"\n{'ALL PASS' if failures == 0 else f'{failures} FAILURE(S)'}")
     return 1 if failures else 0
