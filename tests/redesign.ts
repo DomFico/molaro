@@ -10205,7 +10205,151 @@ async function S59(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59 };
+// ====== S60: per-frame edge existence — a masked group tracks the frame ======
+// Stage 2C: a produces:edges mod returns {pairs, visibility} — a one-shot
+// [n_frames][n_pairs] mask in [0,1] — and the produced pass indexes it per
+// frame-flip: an authored edge appears/vanishes as the displayed frame moves,
+// BOTH directions, with zero per-frame wire traffic. A STATIC (maskless)
+// group in the same scene is untouched by seeks. Proven three ways:
+//   - the GPU truth: the dyn group's iVisible slots equal the mask row of the
+//     DISPLAYED frame at every seek (0 → 60 → 140 → 60 → 0);
+//   - pixels: edge0 (styled red, visible only frames [0,50)) draws at frame 0,
+//     draws ZERO red at frame 60, and RETURNS on seeking back;
+//   - the static neighbor (green) draws at every visited frame, its iVisible
+//     constant.
+async function S60(): Promise<void> {
+  console.log("S60 — per-frame edge existence: the mask tracks the displayed frame, both directions");
+  // T=150 → k=50: edge0 visible frames [0,50), edge1 [50,100), edge2 always
+  const MOD_CODE =
+    "def compute(data, target_indices):\n" +
+    "    T = data.n_frames\n" +
+    "    k = T // 3\n" +
+    "    pairs = [[0, 3000], [1, 3001], [2, 3002]]\n" +
+    "    vis = [[1.0 if f < k else 0.0, 1.0 if k <= f < 2 * k else 0.0, 1.0] for f in range(T)]\n" +
+    "    return {'pairs': pairs, 'visibility': vis}";
+  const redCountJs = (b64: string) => `(async () => {
+    const app = document.getElementById('app').getBoundingClientRect();
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+    const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+    const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+    const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+      Math.round(app.width), Math.round(app.height) - 60).data;
+    let n = 0;
+    for (let i = 0; i < px.length; i += 4) if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) n++;
+    return n;
+  })()`;
+  await withDriver(async (d) => {
+    await d.evaluate(`${V}.player.seek(0)`);
+    await sleep(400);
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const snap = async (tag: string): Promise<string> => {
+      await d.evaluate(`(async () => { for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r)); })()`);
+      return d.captureB64(`${REPORT}/S60_${tag}.png`);
+    };
+    const redAt = async (tag: string): Promise<number> =>
+      d.evaluate<number>(redCountJs(await snap(tag)));
+    const greenAt = async (tag: string): Promise<number> => greenCount(d, await snap(`${tag}_g`));
+    /** Seek and WAIT for the flip to land (cursor + iVisible refill are one
+     * synchronous dispatch, so the cursor read is the settle condition). */
+    const seekTo = async (f: number): Promise<void> => {
+      await d.evaluate(`${V}.player.seek(${f})`);
+      await d.waitFor(`${V}.produced.displayedFrame() === ${f}`, 20000);
+      await sleep(200); // a rendered frame beyond the flip (pixels settle)
+    };
+    /** The dyn group's GPU iVisible slots (the drawn truth). */
+    const gpuVis = () => d.evaluate<number[]>(`(()=>{
+      const ids = ${V}.produced.groupIds("dyn");
+      const v = ${V}.produced.pass.attrArray("iVisible");
+      return ids.map(id => v[id]);
+    })()`);
+    await d.evaluate(`void (window.__lines = [],
+      window.addEventListener('message', (e) => {
+        if (e.data?.type === 'commandResult' && e.data.id === -1) window.__lines.push(e.data);
+      }))`);
+
+    // isolate: only produced edges can put edge pixels up
+    await cmd("pointopacity all 0");
+    await cmd("traceopacity all 0");
+    await cmd("bondsize all 0");
+
+    // author the MASKED group through the REAL producer round-trip
+    await d.evaluate(`window.postMessage({ type: "modsLoaded", mods: [{
+      name: "dynedges", kind: "analysis", produces: "edges", origin: "workspace",
+      edgeGroup: "dyn", code: ${JSON.stringify(MOD_CODE)}
+    }] }, "*")`);
+    await sleep(200);
+    const run = await cmd("dynedges all");
+    check("S60: the masked edges mod acknowledges", run.status === "ok", JSON.stringify(run));
+    await d.waitFor(
+      `window.__lines.some(l => /authored 3 edges .* as group "dyn" .* per-frame visibility \\(150 frames\\)/.test(l.message))`,
+      20000).catch(() => { /* timeout → the checks below go red */ });
+    check("S60: the group registered MASKED (rows verifiable per frame)",
+      await d.evaluate<boolean>(`(()=>{
+        const v = ${V}.produced;
+        const g = v.groups().find(g => g.name === "dyn");
+        return !!g && g.active && g.count === 3 && v.hasMaskedActiveGroups() &&
+          JSON.stringify(v.groupMaskAt("dyn", 0)) === "[1,0,1]" &&
+          JSON.stringify(v.groupMaskAt("dyn", 60)) === "[0,1,1]" &&
+          JSON.stringify(v.groupMaskAt("dyn", 140)) === "[0,0,1]";
+      })()`));
+
+    // a STATIC neighbor in the same scene + styling: edge0 of dyn RED (the
+    // binary pixel carrier — masked off at frame 60), the static pair GREEN
+    await d.evaluate(`(()=>{
+      ${V}.produced.declare("stat", [[3, 3003], [4, 3004]]);
+      const dyn = ${V}.produced.groupIds("dyn");
+      ${V}.produced.writers.colorEdges([dyn[0]], [1, 0, 0]);
+      ${V}.produced.writers.sizeEdges([dyn[0]], 8);
+    })()`);
+    const st = await cmd("colorbonds %stat green");
+    const st2 = await cmd("bondsize %stat 8");
+    check("S60: the static neighbor styles through the 2A verbs",
+      st.status === "ok" && st2.status === "ok", JSON.stringify({ st, st2 }));
+
+    // -- frame 0: edge0 visible → red; static green ---------------------------
+    await seekTo(0);
+    check("S60: frame 0 — GPU iVisible equals the mask row [1,0,1]",
+      JSON.stringify(await gpuVis()) === "[1,0,1]", JSON.stringify(await gpuVis()));
+    const red0 = await redAt("f0");
+    const green0 = await greenAt("f0");
+    check("S60: frame 0 — the masked-in edge DRAWS red; the static neighbor draws green",
+      red0 > 100 && green0 > 100, `red=${red0} green=${green0}`);
+
+    // -- frame 60: edge0 masked OFF → zero red; static unaffected -------------
+    await seekTo(60);
+    check("S60: frame 60 — GPU iVisible equals the mask row [0,1,1]",
+      JSON.stringify(await gpuVis()) === "[0,1,1]", JSON.stringify(await gpuVis()));
+    const red60 = await redAt("f60");
+    const green60 = await greenAt("f60");
+    check("S60: frame 60 — the masked-out edge VANISHES (zero red); the static neighbor stands",
+      red60 < 5 && green60 > 100, `red=${red60} green=${green60}`);
+
+    // -- frame 140: only the always-on edge remains ---------------------------
+    await seekTo(140);
+    check("S60: frame 140 — GPU iVisible equals the mask row [0,0,1]",
+      JSON.stringify(await gpuVis()) === "[0,0,1]", JSON.stringify(await gpuVis()));
+    const green140 = await greenAt("f140");
+    check("S60: frame 140 — the static neighbor STILL stands (seeks never touch it)",
+      green140 > 100 && await d.evaluate<boolean>(`(()=>{
+        const ids = ${V}.produced.groupIds("stat");
+        const v = ${V}.produced.pass.attrArray("iVisible");
+        return ids.every(id => v[id] === 1);
+      })()`), `green=${green140}`);
+
+    // -- BOTH directions: seeking BACK re-derives earlier rows ----------------
+    await seekTo(60);
+    check("S60: back to frame 60 — the row re-derives (tracks, never latches)",
+      JSON.stringify(await gpuVis()) === "[0,1,1]");
+    await seekTo(0);
+    const redBack = await redAt("back0");
+    check("S60: back to frame 0 — the masked edge REAPPEARS (red returns, row [1,0,1])",
+      JSON.stringify(await gpuVis()) === "[1,0,1]" && redBack > 100, `red=${redBack}`);
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -10245,7 +10389,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
   S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
-  S58: "fast", S59: "fast",
+  S58: "fast", S59: "fast", S60: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {
