@@ -13,8 +13,8 @@
  *   - activeSpan is the DRAW span (highest active group end, 0 when none) —
  *     inactive/retired slots inside it collapse through fillVisibleMask;
  *   - fillVisibleMask: group-active ∧ per-edge visible ∧ BOTH endpoints
- *     visible (hidden wins, the covalent rule);
- *   - new slots carry the covalent default look (an unstyled produced edge is
+ *     visible (hidden wins, the header-edge rule);
+ *   - new slots carry the header-edge default look (an unstyled produced edge is
  *     indistinguishable from a load-time edge).
  */
 import assert from "node:assert";
@@ -50,7 +50,7 @@ test("ensureCapacity: doubles from the floor, copies to the SAME offsets, never 
   assert.equal(layer.capacity, wantCap, "never shrinks");
 });
 
-test("setGroup: a NEW group appends with the covalent default look", () => {
+test("setGroup: a NEW group appends with the header-edge default look", () => {
   const layer = new ProducedEdgeLayer();
   const r = layer.setGroup("g", [[0, 1], [2, 3]], sizeOf);
   assert.deepEqual(r, { baseId: 0, count: 2, grew: true });

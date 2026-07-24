@@ -349,14 +349,14 @@ export interface CommandContext {
    * the undo stack — the filesystem is outside the undo model. */
   armRmDeletion(names: string[]): void;
   /** MID-SESSION AUTHORED EDGES (the isolated produced-edge pass): the read
-   * surface over the group registry plus the writer family — the covalent
+   * surface over the group registry plus the writer family — the header-edge
    * edge writers' grow-safe siblings over the ProducedEdgeLayer buffers.
    * Ids are PRODUCED-edge ids (the layer's append-only slot space, one per
    * authored edge — enumerated via groupIds), NEVER header edge ids: the two
-   * spaces are disjoint by design, which is what keeps every covalent edge
+   * spaces are disjoint by design, which is what keeps every header-edge
    * buffer byte-identical under produced writes and vice versa. Same
    * one-stroke capture/LWW/recordOp discipline as the rep writers; opacity is
-   * the alpha half of both color slots (the covalent RGBA interleave).
+   * the alpha half of both color slots (the header-edge RGBA interleave).
    * PLUMBING ONLY this increment: no verb resolves a produced-edge target yet
    * (the %group arms are the next task) — the surface exists so those arms,
    * and the tests proving grow-safety now, reach one spine. */

@@ -5,7 +5,7 @@
  * Those edges live HERE — a separate, independently-allocated structure — and
  * are drawn by their own isolated pass (producedEdgeTubesGenerator in main.ts).
  * They are deliberately NOT header.edges and NOT the rep.state edge buffers:
- * `EdgeTubePass`, header serialization, and every covalent edge buffer stay
+ * `EdgeTubePass`, header serialization, and every header-edge buffer stay
  * byte-for-byte untouched by construction. The GPU resize (the hard seam of a
  * growable pass) exists only in the new pass; this module owns the HOST half.
  *
@@ -26,7 +26,7 @@
  * VISIBILITY is two-layered: a per-edge authored `visible` slot (the writer
  * family's axis) gated by the GROUP's active flag (the undo unit for a
  * declaration) — plus hidden-wins on the endpoints, applied in fillVisibleMask
- * exactly like the covalent pass (an edge drops when EITHER endpoint hides).
+ * exactly like the header-edge pass (an edge drops when EITHER endpoint hides).
  *
  * Pure module: no THREE, no DOM — the GPU twin lives with the pass in main.ts.
  */
@@ -55,11 +55,11 @@ export class ProducedEdgeLayer {
   /** [2 × capacity] endpoint POINT indices per edge. */
   pairs: Int32Array = new Int32Array(0);
   /** [4 × capacity] RGBA at the A end (alpha = the per-edge opacity — the
-   * same interleave the covalent pass uploads as iColorA). */
+   * same interleave the header-edge pass uploads as iColorA). */
   colorA: Float32Array = new Float32Array(0);
   /** [4 × capacity] RGBA at the B end. */
   colorB: Float32Array = new Float32Array(0);
-  /** [capacity] tube radius (the covalent pass's edgeSize/iRadius twin). */
+  /** [capacity] tube radius (the header-edge pass's edgeSize/iRadius twin). */
   radius: Float32Array = new Float32Array(0);
   /** [capacity] dash scale, 0 = solid (the edgeDash twin). */
   dash: Float32Array = new Float32Array(0);
@@ -137,7 +137,7 @@ export class ProducedEdgeLayer {
    * Declare (or re-declare) a group's pairs. `endSizeOf` supplies the CURRENT
    * point size for each endpoint (the junction-trim seed — the layer stays
    * pure of the rep buffers). See the module doc for the id discipline; the
-   * appearance of NEW slots is the covalent pass's default look, so a
+   * appearance of NEW slots is the header-edge pass's default look, so a
    * produced edge is indistinguishable from a load-time one until styled.
    */
   setGroup(
@@ -174,7 +174,7 @@ export class ProducedEdgeLayer {
       const id = baseId + i;
       this.pairs[id * 2] = pairs[i][0];
       this.pairs[id * 2 + 1] = pairs[i][1];
-      // the covalent defaults, so an unstyled produced edge looks exactly
+      // the header-edge defaults, so an unstyled produced edge looks exactly
       // like a load-time edge (alpha rides both halves, like iColorA/iColorB)
       this.colorA[id * 4] = DEFAULT_EDGE_COLOR[0];
       this.colorA[id * 4 + 1] = DEFAULT_EDGE_COLOR[1];
@@ -207,7 +207,7 @@ export class ProducedEdgeLayer {
   /**
    * Instances to DRAW: the end of the highest ACTIVE group's span. Slot ≡ id,
    * so inactive/retired slots INSIDE the span still upload — they collapse
-   * through the visibility mask, exactly like a hidden covalent edge. 0 when
+   * through the visibility mask, exactly like a hidden header edge. 0 when
    * no group is active: the pass draws nothing at zero cost.
    */
   activeSpan(): number {
@@ -221,7 +221,7 @@ export class ProducedEdgeLayer {
   /**
    * Effective per-instance visibility over [0, allocated): group active AND
    * the per-edge authored slot AND both endpoints visible (hidden wins — the
-   * covalent pass's rule). Retired slots stay 0 (no group claims them).
+   * header-edge pass's rule). Retired slots stay 0 (no group claims them).
    * `out` must hold at least `allocated` floats.
    */
   fillVisibleMask(pointVisible: ArrayLike<number>, out: Float32Array): void {

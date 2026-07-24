@@ -855,7 +855,7 @@ const edgeTubesGenerator: ShapeGenerator<EdgeTubePass> = {
  * that attribute BEFORE the flip dispatch, produced edges track offset-bound
  * endpoints for free. The ONLY rep-channel subscription is the point `size`
  * (the junction end-sizes — a real cross-pass point channel); it must never
- * subscribe to any edge* key, or the covalent writers would leak in.
+ * subscribe to any edge* key, or the header-edge writers would leak in.
  */
 type ProducedAttrName =
   | "iStart" | "iEnd" | "iVisible" | "iRadius" | "iColorA" | "iColorB"
@@ -985,7 +985,7 @@ const producedEdgeTubesGenerator: ShapeGenerator<ProducedEdgePass> = {
       onFrameFlip: fillEndpoints,
       onRepWrite: {
         // the junction trim's cross-pass POINT-size subscription — the ONLY
-        // rep channel this pass hears (never any edge* key: covalent edge
+        // rep channel this pass hears (never any edge* key: header-edge
         // writes must not reach produced slots)
         size: (pointIds) => {
           if (layer.allocated === 0) return;
@@ -2975,7 +2975,7 @@ async function main(): Promise<void> {
     model.endStroke();
     return n;
   };
-  /** Per-edge alpha — the covalent interleave (alpha rides BOTH halves). */
+  /** Per-edge alpha — the header-edge interleave (alpha rides BOTH halves). */
   const producedOpacityEdges = (ids: readonly number[], opacity: number): number => {
     model.beginStroke();
     const n = writeProducedSlice(() => producedLayer.colorA, 4, 3, 1, producedWrite("colorA"), ids, () => opacity);

@@ -2993,18 +2993,18 @@ async function S16(): Promise<void> {
  * S16's whole assertion body, optionally REPLAYED with a PRODUCED edge group
  * live in the scene (S58 part 2). With `withProducedGroup`:
  *   - a produced group is declared AND styled through the produced writer
- *     family BEFORE the baseline snapshots, and the five covalent edge buffers
+ *     family BEFORE the baseline snapshots, and the five header-edge buffers
  *     (edgeColorA/B/Size/Opacity/Dash) are asserted BYTE-IDENTICAL across that
- *     setup — the produced pass touches nothing covalent;
+ *     setup — the produced pass touches no header-edge state;
  *   - every S16 check then runs UNCHANGED (pristine-restore byte checks
  *     included) with the produced pass drawing throughout;
  *   - at the end, the produced group is asserted intact (active, styled, still
- *     uploaded) — the whole covalent verb/undo matrix touched nothing
+ *     uploaded) — the whole header-edge verb/undo matrix touched nothing
  *     produced. Cross-talk proven in BOTH directions.
  */
 async function S16body(withProducedGroup: boolean): Promise<void> {
   console.log(withProducedGroup
-    ? "S16(replay) — the covalent edge-verb matrix with a PRODUCED group present (cross-talk guard)"
+    ? "S16(replay) — the header-edge verb matrix with a PRODUCED group present (cross-talk guard)"
     : "S16 — colorbonds/colorbondsof: the edge verbs (contained vs incident)");
   const tag = withProducedGroup ? "S16(+produced)" : "S16";
   await withDriver(async (d) => {
@@ -3015,12 +3015,12 @@ async function S16body(withProducedGroup: boolean): Promise<void> {
     if (withProducedGroup) {
       // The five COVALENT edge buffers, snapshotted BEFORE anything produced
       // exists — the byte-identity target for the whole produced setup.
-      const COVALENT = `["edgeColorA","edgeColorB","edgeSize","edgeOpacity","edgeDash"]`;
+      const HEADER_EDGE_BUFS = `["edgeColorA","edgeColorB","edgeSize","edgeOpacity","edgeDash"]`;
       await d.evaluate(
-        `void (window.__covalent = ${COVALENT}.map(k => Float32Array.from(${V}.rep.state[k])))`);
-      const covalentIntact = () => d.evaluate<boolean>(`(()=>{
-        return ${COVALENT}.every((k, i) => {
-          const c = ${V}.rep.state[k], s = window.__covalent[i];
+        `void (window.__headerEdge = ${HEADER_EDGE_BUFS}.map(k => Float32Array.from(${V}.rep.state[k])))`);
+      const headerEdgeIntact = () => d.evaluate<boolean>(`(()=>{
+        return ${HEADER_EDGE_BUFS}.every((k, i) => {
+          const c = ${V}.rep.state[k], s = window.__headerEdge[i];
           if (c.length !== s.length) return false;
           for (let j = 0; j < c.length; j++) if (c[j] !== s[j]) return false;
           return true;
@@ -3035,8 +3035,8 @@ async function S16body(withProducedGroup: boolean): Promise<void> {
         ${V}.produced.writers.colorEdges(ids, [1, 0, 0]);
         ${V}.produced.writers.sizeEdges(ids, 4);
       })()`);
-      check(`${tag}: declaring + styling a produced group leaves the FIVE covalent edge buffers BYTE-IDENTICAL`,
-        await covalentIntact());
+      check(`${tag}: declaring + styling a produced group leaves the FIVE header-edge buffers BYTE-IDENTICAL`,
+        await headerEdgeIntact());
       check(`${tag}: ...and header.edges untouched`,
         (await d.evaluate<number>(`${V}.edges.length`)) === hdrEdges);
     }
@@ -3214,13 +3214,13 @@ async function S16body(withProducedGroup: boolean): Promise<void> {
     check("S16: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet2);
 
     if (withProducedGroup) {
-      // The OTHER cross-talk direction: the whole covalent matrix above —
+      // The OTHER cross-talk direction: the whole header-edge matrix above —
       // every colorbonds/colorbondsof/undo/LWW stroke — must have left the
       // produced group exactly as styled before it began (host buffers AND
       // the uploaded GPU slots), still active, still in the draw span. (Its
       // endpoints may be HIDDEN here — section (f)'s hide stands — which is
       // hidden-wins working, not cross-talk; visibility is S58's business.)
-      check(`${tag}: after the whole covalent matrix, the produced group stands untouched (both twins)`,
+      check(`${tag}: after the whole header-edge matrix, the produced group stands untouched (both twins)`,
         await d.evaluate<boolean>(`(()=>{
           const v = ${V};
           const g = v.produced.groups().find(g => g.name === "s16group");
@@ -9734,7 +9734,7 @@ async function S57(): Promise<void> {
           ${V}.produced.pass.instanceCount() === ${WANT};
       })()`));
     // pixel proof: the scene is already isolated (points/traces transparent,
-    // covalent tubes collapsed — and `bondsize all 0` provably never reached
+    // header-edge tubes collapsed — and `bondsize all 0` provably never reached
     // the produced pass, or nothing would draw below). Paint the authored
     // group red through the produced writer family and LOOK.
     await d.evaluate(`(()=>{
@@ -9806,11 +9806,11 @@ async function S57(): Promise<void> {
 
 // ========= S58: the produced-edge pass — growable, isolated, undoable ========
 // The CORE of mid-session authored edges (design C): a produces:edges mod's
-// pairs enter an ISOLATED, GROWABLE sibling of the covalent edge pass. Part 1
+// pairs enter an ISOLATED, GROWABLE sibling of the header-edge pass. Part 1
 // drives the machinery end to end on the synthetic scene:
 //   (a) a mod with `# edge-group:` authors a group through the REAL producer
 //       round-trip → it DRAWS as tubes where none were, while header.edges and
-//       all five covalent edge buffers stay byte-identical (isolation);
+//       all five header-edge buffers stay byte-identical (isolation);
 //   (b) the CAPACITY-CROSSING guard: authoring past the initial GPU capacity
 //       reallocates every instanced attribute — every pre-grow slot survives
 //       verbatim and still draws;
@@ -9823,9 +9823,9 @@ async function S57(): Promise<void> {
 //       replaced in place — the declareProducedChannel rule);
 //   (f) the non-selectable-domain guard: `shape edges …` (setActive on the
 //       "edge" domain) cannot disable the produced pass — it keeps drawing.
-// Part 2 replays the ENTIRE S16 covalent edge-verb matrix with a produced
+// Part 2 replays the ENTIRE S16 header-edge verb matrix with a produced
 // group present and styled: S16's own byte-exact checks all hold, the five
-// covalent buffers are byte-identical across the produced setup, and the
+// header-edge buffers are byte-identical across the produced setup, and the
 // produced group survives the matrix untouched — cross-talk, both directions.
 async function S58(): Promise<void> {
   console.log("S58 — produced edges: grow, write-after-grow, undo/redo, isolation");
@@ -9865,17 +9865,17 @@ async function S58(): Promise<void> {
         if (e.data?.type === 'commandResult' && e.data.id === -1) window.__lines.push(e.data);
       }))`);
 
-    // isolate: points/traces transparent, covalent tubes collapsed — only the
+    // isolate: points/traces transparent, header-edge tubes collapsed — only the
     // produced pass can put edge pixels on screen from here on
     await cmd("pointopacity all 0");
     await cmd("traceopacity all 0");
     await cmd("bondsize all 0");
     // the five COVALENT edge buffers + header count — the isolation baseline
-    const COVALENT = `["edgeColorA","edgeColorB","edgeSize","edgeOpacity","edgeDash"]`;
+    const HEADER_EDGE_BUFS = `["edgeColorA","edgeColorB","edgeSize","edgeOpacity","edgeDash"]`;
     await d.evaluate(
-      `void (window.__cov = ${COVALENT}.map(k => Float32Array.from(${V}.rep.state[k])))`);
-    const covalentIntact = () => d.evaluate<boolean>(`(()=>{
-      return ${COVALENT}.every((k, i) => {
+      `void (window.__cov = ${HEADER_EDGE_BUFS}.map(k => Float32Array.from(${V}.rep.state[k])))`);
+    const headerEdgeIntact = () => d.evaluate<boolean>(`(()=>{
+      return ${HEADER_EDGE_BUFS}.every((k, i) => {
         const c = ${V}.rep.state[k], s = window.__cov[i];
         if (c.length !== s.length) return false;
         for (let j = 0; j < c.length; j++) if (c[j] !== s[j]) return false;
@@ -9909,10 +9909,10 @@ async function S58(): Promise<void> {
       })()`));
     check("S58: instanceCount === the active span", await d.evaluate<boolean>(
       `${V}.produced.pass.instanceCount() === 8 && ${V}.produced.activeSpan() === 8`));
-    check("S58: ISOLATION — header.edges and all five covalent edge buffers byte-identical",
-      (await d.evaluate<number>(`${V}.edges.length`)) === hdrEdges && (await covalentIntact()));
+    check("S58: ISOLATION — header.edges and all five header-edge buffers byte-identical",
+      (await d.evaluate<number>(`${V}.edges.length`)) === hdrEdges && (await headerEdgeIntact()));
     // style the group through the writer family; the default look is the
-    // covalent default (bluish) — red is unambiguous against it
+    // header-edge default (bluish) — red is unambiguous against it
     await d.evaluate(`(()=>{
       const ids = ${V}.produced.groupIds("gA");
       ${V}.produced.writers.colorEdges(ids, [1, 0, 0]);
@@ -9921,8 +9921,8 @@ async function S58(): Promise<void> {
     await sleep(300);
     const redA = await redAt("authored");
     check("S58: the authored group DRAWS as tubes where none were", redA > 40, `red=${redA}`);
-    check("S58: ...still nothing covalent moved (the writers bypass rep entirely)",
-      await covalentIntact());
+    check("S58: ...still no header-edge state moved (the writers bypass rep entirely)",
+      await headerEdgeIntact());
 
     // -- (b) the capacity-crossing guard --------------------------------------
     const capBefore = await d.evaluate<number>(`${V}.produced.pass.gpuCapacity()`);
@@ -10032,11 +10032,11 @@ async function S58(): Promise<void> {
     const redF = await redAt("after_shape");
     check("S58: ...and the produced pass keeps drawing (non-selectable domain)",
       redF > 40, `red=${redF}`);
-    check("S58: FINAL isolation sweep — covalent buffers still byte-identical",
-      await covalentIntact());
+    check("S58: FINAL isolation sweep — header-edge buffers still byte-identical",
+      await headerEdgeIntact());
   });
 
-  // -- Part 2: the ENTIRE S16 covalent matrix, replayed with a produced group --
+  // -- Part 2: the ENTIRE S16 header-edge matrix, replayed with a produced group --
   await S16body(true);
 }
 
