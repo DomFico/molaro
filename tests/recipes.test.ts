@@ -298,6 +298,49 @@ test("validateModValues: the edges {group, pairs} echo — same pair rules, the 
   assert.ok(!badGroup.ok && /group must be a single token/.test(badGroup.error), JSON.stringify(badGroup));
 });
 
+test("validateModValues: the edges per-frame visibility mask — accepted, flattened, fail-closed", () => {
+  // frameCount 3, two pairs — the mask must be exactly [3][2]
+  const expect = { produces: "edges" as const, targetCount: 0, frameCount: 3, nPoints: 5 };
+  const good = validateModValues(
+    { pairs: [[0, 1], [2, 3]], visibility: [[1, 0], [0, 1], [1, 1]] }, expect);
+  assert.ok(good.ok && "edges" in good && good.visibility !== undefined, JSON.stringify(good));
+  if (good.ok && "visibility" in good && good.visibility) {
+    assert.ok(good.visibility instanceof Float32Array, "flattened ONCE at the boundary");
+    assert.deepEqual([...good.visibility], [1, 0, 0, 1, 1, 1], "[frame * n_pairs + pair] layout");
+  }
+  // absent = static — no visibility key on the result (the pre-2C shape)
+  const stat = validateModValues({ pairs: [[0, 1]] }, expect);
+  assert.ok(stat.ok && "edges" in stat && !("visibility" in stat), JSON.stringify(stat));
+  // fractional values are legal (validation pins [0,1]; the shader thresholds)
+  const frac = validateModValues({ pairs: [[0, 1]], visibility: [[0.5], [0], [1]] }, expect);
+  assert.ok(frac.ok, JSON.stringify(frac));
+  // the fail-closed matrix: ANY violation rejects the WHOLE declaration
+  const bad: [unknown, RegExp][] = [
+    ["rows", /visibility must be a list of per-frame rows/],
+    [[[1, 0], [0, 1]], /expected 3 rows/],                      // wrong outer (too few)
+    [[[1, 0], [0, 1], [1, 1], [1, 1]], /expected 3 rows/],      // wrong outer (too many)
+    [[[1], [0, 1], [1, 1]], /visibility\[0\] must have one value per pair \(2\)/], // short row
+    [[[1, 0], [0, 1, 1], [1, 1]], /visibility\[1\] must have one value per pair/], // long row
+    [[[1, 0], 7, [1, 1]], /visibility\[1\] must have one value per pair/],         // a non-row
+    [[[1, 0], [0, NaN], [1, 1]], /visibility\[1\]\[1\] must be a finite number in \[0,1\]/],
+    [[[1, 0], [0, 2], [1, 1]], /visibility\[1\]\[1\] must be a finite number in \[0,1\]/],
+    [[[1, 0], [0, -0.1], [1, 1]], /visibility\[1\]\[1\] must be a finite number in \[0,1\]/],
+    [[[1, 0], [0, "1"], [1, 1]], /visibility\[1\]\[1\] must be a finite number in \[0,1\]/],
+  ];
+  for (const [vis, want] of bad) {
+    const r = validateModValues({ pairs: [[0, 1], [2, 3]], visibility: vis }, expect);
+    assert.ok(!r.ok, JSON.stringify(vis));
+    if (!r.ok) assert.match(r.error, want, JSON.stringify(vis));
+  }
+  // pair violations still reject first, mask or not (never a half validation)
+  const badPair = validateModValues(
+    { pairs: [[2, 2]], visibility: [[1], [1], [1]] }, expect);
+  assert.ok(!badPair.ok && /self-loop/.test(badPair.error));
+  // a mask over ZERO pairs is vacuous — dropped, the group is static
+  const empty = validateModValues({ pairs: [], visibility: [[], [], []] }, expect);
+  assert.ok(empty.ok && "edges" in empty && !("visibility" in empty), JSON.stringify(empty));
+});
+
 test("parseModFile: produces edges is accepted (no axis, no channel)", () => {
   const ok = parseModFile(`${MOD_FILE_MAGIC}
 # name: link

@@ -306,6 +306,74 @@ def main() -> int:
                   "error" in bad_reply and "values" not in bad_reply,
                   json.dumps(bad_reply))
 
+        # -- 2C: the per-frame visibility mask — accepted, echoed, fail-closed --
+        # compute may return {pairs, visibility} with visibility [n_frames]
+        # [n_pairs] in [0,1]; run_mod validates (n_frames threaded) and echoes
+        # it beside the pairs. Absent = static (the pre-2C echo, unchanged).
+        NF = 3
+        masked_code = (
+            "def compute(data, target_indices):\n"
+            "    return {'pairs': [[0, 5], [1, 6]],\n"
+            "            'visibility': [[1, 0], [0, 1], [1, 1]]}\n"
+        )
+        reply_m = json.loads(run_mod(
+            None, masked_code, [0], 5.0,
+            produces="edges", n_points=N, edge_group="dyn", n_frames=NF).decode("utf-8"))
+        check("2C: a masked edges run echoes {group, pairs, visibility}",
+              reply_m.get("values") == {"group": "dyn", "pairs": [[0, 5], [1, 6]],
+                                        "visibility": [[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]]},
+              json.dumps(reply_m))
+        # a maskless dict return echoes WITHOUT a visibility key (static)
+        bare_dict_code = (
+            "def compute(data, target_indices):\n"
+            "    return {'pairs': [[0, 5]]}\n"
+        )
+        reply_s = json.loads(run_mod(
+            None, bare_dict_code, [0], 5.0,
+            produces="edges", n_points=N, edge_group="s", n_frames=NF).decode("utf-8"))
+        check("2C: a maskless dict return stays static (no visibility key)",
+              reply_s.get("values") == {"group": "s", "pairs": [[0, 5]]},
+              json.dumps(reply_s))
+        # the fail-closed matrix — any violation rejects the WHOLE return
+        bad_masks = {
+            "not a list": "'rows'",
+            "wrong outer (frame count)": "[[1, 0], [0, 1]]",
+            "short row": "[[1], [0, 1], [1, 1]]",
+            "a non-row": "[[1, 0], 7, [1, 1]]",
+            "NaN": "[[1, 0], [0, float('nan')], [1, 1]]",
+            "out of range (2)": "[[1, 0], [0, 2], [1, 1]]",
+            "out of range (-0.1)": "[[1, 0], [0, -0.1], [1, 1]]",
+            "boolean value": "[[1, 0], [0, True], [1, 1]]",
+        }
+        for label, vis in bad_masks.items():
+            bad_code = (
+                "def compute(data, target_indices):\n"
+                f"    return {{'pairs': [[0, 5], [1, 6]], 'visibility': {vis}}}\n"
+            )
+            r = json.loads(run_mod(
+                None, bad_code, [0], 5.0,
+                produces="edges", n_points=N, edge_group="dyn", n_frames=NF).decode("utf-8"))
+            check(f"2C: a bad mask is rejected fail-closed ({label})",
+                  "error" in r and "values" not in r, json.dumps(r))
+        # a dict return missing 'pairs' is refused by name
+        no_pairs = json.loads(run_mod(
+            None, "def compute(data, target_indices):\n    return {'visibility': [[1]]}\n",
+            [0], 5.0, produces="edges", n_points=N, n_frames=NF).decode("utf-8"))
+        check("2C: an edges dict without pairs is refused",
+              "error" in no_pairs and "pairs" in no_pairs["error"], json.dumps(no_pairs))
+        # LOAD path: a masked mod's pairs land STATIC (the mask is dropped with
+        # a warning — header edges are baked topology; never a silent skip)
+        masked_mod = _edge_mod_file(
+            tmp, "link_masked",
+            "{'pairs': [[0, 41]], 'visibility': [[1]] * data.n_frames}")
+        src_m = SyntheticSource(n_points=N, n_frames=T, seed=3)
+        h_m = src_m.give_header()
+        before_m = len(h_m.edges)
+        apply_edge_mods(src_m, h_m, [masked_mod])
+        check("2C: load-apply appends a masked mod's pairs STATIC (mask dropped, not the mod)",
+              len(h_m.edges) == before_m + 1 and tuple(h_m.edges[-1]) == (0, 41),
+              str(h_m.edges[-3:]))
+
         # -- and through the REAL serve() loop: edge_group threads request→echo -
         src3 = SyntheticSource(n_points=N, n_frames=T, seed=3)
         served = _run(src3, [{

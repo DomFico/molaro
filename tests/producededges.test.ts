@@ -153,6 +153,84 @@ test("reseedEndSizes: point-size writes reach exactly the incident produced edge
   assert.equal(layer.sizeB[1], 11);
 });
 
+test("per-frame mask: setGroup carries it; fillVisibleMask indexes the frame cursor", () => {
+  const layer = new ProducedEdgeLayer();
+  // 2 frames × 2 edges: edge0 only frame 0, edge1 only frame 1
+  const mask = Float32Array.from([1, 0, /* frame 1: */ 0, 1]);
+  layer.setGroup("dyn", [[0, 1], [2, 3]], sizeOf, mask);
+  layer.setGroup("stat", [[0, 2]], sizeOf); // a STATIC neighbor in the same scene
+  const allVisible = new Float32Array(8).fill(1);
+  const out = new Float32Array(layer.capacity);
+  layer.displayedFrame = 0;
+  layer.fillVisibleMask(allVisible, out);
+  assert.deepEqual([...out.slice(0, 3)], [1, 0, 1], "frame 0: edge0 + the static neighbor");
+  layer.displayedFrame = 1;
+  layer.fillVisibleMask(allVisible, out);
+  assert.deepEqual([...out.slice(0, 3)], [0, 1, 1], "frame 1: edge1 + the static neighbor");
+  // BOTH directions: seeking back re-derives the earlier row exactly
+  layer.displayedFrame = 0;
+  layer.fillVisibleMask(allVisible, out);
+  assert.deepEqual([...out.slice(0, 3)], [1, 0, 1], "back to frame 0 — the mask tracks, not latches");
+  // the frame cursor clamps to the covered range (defensive, not a path)
+  layer.displayedFrame = 99;
+  layer.fillVisibleMask(allVisible, out);
+  assert.deepEqual([...out.slice(0, 3)], [0, 1, 1], "past-the-end clamps to the last row");
+});
+
+test("per-frame mask: composes UNDER the existing gates (hidden-wins, authored slot, active flag)", () => {
+  const layer = new ProducedEdgeLayer();
+  const mask = Float32Array.from([1, 1, /* frame 1: */ 1, 1]); // shown every frame…
+  layer.setGroup("dyn", [[0, 1], [2, 3]], sizeOf, mask);
+  const out = new Float32Array(layer.capacity);
+  layer.displayedFrame = 0;
+  // …but a hidden ENDPOINT still drops the edge (mask never resurrects)
+  layer.fillVisibleMask(Float32Array.from([1, 1, 0, 1]), out);
+  assert.deepEqual([...out.slice(0, 2)], [1, 0], "hidden-wins beats the mask");
+  // …and the authored per-edge slot still gates
+  layer.visible[0] = 0;
+  layer.fillVisibleMask(new Float32Array(4).fill(1), out);
+  assert.deepEqual([...out.slice(0, 2)], [0, 1], "the authored slot beats the mask");
+  layer.visible[0] = 1;
+  // …and an inactive group is dark regardless of its mask
+  layer.setActive("dyn", false);
+  layer.fillVisibleMask(new Float32Array(4).fill(1), out);
+  assert.deepEqual([...out.slice(0, 2)], [0, 0], "inactive beats the mask");
+});
+
+test("per-frame mask: groupMaskAt row lookup; hasMaskedActiveGroups gates the flip work", () => {
+  const layer = new ProducedEdgeLayer();
+  assert.equal(layer.hasMaskedActiveGroups(), false, "empty layer — no flip work");
+  layer.setGroup("stat", [[0, 1]], sizeOf);
+  assert.equal(layer.hasMaskedActiveGroups(), false, "static groups demand no flip work");
+  assert.equal(layer.groupMaskAt("stat", 0), null, "a static group has no mask row");
+  const mask = Float32Array.from([0.25, 1, /* frame 1: */ 1, 0]);
+  layer.setGroup("dyn", [[2, 3], [4, 5]], sizeOf, mask);
+  assert.equal(layer.hasMaskedActiveGroups(), true);
+  assert.deepEqual(layer.groupMaskAt("dyn", 0), [0.25, 1]);
+  assert.deepEqual(layer.groupMaskAt("dyn", 1), [1, 0]);
+  assert.deepEqual(layer.groupMaskAt("dyn", 7), [1, 0], "frame clamps to the covered range");
+  assert.equal(layer.groupMaskAt("ghost", 0), null);
+  layer.setActive("dyn", true); // still active — flag unchanged
+  layer.setActive("dyn", false);
+  assert.equal(layer.hasMaskedActiveGroups(), false, "an inactive masked group demands no flip work");
+});
+
+test("per-frame mask: same-count re-declare REPLACES it; re-declare without one returns to static", () => {
+  const layer = new ProducedEdgeLayer();
+  layer.setGroup("g", [[0, 1], [2, 3]], sizeOf, Float32Array.from([1, 1, 0, 0]));
+  assert.deepEqual(layer.groupMaskAt("g", 0), [1, 1]);
+  layer.setGroup("g", [[4, 5], [6, 7]], sizeOf, Float32Array.from([0, 1, 1, 0]));
+  assert.deepEqual(layer.groupMaskAt("g", 0), [0, 1], "the recompute's mask replaces the old one");
+  layer.setGroup("g", [[0, 1], [2, 3]], sizeOf); // no mask this time
+  assert.equal(layer.groupMaskAt("g", 0), null, "maskless re-declare = static again");
+  assert.equal(layer.hasMaskedActiveGroups(), false);
+  // a malformed mask length is the layer's last-line throw (validated
+  // upstream — this is the belt against a future caller skipping the gate):
+  // 3 floats cannot be whole frames of 2 pairs
+  assert.throws(() => layer.setGroup("bad", [[0, 1], [2, 3]], sizeOf, new Float32Array(3)),
+    /not a whole number/);
+});
+
 test("a grow mid-life keeps every group's ids and contents (the undo-slot stability guarantee)", () => {
   const layer = new ProducedEdgeLayer();
   layer.setGroup("a", [[0, 1]], sizeOf);
