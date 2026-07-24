@@ -369,21 +369,55 @@ const v3add = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const v3scl = (a: V3, s: number): V3 => [a[0] * s, a[1] * s, a[2] * s];
 const v3dot = (a: V3, b: V3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const v3len = (a: V3): number => Math.hypot(a[0], a[1], a[2]);
+const v3norm = (a: V3): V3 => { const l = v3len(a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 const rKnot = (a: V3, b: V3): number => Math.sqrt(Math.max(v3len(v3sub(a, b)), 1e-5));
 
-/** Centripetal Catmull-Rom position at t for segment P1→P2 with neighbours
- * P0,P3 — the exact math the ribbon vertex shader carries (asserted above). */
-function ribbonPos(P0: V3, P1: V3, P2: V3, P3: V3, t: number): V3 {
+/** The two non-uniform (centripetal Barry-Goldman) Hermite tangents at P1 and
+ * P2, scaled to the segment's local [0,1] parameter (× d12) — the error-prone
+ * core the shader carries verbatim. Chain ends (P0==P1 / P3==P2) fall back to
+ * the chord. Single-sourced so BOTH the position and tangent mirrors use it. */
+function catmullMs(P0: V3, P1: V3, P2: V3, P3: V3): { chord: V3; m1: V3; m2: V3 } {
   const chord = v3sub(P2, P1);
   const d01 = rKnot(P0, P1), d12 = rKnot(P1, P2), d23 = rKnot(P2, P3);
   const m1: V3 = v3len(v3sub(P1, P0)) < 1e-6 ? chord
     : v3scl(v3add(v3sub(v3scl(v3sub(P1, P0), 1 / d01), v3scl(v3sub(P2, P0), 1 / (d01 + d12))), v3scl(chord, 1 / d12)), d12);
   const m2: V3 = v3len(v3sub(P3, P2)) < 1e-6 ? chord
     : v3scl(v3add(v3sub(v3scl(chord, 1 / d12), v3scl(v3sub(P3, P1), 1 / (d12 + d23))), v3scl(v3sub(P3, P2), 1 / d23)), d12);
+  return { chord, m1, m2 };
+}
+
+/** Centripetal Catmull-Rom POSITION at t for segment P1→P2 — the exact math the
+ * ribbon vertex shader carries (asserted above). */
+function ribbonPos(P0: V3, P1: V3, P2: V3, P3: V3, t: number): V3 {
+  const { m1, m2 } = catmullMs(P0, P1, P2, P3);
   const tt = t * t, ttt = tt * t;
   const h00 = 2 * ttt - 3 * tt + 1, h10 = ttt - 2 * tt + t, h01 = -2 * ttt + 3 * tt, h11 = ttt - tt;
   return v3add(v3add(v3scl(P1, h00), v3scl(m1, h10)), v3add(v3scl(P2, h01), v3scl(m2, h11)));
 }
+
+/** The TANGENT (position-basis derivative) at t — the shader's along(t) before
+ * normalization. Same m1/m2 hull, the derivative basis g00..g11. */
+function ribbonTangent(P0: V3, P1: V3, P2: V3, P3: V3, t: number): V3 {
+  const { m1, m2 } = catmullMs(P0, P1, P2, P3);
+  const tt = t * t;
+  const g00 = 6 * tt - 6 * t, g10 = 3 * tt - 4 * t + 1, g01 = -6 * tt + 6 * t, g11 = 3 * tt - 2 * t;
+  return v3add(v3add(v3scl(P1, g00), v3scl(m1, g10)), v3add(v3scl(P2, g01), v3scl(m2, g11)));
+}
+
+/** The shader's ribbonSlerp, mirrored — guards BOTH poles with a nlerp fallback. */
+function ribbonSlerp(a: V3, b: V3, t: number): V3 {
+  const na = v3norm(a), nb = v3norm(b);
+  const c = Math.max(-1, Math.min(1, v3dot(na, nb)));
+  const ang = Math.acos(c), s = Math.sin(ang);
+  if (s < 1e-3) {
+    const nl = v3add(v3scl(na, 1 - t), v3scl(nb, t));
+    const nll = v3len(nl);
+    return nll < 1e-4 ? na : v3scl(nl, 1 / nll);
+  }
+  return v3add(v3scl(na, Math.sin((1 - t) * ang) / s), v3scl(nb, Math.sin(t * ang) / s));
+}
+
+const isFinite3 = (v: V3): boolean => v.every((x) => Number.isFinite(x));
 
 function maxTurnDeg(pts: V3[]): number {
   let mx = 0;
@@ -449,4 +483,92 @@ test("ribbon: SMOOTHNESS — S=8 spline sub-vertices drop the max turn from ~97�
     `the spline more than halves the max turn (${before.toFixed(1)}° → ${after.toFixed(1)}°)`);
   assert.ok(after < 45,
     `the drawn silhouette rounds toward RIBBON_SIZING's ~35° target (got ${after.toFixed(1)}°)`);
+});
+
+test("ribbon: the m1/m2 non-uniform tangent formulas match the exact GLSL (transcription pin)", () => {
+  // The Barry-Goldman tangent is the error-prone core: a sign or grouping slip
+  // would kink the ribbon with every position/anchor test still green. Pin the
+  // GLSL byte-for-byte, and pin the chain-end chord fallback.
+  assert.match(RIBBON_V,
+    /vec3 m1 = length\(P1 - P0\) < 1e-6\s*\?\s*chord\s*:\s*\(\(P1 - P0\) \/ d01 - \(P2 - P0\) \/ \(d01 \+ d12\) \+ chord \/ d12\) \* d12;/);
+  assert.match(RIBBON_V,
+    /vec3 m2 = length\(P3 - P2\) < 1e-6\s*\?\s*chord\s*:\s*\(chord \/ d12 - \(P3 - P1\) \/ \(d12 \+ d23\) \+ \(P3 - P2\) \/ d23\) \* d12;/);
+});
+
+test("ribbon: the analytic tangent IS the position derivative (finite-difference agreement)", () => {
+  // g00..g11 must be the exact derivative of h00..h11 — otherwise along(t) points
+  // slightly off the curve and the box twists. Check against a central difference
+  // of the position mirror at several t on a curving segment.
+  const P0: V3 = [0, 0, 0], P1: V3 = [1, 0, 0.1], P2: V3 = [1, 1, 0], P3: V3 = [2, 1, 0.3];
+  const eps = 1e-5;
+  for (const t of [0.1, 0.3, 0.5, 0.7, 0.9]) {
+    const num = v3scl(v3sub(ribbonPos(P0, P1, P2, P3, t + eps), ribbonPos(P0, P1, P2, P3, t - eps)), 1 / (2 * eps));
+    const ana = ribbonTangent(P0, P1, P2, P3, t);
+    for (let c = 0; c < 3; c++) {
+      assert.ok(Math.abs(num[c] - ana[c]) < 1e-3,
+        `tangent[${c}] at t=${t}: analytic ${ana[c].toFixed(5)} vs finite-diff ${num[c].toFixed(5)}`);
+    }
+  }
+});
+
+test("ribbon: the tangent DIRECTION is continuous at an interior joint (G1 → the miter never forms)", () => {
+  // The retired miter rests entirely on this: at a shared anchor the END tangent
+  // of the left segment and the START tangent of the right point the SAME way
+  // (they differ only in magnitude, which is why it is G1 not C1). If this ever
+  // failed the joint would kink and a wedge would reopen.
+  const poly: V3[] = [[0, 0, 0], [1, 0, 0.1], [1, 1, 0], [2, 0.9, 0.2], [2.3, 1.9, 0.1]];
+  for (let i = 1; i + 1 < poly.length; i++) {
+    // left segment (poly[i-1] → poly[i]) end tangent at t=1
+    const L0 = i - 2 >= 0 ? poly[i - 2] : poly[i - 1];
+    const endTan = ribbonTangent(L0, poly[i - 1], poly[i], poly[i + 1], 1);
+    // right segment (poly[i] → poly[i+1]) start tangent at t=0
+    const R3 = i + 2 < poly.length ? poly[i + 2] : poly[i + 1];
+    const startTan = ribbonTangent(poly[i - 1], poly[i], poly[i + 1], R3, 0);
+    const cos = v3dot(v3norm(endTan), v3norm(startTan));
+    assert.ok(cos > 0.9999, `joint ${i}: end/start tangent directions must agree (cos=${cos.toFixed(6)})`);
+  }
+});
+
+test("ribbon: coincident / zero-length control points never NaN (chain ends + collapsed hulls)", () => {
+  // chain start (P0==P1) and chain end (P3==P2): the shader's chord fallback
+  const cases: [V3, V3, V3, V3][] = [
+    [[1, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0]],   // P0==P1 (chain start)
+    [[0, 0, 0], [1, 0, 0], [2, 0, 0], [2, 0, 0]],   // P3==P2 (chain end)
+    [[1, 0, 0], [1, 0, 0], [2, 0, 0], [2, 0, 0]],   // both ends of a lone segment
+    [[5, 5, 5], [5, 5, 5], [5, 5, 5], [5, 5, 5]],   // fully coincident hull
+  ];
+  for (const [P0, P1, P2, P3] of cases) {
+    for (const t of [0, 0.5, 1]) {
+      assert.ok(isFinite3(ribbonPos(P0, P1, P2, P3, t)), `pos finite for ${JSON.stringify([P0, P1, P2, P3])} @${t}`);
+      assert.ok(isFinite3(ribbonTangent(P0, P1, P2, P3, t)), `tangent finite for ${JSON.stringify([P0, P1, P2, P3])} @${t}`);
+    }
+  }
+});
+
+test("ribbon: ribbonSlerp is finite and unit at BOTH poles (parallel AND antiparallel)", () => {
+  const parallel: [V3, V3] = [[0, 1, 0], [0, 2, 0]];       // ang → 0
+  const antipar: [V3, V3] = [[0, 1, 0], [0, -1, 0]];        // ang → π (the new guard)
+  const perp: [V3, V3] = [[1, 0, 0], [0, 1, 0]];            // the well-conditioned 90°
+  for (const [name, [a, b]] of [["parallel", parallel], ["antiparallel", antipar], ["perp", perp]] as const) {
+    for (const t of [0, 0.25, 0.5, 0.75, 1]) {
+      const r = ribbonSlerp(a, b, t);
+      assert.ok(isFinite3(r), `${name} @${t} must be finite, got ${JSON.stringify(r)}`);
+      assert.ok(Math.abs(v3len(r) - 1) < 1e-4, `${name} @${t} must stay unit (len=${v3len(r).toFixed(5)})`);
+    }
+  }
+  // the guard is a source fact too: the poles fall back to a normalized lerp,
+  // there is no bare division by sin(ang) left unguarded
+  assert.match(RIBBON_V, /if \(s < 1e-3\) \{/);
+  assert.match(RIBBON_V, /return nll < 1e-4 \? na : nl \/ nll;/);
+});
+
+test("ribbon: a PARTIALLY-bound segment TAPERS — a zero-facing anchor draws no ribbon (no invented facing)", () => {
+  // drawn ≡ supplied at partial binding: the width collapses at the unbound end
+  // and grows to the bound end, rather than borrowing the neighbour's facing at
+  // full width. Pin the per-end taper in the shader source.
+  assert.match(RIBBON_V, /float wA_def = lenA < 1e-9 \? 0\.0 : wA;/);
+  assert.match(RIBBON_V, /float wB_def = lenB < 1e-9 \? 0\.0 : wB;/);
+  assert.match(RIBBON_V, /float w = mix\(wA_def, wB_def, t\);/);
+  // and it must NOT be the old full-width mix over the raw widths
+  assert.doesNotMatch(RIBBON_V, /float w = mix\(wA, wB, t\);/);
 });

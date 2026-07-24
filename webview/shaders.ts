@@ -565,14 +565,23 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
       // control points (chain ends, P0==P1) never divide by zero.
       float ribbonKnot(vec3 a, vec3 b) { return sqrt(max(length(a - b), 1e-5)); }
 
-      // slerp two SIGN-COHERENT facings (the producer already walked the sign, so
-      // the pair is unambiguous within a segment); returns a unit direction.
+      // slerp two facings, returning a unit direction. Guards BOTH poles where
+      // sin(ang) → 0 and the slerp weights diverge: near-PARALLEL (ang → 0) and
+      // near-ANTIPARALLEL (ang → π — a >90° facing rotation within one segment,
+      // reachable because orientation is a USER-MOD-bound channel, not a
+      // producer-guaranteed sign-coherent pair). At either pole fall back to
+      // normalized lerp, which is stable and matches slerp to first order off
+      // the poles; at exact antiparallel nlerp nulls at t=0.5, so nudge to na.
       vec3 ribbonSlerp(vec3 a, vec3 b, float t) {
         vec3 na = normalize(a), nb = normalize(b);
         float c = clamp(dot(na, nb), -1.0, 1.0);
         float ang = acos(c);
-        if (ang < 1e-4) return na;          // (near-)parallel: nothing to rotate
         float s = sin(ang);
+        if (s < 1e-3) {
+          vec3 nl = mix(na, nb, t);
+          float nll = length(nl);
+          return nll < 1e-4 ? na : nl / nll;
+        }
         return (sin((1.0 - t) * ang) / s) * na + (sin(t * ang) / s) * nb;
       }
 
@@ -623,15 +632,26 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         vec3 tangent = g00 * P1 + g10 * m1 + g01 * P2 + g11 * m2;
         float tlen = length(tangent);
         vec3 along = tlen < 1e-9 ? chord / segLen : tangent / tlen;
+        // PER-END DEGENERACY (drawn ≡ supplied): an end whose supplied facing is
+        // zero has NO defined plane, so the band collapses to zero width THERE —
+        // the old per-end rule, preserved across the spline. Crucially the facing
+        // is never INVENTED: at a partially-bound segment (one anchor zero, one
+        // not) the width TAPERS from the bound end to zero at the unbound anchor,
+        // exactly the wedge the flat quad drew — rather than borrowing the
+        // neighbour's facing at full width. Both zero (unbound orientation) →
+        // width zero everywhere → the whole ribbon collapses.
+        float lenA = length(iAcrossA), lenB = length(iAcrossB);
+        float wA_def = lenA < 1e-9 ? 0.0 : wA;
+        float wB_def = lenB < 1e-9 ? 0.0 : wB;
         // WIDTH + COLOUR: linear resample across the segment — the SAME two-end
         // interpolation the flat quad had, now sampled at S+1 points not 2.
-        float w = mix(wA, wB, t);
+        float w = mix(wA_def, wB_def, t);
         vColor = mix(iColorA, iColorB, t);
         // across(t): slerp the supplied facings, then condition where the
         // geometry lives — world → view (rotation only), ⊥ along, unit (the O-1
-        // raw-store recommendation, evaluated at t). A zero facing at an end
-        // drops out; both zero (unbound orientation) → zero across → collapse.
-        float lenA = length(iAcrossA), lenB = length(iAcrossB);
+        // raw-store recommendation, evaluated at t). Where ONE end is zero the
+        // width already tapered to it, so the surviving end's facing carries the
+        // (vanishing) width — no facing is fabricated at the collapsed anchor.
         vec3 acrossWorld =
           (lenA < 1e-9 && lenB < 1e-9) ? vec3(0.0)
           : lenA < 1e-9 ? normalize(iAcrossB)
@@ -640,7 +660,7 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         vec3 acrossView = mat3(modelViewMatrix) * acrossWorld;
         vec3 aperp = acrossView - along * dot(acrossView, along);
         float alen = length(aperp);
-        // DEGENERACY: no defined plane (zero/parallel across) → zero width
+        // DEGENERACY: no defined plane (parallel across) → zero width
         w = w * (alen < 1e-6 ? 0.0 : 1.0);
         vec3 across = alen < 1e-6 ? vec3(0.0) : aperp / alen;
         // THIN BOX CROSS-SECTION. The band gets thickness through its own plane
