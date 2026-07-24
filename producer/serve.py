@@ -131,7 +131,7 @@ def _accepts_third_positional(fn) -> Optional[bool]:
 
 
 def run_mod(source, code: str, target_indices, timeout_s: float, install_channel=None,
-            parameters=None, channel_name=None) -> bytes:
+            parameters=None, channel_name=None, produces=None, n_points=None) -> bytes:
     """Execute a mod's `compute(data, target_indices)` against the RESIDENT
     dataset handle and return the response payload (JSON bytes).
 
@@ -221,6 +221,44 @@ def run_mod(source, code: str, target_indices, timeout_s: float, install_channel
                 # a clean validation error (no traceback), like the other arms
                 return json.dumps({"error": str(exc)}).encode("utf-8")
             return json.dumps({"values": reply}).encode("utf-8")
+        # a `produces: edges` run is identified by the REQUEST carrying
+        # produces == "edges" (the mod header's `# produces:`, threaded here),
+        # NOT by the return's shape — a list of [i, j] pairs is a list, but not
+        # a list of strings nor a flat float list, so it would otherwise fall
+        # through to the finite-floats error. Coerce + validate FAIL-CLOSED: pair
+        # shape, integer indices, range [0, n_points), and no self-loop (i != j).
+        # The wire carries DATA only (an edge is [i, j], never appearance); the
+        # producer appends these to header.edges at LOAD time (apply_edge_mods).
+        if produces == "edges":
+            if n_points is None:
+                return json.dumps(
+                    {"error": "edge authoring is not available in this context"}
+                ).encode("utf-8")
+            if not isinstance(values, list):
+                return json.dumps(
+                    {"error": f"an edges mod must return a list of [i, j] index pairs, not {type(values).__name__}"}
+                ).encode("utf-8")
+            pairs = []
+            for k, e in enumerate(values):
+                pair = list(e) if isinstance(e, (list, tuple)) else None
+                if pair is None or len(pair) != 2:
+                    return json.dumps({"error": f"edges[{k}] must be a pair [i, j]"}).encode("utf-8")
+                i, j = pair
+                if (isinstance(i, bool) or isinstance(j, bool)
+                        or not isinstance(i, int) or not isinstance(j, int)):
+                    return json.dumps(
+                        {"error": f"edges[{k}] indices must be integers (got [{i!r}, {j!r}])"}
+                    ).encode("utf-8")
+                if not (0 <= i < n_points) or not (0 <= j < n_points):
+                    return json.dumps(
+                        {"error": f"edges[{k}] index out of range [0, {n_points}) (got [{i}, {j}])"}
+                    ).encode("utf-8")
+                if i == j:
+                    return json.dumps(
+                        {"error": f"edges[{k}] is a self-loop ({i}) — an edge needs two distinct points"}
+                    ).encode("utf-8")
+                pairs.append([i, j])
+            return json.dumps({"values": pairs}).encode("utf-8")
         if isinstance(values, dict) and isinstance(values.get("png"), str):
             # a FIGURE reply: {png, width, height, axes} — a light structural
             # pass keeps the wire well-formed; the client runs THE deep
@@ -326,9 +364,63 @@ def log_mdtraj_preflight() -> None:
         )
 
 
-def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO) -> None:
+def apply_edge_mods(source, header, edge_mods, timeout_s: float = DEFAULT_MOD_TIMEOUT_S) -> None:
+    """Run each `produces: edges` mod file and APPEND its returned [i, j] pairs
+    to header.edges, IN PLACE, before the header is serialized.
+
+    Called ONCE at load, between give_header() and header_to_json(): the appended
+    edges then render as ordinary edge tubes on (re)load and can be styled by the
+    existing dashbonds/colorbonds verbs. Default empty ⟹ a strict NO-OP ⟹ the
+    served header is byte-identical.
+
+    Each mod runs under the SAME SIGALRM run_mod timeout (run_mod owns the alarm)
+    and its return is coerced + validated there (pair shape, integer indices,
+    range [0, n_points), i != j). FAIL-CLOSED per mod: on ANY failure — unreadable
+    file, exec error, timeout, a bad pair — ROLL BACK what THIS mod appended and
+    skip it, so one bad mod can neither corrupt the header nor abort the load
+    (mirrors the produced-channel discipline's fail-closed spirit).
+    """
+    if not edge_mods:
+        return
+    # edges span the whole system; the mod sees every point as its target set.
+    target = list(range(header.n_points))
+    for path in edge_mods:
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                code = f.read()  # header `# ` lines are inert Python comments
+        except OSError as exc:
+            log.warning("edge-mod %s: cannot read (%s) — skipped", path, exc)
+            continue
+        payload = run_mod(
+            source, code, target, timeout_s,
+            produces="edges", n_points=header.n_points,
+        )
+        try:
+            reply = json.loads(payload.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError) as exc:  # defensive — run_mod emits JSON
+            log.warning("edge-mod %s: unreadable reply (%s) — skipped", path, exc)
+            continue
+        if "error" in reply:
+            log.warning("edge-mod %s failed: %s — skipped", path, reply["error"])
+            continue
+        pairs = reply.get("values") or []
+        before = len(header.edges)
+        try:
+            header.edges.extend((int(a), int(b)) for a, b in pairs)
+        except (TypeError, ValueError) as exc:  # defensive — run_mod already validated
+            del header.edges[before:]  # roll back this mod's partial append
+            log.warning("edge-mod %s: bad pairs (%s) — rolled back, skipped", path, exc)
+            continue
+        log.info("edge-mod %s: appended %d edges", path, len(pairs))
+
+
+def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO,
+          edge_mods=None) -> None:
     log_mdtraj_preflight()
     header = source.give_header()
+    # LOAD-TIME edge authoring: append any `--edge-mods` pairs BEFORE serializing
+    # the header, so they render as ordinary edges on load. Default empty = no-op.
+    apply_edge_mods(source, header, edge_mods or [])
     header_json = header_to_json(header).encode("utf-8")
     log.info(
         "serving %s: N=%d T=%d (%d header bytes)",
@@ -461,6 +553,11 @@ def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO) -> None:
                     float(timeout_s), install_channel=install_channel,
                     parameters=request.get("parameters"),
                     channel_name=request.get("channel_name"),
+                    # produces:edges — an interactive run still VALIDATES + reports
+                    # a count (the viewer honestly defers rather than growing the
+                    # live scene); n_points is the authoritative range bound.
+                    produces=request.get("produces"),
+                    n_points=header.n_points,
                 )
                 log.debug("run_mod -> %d bytes", len(payload))
             else:
@@ -531,6 +628,11 @@ def main() -> None:
     ap.add_argument("--ligand-residue", action="append", help="residue name(s) to tag as ligand")
     ap.add_argument("--system", help="benchmark system id or directory (real mdtraj source)")
     ap.add_argument("--open", help="path to a structure or trajectory file to open directly")
+    ap.add_argument(
+        "--edge-mods", action="append",
+        help="path to a produces:edges mod file whose [i, j] pairs are appended to "
+             "the header at load (repeatable; default: none, header byte-identical)",
+    )
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args()
 
@@ -558,7 +660,7 @@ def main() -> None:
         log.error("failed to build data source: %s", exc)
         sys.exit(1)
     try:
-        serve(source, stdin, stdout)
+        serve(source, stdin, stdout, edge_mods=args.edge_mods or [])
     except (BrokenPipeError, KeyboardInterrupt):
         log.info("pipe closed / interrupted, exiting")
     except EOFError as exc:
