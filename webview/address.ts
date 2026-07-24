@@ -564,12 +564,18 @@ export interface Completion {
   /** The string to INSERT at the cursor: the unique completion (plus "." after
    * a category/group, " " after a verb) or the common-prefix extension. */
   applied: string;
-  /** "filter": the candidates are @name.<pred> FILTER vocabulary — predicates
-   * over the points' type or ancestor labels — not tree levels or members.
-   * The terminal renders a header marking them as such; path-level
-   * completions (genuine tree navigation) carry no kind. Returned data only —
-   * no DOM concern lives here. */
-  kind?: "filter";
+  /** What VOCABULARY the candidates are, when it isn't tree navigation —
+   * the terminal renders a header naming it; path-level completions
+   * (genuine tree levels) carry no kind. Returned data only — no DOM
+   * concern lives here.
+   *   "filter"  @name.<pred> filter vocabulary (predicates over the
+   *             points' type or ancestor labels), not tree levels/members
+   *   "param"   a mod invocation's declared ?parameter names
+   *   "channel" declared channel names (bake/bind's read vocabulary)
+   *   "axis"    bindable axis tokens (bake/bind/unbind)
+   *   "value"   a fixed value vocabulary (booleans, styles, shapes,
+   *             colors, mod selectors, verb names for help) */
+  kind?: "filter" | "param" | "channel" | "axis" | "value";
 }
 
 /** Token characters end at these; the scan-back from the cursor stops here. */
@@ -789,6 +795,25 @@ function capped(
     candidates: [`${candidates.length} matches`, `— type to narrow`],
     applied: appliedWhenCapped,
   };
+}
+
+/** The ONE settle helper for every NON-TARGET argument slot (the verb-aware
+ * dispatcher in commands.ts routes param/channel/axis/style/shape/color/…
+ * vocabularies through here): a thin export over the same `finish` + cap
+ * path completion itself settles with, so an argument token behaves
+ * IDENTICALLY to a path token — same COMPLETION_LIST_CAP, same sorted
+ * distinct prefix-filtered candidates, same common-prefix extension, same
+ * "a unique match appends the separator" rule (`uniqueSuffix`, e.g. "="
+ * after a unique parameter name). Dispatcher slots get NO settle logic of
+ * their own — growing a second settle path is the two-lists defect. */
+export function completeToken(
+  start: number,
+  token: string,
+  pool: Iterable<string>,
+  opts: { uniqueSuffix?: string; kind?: Completion["kind"] } = {},
+): Completion {
+  const done = finish(start, token, pool, opts.uniqueSuffix ?? "");
+  return opts.kind === undefined ? done : { ...done, kind: opts.kind };
 }
 
 function finish(

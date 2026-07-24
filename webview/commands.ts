@@ -16,6 +16,7 @@
 import {
   COMPLETION_LIST_CAP,
   completeTarget,
+  completeToken,
   parseTarget,
   resolveTarget,
   splitLeadingRef,
@@ -2919,14 +2920,82 @@ export function modInstallReport(outcome: ModInstallOutcome, name: string): Comm
   };
 }
 
-/** Tab completion for the terminal — `runCommand`'s sibling. Gathers the
- * registry's verb names plus the viewer surface and defers to the pure
- * completeTarget; the terminal ships {text, cursor} and applies the result. */
-export function makeRunComplete(
+// -- argument-aware completion: the verb dispatcher --------------------------------
+
+/** A mod invocation's non-target slots: `<target> ?name=value ?name2=…`.
+ * The boundary is the SAME collision-proof split parseModParams executes on
+ * (splitOnUnquoted at the reserved `?`), so completion and invocation can
+ * never disagree about where the target ends. No unquoted `?` before the
+ * cursor → the whole argument is target text (the caller's target slot).
+ * Otherwise the LAST `?` segment holds the cursor:
+ *   no `=` yet → complete the parameter NAME from the declared schema MINUS
+ *     the names already used in EARLIER segments (resolveParameters'
+ *     duplicate rule, mirrored); a unique match appends `=`;
+ *   after `=` → complete the VALUE — enumerable only for a boolean
+ *     parameter (true/false); number/string values are unenumerable (empty,
+ *     never a guess).
+ * Settling is completeToken's — identical two-stage behavior to paths. */
+function completeModInvocation(
+  mod: AnalysisMod,
+  argsStart: number,
+  argsHead: string,
+  targetSlot: () => Completion,
+): Completion {
+  const segs = splitOnUnquoted(argsHead, "?");
+  if (segs.length === 1) return targetSlot(); // no unquoted "?" → target text
+  const seg = segs[segs.length - 1];
+  const segStart = argsStart + (argsHead.length - seg.length);
+  const none: Completion = { start: argsStart + argsHead.length, candidates: [], applied: "" };
+  const declared = mod.params ?? [];
+  const eq = seg.indexOf("=");
+  if (eq < 0) {
+    // parameter NAME slot
+    const lead = seg.length - seg.trimStart().length;
+    const token = seg.slice(lead);
+    if (/[\s"]/.test(token)) return none; // a name never holds spaces/quotes
+    const used = new Set(
+      segs.slice(1, -1).map((s) => {
+        const e = s.indexOf("=");
+        return (e < 0 ? s : s.slice(0, e)).trim();
+      }),
+    );
+    const pool = declared.map((p) => p.name).filter((n) => !used.has(n));
+    return completeToken(segStart + lead, token, pool, { uniqueSuffix: "=", kind: "param" });
+  }
+  // VALUE slot: enumerable only for a boolean parameter
+  const param = declared.find((p) => p.name === seg.slice(0, eq).trim());
+  if (!param || param.type !== "boolean") return none;
+  const value = seg.slice(eq + 1);
+  const lead = value.length - value.trimStart().length;
+  return completeToken(segStart + eq + 1 + lead, value.slice(lead), ["true", "false"], {
+    kind: "value",
+  });
+}
+
+/**
+ * Complete the token under `cursor` in a partial command line — the
+ * VERB-AWARE DISPATCHER over completion (`runCommand`'s sibling): it parses
+ * the verb (the first word of `text[0..cursor)`) and routes the cursor's
+ * slot —
+ *   · cursor still in the first word → verb-name completion (completeTarget's
+ *     verb position, unchanged);
+ *   · an enumerable NON-TARGET slot under the cursor (a mod's `?params`
+ *     today; channel/axis/style/shape/color/… slots as the dispatcher
+ *     grows) → that slot's vocabulary, settled through the ONE shared
+ *     completeToken helper — never a second settle path;
+ *   · anything else → target completion (completeTarget), the pre-dispatch
+ *     behavior, so target-grammar completion is untouched.
+ * Total like completeTarget: junk and unenumerable slots yield an empty
+ * Completion, never a throw. Only `text[0..cursor)` is considered.
+ */
+export function completeCommand(
   ctx: CommandContext,
   registry: CommandRegistry,
-): (text: string, cursor: number) => Completion {
-  return (text, cursor) =>
+  text: string,
+  cursor: number,
+): Completion {
+  const head = text.slice(0, Math.max(0, Math.min(cursor, text.length)));
+  const targetSlot = (): Completion =>
     completeTarget(
       text,
       cursor,
@@ -2936,4 +3005,29 @@ export function makeRunComplete(
       ctx.committedEntries(),
       registry.verbs(),
     );
+  // cursor still inside the first word (or leading whitespace) → verbs
+  if (/^\s*\S*$/.test(head)) return targetSlot();
+  const m = /^(\s*\S+\s+)([\s\S]*)$/.exec(head);
+  if (!m) return targetSlot(); // defensive — the test above makes this unreachable
+  const verb = m[1].trim();
+  const argsStart = m[1].length;
+  const argsHead = m[2];
+
+  // a mod's own verb: the ?parameter slots (the target slot falls through)
+  const recipe = getRecipe(verb);
+  if (recipe !== undefined && recipe.kind === "analysis") {
+    return completeModInvocation(recipe, argsStart, argsHead, targetSlot);
+  }
+
+  return targetSlot();
+}
+
+/** Tab completion for the terminal — the late-bound closure main.ts wires:
+ * completeCommand over the live ctx/registry; the terminal ships
+ * {text, cursor} and applies the result. */
+export function makeRunComplete(
+  ctx: CommandContext,
+  registry: CommandRegistry,
+): (text: string, cursor: number) => Completion {
+  return (text, cursor) => completeCommand(ctx, registry, text, cursor);
 }

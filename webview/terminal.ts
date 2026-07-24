@@ -39,8 +39,19 @@ interface CompleteResultMsg {
   start: number;
   candidates: string[];
   applied: string;
-  kind?: "filter";
+  kind?: "filter" | "param" | "channel" | "axis" | "value";
 }
+
+/** The candidate-list header per completion kind — names WHAT vocabulary the
+ * candidates are (path completions carry no kind and stay headerless). The
+ * closed list mirrors Completion.kind (webview/address.ts). */
+const COMPLETION_HEADERS: Record<NonNullable<CompleteResultMsg["kind"]>, string> = {
+  filter: "filter by (type or label):",
+  param: "parameters (name=value):",
+  channel: "channels:",
+  axis: "axes:",
+  value: "values:",
+};
 
 function main(): void {
   const host = acquireVsCodeApi();
@@ -199,14 +210,13 @@ function main(): void {
         input.setSelectionRange(caret, caret);
       }
       if (m.candidates.length > 1) {
-        // "@name." completions are FILTER vocabulary (predicates over the
-        // points' type or ancestor labels), not a membership listing — the
+        // Non-path completions carry a kind naming their vocabulary (filter
+        // predicates, ?parameters, channels, axes, fixed values) — the
         // header keeps that unmistakable. Path completions are genuine tree
         // levels and stay headerless.
         const body = m.candidates.join("  ");
-        printCompletionPreview(
-          m.kind === "filter" ? `filter by (type or label):\n${body}` : body,
-        );
+        const header = m.kind === undefined ? null : COMPLETION_HEADERS[m.kind];
+        printCompletionPreview(header ? `${header}\n${body}` : body);
       }
     }
   });

@@ -11,6 +11,7 @@ import { buildTree } from "../webview/classification.ts";
 import { Hierarchy, type Entry } from "../webview/sets.ts";
 import {
   commandMacroRefusal,
+  completeCommand,
   createCommandRegistry,
   HELP_TEXT,
   installModList,
@@ -2548,4 +2549,110 @@ test("a malformed entry in a push is skipped WITH a reason, never silently dropp
   assert.deepEqual(outcome.installed, []);
   assert.deepEqual(outcome.skipped.map((s) => s.name), ["half", "(unnamed)"]);
   assert.ok(outcome.skipped.every((s) => /well-formed/.test(s.reason)));
+});
+
+// -- completeCommand: the argument-aware completion dispatcher --------------------
+
+/** A registry + ctx with one PARAMIZED analysis mod installed under its own
+ * verb (recipe registry AND command registry, like a real push), plus the
+ * teardown that keeps the module-global recipe registry clean. */
+function makeCompletionFixture() {
+  const fx = makeRegistry();
+  const mod: AnalysisMod = {
+    name: "compmod", kind: "analysis", produces: "commands", origin: "workspace",
+    params: [
+      { name: "floor", type: "number", default: 0.5 },
+      { name: "flag", type: "boolean", default: false },
+      { name: "label", type: "string" }, // required
+    ],
+    code: "def compute(data, target_indices, params):\n    return []",
+  };
+  registerRecipe(mod);
+  fx.registry.register("compmod", makeAnalysisModHandler(fx.ctx, mod), "test mod");
+  const comp = (text: string, cursor = text.length) =>
+    completeCommand(fx.ctx, fx.registry, text, cursor);
+  return { ...fx, comp, done: () => unregisterRecipe("compmod") };
+}
+
+test("completeCommand: verb position is unchanged — and a mod's own verb completes there", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    assert.deepEqual(comp("vie"), { start: 0, candidates: ["view"], applied: "w " });
+    assert.deepEqual(comp("compm"), { start: 0, candidates: ["compmod"], applied: "od " });
+    // cursor inside the first word: still the verb slot (text beyond is ignored)
+    assert.deepEqual(comp("compm alpha", 5), { start: 0, candidates: ["compmod"], applied: "od " });
+    assert.deepEqual(comp("zoom").candidates, []);
+  } finally { done(); }
+});
+
+test("completeCommand: target slots still complete through the dispatcher (regression)", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    // an ordinary verb's target — the pre-dispatch behavior, untouched
+    assert.deepEqual(comp("view c0"), { start: 5, candidates: ["g0"], applied: "." });
+    // a mod invocation's TARGET slot (no ? yet) is target text too
+    assert.deepEqual(comp("compmod c0"), { start: 8, candidates: ["g0"], applied: "." });
+    // a numeric value slot stays a no-op (nothing enumerable)
+    assert.deepEqual(comp("pointsize c0 3").candidates, []);
+  } finally { done(); }
+});
+
+test("completeCommand: ?param NAMES — pool, prefix extension, unique appends '='", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    // all declared names, sorted, kind "param"
+    assert.deepEqual(comp("compmod c0 ?"),
+      { start: 12, candidates: ["flag", "floor", "label"], applied: "", kind: "param" });
+    // partial → common-prefix extension (flag/floor share "fl")
+    assert.deepEqual(comp("compmod c0 ?f"),
+      { start: 12, candidates: ["flag", "floor"], applied: "l", kind: "param" });
+    // unique → the remainder plus "="
+    assert.deepEqual(comp("compmod c0 ?flo"),
+      { start: 12, candidates: ["floor"], applied: "or=", kind: "param" });
+    // exact name → just the "="
+    assert.deepEqual(comp("compmod c0 ?floor"),
+      { start: 12, candidates: ["floor"], applied: "=", kind: "param" });
+  } finally { done(); }
+});
+
+test("completeCommand: chaining excludes names already used in EARLIER segments", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    assert.deepEqual(comp("compmod c0 ?floor=0.8 ?").candidates, ["flag", "label"]);
+    // the used name no longer completes
+    assert.deepEqual(comp("compmod c0 ?floor=0.8 ?flo").candidates, []);
+    // ...but the still-unused prefix sibling does
+    assert.deepEqual(comp("compmod c0 ?floor=0.8 ?fl"),
+      { start: 23, candidates: ["flag"], applied: "ag=", kind: "param" });
+  } finally { done(); }
+});
+
+test("completeCommand: ?param VALUES — boolean enumerates, number/string are no-ops", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    // boolean: the two literals (sorted — the one shared settle path)
+    assert.deepEqual(comp("compmod c0 ?flag="),
+      { start: 17, candidates: ["false", "true"], applied: "", kind: "value" });
+    assert.deepEqual(comp("compmod c0 ?flag=t"),
+      { start: 17, candidates: ["true"], applied: "rue", kind: "value" });
+    // number and string values are unenumerable — empty, never a guess
+    assert.deepEqual(comp("compmod c0 ?floor=").candidates, []);
+    assert.deepEqual(comp("compmod c0 ?label=").candidates, []);
+    // an unknown name's value slot is inert too
+    assert.deepEqual(comp("compmod c0 ?bogus=").candidates, []);
+  } finally { done(); }
+});
+
+test("completeCommand: total on junk — unbalanced quotes and malformed params, never a throw", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    // the ? sits inside an unbalanced quote → NOT a param boundary → the
+    // target slot's own junk handling (empty, no throw)
+    assert.deepEqual(comp('compmod "abc ?floo').candidates, []);
+    // a quoted region in a VALUE holds its ? — the last segment is still
+    // label's (string) value slot, an inert no-op
+    assert.deepEqual(comp('compmod c0 ?label="x ?').candidates, []);
+    // whitespace inside a would-be name token → inert
+    assert.deepEqual(comp("compmod c0 ?floor extra").candidates, []);
+  } finally { done(); }
 });
