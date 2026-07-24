@@ -12,6 +12,7 @@ import { Hierarchy, type Entry } from "../webview/sets.ts";
 import {
   completeTarget,
   completeTargetExpr,
+  completeToken,
   globMatch,
   parseTarget,
   resolveTarget,
@@ -665,8 +666,10 @@ test("the sibling edge: an exact token descends even with longer siblings presen
 });
 
 test("completion: @ completes committed-selection names (+ the reserved @all)", () => {
-  // "all" is always in the pool — @all is the union of every committed selection
-  assert.deepEqual(comp("view @").candidates, ["all", "my picks", "picks", "sol2", "solvent"]);
+  // "all" is always in the pool — @all is the union of every committed selection.
+  // "my picks" holds a space, so the DISPLAY list shows it quoted (label-only
+  // display transform); the raw name still drives filtering/apply.
+  assert.deepEqual(comp("view @").candidates, ["all", '"my picks"', "picks", "sol2", "solvent"]);
   assert.deepEqual(comp("view @sol"), { start: 6, candidates: ["sol2", "solvent"], applied: "" });
   assert.deepEqual(comp("view @solv"), { start: 6, candidates: ["solvent"], applied: "ent" });
 });
@@ -747,6 +750,71 @@ test("completion: only text before the cursor counts", () => {
   // cursor after "view a" with trailing text present — completes the category
   const r = comp("view aXXXX", 6);
   assert.deepEqual(r, { start: 5, candidates: ["alpha"], applied: "lpha" });
+});
+
+// -- completion: QUOTED spaced labels (the "-open completion path) --------------------
+
+test('quoted completion: an open " lists the descendant labels, shown quoted', () => {
+  // the user typed the opening quote; the DISPLAY list shows quotable labels
+  // quoted (lone.solo has one subgroup, "s C") — no closing quote typed yet
+  assert.deepEqual(compSpan('view lone.solo."').candidates, ['"s C"']);
+});
+
+test("quoted completion: a partial in-quote token preserves spaces and settles", () => {
+  // partial "s → the one match, space preserved, auto-closing quote on settle
+  assert.deepEqual(compSpan('view lone.solo."s').candidates, ['"s C"']);
+  assert.equal(compSpan('view lone.solo."s').applied, ' C"'); // tail + closing "
+  // an exact in-quote label "s C" (SPACE PRESERVED) is DESCENDABLE → close + dot
+  assert.deepEqual(compSpan('view lone.solo."s C'),
+    { start: 16, candidates: ["p4"], applied: '".' });
+});
+
+test("quoted completion: a CLOSED quoted label descends with a plain dot", () => {
+  // the quote is already closed → no extra closer, just the descend "."
+  assert.deepEqual(compSpan('view lone.solo."s C"'),
+    { start: 16, candidates: ["p4"], applied: "." });
+});
+
+test("quoted completion: a quoted ancestor completes its leaf (exercises D)", () => {
+  // past a quoted subgroup, the leaf types under it still complete — the
+  // prefix keeps the quoted segment whole (splitOnUnquoted) and the guard no
+  // longer bails on the in-quote space
+  assert.deepEqual(compSpan('view lone.solo."s C".'),
+    { start: 21, candidates: ["p4"], applied: "p4" });
+});
+
+test("quoted completion: an @-name with a space completes + closes the quote", () => {
+  // @"my → the spaced selection name, plus the closing quote on the settle
+  const r = comp('view @"my');
+  assert.deepEqual(r.candidates, ['"my picks"']);
+  assert.equal(r.applied, ' picks"');
+  // a fully-typed, closed quoted name descends into its filter level
+  assert.deepEqual(comp('view @"my picks"'),
+    { start: 7, candidates: ["s1"], applied: ".", kind: "filter" });
+  // and the descend into that filter offers the selection's stored member
+  assert.deepEqual(comp('view @"my picks".').candidates, ["s1"]);
+});
+
+test("quoted completion: the bare (unquoted) list still shows quotable labels quoted", () => {
+  // even with no quote typed, the DISPLAY hints that "s C" needs quoting
+  assert.ok(compSpan("view lone.solo.").candidates.includes('"s C"'));
+});
+
+test("completeToken slots are NEVER quoted (label-only display transform)", () => {
+  // param/axis/channel/style/value vocabularies flow through completeToken,
+  // which passes no display transform — a value with a space stays RAW
+  const r = completeToken(0, "", ["a b", "cd"], { kind: "param" });
+  assert.ok(r.candidates.includes("a b"), "spaced value stays raw");
+  assert.ok(!r.candidates.includes('"a b"'), "never quoted");
+});
+
+test("quoted completion: total on malformed quote input — never throws", () => {
+  assert.doesNotThrow(() => comp('view "'));
+  assert.doesNotThrow(() => comp('view @sel."'));
+  assert.doesNotThrow(() => comp('view a"b'));
+  // the malformed / unknown-selection cases yield inert empty completions
+  assert.deepEqual(comp('view @sel."').candidates, []);
+  assert.deepEqual(comp('view a"b').candidates, []);
 });
 
 // -- completeTargetExpr: the expr-relative core completeTarget wraps ------------------

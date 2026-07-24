@@ -662,6 +662,35 @@ export function completeTarget(
   return { ...inner, start: inner.start + base };
 }
 
+/** A label needs quoting in a target when it carries a grammar-significant
+ * character — whitespace or any of `. , + # @ " * ? [ ]`; otherwise it is
+ * written bare. One uniform rule, applied wherever a label is DISPLAYED or
+ * APPLIED (never to non-label argument slots — see `completeToken`). */
+function needsQuote(label: string): boolean {
+  return /[\s.,+#@"*?[\]]/.test(label);
+}
+
+/** Wrap a label in `"…"` iff it needs quoting; the display/apply transform. */
+function quoteLabel(label: string): string {
+  return needsQuote(label) ? `"${label}"` : label;
+}
+
+/** Is `term` NOT a completable path prefix? True when it holds an "@" or
+ * whitespace OUTSIDE any quoted region, or ends mid-quote (unbalanced). A
+ * quote or space INSIDE a `"…"` region is legal (a quoted spaced label), so
+ * it does not disqualify the prefix. Same no-escape quote rule as `quoted()`
+ * / `splitOnUnquoted`. Replaces the old blanket `/[@"\s]/` bail so a quoted
+ * spaced-label ancestor can still complete its descendants. */
+function badTermBoundary(term: string): boolean {
+  let inQuote = false;
+  for (let i = 0; i < term.length; i++) {
+    const c = term[i];
+    if (c === '"') inQuote = !inQuote;
+    else if (!inQuote && (c === "@" || /\s/.test(c))) return true;
+  }
+  return inQuote;
+}
+
 /**
  * The target-grammar completion CORE: complete the token under `exprCursor`
  * in a bare target EXPRESSION (no verb — `completeTarget` wraps this with
@@ -680,18 +709,61 @@ export function completeTargetExpr(
 ): Completion {
   const head = exprText.slice(0, Math.max(0, Math.min(exprCursor, exprText.length)));
 
-  // the token = the maximal run of token characters ending at the cursor
-  let ts = head.length;
-  while (ts > 0 && !TOKEN_DELIMS.has(head[ts - 1]) && !/\s/.test(head[ts - 1])) ts--;
-  const token = head.slice(ts);
+  // QUOTE-AWARE token scan. Locate the token under the cursor while honoring
+  // "…"-quoted labels — the same no-escape rule as `quoted()`/`splitOnUnquoted`
+  // (a `"` toggles quote state, so `"` is the only delimiter inside a quote).
+  // Scan `head` once, tracking the LAST opening-quote index. Three states:
+  //   open   — an odd `"` count (the cursor sits inside an unclosed quote):
+  //            the token is the raw partial content INCLUDING spaces/reserved
+  //            chars (those are literal inside quotes), starting at qOpen+1;
+  //   closed — even count and the char before the cursor CLOSES a balanced
+  //            quoted segment: peel it, the token is its unquoted content;
+  //   none   — no quote in play: the ordinary TOKEN_DELIMS scan, unchanged.
+  // `before` is ALWAYS sliced to before the opening quote, so it lands on the
+  // exact boundaries the dispatch below already understands (`""`, ends-`.` /
+  // `,` / `@`, `@name.`) — none of those conditions change.
+  let inScanQuote = false;
+  let qOpen = -1;
+  for (let i = 0; i < head.length; i++) {
+    if (head[i] === '"') {
+      if (!inScanQuote) qOpen = i;
+      inScanQuote = !inScanQuote;
+    }
+  }
+  let quoteState: "none" | "open" | "closed";
+  let ts: number;
+  let token: string;
+  let before: string;
+  if (inScanQuote) {
+    quoteState = "open";
+    ts = qOpen + 1; // start = content-begin
+    token = head.slice(qOpen + 1);
+    before = head.slice(0, qOpen);
+  } else if (head.length > 0 && head[head.length - 1] === '"' && qOpen >= 0 && qOpen < head.length - 1) {
+    quoteState = "closed";
+    ts = qOpen + 1;
+    token = head.slice(qOpen + 1, head.length - 1);
+    before = head.slice(0, qOpen);
+  } else {
+    quoteState = "none";
+    ts = head.length;
+    while (ts > 0 && !TOKEN_DELIMS.has(head[ts - 1]) && !/\s/.test(head[ts - 1])) ts--;
+    token = head.slice(ts);
+    before = head.slice(0, ts);
+  }
+  // the closing quote a settle/descend appends when the cursor is inside an
+  // OPEN quote (part B): "" for none/closed (already balanced), `"` for open.
+  const closer = quoteState === "open" ? '"' : "";
   const none: Completion = { start: ts, candidates: [], applied: "" };
 
   // pattern-in-progress → completion opts out (globs, numeric ranges, junk),
-  // and "#" indices are an unbounded integer space — nothing to enumerate
-  if (/[*[\]?"#]/.test(token)) return none;
-  if (/^\d+-\d*$/.test(token)) return none;
-
-  const before = head.slice(0, ts);
+  // and "#" indices are an unbounded integer space — nothing to enumerate.
+  // Inside a quote these chars are LITERAL content, so the opt-out is scoped
+  // to an unquoted token only.
+  if (quoteState === "none") {
+    if (/[*[\]?"#]/.test(token)) return none;
+    if (/^\d+-\d*$/.test(token)) return none;
+  }
 
   // the "@name." filter candidate pool = the selection's STORED MEMBERSHIP
   // (a member's label, a point member's type) — what the panel's member list
@@ -715,9 +787,9 @@ export function completeTargetExpr(
   if (before.endsWith("@")) {
     if (token !== "" && (committedNames.has(token) || token === "all")) {
       const next = [...new Set(selectionPool(token) ?? [])].sort();
-      return { ...capped(ts, next, ".", "."), kind: "filter" };
+      return { ...capped(ts, next.map(quoteLabel), closer + ".", closer + "."), kind: "filter" };
     }
-    return finish(ts, token, [...committedNames.keys(), "all"], "");
+    return finish(ts, token, [...committedNames.keys(), "all"], closer, quoteLabel);
   }
 
   // current term = after the last "+" (or the whole expression prefix); the
@@ -739,19 +811,26 @@ export function completeTargetExpr(
     if (selName === null) return none; // a second level, or junk
     const pool = selectionPool(selName);
     if (pool === null) return none;
-    return { ...finish(ts, token, pool, ""), kind: "filter" };
+    return { ...finish(ts, token, pool, closer, quoteLabel), kind: "filter" };
   }
 
-  if (/[@"\s]/.test(termBefore)) return none; // refs/quotes/spaces → not a completable path
+  // reject a term prefix that is not a completable path: an "@" or whitespace
+  // OUTSIDE any quoted region, or a malformed (unbalanced) quote. A quote or
+  // space INSIDE a "…" region is legal — a quoted spaced-label ancestor
+  // (e.g. `cat.grp."a b".`) must still complete its descendants.
+  if (badTermBoundary(termBefore)) return none;
 
   // completed segments = everything before the segment the token belongs to
   let completed: string[];
   if (termBefore === "") {
     completed = [];
   } else if (termBefore.endsWith(".")) {
-    completed = termBefore.slice(0, -1).split(".");
+    // splitOnUnquoted keeps a quoted segment (`"a b"`) whole, in RAW quoted
+    // form (parseTarget below needs the quotes) — a quoted ancestor stays one
+    // segment instead of splitting on the "." or space inside it.
+    completed = splitOnUnquoted(termBefore.slice(0, -1), ".");
   } else if (termBefore.endsWith(",")) {
-    completed = termBefore.slice(0, -1).split(".").slice(0, -1); // list continues the same segment
+    completed = splitOnUnquoted(termBefore.slice(0, -1), ".").slice(0, -1); // list continues the same segment
   } else {
     return none; // a finished token with no separator — malformed position
   }
@@ -765,11 +844,14 @@ export function completeTargetExpr(
   // with no dot; an exact LEAF token is terminal. Pure in (text, cursor).
   const pathStage = (pool: string[], descend: (() => string[]) | null): Completion => {
     if (token !== "" && pool.includes(token)) {
-      if (!descend) return { start: ts, candidates: [], applied: "" }; // exact leaf: terminal
+      // exact-complete: descend a level (append "." — preceded by the closing
+      // quote when the cursor is inside an open quote), or a leaf is terminal
+      // (an open quote still gets closed).
+      if (!descend) return { start: ts, candidates: [], applied: closer };
       const next = [...new Set(descend())].filter((c) => c !== "").sort();
-      return capped(ts, next, ".", ".");
+      return capped(ts, next.map(quoteLabel), closer + ".", closer + ".");
     }
-    return finish(ts, token, pool, ""); // settle the token — never a "."
+    return finish(ts, token, pool, closer, quoteLabel); // settle the token (+ close quote if open)
   };
 
   if (k === 0) {
@@ -869,19 +951,24 @@ function finish(
   token: string,
   pool: Iterable<string>,
   uniqueSuffix: string,
+  // optional DISPLAY transform for the candidate LIST only — label sites pass
+  // `quoteLabel` so a spaced label shows quoted, while the prefix-filter and
+  // common-prefix math (and thus `applied`, the raw in-quote continuation)
+  // stay on RAW strings. Default identity, so non-label slots stay unquoted.
+  display: (label: string) => string = (l) => l,
 ): Completion {
-  const candidates = [...new Set(pool)].filter((c) => c.startsWith(token)).sort();
-  if (candidates.length === 0) return { start, candidates, applied: "" };
-  if (candidates.length === 1) {
-    return { start, candidates, applied: candidates[0].slice(token.length) + uniqueSuffix };
+  const raw = [...new Set(pool)].filter((c) => c.startsWith(token)).sort();
+  if (raw.length === 0) return { start, candidates: [], applied: "" };
+  if (raw.length === 1) {
+    return { start, candidates: [display(raw[0])], applied: raw[0].slice(token.length) + uniqueSuffix };
   }
-  let common = candidates[0];
-  for (const c of candidates) {
+  let common = raw[0];
+  for (const c of raw) {
     let i = 0;
     while (i < common.length && i < c.length && common[i] === c[i]) i++;
     common = common.slice(0, i);
   }
-  return capped(start, candidates, common.slice(token.length));
+  return capped(start, raw.map(display), common.slice(token.length));
 }
 
 function segmentMatches(seg: Segment, name: string): boolean {
