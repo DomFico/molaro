@@ -18,6 +18,8 @@ import {
   completeTarget,
   completeTargetExpr,
   completeToken,
+  isEdgeIndexExpr,
+  parseEdgeIndexExpr,
   parseTarget,
   resolveTarget,
   splitLeadingRef,
@@ -25,6 +27,7 @@ import {
   splitTrailingName,
   splitTrailingWord,
   type Completion,
+  type EdgeIndexSpec,
   type Segment,
   type TargetAst,
 } from "./address.ts";
@@ -756,6 +759,27 @@ function resolveRepArgs<T>(
   parse: (word: string) => T | null,
   badValue: (word: string) => string,
 ): { points: number[]; value: T; expr: string; word: string } | CommandResult {
+  const v = splitAndParseValue(verb, args, noun, example, parse, badValue);
+  if ("status" in v) return v;
+  const r = resolveTargetPoints(ctx, v.expr);
+  if ("status" in r) return r;
+  return { points: r.points, value: v.value, expr: v.expr, word: v.word };
+}
+
+/** The value-token front half the point AND edge families share: split the
+ * trailing VALUE word (color/size/opacity/dash), enforce the usage error, and
+ * parse it. Factored out so the point path (→ resolveTargetPoints) and the edge
+ * path (→ resolveEdgeIds) split and validate the value IDENTICALLY and can
+ * never diverge on argument shape. Returns the parsed value + the remaining
+ * target expression, or the CommandResult error. */
+function splitAndParseValue<T>(
+  verb: string,
+  args: string,
+  noun: string,
+  example: string,
+  parse: (word: string) => T | null,
+  badValue: (word: string) => string,
+): { value: T; expr: string; word: string } | CommandResult {
   const split = splitTrailingWord(args);
   if (split.word === null) {
     const art = /^[aeiou]/.test(noun) ? "an" : "a";
@@ -766,9 +790,7 @@ function resolveRepArgs<T>(
   }
   const value = parse(split.word);
   if (value === null) return { status: "error", message: badValue(split.word) };
-  const r = resolveTargetPoints(ctx, split.expr);
-  if ("status" in r) return r;
-  return { points: r.points, value, expr: split.expr, word: split.word };
+  return { value, expr: split.expr, word: split.word };
 }
 
 /** The resolve-and-dedupe core the whole representation family targets
@@ -833,6 +855,101 @@ function edgesMatching(
   return ids;
 }
 
+/** Resolve `#e` edge-index specs to concrete edge ids against the edge count.
+ * Bounds NORMALIZE first (#e9-5 ≡ #e5-9 — a range is a set) then clamp to
+ * [0, nEdges); out-of-range resolves to nothing (the `#N` rule). Deduped,
+ * header order. */
+function resolveEdgeSpecs(specs: readonly EdgeIndexSpec[], nEdges: number): number[] {
+  const seen = new Set<number>();
+  const ids: number[] = [];
+  for (const s of specs) {
+    const lo = Math.max(0, Math.min(s.lo, s.hi));
+    const hi = Math.min(nEdges - 1, Math.max(s.lo, s.hi));
+    for (let e = lo; e <= hi; e++) {
+      if (seen.has(e)) continue;
+      seen.add(e);
+      ids.push(e);
+    }
+  }
+  return ids;
+}
+
+/** THE edge-verb resolver: turn a target expression into EDGE ids by EITHER of
+ * two axes, tried in order —
+ *   1. `#e` EDGE-INDEX — `#e5` / `#e5-10` / `#e*` names edges DIRECTLY by their
+ *      contract edge index (validated against ctx.edges.length). `both` is
+ *      irrelevant here: you named the edges, so there is no endpoint predicate.
+ *   2. otherwise a POINT target — view's exact grammar, resolved to points then
+ *      mapped to edges via edgesMatching (both = contained vs incident).
+ * `viaIndex` tells the caller which axis fired so it can word an empty result
+ * (a `#e` miss is "no edges match", a point miss is the endpoint wording). A
+ * malformed `#e...` expr is a loud error; a point nomatch propagates. */
+function resolveEdgeIds(
+  ctx: CommandContext,
+  expr: string,
+  both: boolean,
+): { edgeIds: number[]; viaIndex: boolean } | CommandResult {
+  const parsed = parseEdgeIndexExpr(expr);
+  if (parsed !== null) {
+    if ("error" in parsed) return { status: "error", message: parsed.error };
+    return { edgeIds: resolveEdgeSpecs(parsed.specs, ctx.edges.length), viaIndex: true };
+  }
+  const r = resolveTargetPoints(ctx, expr);
+  if ("status" in r) return r;
+  return { edgeIds: edgesMatching(ctx.edges, r.points, both), viaIndex: false };
+}
+
+/** The "no matching edges" wording, shared by the whole edge-verb family: a
+ * `#e` miss names the index expression; a point-target miss keeps the endpoint
+ * wording (contained vs incident) the verbs shipped with. */
+function noEdgesMsg(expr: string, both: boolean, viaIndex: boolean): string {
+  if (viaIndex) return `no edges match "${expr}"`;
+  return both
+    ? `no edges with both endpoints in "${expr}"`
+    : `no edges touching "${expr}"`;
+}
+
+/** The edge families' shared argument front half — parallel to resolveRepArgs
+ * but resolving to EDGE ids (the `#e` axis or a point target's edgesMatching).
+ * Splits + parses the value token identically (splitAndParseValue), then
+ * resolves edges and folds the empty→nomatch check in so every edge verb reports
+ * it the same way. Success carries the edge ids, the parsed value, and the split
+ * for the verb's own wording. */
+function resolveEdgeRepArgs<T>(
+  ctx: CommandContext,
+  verb: string,
+  args: string,
+  noun: string,
+  example: string,
+  parse: (word: string) => T | null,
+  badValue: (word: string) => string,
+  both: boolean,
+): { edgeIds: number[]; value: T; expr: string; word: string } | CommandResult {
+  const v = splitAndParseValue(verb, args, noun, example, parse, badValue);
+  if ("status" in v) return v;
+  const e = resolveEdgeIds(ctx, v.expr, both);
+  if ("status" in e) return e;
+  if (e.edgeIds.length === 0) {
+    return { status: "nomatch", message: noEdgesMsg(v.expr, both, e.viaIndex) };
+  }
+  return { edgeIds: e.edgeIds, value: v.value, expr: v.expr, word: v.word };
+}
+
+function resolveEdgeColorArgs(ctx: CommandContext, verb: string, args: string, both: boolean) {
+  return resolveEdgeRepArgs(ctx, verb, args, "color", "green", parseColor,
+    (w) => `unknown color "${w}" — use a CSS color name (red, steelblue) or hex (#ff8800)`, both);
+}
+
+function resolveEdgeSizeArgs(ctx: CommandContext, verb: string, args: string, both: boolean) {
+  return resolveEdgeRepArgs(ctx, verb, args, "size", "1.5", parseSize,
+    (w) => `not a size: "${w}" — use a non-negative number (e.g. 1.5 or 0)`, both);
+}
+
+function resolveEdgeOpacityArgs(ctx: CommandContext, verb: string, args: string, both: boolean) {
+  return resolveEdgeRepArgs(ctx, verb, args, "opacity", "0.5", parseOpacity,
+    (w) => `not an opacity: "${w}" — use a number from 0 to 1 (e.g. 0.5)`, both);
+}
+
 /** The subgroup map-up, written ONCE for BOTH axes (colortrace/tracesize):
  * polyline vertices whose subgroup contains ≥1 resolved point. */
 function activeTraceVertexIds(ctx: CommandContext, points: readonly number[]): number[] {
@@ -893,18 +1010,9 @@ export function makeColorBondsHandler(
 ): CommandHandler {
   const both = verb === "colorbonds";
   return (args: string): CommandResult => {
-    const r = resolveColorArgs(ctx, verb, args);
+    const r = resolveEdgeColorArgs(ctx, verb, args, both);
     if ("status" in r) return r;
-    const edgeIds = edgesMatching(ctx.edges, r.points, both);
-    if (edgeIds.length === 0) {
-      return {
-        status: "nomatch",
-        message: both
-          ? `no edges with both endpoints in "${r.expr}"`
-          : `no edges touching "${r.expr}"`,
-      };
-    }
-    const n = ctx.colorEdges(edgeIds, r.value);
+    const n = ctx.colorEdges(r.edgeIds, r.value);
     return { status: "ok", message: `colored ${n} edges ${r.word}` };
   };
 }
@@ -934,17 +1042,12 @@ export function makeBicolorBondsHandler(
         message: `${verb} needs a target — ${verb} <target> (e.g. ${verb} alpha.group-0)`,
       };
     }
-    const r = resolveTargetPoints(ctx, expr);
-    if ("status" in r) return r;
-    const edgeIds = edgesMatching(ctx.edges, r.points, both);
-    if (edgeIds.length === 0) {
-      return {
-        status: "nomatch",
-        message: both
-          ? `no edges with both endpoints in "${expr}"`
-          : `no edges touching "${expr}"`,
-      };
+    const e = resolveEdgeIds(ctx, expr, both);
+    if ("status" in e) return e;
+    if (e.edgeIds.length === 0) {
+      return { status: "nomatch", message: noEdgesMsg(expr, both, e.viaIndex) };
     }
+    const edgeIds = e.edgeIds;
     // The snapshot: each half from ITS endpoint's current point color.
     const colors = ctx.pointColors();
     const aFlat = new Array<number>(edgeIds.length * 3);
@@ -1028,18 +1131,9 @@ export function makeBondSizeHandler(
 ): CommandHandler {
   const both = verb === "bondsize";
   return (args: string): CommandResult => {
-    const r = resolveSizeArgs(ctx, verb, args);
+    const r = resolveEdgeSizeArgs(ctx, verb, args, both);
     if ("status" in r) return r;
-    const edgeIds = edgesMatching(ctx.edges, r.points, both);
-    if (edgeIds.length === 0) {
-      return {
-        status: "nomatch",
-        message: both
-          ? `no edges with both endpoints in "${r.expr}"`
-          : `no edges touching "${r.expr}"`,
-      };
-    }
-    const n = ctx.sizeEdges(edgeIds, r.value.size);
+    const n = ctx.sizeEdges(r.edgeIds, r.value.size);
     return { status: "ok", message: sizedMsg(n, "edges", r.value) };
   };
 }
@@ -1075,19 +1169,10 @@ export function makeDashBondsHandler(
 ): CommandHandler {
   const both = verb === "dashbonds";
   return (args: string): CommandResult => {
-    const r = resolveRepArgs(ctx, verb, args, "dash scale", "1.5", parseSize,
-      (w) => `not a dash scale: "${w}" — use a non-negative number (0 = solid, e.g. 1.5)`);
+    const r = resolveEdgeRepArgs(ctx, verb, args, "dash scale", "1.5", parseSize,
+      (w) => `not a dash scale: "${w}" — use a non-negative number (0 = solid, e.g. 1.5)`, both);
     if ("status" in r) return r;
-    const edgeIds = edgesMatching(ctx.edges, r.points, both);
-    if (edgeIds.length === 0) {
-      return {
-        status: "nomatch",
-        message: both
-          ? `no edges with both endpoints in "${r.expr}"`
-          : `no edges touching "${r.expr}"`,
-      };
-    }
-    const n = ctx.dashEdges(edgeIds, r.value.size);
+    const n = ctx.dashEdges(r.edgeIds, r.value.size);
     return {
       status: "ok",
       message: `set ${n} edges to dash ${r.value.size}${
@@ -1136,18 +1221,9 @@ export function makeBondOpacityHandler(
 ): CommandHandler {
   const both = verb === "bondopacity";
   return (args: string): CommandResult => {
-    const r = resolveOpacityArgs(ctx, verb, args);
+    const r = resolveEdgeOpacityArgs(ctx, verb, args, both);
     if ("status" in r) return r;
-    const edgeIds = edgesMatching(ctx.edges, r.points, both);
-    if (edgeIds.length === 0) {
-      return {
-        status: "nomatch",
-        message: both
-          ? `no edges with both endpoints in "${r.expr}"`
-          : `no edges touching "${r.expr}"`,
-      };
-    }
-    const n = ctx.opacityEdges(edgeIds, r.value.opacity);
+    const n = ctx.opacityEdges(r.edgeIds, r.value.opacity);
     return { status: "ok", message: opacityMsg(n, "edges", r.value) };
   };
 }
@@ -3029,7 +3105,11 @@ function targetChunkCount(
   prior: readonly { start: number; end: number }[],
 ): number {
   for (let k = prior.length; k >= 1; k--) {
-    if (parseTarget(argsHead.slice(prior[0].start, prior[k - 1].end)).kind !== "error") return k;
+    // A prefix is a completed target if it parses as a point target OR is a
+    // well-formed `#e` edge-index expression — so a value slot after a `#e`
+    // target completes exactly as it does after `#N` (`#e` completes like `#N`).
+    const chunk = argsHead.slice(prior[0].start, prior[k - 1].end);
+    if (parseTarget(chunk).kind !== "error" || isEdgeIndexExpr(chunk)) return k;
   }
   return 0;
 }

@@ -1100,6 +1100,44 @@ test("bicolor verbs are sealed built-ins with help lines", () => {
   assert.match(HELP_TEXT, /bicolorbondsof <expr>/);
 });
 
+// -- the #e edge-index axis: name edges DIRECTLY by contract edge index -----------
+
+test("#e edge-index: names edges directly (both/incident irrelevant), header order", () => {
+  const { registry, edgeOps, dashOps } = makeRegistry();
+  // edges are [[0,1],[1,2]] → #e0 = edge 0, #e1 = edge 1, #e0-1 / #e* = both
+  assert.equal(registry.runCommand("colorbonds #e0 red").message, "colored 1 edges red");
+  assert.deepEqual(edgeOps[0], { edgeIds: [0], rgb: [1, 0, 0] });
+  assert.equal(registry.runCommand("colorbonds #e1 blue").message, "colored 1 edges blue");
+  assert.deepEqual(edgeOps[1].edgeIds, [1]);
+  assert.equal(registry.runCommand("colorbonds #e0-1 green").message, "colored 2 edges green");
+  assert.deepEqual(edgeOps[2].edgeIds, [0, 1]);
+  assert.equal(registry.runCommand("colorbonds #e* white").message, "colored 2 edges white");
+  assert.deepEqual(edgeOps[3].edgeIds, [0, 1]);
+  // the `of` variant with a #e target names the SAME edges — you named them
+  assert.equal(registry.runCommand("colorbondsof #e0 red").message, "colored 1 edges red");
+  assert.deepEqual(edgeOps[4].edgeIds, [0]);
+  // dash the AUTHORED edges by index — the increment's motivating use
+  assert.equal(registry.runCommand("dashbonds #e1 2").message, "set 1 edges to dash 2");
+  assert.deepEqual(dashOps[0], { ids: [1], dash: 2 });
+});
+
+test("#e edge-index: out-of-range clamps to nothing (nomatch, the #N rule); malformed errors", () => {
+  const { registry, edgeOps } = makeRegistry();
+  // #e5 is past the 2 edges → nomatch, nothing written
+  const oor = registry.runCommand("colorbonds #e5 red");
+  assert.equal(oor.status, "nomatch");
+  assert.equal(oor.message, `no edges match "#e5"`);
+  // a range partly out of bounds keeps the in-range part (#e1-9 → edge 1)
+  assert.equal(registry.runCommand("colorbonds #e1-9 red").message, "colored 1 edges red");
+  assert.deepEqual(edgeOps[0].edgeIds, [1]);
+  // a malformed #e token is a loud error, writes nothing
+  const bad = registry.runCommand("colorbonds #eq red");
+  assert.equal(bad.status, "error");
+  assert.match(bad.message, /invalid #e edge-index/);
+  // #e mixed with a point term is refused (edges and points don't union)
+  assert.equal(registry.runCommand("colorbonds #e0+alpha red").status, "error");
+});
+
 test("colortrace: active subgroups → vertices, with the map-up to subgroup grain", () => {
   const { registry, traceOps, colorOps, edgeOps } = makeRegistry();
   // c0 = {0,1}: s0 active → vertex 0 (its anchor, point 0)

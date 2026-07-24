@@ -214,6 +214,67 @@ export function parseTarget(expr: string): TargetAst | ParseError {
   }
 }
 
+/** One `#e` edge-index specifier: an inclusive range over the CONTRACT EDGE
+ * INDEX (Infinity hi = the `#e*` wildcard, resolution clamps it to the edge
+ * count). Mirrors the point-index spec shape. */
+export interface EdgeIndexSpec {
+  lo: number;
+  hi: number;
+}
+
+/**
+ * The `#e` EDGE-INDEX axis — names EDGES directly by their contract edge index,
+ * symmetric to the `#N` point-index axis but a SEPARATE namespace (edges, not
+ * points/entries). It therefore lives OUTSIDE parseTarget's entries grammar
+ * (mixing an edge id into a target that resolves to points would be incoherent)
+ * and is recognized only by the edge-verb family. Grammar:
+ *
+ *   edge-expr := edge-spec (("," | "+") edge-spec)*
+ *   edge-spec := "#e" ("*" | INT ("-" INT)?)
+ *
+ * `#e5` = edge 5; `#e5-10` = edges 5..10 (either bound order — a range is a set);
+ * `#e*` = every edge. `,` and `+` both union edge specs (a flat edge-id set has
+ * no term structure to distinguish them). Out-of-range indices resolve to
+ * nothing (nomatch), never an error — the `#N` rule.
+ *
+ * Returns the specs, an error (a `#e`-leading expr whose parts don't all match),
+ * or `null` when the text is NOT a `#e` expression at all (the caller falls
+ * through to a POINT target). Total — never throws. `#e...` is unambiguous: a
+ * point index is `#5` (a digit after `#`), an edge index is `#e5`.
+ */
+export function parseEdgeIndexExpr(
+  expr: string,
+): { specs: EdgeIndexSpec[] } | { error: string } | null {
+  const t = expr.trim();
+  if (!/^#e/i.test(t)) return null; // not a #e expression → try a point target
+  const parts = t.split(/[,+]/).map((p) => p.trim());
+  const specs: EdgeIndexSpec[] = [];
+  for (const p of parts) {
+    const m = /^#e(\*|\d+(?:-\d+)?)$/i.exec(p);
+    if (!m) {
+      return { error: `invalid #e edge-index "${p}" — use #e5, #e5-10, or #e*` };
+    }
+    if (m[1] === "*") {
+      specs.push({ lo: 0, hi: Infinity });
+      continue;
+    }
+    const r = /^(\d+)(?:-(\d+))?$/.exec(m[1])!;
+    const lo = Number(r[1]);
+    const hi = r[2] !== undefined ? Number(r[2]) : lo;
+    specs.push({ lo, hi });
+  }
+  return { specs };
+}
+
+/** True iff `expr` is a well-formed `#e` edge-index expression (not a point
+ * target, not a malformed `#e...`). The completion dispatcher uses it to treat
+ * a `#e` chunk as a completed target (so a value slot after it completes) —
+ * `#e` completes like `#N`. */
+export function isEdgeIndexExpr(expr: string): boolean {
+  const r = parseEdgeIndexExpr(expr);
+  return r !== null && "specs" in r;
+}
+
 /** Internal parse failure — caught by parseTarget and returned as ParseError. */
 class Failure extends Error {}
 

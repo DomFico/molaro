@@ -14,6 +14,8 @@ import {
   completeTargetExpr,
   completeToken,
   globMatch,
+  isEdgeIndexExpr,
+  parseEdgeIndexExpr,
   parseTarget,
   resolveTarget,
   splitLeadingRef,
@@ -991,4 +993,41 @@ test('splitOnUnquoted: a "?" inside quotes is NOT a boundary; unbalanced quote h
   assert.deepEqual(splitOnUnquoted('t ?k="a?b"', "?"), ["t ", 'k="a?b"']);
   // an unbalanced quote leaves the rest in-quote → the '?' is not split (fails loudly downstream)
   assert.deepEqual(splitOnUnquoted('"a ?b', "?"), ['"a ?b'], "unbalanced quote: no split");
+});
+
+// -- the #e edge-index axis (a SEPARATE namespace, outside parseTarget) -----------
+
+test("parseEdgeIndexExpr: #e names edges by index; specs, ranges, wildcard, unions", () => {
+  // a single index
+  assert.deepEqual(parseEdgeIndexExpr("#e5"), { specs: [{ lo: 5, hi: 5 }] });
+  // a range (either bound order — a range is a set, normalized by the resolver)
+  assert.deepEqual(parseEdgeIndexExpr("#e5-10"), { specs: [{ lo: 5, hi: 10 }] });
+  // the wildcard
+  assert.deepEqual(parseEdgeIndexExpr("#e*"), { specs: [{ lo: 0, hi: Infinity }] });
+  // ',' and '+' both union edge specs
+  assert.deepEqual(parseEdgeIndexExpr("#e0,#e2-3"),
+    { specs: [{ lo: 0, hi: 0 }, { lo: 2, hi: 3 }] });
+  assert.deepEqual(parseEdgeIndexExpr("#e0 + #e9"),
+    { specs: [{ lo: 0, hi: 0 }, { lo: 9, hi: 9 }] });
+  // case-insensitive on the sigil
+  assert.deepEqual(parseEdgeIndexExpr("#E4"), { specs: [{ lo: 4, hi: 4 }] });
+});
+
+test("parseEdgeIndexExpr: NOT-#e returns null (fall through to a point target); malformed errors", () => {
+  // a point target is not a #e expression — null, so the edge verbs fall through
+  assert.equal(parseEdgeIndexExpr("alpha.g0"), null);
+  assert.equal(parseEdgeIndexExpr("#5"), null, "a point index #5 is not #e");
+  assert.equal(parseEdgeIndexExpr("all"), null);
+  // a #e-leading expr whose parts don't all match is a loud error
+  for (const bad of ["#e", "#eq", "#e1-", "#e1.2", "#e0+alpha"]) {
+    const r = parseEdgeIndexExpr(bad);
+    assert.ok(r !== null && "error" in r, bad);
+  }
+});
+
+test("isEdgeIndexExpr: true only for a well-formed #e expression", () => {
+  for (const good of ["#e0", "#e5-10", "#e*", "#e0,#e2"]) assert.ok(isEdgeIndexExpr(good), good);
+  for (const notEdge of ["alpha", "#5", "#eq", "#e", "#e0+alpha"]) {
+    assert.ok(!isEdgeIndexExpr(notEdge), notEdge);
+  }
 });
