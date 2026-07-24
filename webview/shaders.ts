@@ -517,11 +517,25 @@ export function focusFlashShaders(): { vertex: string; fragment: string } {
  * absolute so a thin coil and a wide helix keep the same slenderness. */
 export const RIBBON_THICKNESS = 0.15;
 
+/** Renderer-side spline sampling: how many sub-quads each ORIGINAL polyline
+ * segment is diced into before the centripetal Catmull-Rom is evaluated across
+ * them. One flat quad per segment FACETS every turn into a sharp corner (the
+ * trace is genuinely angular — median turn ~83°/step); linear subdivision is a
+ * no-op on that (the sub-points stay collinear), only a spline rounds it. At
+ * S=8 the measured max turn over the drawn sub-vertices drops from ~97° toward
+ * ~35°. An internal constant like RIBBON_THICKNESS — this is a ribbon-private
+ * geometry knob, not a contract or a wire value. The base geometry carries S
+ * sub-boxes (16·S corners) so instanceCount stays the per-segment control hull
+ * and every per-instance fill is byte-untouched. */
+export const RIBBON_SEGMENTS = 8;
+
 export function ribbonShaders(): { vertex: string; fragment: string } {
   return {
     vertex: `
-      // RIBBON static per-corner: x = side (-1 | +1 across width), y = end (0 | 1),
-      // z = offset through the thickness (-1 | +1)
+      // RIBBON static per-corner: x = side (-1 | +1 across width), y = t (the
+      // parametric position ALONG the original segment, in [0,1]; sub-quad j
+      // spans [j/S, (j+1)/S], anchors land exactly on t=0 and t=1), z = offset
+      // through the thickness (-1 | +1)
       attribute vec3 aCorner;
       // which of the box's four faces this corner belongs to, so each shades with
       // its own normal: 0 = +normal, 1 = -normal, 2 = +across edge, 3 = -across
@@ -532,6 +546,13 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
       attribute vec2 iWidth;
       attribute vec4 iColorA; attribute vec4 iColorB;
       attribute vec3 iAcrossA; attribute vec3 iAcrossB;
+      // the CATMULL-ROM CONTROL HULL: the point BEFORE iStart and AFTER iEnd.
+      // A chain end points at its OWN endpoint (fill sets prev/next to self), so
+      // P0==P1 / P3==P2 there → the tangent falls back to the chord (a clean,
+      // straight end, exactly as the old flat quad had). Formerly the miter
+      // neighbours; the spline SUBSUMES the miter (matching tangents at every
+      // sub-joint AND — because adjacent segments share this hull — at the
+      // original joints too), so there is no wedge left to close.
       attribute vec3 iPrevPoint; attribute vec3 iNextPoint;
       attribute float iStyle;
       uniform float uWorldPerSize;
@@ -539,49 +560,89 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
       ${ALPHA_PASS_CHUNK}
       varying vec4 vColor;
       varying vec3 vNormal;
+
+      // centripetal (α = 0.5) knot spacing: |Δ|^0.5, floored so coincident
+      // control points (chain ends, P0==P1) never divide by zero.
+      float ribbonKnot(vec3 a, vec3 b) { return sqrt(max(length(a - b), 1e-5)); }
+
+      // slerp two SIGN-COHERENT facings (the producer already walked the sign, so
+      // the pair is unambiguous within a segment); returns a unit direction.
+      vec3 ribbonSlerp(vec3 a, vec3 b, float t) {
+        vec3 na = normalize(a), nb = normalize(b);
+        float c = clamp(dot(na, nb), -1.0, 1.0);
+        float ang = acos(c);
+        if (ang < 1e-4) return na;          // (near-)parallel: nothing to rotate
+        float s = sin(ang);
+        return (sin((1.0 - t) * ang) / s) * na + (sin(t * ang) / s) * nb;
+      }
+
       void main() {
         vStyleParams = styleParams(iStyle);
+        float t = aCorner.y;
         bool shown = iWidth.x >= 0.0 && iWidth.y >= 0.0
           && inAlphaPass(min(iColorA.a, iColorB.a));
         float wA = uWorldPerSize * abs(iWidth.x);
         float wB = uWorldPerSize * abs(iWidth.y);
-        vec3 mvA = (modelViewMatrix * vec4(iStart, 1.0)).xyz;
-        vec3 mvB = (modelViewMatrix * vec4(iEnd, 1.0)).xyz;
-        vec3 seg = mvB - mvA;
-        float len = length(seg);
-        if (!shown || len * len < 1e-16 || max(wA, wB) <= 0.0) {
+        // the control hull in VIEW space (Catmull-Rom is affine-invariant, so
+        // evaluating here equals transforming the world-space curve)
+        vec3 P0 = (modelViewMatrix * vec4(iPrevPoint, 1.0)).xyz;
+        vec3 P1 = (modelViewMatrix * vec4(iStart, 1.0)).xyz;
+        vec3 P2 = (modelViewMatrix * vec4(iEnd, 1.0)).xyz;
+        vec3 P3 = (modelViewMatrix * vec4(iNextPoint, 1.0)).xyz;
+        vec3 chord = P2 - P1;
+        float segLen = length(chord);
+        if (!shown || segLen * segLen < 1e-16 || max(wA, wB) <= 0.0) {
           gl_Position = vec4(2.0, 2.0, 2.0, 1.0);
           vColor = vec4(0.0); vNormal = vec3(0.0, 0.0, 1.0);
           return;
         }
-        vec3 along = seg / len;
-        // the supplied across, per end: world → view (rotation only), then
-        // ⊥ along, then unit — the O-1 recommendation executed here
-        bool atB = aCorner.y > 0.5;
-        vec3 acrossWorld = atB ? iAcrossB : iAcrossA;
+        // CENTRIPETAL CATMULL-ROM (α = 0.5, no cusps/overshoot on sharp turns):
+        // non-uniform Hermite tangents at P1 and P2, scaled to the segment's
+        // local [0,1] parameter (× d12). Chain ends fall back to the chord.
+        float d01 = ribbonKnot(P0, P1), d12 = ribbonKnot(P1, P2), d23 = ribbonKnot(P2, P3);
+        vec3 m1 = length(P1 - P0) < 1e-6
+          ? chord
+          : ((P1 - P0) / d01 - (P2 - P0) / (d01 + d12) + chord / d12) * d12;
+        vec3 m2 = length(P3 - P2) < 1e-6
+          ? chord
+          : (chord / d12 - (P3 - P1) / (d12 + d23) + (P3 - P2) / d23) * d12;
+        // Hermite basis: pos(0)=P1=iStart, pos(1)=P2=iEnd — the INTERPOLATING
+        // spline HONOURS every supplied anchor exactly (drawn ≡ supplied for
+        // position at the anchors); only the path BETWEEN anchors is rounded.
+        float tt = t * t, ttt = tt * t;
+        float h00 = 2.0 * ttt - 3.0 * tt + 1.0;
+        float h10 = ttt - 2.0 * tt + t;
+        float h01 = -2.0 * ttt + 3.0 * tt;
+        float h11 = ttt - tt;
+        vec3 pos = h00 * P1 + h10 * m1 + h01 * P2 + h11 * m2;
+        // the TRUE tangent (basis derivative) → along(t)
+        float g00 = 6.0 * tt - 6.0 * t;
+        float g10 = 3.0 * tt - 4.0 * t + 1.0;
+        float g01 = -6.0 * tt + 6.0 * t;
+        float g11 = 3.0 * tt - 2.0 * t;
+        vec3 tangent = g00 * P1 + g10 * m1 + g01 * P2 + g11 * m2;
+        float tlen = length(tangent);
+        vec3 along = tlen < 1e-9 ? chord / segLen : tangent / tlen;
+        // WIDTH + COLOUR: linear resample across the segment — the SAME two-end
+        // interpolation the flat quad had, now sampled at S+1 points not 2.
+        float w = mix(wA, wB, t);
+        vColor = mix(iColorA, iColorB, t);
+        // across(t): slerp the supplied facings, then condition where the
+        // geometry lives — world → view (rotation only), ⊥ along, unit (the O-1
+        // raw-store recommendation, evaluated at t). A zero facing at an end
+        // drops out; both zero (unbound orientation) → zero across → collapse.
+        float lenA = length(iAcrossA), lenB = length(iAcrossB);
+        vec3 acrossWorld =
+          (lenA < 1e-9 && lenB < 1e-9) ? vec3(0.0)
+          : lenA < 1e-9 ? normalize(iAcrossB)
+          : lenB < 1e-9 ? normalize(iAcrossA)
+          : ribbonSlerp(iAcrossA, iAcrossB, t);
         vec3 acrossView = mat3(modelViewMatrix) * acrossWorld;
         vec3 aperp = acrossView - along * dot(acrossView, along);
         float alen = length(aperp);
-        // DEGENERACY: no defined plane at this end → zero width (collapse)
-        float w = (atB ? wB : wA) * (alen < 1e-6 ? 0.0 : 1.0);
+        // DEGENERACY: no defined plane (zero/parallel across) → zero width
+        w = w * (alen < 1e-6 ? 0.0 : 1.0);
         vec3 across = alen < 1e-6 ? vec3(0.0) : aperp / alen;
-        // BEND MITER: slide the junction corner along the segment onto the
-        // bend's bisector plane, so adjacent segments' end edges become COPLANAR
-        // and the wedge gap closes. across (hence the plane normal cross(along,
-        // across)) is UNCHANGED — only the position moves along the segment, so
-        // drawn-equals-supplied survives. A chain end / straight run gives a zero
-        // neighbour direction, so m = along, across is perpendicular to along,
-        // dot(across,m)=0, the shift is zero (the naive, clean end). A degenerate
-        // end has w=0, so no shift.
-        vec3 endpoint = atB ? mvB : mvA;
-        vec3 mvPrev = (modelViewMatrix * vec4(iPrevPoint, 1.0)).xyz;
-        vec3 mvNext = (modelViewMatrix * vec4(iNextPoint, 1.0)).xyz;
-        vec3 nbr = atB ? (mvNext - mvB) : (mvA - mvPrev); // neighbour flow through the junction
-        float nlen = length(nbr);
-        vec3 alongNbr = nlen < 1e-6 ? along : nbr / nlen;
-        vec3 m = normalize(along + alongNbr);             // bisector tangent
-        float denom = max(dot(along, m), 0.25);           // cos(θ/2), clamped = miter limit 4
-        float shift = (-aCorner.x * w) * dot(across, m) / denom;
         // THIN BOX CROSS-SECTION. The band gets thickness through its own plane
         // normal, so it reads as a solid strip with edges rather than as paper.
         //
@@ -590,16 +651,16 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // invisible on the other. RIBBON_THICKNESS is a fraction of the HALF
         // width (w), so the box is 2w wide and 2*RIBBON_THICKNESS*w thick.
         //
-        // DRAWN ≡ SUPPLIED survives: the offset is along cross(along, across),
-        // which is perpendicular to both, so the plane's orientation is untouched
-        // — only its extrusion is new. DEGENERACY survives too: a zero across
-        // gives a zero normal AND w = 0, so every corner still lands on the
-        // endpoint and nothing is drawn. And the MITER survives: the shift does not
-        // depend on aCorner.z, so both faces slide together onto the bisector.
+        // NO MITER SHIFT: the C1 spline shares its control hull with each
+        // neighbour, so tangents (hence end faces) already match at every
+        // sub-joint AND at the original joints — the wedge the miter closed
+        // never forms. DRAWN ≡ SUPPLIED survives: the thickness offset is along
+        // cross(along, across), ⊥ both, so the facing is untouched; and a zero
+        // across gives a zero normal AND w = 0, so every corner lands on the
+        // curve point and nothing is drawn.
         vec3 nrm = cross(along, across);
-        vec3 pos = endpoint + across * (aCorner.x * w) + along * shift
+        vec3 vpos = pos + across * (aCorner.x * w)
                  + nrm * (aCorner.z * ${RIBBON_THICKNESS.toFixed(3)} * w);
-        vColor = atB ? iColorB : iColorA;
         // Per-face normal: the two broad faces look along ±nrm, the two edges
         // along ±across. Averaging one normal across all of them would light the
         // edges as if they were the face and lose the thickness cue entirely.
@@ -610,7 +671,7 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
                 : aFace < 1.5 ? -nrm
                 : aFace < 2.5 ? across
                 : -across;
-        gl_Position = projectionMatrix * vec4(pos, 1.0);
+        gl_Position = projectionMatrix * vec4(vpos, 1.0);
       }`,
     fragment: `
       ${IMPOSTOR_SHADE_CHUNK}

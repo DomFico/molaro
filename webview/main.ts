@@ -74,6 +74,7 @@ import {
 } from "./geometry.ts";
 import {
   IMPOSTOR_DEPTH_DEFINE,
+  RIBBON_SEGMENTS,
   edgeTubeShaders,
   focusFlashShaders,
   highlightShaders,
@@ -1045,10 +1046,15 @@ const traceTubesGenerator: ShapeGenerator<TraceTubePass> = {
  * verb; with orientation unbound the buffer is zero and every quad
  * collapses (the ruled degeneracy: no data, no plane, no pixels). No joint
  * pass: the tube's joint-sphere identity is rotational symmetry's trick and
- * dies with it. Instead, a BEND MITER (shader) slides each junction corner
- * along its segment onto the bend's bisector plane, closing the wedge gap
- * while leaving the plane orientation (across) untouched — see ribbonShaders
- * + iPrevPoint/iNextPoint. Chain ends stay naive by construction. */
+ * dies with it. Instead, a renderer-side CENTRIPETAL CATMULL-ROM ROUNDS the
+ * band: each segment is diced into S sub-quads (base geometry, instanceCount
+ * untouched) and the spline is evaluated per sub-quad from the control hull
+ * iPrevPoint/iStart/iEnd/iNextPoint already on the instance — so tight turns
+ * curve instead of faceting. The interpolating spline passes through every
+ * supplied vertex exactly (anchors on-curve), and because adjacent segments
+ * share their control hull the tangents match at the original joints too, so
+ * the old bend miter is RETIRED — there is no wedge left to close. Chain ends
+ * (prev/next point at self) fall back to the chord tangent by construction. */
 interface RibbonPass extends BuiltPass {
   attrVersions(): { start: number; across: number; width: number; color: number };
 }
@@ -1063,11 +1069,16 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
     const seg = traceSegments(header.polylines);
     if (seg.count === 0) return null;
     const geo = new THREE.InstancedBufferGeometry();
+    // instanceCount stays the per-segment CONTROL HULL: the renderer-side
+    // Catmull-Rom is diced in the BASE geometry (S sub-boxes per instance), not
+    // by multiplying instances. So slot ≡ header order and EVERY per-instance
+    // fill below is byte-untouched — the spline is entirely private to this pass.
     geo.instanceCount = seg.count;
-    // THIN BOX CROSS-SECTION as base geometry: 16 corners, not 8. Thickness is
-    // per-vertex geometry — the instance count is untouched and slot ≡ header
-    // order still holds, because a thicker band is more corners per segment, not
-    // more segments. aCorner = (side across, end along, offset through thickness).
+    // THIN BOX CROSS-SECTION as base geometry: 16 corners per SUB-BOX, not 8.
+    // Thickness is per-vertex geometry — the instance count is untouched and
+    // slot ≡ header order still holds, because a thicker band is more corners per
+    // segment, not more segments. aCorner = (side across, t along [0,1], offset
+    // through thickness).
     //
     // SIXTEEN rather than eight so each of the four faces carries its OWN normal.
     // Eight shared corners force one averaged normal per corner, and the edges then
@@ -1075,30 +1086,41 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
     // buys. The slot for aFace was bought by packing width and visibility together;
     // this pass sat at the 14-attribute ceiling before that, and the 16-corner
     // version drew ZERO pixels with nothing reporting why.
+    //
+    // SPLINE SUBDIVISION: S sub-boxes, each spanning t ∈ [j/S, (j+1)/S] of the
+    // ORIGINAL segment. The shader evaluates the centripetal Catmull-Rom at each
+    // corner's t, so a segment renders as a rounded strip instead of one flat
+    // quad. t is stored directly in aCorner.y (the sub-box's two ends), and the
+    // anchor t-values 0 and 1 are hit exactly at the segment's true endpoints.
     const FACES: { z: [number, number]; x: [number, number]; face: number }[] = [
       { z: [1, 1], x: [-1, 1], face: 0 },    // +normal broad face
       { z: [-1, -1], x: [-1, 1], face: 1 },  // -normal broad face
       { z: [-1, 1], x: [1, 1], face: 2 },    // +across edge
       { z: [-1, 1], x: [-1, -1], face: 3 },  // -across edge
     ];
+    const S = RIBBON_SEGMENTS;
     const corner: number[] = [];
     const faceId: number[] = [];
     const index: number[] = [];
-    for (const f of FACES) {
-      const base = corner.length / 3;
-      for (const end of [0, 1]) {
-        for (let u = 0; u < 2; u++) {
-          corner.push(
-            f.x[0] === f.x[1] ? f.x[0] : (u === 0 ? -1 : 1),
-            end,
-            f.z[0] === f.z[1] ? f.z[0] : (u === 0 ? -1 : 1),
-          );
-          faceId.push(f.face);
+    for (let j = 0; j < S; j++) {
+      const t0 = j / S;
+      const t1 = (j + 1) / S;
+      for (const f of FACES) {
+        const base = corner.length / 3;
+        for (const tv of [t0, t1]) {
+          for (let u = 0; u < 2; u++) {
+            corner.push(
+              f.x[0] === f.x[1] ? f.x[0] : (u === 0 ? -1 : 1),
+              tv,
+              f.z[0] === f.z[1] ? f.z[0] : (u === 0 ? -1 : 1),
+            );
+            faceId.push(f.face);
+          }
         }
+        index.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
       }
-      index.push(base, base + 2, base + 1, base + 1, base + 2, base + 3);
     }
-    geo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(16 * 3), 3));
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(new Float32Array(16 * S * 3), 3));
     geo.setAttribute("aCorner", new THREE.Float32BufferAttribute(corner, 3));
     geo.setAttribute("aFace", new THREE.Float32BufferAttribute(faceId, 1));
     geo.setIndex(index);
