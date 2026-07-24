@@ -40,6 +40,14 @@ export interface ProducedGroup {
    * slots draw nothing, but their ids and contents stay allocated so redo
    * (and any recorded appearance op) lands on the same slots. */
   active: boolean;
+  /** PER-FRAME EXISTENCE (stage 2C): an optional flat visibility mask,
+   * `[frame * count + local]` over ALL frames — 0 hides the edge that frame,
+   * 1 shows it (validated to [0,1] upstream; the shader thresholds at 0.5, so
+   * authors should use 0/1). Declared ONCE with the pairs and indexed per
+   * frame-flip — no per-frame wire traffic, no resize. Absent = a STATIC
+   * group (every frame; the pre-2C behavior, byte-identical). The mask rides
+   * the group: undo/redo/retire semantics are unchanged. */
+  mask?: Float32Array;
 }
 
 /** First real allocation (the doubling floor). Small on purpose: the E2E
@@ -144,12 +152,21 @@ export class ProducedEdgeLayer {
     name: string,
     pairs: readonly (readonly [number, number])[],
     endSizeOf: (point: number) => number,
+    mask?: Float32Array,
   ): { baseId: number; count: number; grew: boolean } {
+    // The mask is VALIDATED upstream (recipes.ts, fail-closed); this is the
+    // last-line shape assert so a half-masked group can never be stored.
+    if (mask !== undefined && (pairs.length === 0 || mask.length % pairs.length !== 0)) {
+      throw new Error(
+        `produced-edge mask length ${mask.length} is not a whole number of ${pairs.length}-wide frames`);
+    }
     const existing = this.byName.get(name);
     if (existing && existing.count === pairs.length) {
       // replace IN PLACE: pairs + endpoint sizes re-seed; authored appearance
       // (color/radius/dash/style/visible) survives the recompute — the
       // channel discipline (data replaced under whatever styling stands).
+      // The MASK is data, not styling: it replaces with the pairs (and a
+      // re-declaration WITHOUT one returns the group to static).
       const { baseId } = existing;
       for (let i = 0; i < pairs.length; i++) {
         const id = baseId + i;
@@ -159,6 +176,8 @@ export class ProducedEdgeLayer {
         this.sizeB[id] = endSizeOf(pairs[i][1]);
       }
       existing.active = true;
+      if (mask !== undefined) existing.mask = mask;
+      else delete existing.mask;
       return { baseId, count: existing.count, grew: false };
     }
     if (existing) {
@@ -191,7 +210,7 @@ export class ProducedEdgeLayer {
       this.style[id] = 0;
       this.visible[id] = 1;
     }
-    this.byName.set(name, { baseId, count, active: true });
+    this.byName.set(name, { baseId, count, active: true, ...(mask !== undefined ? { mask } : {}) });
     return { baseId, count, grew };
   }
 
@@ -218,22 +237,60 @@ export class ProducedEdgeLayer {
     return span;
   }
 
+  /** The DISPLAYED-frame cursor the per-frame mask indexes by. Set by the
+   * host at the ONE place a frame becomes pixels (setPositionsFor — which
+   * runs BEFORE the flip dispatch on both the playback and the paused
+   * refresh path), read by fillVisibleMask at flip/visibility cadence. A
+   * plain field, not an event: the mask is derived state re-read per fill,
+   * exactly like the endpoints re-read positionAttr. */
+  displayedFrame = 0;
+
+  /** True iff any ACTIVE group carries a per-frame mask — the flip-cadence
+   * gate: a scene without masked groups does ZERO extra per-flip visibility
+   * work (static groups and every pre-2C scene stay byte-identical). */
+  hasMaskedActiveGroups(): boolean {
+    for (const g of this.byName.values()) {
+      if (g.active && g.mask !== undefined) return true;
+    }
+    return false;
+  }
+
+  /** A group's mask row at `frame` (length = the group's count), null when
+   * the group is unknown or static. Pure indexing (the test surface for the
+   * flat layout); the frame clamps to the mask's covered range. */
+  groupMaskAt(name: string, frame: number): number[] | null {
+    const g = this.byName.get(name);
+    if (!g || g.mask === undefined || g.count === 0) return null;
+    const frames = g.mask.length / g.count;
+    const f = Math.max(0, Math.min(frame, frames - 1));
+    const out: number[] = [];
+    for (let i = 0; i < g.count; i++) out.push(g.mask[f * g.count + i]);
+    return out;
+  }
+
   /**
    * Effective per-instance visibility over [0, allocated): group active AND
    * the per-edge authored slot AND both endpoints visible (hidden wins — the
-   * header-edge pass's rule). Retired slots stay 0 (no group claims them).
-   * `out` must hold at least `allocated` floats.
+   * header-edge pass's rule) AND — for a MASKED group — the mask value at
+   * the frame cursor (displayedFrame). Retired slots stay 0 (no group claims
+   * them). `out` must hold at least `allocated` floats. The mask value is
+   * written THROUGH (not thresholded) — validation pins it to [0,1] and the
+   * shader collapses below 0.5, the same contract iVisible always had.
    */
   fillVisibleMask(pointVisible: ArrayLike<number>, out: Float32Array): void {
     out.fill(0, 0, this.nextId);
     for (const g of this.byName.values()) {
       if (!g.active) continue;
+      const mask = g.mask;
+      const frames = mask !== undefined && g.count > 0 ? mask.length / g.count : 0;
+      const f = Math.max(0, Math.min(this.displayedFrame, frames - 1));
       for (let i = 0; i < g.count; i++) {
         const id = g.baseId + i;
         const a = this.pairs[id * 2];
         const b = this.pairs[id * 2 + 1];
-        out[id] =
-          this.visible[id] > 0.5 && pointVisible[a] > 0.5 && pointVisible[b] > 0.5 ? 1 : 0;
+        const shown =
+          this.visible[id] > 0.5 && pointVisible[a] > 0.5 && pointVisible[b] > 0.5;
+        out[id] = shown ? (mask !== undefined ? mask[f * g.count + i] : 1) : 0;
       }
     }
   }

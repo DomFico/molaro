@@ -970,6 +970,16 @@ const producedEdgeTubesGenerator: ShapeGenerator<ProducedEdgePass> = {
       layer.fillVisibleMask(rep.state.visible, attrs.iVisible.array as Float32Array);
       attrs.iVisible.needsUpdate = true;
     };
+    /** FLIP cadence (2C): endpoints always; visibility ONLY when a masked
+     * ACTIVE group exists — fillVisibleMask indexes the layer's frame cursor
+     * (set in setPositionsFor before this dispatch), so a masked edge
+     * appears/vanishes with the displayed frame. Unmasked scenes skip the
+     * refill entirely: no extra work, no iVisible re-upload — static groups
+     * and every pre-2C scene stay byte-identical per flip. */
+    const onFlip = (): void => {
+      fillEndpoints();
+      if (layer.hasMaskedActiveGroups()) fillVisibility();
+    };
     const sync = (): void => {
       growTo(layer.capacity);
       fillEndpoints();
@@ -982,7 +992,7 @@ const producedEdgeTubesGenerator: ShapeGenerator<ProducedEdgePass> = {
     };
     return {
       objects: [new THREE.Mesh(edgeGeo, env.materials.edges)],
-      onFrameFlip: fillEndpoints,
+      onFrameFlip: onFlip,
       onRepWrite: {
         // the junction trim's cross-pass POINT-size subscription — the ONLY
         // rep channel this pass hears (never any edge* key: header-edge
@@ -2808,6 +2818,12 @@ async function main(): Promise<void> {
     offsetBufferNonZero || bindingRegistry.all().some((b) => b.axis === OFFSET_AXIS);
   let shown: Float32Array | null = null; // lazily allocated on first ACTIVE flip
   const setPositionsFor = (chunk: FrameChunk, f: number): void => {
+    // 2C: the produced layer's frame cursor — set at the ONE place a frame
+    // becomes pixels, BEFORE the flip dispatch (displayedFrame itself is
+    // assigned after registry.frameFlip, so it cannot serve), so a masked
+    // group's per-flip visibility indexes the frame being SHOWN. Both paths
+    // (playback displayFrame and the paused refreshShownPositions) land here.
+    producedLayer.displayedFrame = f;
     const offset = (f - chunk.start) * header.n_points * 3;
     if (!offsetActive()) {
       // the verbatim original path — zero-copy, byte-identical
@@ -3129,9 +3145,13 @@ async function main(): Promise<void> {
     mod: AnalysisMod,
     edges: readonly (readonly [number, number])[],
     group: string,
+    // 2C: the optional PER-FRAME visibility mask, already validated and
+    // flattened ([frame * n_pairs + pair], values in [0,1]) — rides the
+    // group; absent = a static group (the pre-2C declaration, unchanged).
+    visibility?: Float32Array,
   ): void => {
     const existed = producedLayer.hasGroup(group);
-    producedLayer.setGroup(group, edges, (p) => rep.state.size[p]);
+    producedLayer.setGroup(group, edges, (p) => rep.state.size[p], visibility);
     producedPass.sync();
     if (existed) {
       model.dropRedo(
@@ -3149,9 +3169,14 @@ async function main(): Promise<void> {
         return [];
       });
     }
+    // the STATIC wording is pinned (S57); a masked declaration says what is
+    // different about it — its edges appear/vanish with the displayed frame
     asyncLine("ok",
       `${mod.name} → authored ${edges.length} edges (computed over the whole system) as ` +
-      `group "${group}" — drawn live, no reload`);
+      `group "${group}" — drawn live, no reload` +
+      (visibility !== undefined
+        ? ` · per-frame visibility (${visibility.length / Math.max(edges.length, 1)} frames)`
+        : ""));
   };
 
   // ONE awaitable run of a mod through the producer round-trip — returns true if
@@ -3293,7 +3318,7 @@ async function main(): Promise<void> {
               `requesting "${group}" — nothing authored`);
             return false;
           }
-          declareProducedEdges(mod, checked.edges, group);
+          declareProducedEdges(mod, checked.edges, group, checked.visibility);
           return true;
         }
         return true;
@@ -4248,6 +4273,11 @@ async function main(): Promise<void> {
         capacity: () => producedLayer.capacity,
         allocated: () => producedLayer.allocated,
         activeSpan: () => producedLayer.activeSpan(),
+        // 2C seams: the mask row a group shows at a frame (null = static)
+        // and the flip-cadence gate — S60 asserts both against the GPU.
+        groupMaskAt: (name: string, frame: number) => producedLayer.groupMaskAt(name, frame),
+        hasMaskedActiveGroups: () => producedLayer.hasMaskedActiveGroups(),
+        displayedFrame: () => producedLayer.displayedFrame,
         layer: {
           pairs: () => producedLayer.pairs,
           colorA: () => producedLayer.colorA,

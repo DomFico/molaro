@@ -133,7 +133,7 @@ def _accepts_third_positional(fn) -> Optional[bool]:
 
 def run_mod(source, code: str, target_indices, timeout_s: float, install_channel=None,
             parameters=None, channel_name=None, produces=None, n_points=None,
-            edge_group=None) -> bytes:
+            edge_group=None, n_frames=None) -> bytes:
     """Execute a mod's `compute(data, target_indices)` against the RESIDENT
     dataset handle and return the response payload (JSON bytes).
 
@@ -241,6 +241,23 @@ def run_mod(source, code: str, target_indices, timeout_s: float, install_channel
                 return json.dumps(
                     {"error": "edge authoring is not available in this context"}
                 ).encode("utf-8")
+            # PER-FRAME EXISTENCE (stage 2C): compute may return the bare pair
+            # list OR a dict {pairs, visibility?} where visibility is a
+            # [n_frames][n_pairs] mask in [0,1] (0 hides the edge that frame).
+            # The mask is VIEWER-owned data riding this reply — never header
+            # state, never the frame stream. Validated fail-closed below, after
+            # the pairs (the inner width needs the pair count).
+            vis_raw = None
+            if isinstance(values, dict):
+                if "pairs" not in values:
+                    return json.dumps(
+                        {"error": "an edges dict return must carry {pairs} (with optional visibility)"}
+                    ).encode("utf-8")
+                vis_raw = values.get("visibility")
+                # tolerate an array-like mask (a numpy mask is natural here)
+                if vis_raw is not None and hasattr(vis_raw, "tolist"):
+                    vis_raw = vis_raw.tolist()
+                values = values["pairs"]
             if not isinstance(values, list):
                 return json.dumps(
                     {"error": f"an edges mod must return a list of [i, j] index pairs, not {type(values).__name__}"}
@@ -265,7 +282,41 @@ def run_mod(source, code: str, target_indices, timeout_s: float, install_channel
                         {"error": f"edges[{k}] is a self-loop ({i}) — an edge needs two distinct points"}
                     ).encode("utf-8")
                 pairs.append([i, j])
-            return json.dumps({"values": {"group": edge_group, "pairs": pairs}}).encode("utf-8")
+            # the optional mask, validated FAIL-CLOSED (any violation rejects
+            # the WHOLE return — never a half-masked declaration): outer =
+            # one row per frame (checked when n_frames is known — the serve
+            # loop threads it; the viewer re-checks against ITS header), inner
+            # = one finite [0,1] value per pair.
+            visibility = None
+            if vis_raw is not None:
+                if not isinstance(vis_raw, list):
+                    return json.dumps(
+                        {"error": f"edges visibility must be a list of per-frame rows, not {type(vis_raw).__name__}"}
+                    ).encode("utf-8")
+                if n_frames is not None and len(vis_raw) != n_frames:
+                    return json.dumps(
+                        {"error": f"edges visibility must cover every frame — expected {n_frames} rows, got {len(vis_raw)}"}
+                    ).encode("utf-8")
+                visibility = []
+                for f, row in enumerate(vis_raw):
+                    if not isinstance(row, list) or len(row) != len(pairs):
+                        got = len(row) if isinstance(row, list) else type(row).__name__
+                        return json.dumps(
+                            {"error": f"edges visibility[{f}] must have one value per pair ({len(pairs)}), got {got}"}
+                        ).encode("utf-8")
+                    out_row = []
+                    for k, v in enumerate(row):
+                        if (isinstance(v, bool) or not isinstance(v, (int, float))
+                                or not math.isfinite(float(v)) or not (0.0 <= float(v) <= 1.0)):
+                            return json.dumps(
+                                {"error": f"edges visibility[{f}][{k}] must be a finite number in [0,1] — got {v!r}"}
+                            ).encode("utf-8")
+                        out_row.append(float(v))
+                    visibility.append(out_row)
+            reply = {"group": edge_group, "pairs": pairs}
+            if visibility is not None:
+                reply["visibility"] = visibility
+            return json.dumps({"values": reply}).encode("utf-8")
         if isinstance(values, dict) and isinstance(values.get("png"), str):
             # a FIGURE reply: {png, width, height, axes} — a light structural
             # pass keeps the wire well-formed; the client runs THE deep
@@ -414,7 +465,7 @@ def apply_edge_mods(source, header, edge_mods, timeout_s: float = DEFAULT_MOD_TI
             continue
         payload = run_mod(
             source, code, target, timeout_s,
-            produces="edges", n_points=header.n_points,
+            produces="edges", n_points=header.n_points, n_frames=header.n_frames,
         )
         try:
             reply = json.loads(payload.decode("utf-8"))
@@ -424,10 +475,18 @@ def apply_edge_mods(source, header, edge_mods, timeout_s: float = DEFAULT_MOD_TI
         if "error" in reply:
             log.warning("edge-mod %s failed: %s — skipped", path, reply["error"])
             continue
-        # run_mod's edges arm replies {"values": {"group", "pairs"}} — the
-        # group is the INTERACTIVE path's token (None here); load-apply
-        # consumes only the validated pairs.
+        # run_mod's edges arm replies {"values": {"group", "pairs",
+        # "visibility"?}} — the group is the INTERACTIVE path's token (None
+        # here); load-apply consumes only the validated pairs. A PER-FRAME
+        # visibility mask cannot ride header.edges (baked topology draws
+        # every frame), so it is DROPPED here — loudly, never silently: the
+        # pairs still land, STATIC. Interactive runs are the masked path.
         vals = reply.get("values") or {}
+        if isinstance(vals, dict) and vals.get("visibility") is not None:
+            log.warning(
+                "edge-mod %s: returned a per-frame visibility mask — masks are "
+                "interactive-only (header edges are static); its %d pairs are "
+                "appended WITHOUT the mask", path, len(vals.get("pairs") or []))
         pairs = (vals.get("pairs") if isinstance(vals, dict) else vals) or []
         # (2) collect this mod's VALIDATED pairs into a local first, so a
         # defensive coercion failure contributes nothing (all-or-nothing per mod)
@@ -599,6 +658,9 @@ def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO,
                     produces=request.get("produces"),
                     n_points=header.n_points,
                     edge_group=request.get("edge_group"),
+                    # 2C: the frame count bounds an edges run's per-frame
+                    # visibility mask (one row per frame, fail-closed)
+                    n_frames=header.n_frames,
                 )
                 log.debug("run_mod -> %d bytes", len(payload))
             else:

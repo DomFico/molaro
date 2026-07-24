@@ -527,7 +527,7 @@ export function validateModValues(
   | { ok: true; commands: string[] }
   | { ok: true; figure: { png: string; width: number; height: number; axes: FigureAxes[] } }
   | { ok: true; channel: Channel; warning?: string }
-  | { ok: true; edges: [number, number][]; group?: string }
+  | { ok: true; edges: [number, number][]; group?: string; visibility?: Float32Array }
   | { ok: false; error: string } {
   if (expect.produces === "channel") {
     // The producer already DECLARED + stored the channel (its data rides
@@ -583,12 +583,15 @@ export function validateModValues(
     //     threaded (the webview name stays the single source; the echo lets
     //     the caller assert nothing drifted in flight).
     let group: string | undefined;
+    let visRaw: unknown;
     let list: unknown = values;
     if (values && typeof values === "object" && !Array.isArray(values) &&
         "pairs" in (values as Record<string, unknown>)) {
       // ONLY a dict carrying `pairs` is the wrapper — any other dict falls
       // through to the list check and gets the compute-return error, so a mod
-      // returning a stray dict hears the same refusal in both gates.
+      // returning a stray dict hears the same refusal in both gates. The
+      // SAME arm serves the producer's {group, pairs, visibility?} echo and
+      // a compute's own {pairs, visibility?} return.
       const m = values as Record<string, unknown>;
       if (m.group !== undefined && m.group !== null) {
         if (typeof m.group !== "string" || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(m.group)) {
@@ -596,6 +599,7 @@ export function validateModValues(
         }
         group = m.group;
       }
+      if (m.visibility !== undefined && m.visibility !== null) visRaw = m.visibility;
       list = m.pairs;
     }
     if (!Array.isArray(list)) {
@@ -623,7 +627,55 @@ export function validateModValues(
       }
       edges.push([a, b]);
     }
-    return { ok: true, edges, ...(group !== undefined ? { group } : {}) };
+    // PER-FRAME EXISTENCE (stage 2C): the OPTIONAL visibility mask — shape
+    // [n_frames][n_pairs], each value a finite number in [0,1] (0 hides the
+    // edge that frame). FAIL-CLOSED like the pairs: ANY violation rejects the
+    // WHOLE declaration (never a half-masked group). Absent ⇒ a STATIC group
+    // (the pre-2C behavior). Flattened here to one typed array
+    // [frame * n_pairs + pair] — the layer's storage layout, built once at
+    // the validation boundary so nothing downstream re-walks nested lists.
+    let visibility: Float32Array | undefined;
+    if (visRaw !== undefined) {
+      if (!Array.isArray(visRaw)) {
+        return { ok: false, error: `edges visibility must be a list of per-frame rows, not ${typeof visRaw}` };
+      }
+      if (visRaw.length !== expect.frameCount) {
+        return {
+          ok: false,
+          error: `edges visibility must cover every frame — expected ${expect.frameCount} rows ` +
+            `(one per frame), got ${visRaw.length}`,
+        };
+      }
+      visibility = new Float32Array(expect.frameCount * edges.length);
+      for (let f = 0; f < visRaw.length; f++) {
+        const row = visRaw[f];
+        if (!Array.isArray(row) || row.length !== edges.length) {
+          return {
+            ok: false,
+            error: `edges visibility[${f}] must have one value per pair (${edges.length}), got ` +
+              `${Array.isArray(row) ? row.length : typeof row}`,
+          };
+        }
+        for (let k = 0; k < row.length; k++) {
+          const v = row[k];
+          if (typeof v !== "number" || !Number.isFinite(v) || v < 0 || v > 1) {
+            return {
+              ok: false,
+              error: `edges visibility[${f}][${k}] must be a finite number in [0,1] — got ${String(v)}`,
+            };
+          }
+          visibility[f * edges.length + k] = v;
+        }
+      }
+    }
+    return {
+      ok: true,
+      edges,
+      ...(group !== undefined ? { group } : {}),
+      // a mask over ZERO pairs is vacuous — drop it (an empty group is
+      // trivially static; the layer never stores a 0-wide mask)
+      ...(visibility !== undefined && edges.length > 0 ? { visibility } : {}),
+    };
   }
   if (expect.produces === "figure") {
     // THE one figure validator (plotmodel.validateFigure) — shared with the
