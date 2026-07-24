@@ -16,6 +16,7 @@
 import {
   COMPLETION_LIST_CAP,
   completeTarget,
+  completeTargetExpr,
   completeToken,
   parseTarget,
   resolveTarget,
@@ -2972,6 +2973,152 @@ function completeModInvocation(
   });
 }
 
+/** Quote-aware whitespace chunking WITH OFFSETS — splitTrailingWord's exact
+ * scan generalized to every chunk (a `"` toggles quote state, no escape),
+ * so slot detection sees the same word boundaries the verbs' own argument
+ * splitters see. Raw untrimmed slices; an unbalanced quote swallows to the
+ * end as one chunk (never a throw). */
+function chunkWords(s: string): { start: number; end: number; text: string }[] {
+  const out: { start: number; end: number; text: string }[] = [];
+  let inQuote = false;
+  let start = -1;
+  for (let i = 0; i < s.length; i++) {
+    const ws = !inQuote && /\s/.test(s[i]);
+    if (!ws && start < 0) start = i;
+    if (s[i] === '"') inQuote = !inQuote;
+    if (ws && start >= 0) {
+      out.push({ start, end: i, text: s.slice(start, i) });
+      start = -1;
+    }
+  }
+  if (start >= 0) out.push({ start, end: s.length, text: s.slice(start) });
+  return out;
+}
+
+/** Where the cursor sits among a verb's argument chunks: the chunks BEFORE
+ * the token under construction, plus the token and its offset in argsHead
+ * (empty token = the head ends at top-level whitespace, a fresh chunk). The
+ * cursor is always at the END of argsHead (only text[0..cursor) exists). */
+function argPosition(argsHead: string): {
+  prior: { start: number; end: number; text: string }[];
+  token: string;
+  tokenStart: number;
+} {
+  const chunks = chunkWords(argsHead);
+  const last = chunks[chunks.length - 1];
+  if (last !== undefined && last.end === argsHead.length) {
+    return { prior: chunks.slice(0, -1), token: last.text, tokenStart: last.start };
+  }
+  return { prior: chunks, token: "", tokenStart: argsHead.length };
+}
+
+/** How many leading chunks form the LONGEST prefix that parses as one
+ * target expression (0 = none does). Slot detection needs to know where the
+ * target ends, and the target grammar itself is the authority: spaces occur
+ * inside a target only via quoted labels and ` + ` unions, both of which
+ * parse — so the longest parseable chunk prefix IS the target. */
+function targetChunkCount(
+  argsHead: string,
+  prior: readonly { start: number; end: number }[],
+): number {
+  for (let k = prior.length; k >= 1; k--) {
+    if (parseTarget(argsHead.slice(prior[0].start, prior[k - 1].end)).kind !== "error") return k;
+  }
+  return 0;
+}
+
+/** One enumerable word slot after the target: its live vocabulary, the
+ * separator a unique match appends, and the header kind. */
+interface WordSlot {
+  pool(): string[];
+  uniqueSuffix?: string;
+  kind?: Completion["kind"];
+}
+
+/** The shared `<verb> <target> <word> [<word>…]` completer: find where the
+ * target ends (the longest parseable chunk prefix), then complete the
+ * cursor's slot from the verb's slot table (slot 0 = the first word after
+ * the target). The cursor before/inside the target — or continuing a `+`
+ * union (`colorpoints alpha + be` completes `be` as a TARGET term) —
+ * routes to the target slot; a malformed prior or an out-of-table slot
+ * (e.g. bake's numeric range) is inert. Settling is completeToken's. */
+function completeSlotsAfterTarget(
+  argsStart: number,
+  argsHead: string,
+  targetSlot: () => Completion,
+  slots: readonly WordSlot[],
+): Completion {
+  const { prior, token, tokenStart } = argPosition(argsHead);
+  const none: Completion = { start: argsStart + tokenStart, candidates: [], applied: "" };
+  // no finished chunk yet, or a token continuing a union → target text
+  if (prior.length === 0 || token.startsWith("+")) return targetSlot();
+  const priorText = argsHead.slice(prior[0].start, prior[prior.length - 1].end);
+  if (priorText.trimEnd().endsWith("+")) return targetSlot();
+  const k = targetChunkCount(argsHead, prior);
+  if (k === 0) return none;
+  const slot = slots[prior.length - k];
+  if (slot === undefined) return none;
+  return completeToken(argsStart + tokenStart, token, slot.pool(), {
+    uniqueSuffix: slot.uniqueSuffix,
+    kind: slot.kind,
+  });
+}
+
+/** The channel slot bake/bind share: the DECLARED channel names, live from
+ * ctx (a produced channel appears the instant it declares). An axis must
+ * follow, so a unique match appends the separator space. */
+function channelSlot(ctx: CommandContext): WordSlot {
+  return {
+    pool: () => ctx.channels().map((c) => c.name),
+    uniqueSuffix: " ",
+    kind: "channel",
+  };
+}
+
+/** The axis slot, derived from the channelmap constants — never a
+ * hand-copied list: bind/unbind take every bindable axis; bake EXCLUDES
+ * `offset` (bake refuses it — offset is bind-only), so the two pools
+ * differ by exactly that one constant. */
+function axisSlot(includeOffset: boolean): WordSlot {
+  return {
+    pool: () =>
+      ([...SCALAR_AXES, ...VECTOR_AXES] as string[]).filter(
+        (a) => includeOffset || a !== OFFSET_AXIS,
+      ),
+    kind: "axis",
+  };
+}
+
+/** add/remove: `<verb> @name <target-expr>` — the target is the SECOND
+ * argument. Cursor still in the first chunk → the plain target slot
+ * (completeTarget's @-handling already completes the leading reference);
+ * past a leading @chunk → the pure expr-relative core over the sliced
+ * remainder, re-based to its offset (the slice is what completeTargetExpr
+ * exists for). A non-@ first chunk is a malformed lead — inert. */
+function completeSecondArgTarget(
+  ctx: CommandContext,
+  argsStart: number,
+  argsHead: string,
+  targetSlot: () => Completion,
+): Completion {
+  const chunks = chunkWords(argsHead);
+  if (chunks.length === 0) return targetSlot();
+  const first = chunks[0];
+  if (chunks.length === 1 && first.end === argsHead.length) return targetSlot();
+  if (!first.text.startsWith("@")) {
+    return { start: argsStart + argsHead.length, candidates: [], applied: "" };
+  }
+  const inner = completeTargetExpr(
+    argsHead.slice(first.end),
+    argsHead.length - first.end,
+    ctx.tree,
+    ctx.hierarchy,
+    ctx.pointTypes,
+    ctx.committedEntries(),
+  );
+  return { ...inner, start: inner.start + argsStart + first.end };
+}
+
 /**
  * Complete the token under `cursor` in a partial command line — the
  * VERB-AWARE DISPATCHER over completion (`runCommand`'s sibling): it parses
@@ -3012,6 +3159,25 @@ export function completeCommand(
   const verb = m[1].trim();
   const argsStart = m[1].length;
   const argsHead = m[2];
+
+  // the built-in verbs with enumerable non-target slots
+  switch (verb) {
+    case "bake":
+      return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [
+        channelSlot(ctx),
+        axisSlot(false), // bake refuses offset — the pool says so
+      ]);
+    case "bind":
+      return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [
+        channelSlot(ctx),
+        axisSlot(true),
+      ]);
+    case "unbind":
+      return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [axisSlot(true)]);
+    case "add":
+    case "remove":
+      return completeSecondArgTarget(ctx, argsStart, argsHead, targetSlot);
+  }
 
   // a mod's own verb: the ?parameter slots (the target slot falls through)
   const recipe = getRecipe(verb);

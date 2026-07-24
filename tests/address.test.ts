@@ -11,6 +11,7 @@ import { buildTree } from "../webview/classification.ts";
 import { Hierarchy, type Entry } from "../webview/sets.ts";
 import {
   completeTarget,
+  completeTargetExpr,
   globMatch,
   parseTarget,
   resolveTarget,
@@ -746,6 +747,29 @@ test("completion: only text before the cursor counts", () => {
   // cursor after "view a" with trailing text present — completes the category
   const r = comp("view aXXXX", 6);
   assert.deepEqual(r, { start: 5, candidates: ["alpha"], applied: "lpha" });
+});
+
+// -- completeTargetExpr: the expr-relative core completeTarget wraps ------------------
+
+test("completeTargetExpr: start is RELATIVE to the expression text", () => {
+  const core = completeTargetExpr("alpha.", 6, tree, hier, header.points.type, NAMES);
+  assert.deepEqual(core, { start: 6, candidates: ["g-1", "g-2"], applied: "g-" });
+  // the filter kind rides through the core exactly as through the wrapper
+  const filt = completeTargetExpr("@solvent.", 9, tree, hier, header.points.type, NAMES);
+  assert.deepEqual(filt, { start: 9, candidates: ["env3"], applied: "env3", kind: "filter" });
+});
+
+test("completeTargetExpr: wrapper parity — completeTarget = the core re-based by the verb prefix", () => {
+  for (const expr of ["alpha.", "alpha.g-1", "@sol", "a", "@picks.", "alpha + e", "al*", ""]) {
+    const core = completeTargetExpr(expr, expr.length, tree, hier, header.points.type, NAMES);
+    const wrapped = comp(`view ${expr}`);
+    assert.deepEqual(wrapped, { ...core, start: core.start + "view ".length }, expr);
+  }
+  // a NON-ZERO base a dispatcher would add (slicing the expr out of a longer
+  // argument list): the core's numbers stay expr-relative — the token "g-"
+  // begins at offset 7 of the slice — and only the caller's base moves them
+  const sliced = completeTargetExpr(" alpha.g-", 9, tree, hier, header.points.type, NAMES);
+  assert.deepEqual(sliced, { start: 7, candidates: ["g-1", "g-2"], applied: "" });
 });
 
 // -- splitTrailingName: the mutating verbs' [name] argument ---------------------------

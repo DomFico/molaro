@@ -2656,3 +2656,82 @@ test("completeCommand: total on junk — unbalanced quotes and malformed params,
     assert.deepEqual(comp("compmod c0 ?floor extra").candidates, []);
   } finally { done(); }
 });
+
+test("completeCommand: bake/bind channel slot — declared names, unique appends a space", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    assert.deepEqual(comp("bake c0 "),
+      { start: 8, candidates: ["energy", "flow", "mass", "time"], applied: "", kind: "channel" });
+    assert.deepEqual(comp("bake c0 en"),
+      { start: 8, candidates: ["energy"], applied: "ergy ", kind: "channel" });
+    assert.deepEqual(comp("bind c0 ma"),
+      { start: 8, candidates: ["mass"], applied: "ss ", kind: "channel" });
+  } finally { done(); }
+});
+
+test("completeCommand: axis slots — bake EXCLUDES offset, bind includes it, one constant apart", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    const bake = comp("bake c0 energy ");
+    const bind = comp("bind c0 energy ");
+    assert.equal(bake.kind, "axis");
+    assert.equal(bind.kind, "axis");
+    // both pools come from the channelmap constants — never a hand-copied list
+    assert.deepEqual(bake.candidates,
+      ([...SCALAR_AXES, ...VECTOR_AXES] as string[]).filter((a) => a !== OFFSET_AXIS).sort());
+    assert.deepEqual(bind.candidates, ([...SCALAR_AXES, ...VECTOR_AXES] as string[]).sort());
+    // the two differ by EXACTLY offset
+    assert.deepEqual(bind.candidates.filter((a) => a !== OFFSET_AXIS), bake.candidates);
+    // a partial axis token narrows; bake's pool cannot reach offset
+    assert.deepEqual(comp("bind c0 flow of"),
+      { start: 13, candidates: ["offset"], applied: "fset", kind: "axis" });
+    assert.deepEqual(comp("bake c0 flow of").candidates, []);
+    // the numeric range beyond the axis stays a no-op
+    assert.deepEqual(comp("bake c0 energy color ").candidates, []);
+  } finally { done(); }
+});
+
+test("completeCommand: unbind's trailing word is the axis slot (offset included)", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    assert.deepEqual(comp("unbind c0 ").candidates,
+      ([...SCALAR_AXES, ...VECTOR_AXES] as string[]).sort());
+    assert.equal(comp("unbind c0 ").kind, "axis");
+    assert.deepEqual(comp("unbind all tracec"),
+      { start: 11, candidates: ["tracecolor"], applied: "olor", kind: "axis" });
+    // the target itself still completes (prior chunk empty → target slot)
+    assert.deepEqual(comp("unbind c").candidates, ["c0", "c1"]);
+    // past the axis there is nothing
+    assert.deepEqual(comp("unbind c0 color ").candidates, []);
+  } finally { done(); }
+});
+
+test("completeCommand: the + union guard keeps the cursor in the TARGET", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    // a trailing + means the union continues — never the channel slot
+    assert.deepEqual(comp("bake c0 + ").candidates, ["c0", "c1"]);
+    assert.equal(comp("bake c0 + ").kind, undefined);
+    assert.deepEqual(comp("bake c0 + c"), { start: 10, candidates: ["c0", "c1"], applied: "" });
+    // once the union is complete, the NEXT chunk is the channel again
+    assert.deepEqual(comp("bake c0 + c1 ").kind, "channel");
+    assert.deepEqual(comp("bake c0 + c1 ").candidates, ["energy", "flow", "mass", "time"]);
+  } finally { done(); }
+});
+
+test("completeCommand: add/remove complete their SECOND-argument target (re-based start)", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    // the leading @name completes through the plain target slot
+    assert.deepEqual(comp("add @").candidates, ["all", "second", "stored"]);
+    assert.deepEqual(comp("add @st"), { start: 5, candidates: ["stored"], applied: "ored" });
+    // the second argument is a TREE target — the expr core, re-based
+    assert.deepEqual(comp("add @stored c"), { start: 12, candidates: ["c0", "c1"], applied: "" });
+    assert.deepEqual(comp("add @stored c0"), { start: 12, candidates: ["g0"], applied: "." });
+    assert.deepEqual(comp("remove @stored c0"), { start: 15, candidates: ["g0"], applied: "." });
+    // a union in the second argument keeps completing
+    assert.deepEqual(comp("add @stored c0 + c"), { start: 17, candidates: ["c0", "c1"], applied: "" });
+    // a malformed lead (no @) is inert — the command shape is already broken
+    assert.deepEqual(comp("add alpha c").candidates, []);
+  } finally { done(); }
+});

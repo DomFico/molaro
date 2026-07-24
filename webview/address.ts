@@ -626,6 +626,58 @@ export function completeTarget(
   let ts = head.length;
   while (ts > 0 && !TOKEN_DELIMS.has(head[ts - 1]) && !/\s/.test(head[ts - 1])) ts--;
   const token = head.slice(ts);
+  const before = head.slice(0, ts);
+
+  // verb position: nothing but whitespace before the token
+  if (/^\s*$/.test(before)) {
+    // pattern-in-progress opts out here exactly as it does inside a target
+    if (/[*[\]?"#]/.test(token) || /^\d+-\d*$/.test(token)) {
+      return { start: ts, candidates: [], applied: "" };
+    }
+    return finish(ts, token, verbs, " ");
+  }
+
+  // everything after the verb word (and its whitespace) is the target
+  // expression — the pure expr-relative core completes it, and the verb
+  // prefix's length re-bases the result (the ONE base-offset addition; a
+  // dispatcher slicing a target out of a longer argument list adds its own
+  // base the same way)
+  const m = /^(\s*\S+\s+)([\s\S]*)$/.exec(head);
+  if (!m) return { start: ts, candidates: [], applied: "" };
+  const base = m[1].length;
+  const inner = completeTargetExpr(
+    m[2],
+    head.length - base,
+    tree,
+    hierarchy,
+    types,
+    committedNames,
+  );
+  return { ...inner, start: inner.start + base };
+}
+
+/**
+ * The target-grammar completion CORE: complete the token under `exprCursor`
+ * in a bare target EXPRESSION (no verb — `completeTarget` wraps this with
+ * verb-name completion and the after-the-verb slice). `start` is relative
+ * to `exprText`; a caller that sliced the expression out of a longer line
+ * adds its slice's base offset. Same totality contract: junk yields empty
+ * candidates, never a throw.
+ */
+export function completeTargetExpr(
+  exprText: string,
+  exprCursor: number,
+  tree: TreeModel,
+  hierarchy: Hierarchy,
+  types: readonly string[],
+  committedNames: ReadonlyMap<string, readonly Entry[]>,
+): Completion {
+  const head = exprText.slice(0, Math.max(0, Math.min(exprCursor, exprText.length)));
+
+  // the token = the maximal run of token characters ending at the cursor
+  let ts = head.length;
+  while (ts > 0 && !TOKEN_DELIMS.has(head[ts - 1]) && !/\s/.test(head[ts - 1])) ts--;
+  const token = head.slice(ts);
   const none: Completion = { start: ts, candidates: [], applied: "" };
 
   // pattern-in-progress → completion opts out (globs, numeric ranges, junk),
@@ -634,9 +686,6 @@ export function completeTarget(
   if (/^\d+-\d*$/.test(token)) return none;
 
   const before = head.slice(0, ts);
-
-  // verb position: nothing but whitespace before the token
-  if (/^\s*$/.test(before)) return finish(ts, token, verbs, " ");
 
   // the "@name." filter candidate pool = the selection's STORED MEMBERSHIP
   // (a member's label, a point member's type) — what the panel's member list
@@ -665,18 +714,11 @@ export function completeTarget(
     return finish(ts, token, [...committedNames.keys(), "all"], "");
   }
 
-  // current term = after the last "+" (or after the verb); the structural
-  // prefix before the token must be empty or end at a "." / "," boundary
+  // current term = after the last "+" (or the whole expression prefix); the
+  // structural prefix before the token must be empty or end at a "." / ","
+  // boundary
   const plusAt = before.lastIndexOf("+");
-  let termBefore: string;
-  if (plusAt >= 0) {
-    termBefore = before.slice(plusAt + 1);
-  } else {
-    const m = /^\s*\S+\s+([\s\S]*)$/.exec(before);
-    if (!m) return none;
-    termBefore = m[1];
-  }
-  termBefore = termBefore.trim();
+  const termBefore = (plusAt >= 0 ? before.slice(plusAt + 1) : before).trim();
 
   // "@name." → the selection's OWN identity tokens: the distinct types AND
   // the distinct subgroup/group/category labels represented among its points
