@@ -2828,10 +2828,18 @@ async function main(): Promise<void> {
     params?: Record<string, ParamValue>,
   ): Promise<boolean> => {
       try {
+        // produces:edges runs on the WHOLE system, never the resolved subset:
+        // load-time apply (serve.py apply_edge_mods) has no selection — it always
+        // runs the mod on range(n_points) — so a target-respecting mod's
+        // interactive count must be computed over the SAME set, or the reported
+        // number would differ from what load-apply actually authors (untruthful).
+        const targetIndices = mod.produces === "edges"
+          ? Array.from({ length: header.n_points }, (_, i) => i)
+          : points;
         const bytes = await transport.request({
           type: "run_mod",
           code: mod.code,
-          target_indices: points,
+          target_indices: targetIndices,
           // Additive: only present when the mod declared parameters (the
           // resolver filled defaults webview-side, so the producer gets the
           // COMPLETE effective set or none at all).
@@ -2930,11 +2938,16 @@ async function main(): Promise<void> {
           // returned pairs are validated fail-closed above, but the LIVE scene
           // is NOT grown here: the edge rep buffers are sized once from
           // header.edges.length at load, and mid-session live authoring is a
-          // later increment. Report the count HONESTLY (never a silent no-op)
-          // and count the run a success — the mod ran and produced valid edges.
+          // later increment. Report HONESTLY (never a silent no-op): the run
+          // was computed over the WHOLE system (the targetIndices override
+          // above), so the count EQUALS what load-time --edge-mods would
+          // author — and the message promises no render this increment can't
+          // deliver (there is no --edge-mods UI wiring; a plain reload draws
+          // nothing). The run still counts as a success — it validated.
           asyncLine("ok",
-            `${mod.name} → authored ${checked.edges.length} edges — reload to render ` +
-            `(live mid-session authoring is not yet enabled)`);
+            `${mod.name} → validated ${checked.edges.length} edges (computed over the whole system) — ` +
+            `nothing rendered: edges mods apply at load via the producer's --edge-mods; ` +
+            `live mid-session authoring is a later increment`);
           return true;
         }
         return true;
