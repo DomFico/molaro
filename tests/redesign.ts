@@ -2987,12 +2987,59 @@ async function S15(): Promise<void> {
 }
 
 async function S16(): Promise<void> {
-  console.log("S16 — colorbonds/colorbondsof: the edge verbs (contained vs incident)");
+  await S16body(false);
+}
+/**
+ * S16's whole assertion body, optionally REPLAYED with a PRODUCED edge group
+ * live in the scene (S58 part 2). With `withProducedGroup`:
+ *   - a produced group is declared AND styled through the produced writer
+ *     family BEFORE the baseline snapshots, and the five covalent edge buffers
+ *     (edgeColorA/B/Size/Opacity/Dash) are asserted BYTE-IDENTICAL across that
+ *     setup — the produced pass touches nothing covalent;
+ *   - every S16 check then runs UNCHANGED (pristine-restore byte checks
+ *     included) with the produced pass drawing throughout;
+ *   - at the end, the produced group is asserted intact (active, styled, still
+ *     uploaded) — the whole covalent verb/undo matrix touched nothing
+ *     produced. Cross-talk proven in BOTH directions.
+ */
+async function S16body(withProducedGroup: boolean): Promise<void> {
+  console.log(withProducedGroup
+    ? "S16(replay) — the covalent edge-verb matrix with a PRODUCED group present (cross-talk guard)"
+    : "S16 — colorbonds/colorbondsof: the edge verbs (contained vs incident)");
+  const tag = withProducedGroup ? "S16(+produced)" : "S16";
   await withDriver(async (d) => {
     await seedSolvent(d); // the committed @solvent in the parity matrix
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    if (withProducedGroup) {
+      // The five COVALENT edge buffers, snapshotted BEFORE anything produced
+      // exists — the byte-identity target for the whole produced setup.
+      const COVALENT = `["edgeColorA","edgeColorB","edgeSize","edgeOpacity","edgeDash"]`;
+      await d.evaluate(
+        `void (window.__covalent = ${COVALENT}.map(k => Float32Array.from(${V}.rep.state[k])))`);
+      const covalentIntact = () => d.evaluate<boolean>(`(()=>{
+        return ${COVALENT}.every((k, i) => {
+          const c = ${V}.rep.state[k], s = window.__covalent[i];
+          if (c.length !== s.length) return false;
+          for (let j = 0; j < c.length; j++) if (c[j] !== s[j]) return false;
+          return true;
+        });
+      })()`);
+      const hdrEdges = await d.evaluate<number>(`${V}.edges.length`);
+      // declare through the REAL declareProducedEdges path + style through the
+      // writer family — a live, styled produced group before S16 begins
+      await d.evaluate(`(()=>{
+        ${V}.produced.declare("s16group", [[0, 3000], [1, 3001], [2, 3002]]);
+        const ids = ${V}.produced.groupIds("s16group");
+        ${V}.produced.writers.colorEdges(ids, [1, 0, 0]);
+        ${V}.produced.writers.sizeEdges(ids, 4);
+      })()`);
+      check(`${tag}: declaring + styling a produced group leaves the FIVE covalent edge buffers BYTE-IDENTICAL`,
+        await covalentIntact());
+      check(`${tag}: ...and header.edges untouched`,
+        (await d.evaluate<number>(`${V}.edges.length`)) === hdrEdges);
+    }
     const snap = (slot: string, buf: "color" | "edgeColorA") =>
       d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.${buf}))`);
     const equalsSnap = (slot: string, buf: "color" | "edgeColorA") =>
@@ -3166,7 +3213,30 @@ async function S16(): Promise<void> {
       await equalsSnap("__quiet2E", "edgeColorA"));
     check("S16: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet2);
 
-    await d.screenshot(`${REPORT}/S16_colorbonds.png`);
+    if (withProducedGroup) {
+      // The OTHER cross-talk direction: the whole covalent matrix above —
+      // every colorbonds/colorbondsof/undo/LWW stroke — must have left the
+      // produced group exactly as styled before it began (host buffers AND
+      // the uploaded GPU slots), still active, still in the draw span. (Its
+      // endpoints may be HIDDEN here — section (f)'s hide stands — which is
+      // hidden-wins working, not cross-talk; visibility is S58's business.)
+      check(`${tag}: after the whole covalent matrix, the produced group stands untouched (both twins)`,
+        await d.evaluate<boolean>(`(()=>{
+          const v = ${V};
+          const g = v.produced.groups().find(g => g.name === "s16group");
+          if (!g || !g.active || g.count !== 3) return false;
+          const host = v.produced.layer.colorA();
+          const gpu = v.produced.pass.attrArray("iColorA");
+          for (const id of v.produced.groupIds("s16group")) {
+            if (host[id*4] !== 1 || host[id*4+1] !== 0 || host[id*4+2] !== 0) return false;
+            if (gpu[id*4] !== 1 || gpu[id*4+1] !== 0 || gpu[id*4+2] !== 0) return false;
+            if (v.produced.layer.radius()[id] !== 4) return false;
+          }
+          return v.produced.pass.instanceCount() === 3;
+        })()`));
+    }
+
+    await d.screenshot(`${REPORT}/S16_colorbonds${withProducedGroup ? "_produced" : ""}.png`);
   });
 }
 
@@ -9534,26 +9604,28 @@ async function S56(): Promise<void> {
   });
 }
 
-// ============ S57: produces:edges — load-time authoring + honest defer =======
+// ============ S57: produces:edges — load-time + LIVE interactive authoring ===
 // The neutral SPINE for authorable edges: a `produces: edges` mod's [i, j]
 // pairs are appended to header.edges at LOAD (they render as ordinary edge
-// tubes and style through the existing verbs), while an INTERACTIVE run honestly
-// defers (mid-session live authoring is a later increment). Default OFF → the
-// served header is byte-identical. The mod is TARGET-RESPECTING (it reads
-// target_indices; its count DEPENDS on the target size), which pins the
-// truthfulness contract: an interactive run is computed over the WHOLE system —
-// even when invoked on a subset — so the count it reports EQUALS what load-time
+// tubes and style through the existing verbs), and an INTERACTIVE run now
+// AUTHORS LIVE into the isolated produced-edge pass (the former honest defer
+// ENDED — this is the "later increment"). Default OFF → the served header is
+// byte-identical. The mod is TARGET-RESPECTING (it reads target_indices; its
+// count DEPENDS on the target size), which pins the truthfulness contract: an
+// interactive run is computed over the WHOLE system — even when invoked on a
+// subset — so the count it reports (and now DRAWS) EQUALS what load-time
 // --edge-mods authors (a constant-return mod would mask a subset-vs-whole
 // divergence). Proven two ways on synthetic data:
 //   Part A (mod OFF, default load) — the control: the first authored pair is not
 //     already an edge; addressing a not-yet-existent edge by #e nomatches and
-//     draws nothing; and the mod run interactively ON A SUBSET reports the
-//     WHOLE-SYSTEM count with the no-render truth, WITHOUT growing the scene.
+//     draws nothing; then the mod run interactively ON A SUBSET reports (and
+//     renders) the WHOLE-SYSTEM count through the produced pass — while
+//     header.edges NEVER grows (isolation) and #e stays a header-edge axis.
 //   Part B (mod ON, spawned with --edge-mods) — the header grows by EXACTLY the
 //     interactively-reported count, the pairs are the mod's, and the first
 //     authored edge DRAWS as pixels where none was, addressable by #e.
 async function S57(): Promise<void> {
-  console.log("S57 — produces:edges: a load-time-authored edge draws; an interactive run honestly defers");
+  console.log("S57 — produces:edges: load-time authoring draws via the header; an interactive run draws LIVE via the produced pass");
   // The TARGET-RESPECTING mod: link t[i] → t[i + len//2] for the first half —
   // count = len(target)//2, so a subset target would yield a DIFFERENT count
   // than the whole system (the discrimination the constant mod lacked). On the
@@ -9622,8 +9694,10 @@ async function S57(): Promise<void> {
     const offRed = await d.evaluate<number>(redCountJs(await snap("off")));
     check("S57: (control) nothing draws for that index with the mod OFF", offRed === 0, `red=${offRed}`);
 
-    // -- interactive honest-defer: register the TARGET-RESPECTING mod, run it
-    //    ON A SUBSET, and prove the reported count is the WHOLE-SYSTEM count ---
+    // -- interactive LIVE authoring: register the TARGET-RESPECTING mod, run it
+    //    ON A SUBSET — the reported count is the WHOLE-SYSTEM count, the pairs
+    //    render NOW through the isolated produced-edge pass, and header.edges
+    //    never grows (isolation by construction) ------------------------------
     // JSON.stringify escapes the newlines in the Python source correctly.
     await d.evaluate(`window.postMessage({ type: "modsLoaded", mods: [{
       name: "link_defer", kind: "analysis", produces: "edges", origin: "workspace",
@@ -9636,22 +9710,42 @@ async function S57(): Promise<void> {
     const subsetPts = (await d.evaluate<number[]>(`${V}.debug.resolvePoints("alpha")`)).length;
     const run = await cmd("link_defer alpha");
     check("S57: the produces:edges mod is invokable and acknowledges", run.status === "ok", JSON.stringify(run));
-    await d.waitFor(`window.__lines.some(l => /validated \\d+ edges \\(computed over the whole system\\)/.test(l.message))`, 20000)
+    await d.waitFor(`window.__lines.some(l => /authored \\d+ edges \\(computed over the whole system\\)/.test(l.message))`, 20000)
       .catch(() => { /* timeout → the check below goes red */ });
     const line = await d.evaluate<{ status: string; message: string } | null>(`window.__lines.at(-1) ?? null`);
-    const mCount = line ? /validated (\d+) edges/.exec(line.message) : null;
+    const mCount = line ? /authored (\d+) edges/.exec(line.message) : null;
     interactiveCount = mCount ? Number(mCount[1]) : -1;
     check("S57: an interactive run reports the WHOLE-SYSTEM count, not the subset (truthful)",
       interactiveCount === WANT && subsetPts < WANT,
       `reported=${interactiveCount} want=${WANT} subsetPts=${subsetPts}`);
-    check("S57: ...the message promises NO render this increment can't deliver (no 'reload to render')",
+    check("S57: ...the line names the group (default = the mod name) and claims the LIVE draw",
       !!line && line.status === "ok" &&
-        /computed over the whole system/.test(line.message) &&
-        /apply at load via the producer's --edge-mods/.test(line.message) &&
-        !/reload to render/.test(line.message),
+        /as group "link_defer"/.test(line.message) &&
+        /drawn live, no reload/.test(line.message),
       JSON.stringify(line));
-    check("S57: ...and the interactive run does NOT grow the live scene (edge count unchanged)",
+    check("S57: header.edges NEVER grows from an interactive run (produced edges are isolated)",
       (await edgeCount()) === before, `${before} → ${await edgeCount()}`);
+    check("S57: #e stays a HEADER-edge axis — one past the last header edge still nomatches",
+      (await cmd(`colorbonds #e${L0} red`)).status === "nomatch");
+    check("S57: the produced pass carries the whole authored group, live",
+      await d.evaluate<boolean>(`(()=>{
+        const g = ${V}.produced.groups().find(g => g.name === "link_defer");
+        return !!g && g.active && g.count === ${WANT} &&
+          ${V}.produced.pass.instanceCount() === ${WANT};
+      })()`));
+    // pixel proof: the scene is already isolated (points/traces transparent,
+    // covalent tubes collapsed — and `bondsize all 0` provably never reached
+    // the produced pass, or nothing would draw below). Paint the authored
+    // group red through the produced writer family and LOOK.
+    await d.evaluate(`(()=>{
+      const ids = ${V}.produced.groupIds("link_defer");
+      ${V}.produced.writers.colorEdges(ids, [1, 0, 0]);
+      ${V}.produced.writers.sizeEdges(ids, 6);
+    })()`);
+    await sleep(300);
+    const liveRed = await d.evaluate<number>(redCountJs(await snap("live")));
+    check("S57: the authored edges DRAW LIVE where the control drew zero red pixels",
+      liveRed > 20, `red=${liveRed}`);
   });
 
   // -- Part B: the mod ON (spawned with --edge-mods) → the edges RENDER --------
@@ -9710,7 +9804,243 @@ async function S57(): Promise<void> {
   }
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57 };
+// ========= S58: the produced-edge pass — growable, isolated, undoable ========
+// The CORE of mid-session authored edges (design C): a produces:edges mod's
+// pairs enter an ISOLATED, GROWABLE sibling of the covalent edge pass. Part 1
+// drives the machinery end to end on the synthetic scene:
+//   (a) a mod with `# edge-group:` authors a group through the REAL producer
+//       round-trip → it DRAWS as tubes where none were, while header.edges and
+//       all five covalent edge buffers stay byte-identical (isolation);
+//   (b) the CAPACITY-CROSSING guard: authoring past the initial GPU capacity
+//       reallocates every instanced attribute — every pre-grow slot survives
+//       verbatim and still draws;
+//   (c) the WRITER-STALENESS guard: a LOW-id write after the grow lands in the
+//       CURRENT allocation (host + GPU), and its undo restores through the
+//       getter too (a captured pre-grow array would silently miss);
+//   (d) a NEW group's declaration is ONE undo op — undo deactivates (draw span
+//       recomputes), redo reactivates;
+//   (e) RE-declaring a group drops the walked-back redo future (pairs are
+//       replaced in place — the declareProducedChannel rule);
+//   (f) the non-selectable-domain guard: `shape edges …` (setActive on the
+//       "edge" domain) cannot disable the produced pass — it keeps drawing.
+// Part 2 replays the ENTIRE S16 covalent edge-verb matrix with a produced
+// group present and styled: S16's own byte-exact checks all hold, the five
+// covalent buffers are byte-identical across the produced setup, and the
+// produced group survives the matrix untouched — cross-talk, both directions.
+async function S58(): Promise<void> {
+  console.log("S58 — produced edges: grow, write-after-grow, undo/redo, isolation");
+  // The authored pairs link structured points to bulk points — none pre-exist
+  // (the synthetic chain links consecutive points only), all long enough to
+  // cross visible space. 8 edges: comfortably inside the initial capacity.
+  const GA_PAIRS: [number, number][] = Array.from({ length: 8 }, (_, i) => [i, 3000 + i]);
+  const MOD_CODE =
+    "def compute(data, target_indices):\n" +
+    `    return ${JSON.stringify(GA_PAIRS)}`;
+  const redCountJs = (b64: string) => `(async () => {
+    const app = document.getElementById('app').getBoundingClientRect();
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+    const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+    const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+    const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+      Math.round(app.width), Math.round(app.height) - 60).data;
+    let n = 0;
+    for (let i = 0; i < px.length; i += 4) if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) n++;
+    return n;
+  })()`;
+
+  await withDriver(async (d) => {
+    await d.evaluate(`${V}.player.seek(0)`); // deterministic frame-0 positions
+    await sleep(400);
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const snap = async (tag: string): Promise<string> => {
+      await d.evaluate(`(async () => { for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r)); })()`);
+      return d.captureB64(`${REPORT}/S58_${tag}.png`);
+    };
+    const redAt = async (tag: string): Promise<number> =>
+      d.evaluate<number>(redCountJs(await snap(tag)));
+    await d.evaluate(`void (window.__lines = [],
+      window.addEventListener('message', (e) => {
+        if (e.data?.type === 'commandResult' && e.data.id === -1) window.__lines.push(e.data);
+      }))`);
+
+    // isolate: points/traces transparent, covalent tubes collapsed — only the
+    // produced pass can put edge pixels on screen from here on
+    await cmd("pointopacity all 0");
+    await cmd("traceopacity all 0");
+    await cmd("bondsize all 0");
+    // the five COVALENT edge buffers + header count — the isolation baseline
+    const COVALENT = `["edgeColorA","edgeColorB","edgeSize","edgeOpacity","edgeDash"]`;
+    await d.evaluate(
+      `void (window.__cov = ${COVALENT}.map(k => Float32Array.from(${V}.rep.state[k])))`);
+    const covalentIntact = () => d.evaluate<boolean>(`(()=>{
+      return ${COVALENT}.every((k, i) => {
+        const c = ${V}.rep.state[k], s = window.__cov[i];
+        if (c.length !== s.length) return false;
+        for (let j = 0; j < c.length; j++) if (c[j] !== s[j]) return false;
+        return true;
+      });
+    })()`);
+    const hdrEdges = await d.evaluate<number>(`${V}.edges.length`);
+    check("S58: (control) nothing produced yet — zero capacity host-side, zero instances drawn",
+      await d.evaluate<boolean>(
+        `${V}.produced.capacity() === 0 && ${V}.produced.pass.instanceCount() === 0`));
+    const red0 = await redAt("before");
+    check("S58: (control) no red pixels before anything is authored", red0 === 0, `red=${red0}`);
+
+    // -- (a) author through the REAL mod round-trip (# edge-group: gA) ---------
+    await d.evaluate(`window.postMessage({ type: "modsLoaded", mods: [{
+      name: "mkpairs", kind: "analysis", produces: "edges", origin: "workspace",
+      edgeGroup: "gA", code: ${JSON.stringify(MOD_CODE)}
+    }] }, "*")`);
+    await sleep(200);
+    const run = await cmd("mkpairs all");
+    check("S58: the edges mod acknowledges", run.status === "ok", JSON.stringify(run));
+    await d.waitFor(`window.__lines.some(l => /authored 8 edges .* as group "gA"/.test(l.message))`, 20000)
+      .catch(() => { /* timeout → the checks below go red */ });
+    check("S58: the group registered with exactly the mod's pairs at ids [0, 8)",
+      await d.evaluate<boolean>(`(()=>{
+        const v = ${V};
+        const g = v.produced.groups().find(g => g.name === "gA");
+        if (!g || !g.active || g.baseId !== 0 || g.count !== 8) return false;
+        const pairs = v.produced.layer.pairs();
+        return ${JSON.stringify(GA_PAIRS)}.every(([a, b], i) => pairs[i*2] === a && pairs[i*2+1] === b);
+      })()`));
+    check("S58: instanceCount === the active span", await d.evaluate<boolean>(
+      `${V}.produced.pass.instanceCount() === 8 && ${V}.produced.activeSpan() === 8`));
+    check("S58: ISOLATION — header.edges and all five covalent edge buffers byte-identical",
+      (await d.evaluate<number>(`${V}.edges.length`)) === hdrEdges && (await covalentIntact()));
+    // style the group through the writer family; the default look is the
+    // covalent default (bluish) — red is unambiguous against it
+    await d.evaluate(`(()=>{
+      const ids = ${V}.produced.groupIds("gA");
+      ${V}.produced.writers.colorEdges(ids, [1, 0, 0]);
+      ${V}.produced.writers.sizeEdges(ids, 6);
+    })()`);
+    await sleep(300);
+    const redA = await redAt("authored");
+    check("S58: the authored group DRAWS as tubes where none were", redA > 40, `red=${redA}`);
+    check("S58: ...still nothing covalent moved (the writers bypass rep entirely)",
+      await covalentIntact());
+
+    // -- (b) the capacity-crossing guard --------------------------------------
+    const capBefore = await d.evaluate<number>(`${V}.produced.pass.gpuCapacity()`);
+    // author PAST the GPU capacity in one declaration (the test-seam declare
+    // is the REAL declareProducedEdges — op recorded, redo dropped on re-run)
+    const GB_COUNT = capBefore * 2;
+    await d.evaluate(`(()=>{
+      const pairs = Array.from({ length: ${GB_COUNT} }, (_, i) => [1000 + (i % 500), 4000 + (i % 900)]);
+      ${V}.produced.declare("gB", pairs);
+    })()`);
+    const capAfter = await d.evaluate<number>(`${V}.produced.pass.gpuCapacity()`);
+    check("S58: authoring past the initial capacity REALLOCATES (geometric grow)",
+      capAfter > capBefore && capAfter >= 8 + GB_COUNT,
+      `gpu ${capBefore} → ${capAfter} (need ≥ ${8 + GB_COUNT})`);
+    check("S58: host and GPU capacities stay in lockstep (one capacity truth)",
+      await d.evaluate<boolean>(`${V}.produced.capacity() === ${V}.produced.pass.gpuCapacity()`));
+    check("S58: instanceCount covers both groups", await d.evaluate<boolean>(
+      `${V}.produced.pass.instanceCount() === ${8 + GB_COUNT}`));
+    check("S58: every PRE-GROW slot survived the reallocation verbatim (GPU attributes)",
+      await d.evaluate<boolean>(`(()=>{
+        const v = ${V};
+        const c = v.produced.pass.attrArray("iColorA");
+        const r = v.produced.pass.attrArray("iRadius");
+        for (let id = 0; id < 8; id++) {
+          if (c[id*4] !== 1 || c[id*4+1] !== 0 || c[id*4+2] !== 0 || r[id] !== 6) return false;
+        }
+        return true;
+      })()`));
+    await sleep(300);
+    const redB = await redAt("crossed");
+    check("S58: ...and the pre-grow group still DRAWS after the grow", redB > 40, `red=${redB}`);
+
+    // -- (c) the writer-staleness guard: a LOW id written AFTER the grow -------
+    await d.evaluate(`${V}.produced.writers.colorEdges([0], [0, 1, 0])`);
+    check("S58: a low-id write after the grow lands in the CURRENT buffers (host + GPU)",
+      await d.evaluate<boolean>(`(()=>{
+        const v = ${V};
+        const host = v.produced.layer.colorA();
+        const gpu = v.produced.pass.attrArray("iColorA");
+        return host[0] === 0 && host[1] === 1 && host[2] === 0 &&
+               gpu[0] === 0 && gpu[1] === 1 && gpu[2] === 0 &&
+               host[4] === 1 && gpu[4] === 1; // its neighbor kept red
+      })()`));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S58: ...and its UNDO restores through the getter too (red is back, post-grow)",
+      await d.evaluate<boolean>(`(()=>{
+        const v = ${V};
+        const host = v.produced.layer.colorA();
+        const gpu = v.produced.pass.attrArray("iColorA");
+        return host[0] === 1 && host[1] === 0 && gpu[0] === 1 && gpu[1] === 0;
+      })()`));
+
+    // -- (d) a declaration is ONE undo op: undo deactivates, redo reactivates --
+    const depth0 = await d.evaluate<number>(`${V}.model.undoDepth`);
+    await d.evaluate(`${V}.produced.declare("gC", [[10, 3010], [11, 3011]])`);
+    const spanC = 8 + GB_COUNT + 2;
+    check("S58: a new declaration pushes exactly ONE op and extends the span",
+      (await d.evaluate<number>(`${V}.model.undoDepth`)) === depth0 + 1 &&
+      (await d.evaluate<number>(`${V}.produced.pass.instanceCount()`)) === spanC);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S58: undo DEACTIVATES the group (ids keep their slots; the span recomputes)",
+      await d.evaluate<boolean>(`(()=>{
+        const v = ${V};
+        const g = v.produced.groups().find(g => g.name === "gC");
+        return !!g && !g.active && g.count === 2 &&
+          v.produced.pass.instanceCount() === ${8 + GB_COUNT};
+      })()`));
+    await d.evaluate(`${V}.model.redo()`);
+    await sleep(120);
+    check("S58: redo REACTIVATES it (same ids, same span)",
+      await d.evaluate<boolean>(`(()=>{
+        const v = ${V};
+        const g = v.produced.groups().find(g => g.name === "gC");
+        return !!g && g.active && v.produced.pass.instanceCount() === ${spanC};
+      })()`));
+
+    // -- (e) a RE-declaration drops the walked-back redo future ----------------
+    await d.ctrlZ(); // walk gC's declaration back again → it sits in redo
+    await sleep(120);
+    check("S58: (arrange) the declaration op is in the redo future",
+      await d.evaluate<boolean>(`${V}.model.canRedo`));
+    await d.evaluate(`${V}.produced.declare("gC", [[12, 3012], [13, 3013], [14, 3014]])`);
+    check("S58: re-declaring the group DROPS redo, with the produced-edge reason",
+      await d.evaluate<boolean>(`(()=>{
+        const v = ${V};
+        return !v.model.canRedo && /edge group "gC" was re-declared/.test(v.model.redoBlockedReason ?? "");
+      })()`));
+    check("S58: ...the re-declared group appended at FRESH ids (count changed → old span retired)",
+      await d.evaluate<boolean>(`(()=>{
+        const v = ${V};
+        const g = v.produced.groups().find(g => g.name === "gC");
+        return !!g && g.active && g.count === 3 && g.baseId === ${8 + GB_COUNT + 2} &&
+          v.produced.pass.instanceCount() === ${8 + GB_COUNT + 2 + 3};
+      })()`));
+
+    // -- (f) the non-selectable-domain guard -----------------------------------
+    // setActive on the "edge" domain (`shape bonds …` — the verb's domain
+    // token) enables/disables ONLY that domain's passes — the produced pass
+    // lives on its own "produced-edge" domain and must keep drawing. (One
+    // edge shape exists today, so the swap is a re-set — it still walks the
+    // exact code path that would disable a same-domain pass.)
+    const sh = await cmd("shape bonds tube");
+    check("S58: `shape bonds tube` is accepted", sh.status === "ok", JSON.stringify(sh));
+    await sleep(300);
+    const redF = await redAt("after_shape");
+    check("S58: ...and the produced pass keeps drawing (non-selectable domain)",
+      redF > 40, `red=${redF}`);
+    check("S58: FINAL isolation sweep — covalent buffers still byte-identical",
+      await covalentIntact());
+  });
+
+  // -- Part 2: the ENTIRE S16 covalent matrix, replayed with a produced group --
+  await S16body(true);
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -9750,6 +10080,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
   S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
+  S58: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {
