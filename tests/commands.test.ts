@@ -2635,6 +2635,21 @@ test("completeCommand: target slots still complete through the dispatcher (regre
   } finally { done(); }
 });
 
+test("completeCommand: a #e chunk completes the value slot for EDGE verbs only", () => {
+  const { comp, done } = makeCompletionFixture();
+  try {
+    // colorbonds accepts #e at runtime → the color slot after it completes
+    const edge = comp("colorbonds #e0 re");
+    assert.ok(edge.candidates.includes("red"), JSON.stringify(edge));
+    // colorpoints REFUSES #e at runtime → its value slot after a #e chunk is
+    // inert (no candidates offered for a command that cannot run)
+    assert.deepEqual(comp("colorpoints #e0 re").candidates, []);
+    // a point target still completes colorpoints' value slot (the gate is
+    // scoped to the #e chunk, not the verb's completion generally)
+    assert.ok(comp("colorpoints c0 re").candidates.includes("red"));
+  } finally { done(); }
+});
+
 test("completeCommand: ?param NAMES — pool, prefix extension, unique appends '='", () => {
   const { comp, done } = makeCompletionFixture();
   try {

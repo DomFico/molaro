@@ -3103,13 +3103,17 @@ function argPosition(argsHead: string): {
 function targetChunkCount(
   argsHead: string,
   prior: readonly { start: number; end: number }[],
+  allowEdgeIndex = false,
 ): number {
   for (let k = prior.length; k >= 1; k--) {
-    // A prefix is a completed target if it parses as a point target OR is a
-    // well-formed `#e` edge-index expression — so a value slot after a `#e`
-    // target completes exactly as it does after `#N` (`#e` completes like `#N`).
+    // A prefix is a completed target if it parses as a point target — or, for
+    // the EDGE-verb family only (allowEdgeIndex), if it is a well-formed `#e`
+    // edge-index expression, so a value slot after a `#e` target completes
+    // exactly as it does after `#N`. Gated because only the edge verbs accept
+    // `#e` at runtime — `colorpoints #e0` errors, so offering its value slot
+    // would complete a command that cannot run.
     const chunk = argsHead.slice(prior[0].start, prior[k - 1].end);
-    if (parseTarget(chunk).kind !== "error" || isEdgeIndexExpr(chunk)) return k;
+    if (parseTarget(chunk).kind !== "error" || (allowEdgeIndex && isEdgeIndexExpr(chunk))) return k;
   }
   return 0;
 }
@@ -3134,6 +3138,9 @@ function completeSlotsAfterTarget(
   argsHead: string,
   targetSlot: () => Completion,
   slots: readonly WordSlot[],
+  // true only for the EDGE-verb family: a `#e` chunk counts as a completed
+  // target there (and only there — see targetChunkCount's gate).
+  allowEdgeIndex = false,
 ): Completion {
   const { prior, token, tokenStart } = argPosition(argsHead);
   const none: Completion = { start: argsStart + tokenStart, candidates: [], applied: "" };
@@ -3141,7 +3148,7 @@ function completeSlotsAfterTarget(
   if (prior.length === 0 || token.startsWith("+")) return targetSlot();
   const priorText = argsHead.slice(prior[0].start, prior[prior.length - 1].end);
   if (priorText.trimEnd().endsWith("+")) return targetSlot();
-  const k = targetChunkCount(argsHead, prior);
+  const k = targetChunkCount(argsHead, prior, allowEdgeIndex);
   if (k === 0) return none;
   const slot = slots[prior.length - k];
   if (slot === undefined) return none;
@@ -3325,14 +3332,17 @@ export function completeCommand(
     case "remove":
       return completeSecondArgTarget(ctx, argsStart, argsHead, targetSlot);
     case "colorpoints":
-    case "colorbonds":
-    case "colorbondsof":
     case "colortrace":
       return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [colorSlot()]);
+    case "colorbonds":
+    case "colorbondsof":
+      // edge verbs: a `#e` edge-index chunk is a completed target too
+      return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [colorSlot()], true);
     case "stylepoints":
-    case "stylebonds":
     case "styletrace":
       return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [styleSlot(ctx)]);
+    case "stylebonds":
+      return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [styleSlot(ctx)], true);
     case "shape":
       return completeShapeSlots(ctx, argsStart, argsHead);
     case "background":
