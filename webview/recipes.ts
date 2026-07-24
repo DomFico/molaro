@@ -53,14 +53,17 @@ export type ModAxis = (typeof MOD_AXES)[number];
 
 /** THE single source of truth for a mod parameter's scalar type. This is the
  * ONLY enumerated thing a parameter schema carries — a param's name and default
- * are per-mod DATA, not an enumerated set. Kept closed and small (three scalars,
- * nothing speculative) exactly like MOD_PRODUCES / MOD_AXES, and guarded the same
- * way (tests/recipes.test.ts). Every surface derives from this: the header parser
- * validates against it; the header IS the schema's single source. The wire and
- * the producer carry VALUES, not the type set — so it is a one-language enum, not
- * a cross-language twin (the producer never authors a parameter declaration, it
- * only consumes already-typed values). See reports/MOD_PARAMS_PHASE0.md. */
-export const MOD_PARAM_TYPES = ["number", "string", "boolean"] as const;
+ * are per-mod DATA, not an enumerated set. Kept closed and small (three scalars
+ * plus `color` — a string-VALUED token, coerced to a string like `string`, whose
+ * value slot completes CSS color names; nothing speculative) exactly like
+ * MOD_PRODUCES / MOD_AXES, and guarded the same way (tests/recipes.test.ts).
+ * Every surface derives from this: the header parser validates against it; the
+ * header IS the schema's single source. The wire and the producer carry VALUES,
+ * not the type set — so it is a one-language enum, not a cross-language twin (the
+ * producer never authors a parameter declaration, it only consumes already-typed
+ * values, and a `color` arrives as its plain string token). See
+ * reports/MOD_PARAMS_PHASE0.md. */
+export const MOD_PARAM_TYPES = ["number", "string", "boolean", "color"] as const;
 export type ModParamType = (typeof MOD_PARAM_TYPES)[number];
 
 /** A parameter value once coerced to its declared type. */
@@ -370,12 +373,26 @@ function coerceValue(
     if (raw === "false") return { ok: true, value: false };
     return { ok: false, reason: `expects true or false, got "${String(raw)}"` };
   }
-  if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean") {
-    const s = String(raw);
-    if (s.includes('"')) return { ok: false, reason: `cannot contain a double-quote, got "${s}"` };
-    return { ok: true, value: s };
+  // `string` and `color` both coerce to a STRING — a color value IS a color
+  // token (a CSS name like `lightgreen`, or a hex like `#ff8800`). A color is
+  // deliberately NOT color-validated here: the only color parser (parseColor)
+  // lives in commands.ts, which imports THIS module, so importing it back would
+  // introduce a circular import. Coerce-as-string and let the command/mod path
+  // validate the color downstream. The `"` refusal is uniform (see above).
+  if (type === "string" || type === "color") {
+    if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean") {
+      const s = String(raw);
+      if (s.includes('"')) return { ok: false, reason: `cannot contain a double-quote, got "${s}"` };
+      return { ok: true, value: s };
+    }
+    return { ok: false, reason: `expects a ${type}, got "${String(raw)}"` };
   }
-  return { ok: false, reason: `expects a string, got "${String(raw)}"` };
+  // Exhaustiveness (compile-time): MOD_PARAM_TYPES is a closed set; after
+  // number/boolean/string/color, `type` narrows to `never`. A new member added
+  // to MOD_PARAM_TYPES without a coercion branch here fails to compile — the
+  // two-lists-must-agree guard, enforced by the type system, not just a test.
+  const _exhaustive: never = type;
+  return { ok: false, reason: `unknown parameter type "${String(_exhaustive)}"` };
 }
 
 const PARAM_NAME_RE = /^[a-z][a-z0-9_-]*$/;

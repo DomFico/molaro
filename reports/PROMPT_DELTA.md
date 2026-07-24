@@ -17,6 +17,28 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
 
 ## Since the last prompt pass
 
+### New mod-param type `color` — declare `# param: <name> color <default>` (incr 52)
+> **STATUS: PENDING** — new authoring surface; a next-attended-pass decision whether to teach
+> it. NOT a blind spot: `write_mod`'s `type` enum is single-sourced from `MOD_PARAM_TYPES`, so
+> the assistant CAN already emit `type: "color"` and the schema accepts it — this entry is about
+> preferring it over `string`.
+- **What changed:** `MOD_PARAM_TYPES` gained a fourth member, `color`, alongside
+  `number`/`string`/`boolean`. A `color` param's VALUE coerces to a plain string token (a CSS
+  color name like `lightgreen`, or a hex like `#ff8800`) — same runtime type as `string`, so
+  nothing downstream changes — but its `?<name>=` slot now tab-completes CSS color NAMES from the
+  exact same pool the `colorpoints`/`background` color argument uses (hex stays open input).
+- **Teach:** when authoring a mod whose parameter IS a color, declare it `color`, NOT `string`.
+  The only behavioral difference is completion (and a future validation hook) — the value the
+  producer receives is the identical string either way, so it is a safe, always-better default
+  for color-shaped parameters. Example: `# param: tint color steelblue`.
+- **Not validated at coerce (by design):** a `color` value is NOT color-parsed at coercion time
+  (the color parser lives in `commands.ts`, which imports the mod module — validating there would
+  be a circular import); the command/mod path validates it downstream. So an unrecognized color
+  token still reaches the producer as a string; a mod that maps color names should fall back
+  gracefully (mirrors Rule #5's derive-vocabulary-at-run-time posture).
+- **Point at:** `MOD_PARAM_TYPES` (webview/recipes.ts) + the color slot pool (`colorSlot`,
+  webview/commands.ts).
+
 ### Edge appearance surface grew: bicolor + dashed edges (incr 51)
 > **STATUS: PENDING** — new user-facing surface; a next-attended-pass decision whether to teach
 > it. NOT a blind spot: the prompt teaches grammar-by-shape + examples and get_context reports

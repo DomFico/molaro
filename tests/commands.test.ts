@@ -2643,6 +2643,53 @@ test("completeCommand: ?param VALUES — boolean enumerates, number/string are n
   } finally { done(); }
 });
 
+test("completeCommand: ?param VALUES — a color param completes CSS names, exactly like the color slot", () => {
+  // a mod with a color parameter, installed under its own verb (NOT the shared
+  // fixture, whose NAME assertions would shift). Its ?c= value slot must reuse
+  // the color-argument slot's pool + settle path verbatim.
+  const fx = makeRegistry();
+  const mod: AnalysisMod = {
+    name: "tintmod", kind: "analysis", produces: "commands", origin: "workspace",
+    params: [
+      { name: "c", type: "color", default: "green" },
+      { name: "on", type: "boolean", default: false }, // a boolean sibling — no regression
+    ],
+    code: "def compute(data, target_indices, params):\n    return []",
+  };
+  registerRecipe(mod);
+  fx.registry.register("tintmod", makeAnalysisModHandler(fx.ctx, mod), "test mod");
+  const comp = (text: string, cursor = text.length) => completeCommand(fx.ctx, fx.registry, text, cursor);
+  try {
+    // ?c=li → the "li" CSS names, sorted, kind "value" — the SAME candidates the
+    // colorpoints/background color slot yields for "li" (single-sourced pool).
+    const liCandidates = [
+      "lightblue", "lightcoral", "lightcyan", "lightgoldenrodyellow", "lightgray",
+      "lightgreen", "lightgrey", "lightpink", "lightsalmon", "lightseagreen",
+      "lightskyblue", "lightslategray", "lightslategrey", "lightsteelblue",
+      "lightyellow", "lime", "limegreen", "linen",
+    ];
+    assert.deepEqual(comp("tintmod c0 ?c=li"),
+      { start: 14, candidates: liCandidates, applied: "", kind: "value" });
+    // includes lightgreen and lime, as expected
+    assert.ok(liCandidates.includes("lightgreen") && liCandidates.includes("lime"));
+    // the color-param pool IS the color-argument slot's pool (proves single-source)
+    assert.deepEqual(comp("tintmod c0 ?c=li").candidates, comp("colorpoints c0 li").candidates);
+    // a unique prefix extends + no separator (a color slot appends nothing)
+    assert.deepEqual(comp("tintmod c0 ?c=ste"),
+      { start: 14, candidates: ["steelblue"], applied: "elblue", kind: "value" });
+    // empty value → the FULL color pool, capped exactly like the color slot
+    const all = comp("tintmod c0 ?c=");
+    assert.match(all.candidates[0], /^\d+ matches$/);
+    assert.equal(all.candidates[1], "— type to narrow");
+    assert.deepEqual(all.candidates, comp("colorpoints c0 ").candidates);
+    // a hex token stays open input — a no-op, exactly like the color slot
+    assert.deepEqual(comp("tintmod c0 ?c=#ff").candidates, []);
+    // no regression: the boolean sibling still completes true/false
+    assert.deepEqual(comp("tintmod c0 ?on="),
+      { start: 15, candidates: ["false", "true"], applied: "", kind: "value" });
+  } finally { unregisterRecipe("tintmod"); }
+});
+
 test("completeCommand: total on junk — unbalanced quotes and malformed params, never a throw", () => {
   const { comp, done } = makeCompletionFixture();
   try {

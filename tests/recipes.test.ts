@@ -342,8 +342,8 @@ test("a commands mod round-trips through serialize → parse (the write_mod file
 
 // -- P-1: parameters — MOD_PARAM_TYPES single source, parse, resolve, round-trip --
 
-test("MOD_PARAM_TYPES is exactly the three scalar types, and parseParamLine validates against it", () => {
-  assert.deepEqual([...MOD_PARAM_TYPES].sort(), ["boolean", "number", "string"].sort());
+test("MOD_PARAM_TYPES is exactly the scalar types plus color, and parseParamLine validates against it", () => {
+  assert.deepEqual([...MOD_PARAM_TYPES].sort(), ["boolean", "color", "number", "string"].sort());
   for (const t of MOD_PARAM_TYPES) {
     const r = parseParamLine(`p ${t}`);
     assert.ok(r.ok, `type ${t} must parse${r.ok ? "" : " — " + r.error}`);
@@ -353,6 +353,38 @@ test("MOD_PARAM_TYPES is exactly the three scalar types, and parseParamLine vali
   const bad = parseParamLine("p complex");
   assert.ok(!bad.ok);
   if (!bad.ok) for (const t of MOD_PARAM_TYPES) assert.ok(bad.error.includes(t), `error should list ${t}`);
+});
+
+test("color param type: coerces its token to a string (a color IS a token), a default round-trips", () => {
+  // a `color` value coerces to a STRING — a CSS name or hex both survive as their
+  // plain token (NOT color-validated at coerce: parseColor lives in commands.ts
+  // and importing it into recipes.ts would be a circular import; the command/mod
+  // path validates downstream). resolveParameters is the coerce entrance.
+  const schema: ModParam[] = [{ name: "c", type: "color", default: "green" }];
+  // string input (terminal path): a CSS name and a hex both pass through as-is
+  assert.deepEqual(resolveParameters(schema, new Map<string, unknown>([["c", "lightgreen"]])),
+    { ok: true, values: { c: "lightgreen" } });
+  assert.deepEqual(resolveParameters(schema, new Map<string, unknown>([["c", "#ff8800"]])),
+    { ok: true, values: { c: "#ff8800" } });
+  // an unrecognized token still coerces (validation is downstream, not here)
+  assert.deepEqual(resolveParameters(schema, new Map<string, unknown>([["c", "notacolor"]])),
+    { ok: true, values: { c: "notacolor" } });
+  // default fills when nothing is passed
+  assert.deepEqual(resolveParameters(schema, new Map()), { ok: true, values: { c: "green" } });
+  // the `"` refusal is uniform across string-valued types (it can't round-trip)
+  assert.match((resolveParameters(schema, new Map<string, unknown>([["c", 'a"b']])) as { error: string }).error,
+    /cannot contain a double-quote/);
+  // a color default parses/round-trips through the header format
+  assert.deepEqual(parseParamLine("tint color steelblue"),
+    { ok: true, param: { name: "tint", type: "color", default: "steelblue" } });
+  const mod: AnalysisMod = {
+    name: "tinted", kind: "analysis", produces: "per-frame-series", origin: "workspace",
+    params: [{ name: "tint", type: "color", default: "steelblue" }],
+    code: "def compute(data, target_indices, params):\n    return [1.0]",
+  };
+  const back = parseModFile(serializeMod(mod), "workspace");
+  assert.ok(back.ok, back.ok ? "" : back.error);
+  if (back.ok) assert.deepEqual(back.mod, mod);
 });
 
 test("parseParamLine: name/type/default, required vs optional, malformed, default coercion", () => {

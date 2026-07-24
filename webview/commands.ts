@@ -2963,12 +2963,19 @@ function completeModInvocation(
     const pool = declared.map((p) => p.name).filter((n) => !used.has(n));
     return completeToken(segStart + lead, token, pool, { uniqueSuffix: "=", kind: "param" });
   }
-  // VALUE slot: enumerable only for a boolean parameter
+  // VALUE slot: enumerable for a boolean (true/false) or a `color` (CSS color
+  // NAMES — the SAME pool + settle path the colorpoints/background color slot
+  // uses, single-sourced via colorSlot(); hex stays open input, exactly like
+  // that slot). number/string values are unenumerable (empty, never a guess).
   const param = declared.find((p) => p.name === seg.slice(0, eq).trim());
-  if (!param || param.type !== "boolean") return none;
+  if (!param) return none;
+  let pool: string[];
+  if (param.type === "boolean") pool = ["true", "false"];
+  else if (param.type === "color") pool = colorSlot().pool();
+  else return none; // number / string — no enumerable value vocabulary
   const value = seg.slice(eq + 1);
   const lead = value.length - value.trimStart().length;
-  return completeToken(segStart + eq + 1 + lead, value.slice(lead), ["true", "false"], {
+  return completeToken(segStart + eq + 1 + lead, value.slice(lead), pool, {
     kind: "value",
   });
 }
