@@ -800,6 +800,32 @@ test("quoted completion: the bare (unquoted) list still shows quotable labels qu
   assert.ok(compSpan("view lone.solo.").candidates.includes('"s C"'));
 });
 
+test("quoted completion: a manually-CLOSED PARTIAL quote settles INERT — never a tail outside the quote", () => {
+  // `"s"` closes the quote on a PREFIX of "s C" — the apply model is
+  // append-at-cursor, so ANY continuation would land AFTER the closing quote
+  // (`"s" C` = malformed). Inert, with the quoted candidate as the hint.
+  assert.deepEqual(compSpan('view lone.solo."s"'),
+    { start: 16, candidates: ['"s C"'], applied: "" });
+  // CLOSED-EXACT still descends (unchanged): `"s C"` → "."
+  assert.deepEqual(compSpan('view lone.solo."s C"'),
+    { start: 16, candidates: ["p4"], applied: "." });
+});
+
+test("quoted completion: a BARE unique space-label settles INERT (the opening quote can't be inserted)", () => {
+  // bare `s` uniquely matches "s C", but a raw ` C` tail would apply
+  // UNQUOTED (`lone.solo.s C` = parse error) — the opening quote cannot be
+  // inserted before typed text, so the settle is inert; the quoted DISPLAY
+  // is the hint to retype with the quote.
+  assert.deepEqual(compSpan("view lone.solo.s"),
+    { start: 15, candidates: ['"s C"'], applied: "" });
+  // bare NON-space unique completions still apply their raw tail
+  assert.deepEqual(comp("view a"), { start: 5, candidates: ["alpha"], applied: "lpha" });
+  assert.deepEqual(comp("view alpha.g-2."), { start: 15, candidates: ["s1"], applied: "s1" });
+  // and the OPEN path still applies tail + closing quote (unchanged)
+  assert.equal(compSpan('view lone.solo."s').applied, ' C"');
+  assert.equal(comp('view @"my').applied, ' picks"');
+});
+
 test("completeToken slots are NEVER quoted (label-only display transform)", () => {
   // param/axis/channel/style/value vocabularies flow through completeToken,
   // which passes no display transform — a value with a space stays RAW

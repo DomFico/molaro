@@ -756,6 +756,19 @@ export function completeTargetExpr(
   const closer = quoteState === "open" ? '"' : "";
   const none: Completion = { start: ts, candidates: [], applied: "" };
 
+  // The ONE label-settle wrapper over `finish` for the label call sites.
+  // APPEND-ONLY-APPLY GUARD: the terminal inserts `applied` at the cursor and
+  // can never rewrite what is already typed — so once a quote is CLOSED, any
+  // continuation would land OUTSIDE it (`"s" C` — malformed). A CLOSED
+  // partial therefore settles INERT (`applied:""`), keeping the (quoted)
+  // candidate list as the hint; the exact-descend paths return before this.
+  // (`finish` itself holds the NONE-state twin of this guard: a unique
+  // candidate that NEEDS quoting never auto-applies a raw tail.)
+  const settleLabel = (pool: Iterable<string>): Completion => {
+    const done = finish(ts, token, pool, closer, quoteLabel);
+    return quoteState === "closed" ? { ...done, applied: "" } : done;
+  };
+
   // pattern-in-progress → completion opts out (globs, numeric ranges, junk),
   // and "#" indices are an unbounded integer space — nothing to enumerate.
   // Inside a quote these chars are LITERAL content, so the opt-out is scoped
@@ -789,7 +802,7 @@ export function completeTargetExpr(
       const next = [...new Set(selectionPool(token) ?? [])].sort();
       return { ...capped(ts, next.map(quoteLabel), closer + ".", closer + "."), kind: "filter" };
     }
-    return finish(ts, token, [...committedNames.keys(), "all"], closer, quoteLabel);
+    return settleLabel([...committedNames.keys(), "all"]);
   }
 
   // current term = after the last "+" (or the whole expression prefix); the
@@ -811,7 +824,7 @@ export function completeTargetExpr(
     if (selName === null) return none; // a second level, or junk
     const pool = selectionPool(selName);
     if (pool === null) return none;
-    return { ...finish(ts, token, pool, closer, quoteLabel), kind: "filter" };
+    return { ...settleLabel(pool), kind: "filter" };
   }
 
   // reject a term prefix that is not a completable path: an "@" or whitespace
@@ -851,7 +864,7 @@ export function completeTargetExpr(
       const next = [...new Set(descend())].filter((c) => c !== "").sort();
       return capped(ts, next.map(quoteLabel), closer + ".", closer + ".");
     }
-    return finish(ts, token, pool, closer, quoteLabel); // settle the token (+ close quote if open)
+    return settleLabel(pool); // settle the token (+ close quote if open; inert if closed)
   };
 
   if (k === 0) {
@@ -960,7 +973,20 @@ function finish(
   const raw = [...new Set(pool)].filter((c) => c.startsWith(token)).sort();
   if (raw.length === 0) return { start, candidates: [], applied: "" };
   if (raw.length === 1) {
-    return { start, candidates: [display(raw[0])], applied: raw[0].slice(token.length) + uniqueSuffix };
+    // APPEND-ONLY-APPLY GUARD (the NONE-state twin of settleLabel's closed
+    // rule): a unique candidate that NEEDS quoting (display ≠ raw) must not
+    // auto-apply its raw tail unless the cursor already sits inside an open
+    // quote — the label sites pass the closing `"` as uniqueSuffix there.
+    // The terminal can never insert the OPENING quote before typed text, so
+    // a bare raw tail would land unquoted and build a broken target. Settle
+    // INERT instead; the quoted DISPLAY stays as the hint. Non-label slots
+    // use the identity display, so they are never withheld.
+    const inert = uniqueSuffix === "" && display(raw[0]) !== raw[0];
+    return {
+      start,
+      candidates: [display(raw[0])],
+      applied: inert ? "" : raw[0].slice(token.length) + uniqueSuffix,
+    };
   }
   let common = raw[0];
   for (const c of raw) {
