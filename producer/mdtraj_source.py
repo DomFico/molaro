@@ -90,22 +90,27 @@ _STREAMABLE_EXTS = {".dcd", ".xtc", ".trr", ".nc", ".ncdf", ".netcdf"}
 SCAN_CHUNK_FRAMES = 64
 
 # Backbone-trace gap break. A backbone trace polyline must NOT bridge a real
-# chain discontinuity (unmodelled/missing residues): drawing one straight
-# segment across the gap implies a continuity that does not exist. The primary,
-# frame-independent signal for missing residues is a resSeq NUMBERING jump
-# (residue i+1's resSeq > residue i's resSeq + 1); the distance below is the
-# spatial GUARD that both confirms the numbering gap is a real break (not a mere
-# renumbering of a physically continuous chain) and, applied to any
-# non-consecutive numbering, catches a same-number-different-position break.
+# chain discontinuity (unmodelled/missing residues): drawing one straight segment
+# across the gap implies a continuity that does not exist. The criterion is a
+# SPATIAL gap — split between consecutive trace anchors whose frame-0 distance
+# exceeds this threshold.
 #
-# The threshold is MEASURED, not the CA-CA-only 0.38 nm intuition: within a
-# chain, consecutive trace-anchor distances span protein CA-CA ~0.29-0.40 nm AND
-# nucleic P-P up to 0.73 nm (backbone anchors differ per polymer), while a real
-# missing-residue gap is >=1.33 nm (corpus + crystal measurement: continuous
-# <=0.73 nm, gaps >=1.33 nm). 1.0 nm sits cleanly in the empty band between them
-# — a naive 0.5 nm would falsely shred continuous nucleic backbones. The break
-# still REQUIRES the resSeq jump, so the distance never even fires on a
-# consecutively-numbered chain however stretched its anchors.
+# Distance ALONE, not a resSeq-numbering test, because a consecutively-numbered
+# file can still hide a real gap: renumbered / MD-prepped structures routinely
+# drop residues without leaving a numbering jump, and that renumbered gap is the
+# exact false-bridge this fix targets — a resSeq-primary rule would miss it.
+# Conversely a resSeq jump with the anchors still bonded (insertion codes,
+# engineered renumbering) is NOT a gap and must not split; distance leaves it
+# intact (adjacent inserted residues sit ~0.38 nm apart).
+#
+# The threshold is MEASURED and physically bounded, not the CA-CA-only 0.38 nm
+# intuition: a continuous backbone anchor step is COVALENTLY bounded — within a
+# chain, consecutive trace-anchor distances span protein CA-CA ~0.29-0.40 nm and
+# nucleic P-P up to 0.73 nm (measured max across all trace-bearing corpus + crystal
+# systems, incl. the 1472-anchor membrane at ~0.39), while a real missing-residue
+# gap is >=1.33 nm (5DZT 1.33-2.11). 1.0 nm sits cleanly in the empty band between
+# the two, protecting nucleic (0.73 < 1.0); a naive 0.5 nm would falsely shred
+# nucleic backbones.
 TRACE_GAP_BREAK_NM = 1.0
 
 # Periodic-image centering ----------------------------------------------------
@@ -1005,18 +1010,16 @@ class MdtrajSource(DataSource):
         with no anchors (CG beads, solvent, ligands) contribute nothing (hard
         cases 6, 8).
 
-        A group's anchor run is split into multiple polylines wherever a gap sits
-        between consecutive residues i and i+1: a resSeq NUMBERING jump
-        (``resSeq[i+1] != resSeq[i] + 1`` — the primary, frame-independent
-        missing-residue signal) that is CORROBORATED by a spatial gap
-        (frame-0 anchor-anchor distance > ``TRACE_GAP_BREAK_NM``). Requiring the
-        resSeq jump means a consecutively-numbered chain is never split however
-        stretched (protecting nucleic P-P ~0.73 nm backbones); requiring the
-        distance means a renumbered-but-physically-continuous chain is not falsely
-        split, while a non-consecutive numbering that IS spatially separated
-        (including a same-number-different-position break) is caught. Each
-        resulting sub-polyline keeps the existing len>=2 rule, so a lone singleton
-        anchor stranded between two gaps (no segment of its own) is dropped."""
+        A group's anchor run is split into multiple polylines wherever a SPATIAL
+        gap sits between consecutive residues i and i+1: their frame-0 anchor-anchor
+        distance exceeds ``TRACE_GAP_BREAK_NM``. Distance alone (not a resSeq test)
+        catches a renumbered/MD-prepped gap that kept consecutive numbering — the
+        exact false-bridge this fix targets — while leaving a consecutively-numbered
+        continuous chain (protein CA-CA / nucleic P-P <=0.73 nm) and a bonded-but-
+        renumbered pair (insertion codes ~0.38 nm) intact, since both stay under the
+        threshold. Each resulting sub-polyline keeps the existing len>=2 rule, so a
+        lone singleton anchor stranded between two gaps (no segment of its own) is
+        dropped."""
         top = self._topology
         xyz0 = self._representative_xyz()
         polylines: List[List[int]] = []
@@ -1027,28 +1030,28 @@ class MdtrajSource(DataSource):
             residues_by_group.setdefault(g, []).append(res)
 
         for g in sorted(residues_by_group):
-            # (resSeq, anchor_index) for every residue in this group that has a
-            # trace anchor, in residue order.
-            run: List[Tuple[int, int]] = []
+            # Trace-anchor global index for every residue in this group that has
+            # one, in residue order.
+            run: List[int] = []
             for res in residues_by_group[g]:
                 names = {a.name: a.index for a in res.atoms}
                 anchor = trace_anchor_indices(
                     names, bool(res.is_protein), bool(res.is_nucleic)
                 )
                 if anchor is not None:
-                    run.append((int(res.resSeq), anchor))
+                    run.append(anchor)
 
-            # Split `run` into segments at each gap between consecutive anchors.
+            # Split `run` into segments at each spatial gap between consecutive
+            # anchors.
             segment: List[int] = []
-            for k, (rseq, anchor) in enumerate(run):
+            for k, anchor in enumerate(run):
                 if k > 0:
-                    prev_rseq, prev_anchor = run[k - 1]
-                    resseq_jump = rseq != prev_rseq + 1
+                    prev_anchor = run[k - 1]
                     spatial_gap = (
                         float(np.linalg.norm(xyz0[anchor] - xyz0[prev_anchor]))
                         > TRACE_GAP_BREAK_NM
                     )
-                    if resseq_jump and spatial_gap:
+                    if spatial_gap:
                         if len(segment) >= 2:  # drop a lone stranded singleton
                             polylines.append(segment)
                         segment = []
