@@ -89,6 +89,25 @@ _STREAMABLE_EXTS = {".dcd", ".xtc", ".trr", ".nc", ".ncdf", ".netcdf"}
 # Frames read per chunk during the one-pass startup sweep (≤1 chunk resident).
 SCAN_CHUNK_FRAMES = 64
 
+# Backbone-trace gap break. A backbone trace polyline must NOT bridge a real
+# chain discontinuity (unmodelled/missing residues): drawing one straight
+# segment across the gap implies a continuity that does not exist. The primary,
+# frame-independent signal for missing residues is a resSeq NUMBERING jump
+# (residue i+1's resSeq > residue i's resSeq + 1); the distance below is the
+# spatial GUARD that both confirms the numbering gap is a real break (not a mere
+# renumbering of a physically continuous chain) and, applied to any
+# non-consecutive numbering, catches a same-number-different-position break.
+#
+# The threshold is MEASURED, not the CA-CA-only 0.38 nm intuition: within a
+# chain, consecutive trace-anchor distances span protein CA-CA ~0.29-0.40 nm AND
+# nucleic P-P up to 0.73 nm (backbone anchors differ per polymer), while a real
+# missing-residue gap is >=1.33 nm (corpus + crystal measurement: continuous
+# <=0.73 nm, gaps >=1.33 nm). 1.0 nm sits cleanly in the empty band between them
+# — a naive 0.5 nm would falsely shred continuous nucleic backbones. The break
+# still REQUIRES the resSeq jump, so the distance never even fires on a
+# consecutively-numbered chain however stretched its anchors.
+TRACE_GAP_BREAK_NM = 1.0
+
 # Periodic-image centering ----------------------------------------------------
 #
 # A solvated trajectory wraps its solute back into the primary box, so the
@@ -966,12 +985,40 @@ class MdtrajSource(DataSource):
         keep = max_len <= PBC_BOND_CUTOFF_NM
         return [(int(i), int(j)) for (i, j), k in zip(pairs, keep) if k]
 
+    def _representative_xyz(self) -> np.ndarray:
+        """Frame-0 coordinates (N, 3), for the STATIC header's polyline gap test.
+
+        Resident serves ``_xyz[0]`` (centered), streaming ``_scan_frame0`` (raw).
+        These differ by centering, but the gap distance test is centering-INVARIANT
+        for a backbone: ``_center_on_solute`` translates the whole solute (which
+        holds every protein/nucleic backbone anchor) rigidly and only re-images the
+        loose non-anchor groups, so every intra-chain anchor-anchor distance — the
+        only distance this test asks for — is identical raw vs centered. Hence the
+        gap decision is stable and not an artefact of wrapping (see the class
+        note and ``_apply_centering``)."""
+        return self._xyz[0] if not self._streaming else self._scan_frame0
+
     def _polylines(self, group_id: Sequence[int]) -> List[List[int]]:
-        """One backbone polyline per group (chain/segment), threading its
-        residues' trace anchors in order. Groups with no anchors (CG beads,
-        solvent, ligands) contribute nothing (hard cases 6, 8)."""
+        """Backbone polylines per group (chain/segment), threading its residues'
+        trace anchors in order — but BROKEN at real chain discontinuities so the
+        trace never draws a false straight line across missing residues. Groups
+        with no anchors (CG beads, solvent, ligands) contribute nothing (hard
+        cases 6, 8).
+
+        A group's anchor run is split into multiple polylines wherever a gap sits
+        between consecutive residues i and i+1: a resSeq NUMBERING jump
+        (``resSeq[i+1] != resSeq[i] + 1`` — the primary, frame-independent
+        missing-residue signal) that is CORROBORATED by a spatial gap
+        (frame-0 anchor-anchor distance > ``TRACE_GAP_BREAK_NM``). Requiring the
+        resSeq jump means a consecutively-numbered chain is never split however
+        stretched (protecting nucleic P-P ~0.73 nm backbones); requiring the
+        distance means a renumbered-but-physically-continuous chain is not falsely
+        split, while a non-consecutive numbering that IS spatially separated
+        (including a same-number-different-position break) is caught. Each
+        resulting sub-polyline keeps the existing len>=2 rule, so a lone singleton
+        anchor stranded between two gaps (no segment of its own) is dropped."""
         top = self._topology
-        # Collect, per residue, atom-name -> global index.
+        xyz0 = self._representative_xyz()
         polylines: List[List[int]] = []
         # Group residues by their group_id (via any atom), preserving order.
         residues_by_group: Dict[int, List] = {}
@@ -980,16 +1027,34 @@ class MdtrajSource(DataSource):
             residues_by_group.setdefault(g, []).append(res)
 
         for g in sorted(residues_by_group):
-            anchors: List[int] = []
+            # (resSeq, anchor_index) for every residue in this group that has a
+            # trace anchor, in residue order.
+            run: List[Tuple[int, int]] = []
             for res in residues_by_group[g]:
                 names = {a.name: a.index for a in res.atoms}
                 anchor = trace_anchor_indices(
                     names, bool(res.is_protein), bool(res.is_nucleic)
                 )
                 if anchor is not None:
-                    anchors.append(anchor)
-            if len(anchors) >= 2:
-                polylines.append(anchors)
+                    run.append((int(res.resSeq), anchor))
+
+            # Split `run` into segments at each gap between consecutive anchors.
+            segment: List[int] = []
+            for k, (rseq, anchor) in enumerate(run):
+                if k > 0:
+                    prev_rseq, prev_anchor = run[k - 1]
+                    resseq_jump = rseq != prev_rseq + 1
+                    spatial_gap = (
+                        float(np.linalg.norm(xyz0[anchor] - xyz0[prev_anchor]))
+                        > TRACE_GAP_BREAK_NM
+                    )
+                    if resseq_jump and spatial_gap:
+                        if len(segment) >= 2:  # drop a lone stranded singleton
+                            polylines.append(segment)
+                        segment = []
+                segment.append(anchor)
+            if len(segment) >= 2:
+                polylines.append(segment)
         return polylines
 
     def _bbox(self) -> BBox:
