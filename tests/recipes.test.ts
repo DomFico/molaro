@@ -165,8 +165,8 @@ test("mod files: every malformed shape is a reported skip, never a throw", () =>
 });
 
 test("validateModValues: the FAIL-CLOSED matrix — any violation binds nothing", () => {
-  const perPoint = { produces: "per-point-scalar" as const, targetCount: 3, frameCount: 150 };
-  const series = { produces: "per-frame-series" as const, targetCount: 3, frameCount: 4 };
+  const perPoint = { produces: "per-point-scalar" as const, targetCount: 3, frameCount: 150, nPoints: 100 };
+  const series = { produces: "per-frame-series" as const, targetCount: 3, frameCount: 4, nPoints: 100 };
   // the good paths
   assert.deepEqual(validateModValues([0, 0.5, 1], perPoint), { ok: true, values: [0, 0.5, 1] });
   assert.deepEqual(validateModValues([9, -2, 0.5, 1e6], series), { ok: true, values: [9, -2, 0.5, 1e6] },
@@ -192,7 +192,7 @@ test("validateModValues: the FAIL-CLOSED matrix — any violation binds nothing"
 });
 
 test("validateModValues: the commands return — a flat list of NON-EMPTY strings", () => {
-  const cmds = { produces: "commands" as const, targetCount: 3, frameCount: 10 };
+  const cmds = { produces: "commands" as const, targetCount: 3, frameCount: 10, nPoints: 100 };
   // good: a list of non-empty command strings
   assert.deepEqual(
     validateModValues(["colorbonds alpha red", "hide beta"], cmds),
@@ -215,7 +215,7 @@ test("validateModValues: the commands return — a flat list of NON-EMPTY string
 });
 
 test("validateModValues: the scatter dict return — good paths and the full fail matrix", () => {
-  const expect = { produces: "scatter" as const, targetCount: 3, frameCount: 10 };
+  const expect = { produces: "scatter" as const, targetCount: 3, frameCount: 10, nPoints: 100 };
   const good = validateModValues(
     { x: [1, 2], y: [3, 4], frames: [0, 9], xLabel: "a", yLabel: "b" }, expect);
   assert.deepEqual(good,
@@ -241,8 +241,67 @@ test("validateModValues: the scatter dict return — good paths and the full fai
   }
   // the flat-list kinds are UNCHANGED by the widening
   assert.ok(!validateModValues({ x: [1], y: [1] },
-    { produces: "per-frame-series", targetCount: 0, frameCount: 1 }).ok,
+    { produces: "per-frame-series", targetCount: 0, frameCount: 1, nPoints: 100 }).ok,
     "a dict is still wrong for a series");
+});
+
+test("validateModValues: the edges return — a list of in-range distinct integer pairs", () => {
+  // nPoints is the authoritative range bound (mirrors the channel arm); the
+  // dataset has 5 points here, so a valid index is 0..4.
+  const expect = { produces: "edges" as const, targetCount: 0, frameCount: 10, nPoints: 5 };
+  // good: a list of [i, j] integer pairs, each in range and non-self-looping
+  assert.deepEqual(validateModValues([[0, 4], [1, 2]], expect),
+    { ok: true, edges: [[0, 4], [1, 2]] });
+  assert.deepEqual(validateModValues([], expect), { ok: true, edges: [] }, "empty list = no new edges");
+  // fail-closed matrix: every violation returns nothing
+  const bad: [unknown, RegExp][] = [
+    ["nope", /must return a list/],                     // not a list
+    [{ 0: [0, 1] }, /must return a list/],              // a dict
+    [42, /must return a list/],
+    [[[0, 1, 2]], /edges\[0\] must be a pair/],         // a triple, not a pair
+    [[[0]], /edges\[0\] must be a pair/],               // a single
+    [[3], /edges\[0\] must be a pair/],                 // a bare number, not a pair
+    [[[0, 1.5]], /edges\[0\] indices must be integers/],// a non-integer index
+    [[[0, "1"]], /edges\[0\] indices must be integers/],// a string index
+    [[[0, true]], /edges\[0\] indices must be integers/],// a boolean index
+    [[[0, 5]], /edges\[0\] index out of range \[0, 5\)/],// out of range (>= nPoints)
+    [[[-1, 0]], /edges\[0\] index out of range \[0, 5\)/],// out of range (< 0)
+    [[[2, 2]], /edges\[0\] is a self-loop \(2 → 2\)/],   // a self-loop
+    [[[0, 1], [3, 3]], /edges\[1\] is a self-loop/],    // self-loop reported at its index
+  ];
+  for (const [values, want] of bad) {
+    const r = validateModValues(values, expect);
+    assert.ok(!r.ok, JSON.stringify(values));
+    if (!r.ok) assert.match(r.error, want, JSON.stringify(values));
+  }
+  // the flat-list kinds are UNCHANGED: a list of pairs is still wrong for a series
+  assert.ok(!validateModValues([[0, 1]],
+    { produces: "per-frame-series", targetCount: 0, frameCount: 1, nPoints: 5 }).ok,
+    "a list of pairs is still wrong for a series");
+});
+
+test("parseModFile: produces edges is accepted (no axis, no channel)", () => {
+  const ok = parseModFile(`${MOD_FILE_MAGIC}
+# name: link
+# kind: analysis
+# produces: edges
+
+def compute(data, target_indices):
+    return [[0, 1]]
+`, "workspace");
+  assert.ok(ok.ok && ok.mod.produces === "edges", JSON.stringify(ok));
+  if (ok.ok) assert.equal(ok.mod.axis, undefined, "an edges mod has no axis");
+  // axis on an edges mod is rejected (axis is per-point-scalar only)
+  const bad = parseModFile(`${MOD_FILE_MAGIC}
+# name: link
+# kind: analysis
+# produces: edges
+# axis: color
+
+def compute(data, target_indices):
+    return [[0, 1]]
+`, "workspace");
+  assert.ok(!bad.ok && /axis is only valid/.test(bad.error), JSON.stringify(bad));
 });
 
 test("parseModFile: produces scatter is accepted; axis on a scatter is rejected", () => {
@@ -308,9 +367,9 @@ test("unregisterRecipe removes a mod from the registry (and only that mod)", () 
 });
 
 // -- Brief #10a: MOD_PRODUCES / MOD_AXES as the single source ------------------
-test("MOD_PRODUCES is exactly the six supported kinds, and parseModFile validates against it", () => {
+test("MOD_PRODUCES is exactly the seven supported kinds, and parseModFile validates against it", () => {
   assert.deepEqual([...MOD_PRODUCES].sort(),
-    ["channel", "commands", "figure", "per-frame-series", "per-point-scalar", "scatter"].sort());
+    ["channel", "commands", "edges", "figure", "per-frame-series", "per-point-scalar", "scatter"].sort());
   // EVERY supported produces value parses (with axis / channel where required)
   for (const p of MOD_PRODUCES) {
     const axisLine = p === "per-point-scalar" ? "# axis: color\n" : "";

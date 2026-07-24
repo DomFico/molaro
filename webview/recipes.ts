@@ -43,7 +43,7 @@ export type ModKind = "representation" | "analysis";
  * A `write_mod` schema that hardcoded a stale subset (missing `commands`) is the
  * bug this closes: two lists that must agree, only one updated. See
  * tests/recipes.test.ts for the equality guard. */
-export const MOD_PRODUCES = ["per-point-scalar", "per-frame-series", "scatter", "commands", "figure", "channel"] as const;
+export const MOD_PRODUCES = ["per-point-scalar", "per-frame-series", "scatter", "commands", "figure", "channel", "edges"] as const;
 export type ModProduces = (typeof MOD_PRODUCES)[number];
 
 /** The point axes a `per-point-scalar` mod binds to — the single source the
@@ -108,7 +108,9 @@ export interface AnalysisMod extends ModCommon {
   /** The declared result kind (see MOD_PRODUCES — the single source). per-point-
    * scalar/per-frame-series/scatter bind through the typed-result rails;
    * `commands` returns a `list[str]` run through the command path at the mod-run
-   * boundary (NOT a TypedResult — the union stays closed at four). */
+   * boundary (NOT a TypedResult — the union stays closed at four); `edges`
+   * returns `[i, j]` index pairs the PRODUCER appends to header.edges at LOAD
+   * time (run interactively it honestly defers — the live scene is not grown). */
   produces: ModProduces;
   /** Required iff produces = per-point-scalar: which point axis the scalars
    * bind to (see MOD_AXES). */
@@ -466,6 +468,10 @@ export interface ModRunExpectation {
   targetCount: number;
   /** per-frame-series length / scatter frames range: the dataset's frame count. */
   frameCount: number;
+  /** edges: the dataset's TOTAL point count — the authoritative range bound for
+   * each returned [i, j] pair (each index must be in [0, nPoints)). Mirrors the
+   * channel arm getting its point count; ignored by the other kinds. */
+  nPoints: number;
 }
 
 /** A validated scatter return: equal-length finite x/y, optional integer
@@ -495,6 +501,7 @@ export function validateModValues(
   | { ok: true; commands: string[] }
   | { ok: true; figure: { png: string; width: number; height: number; axes: FigureAxes[] } }
   | { ok: true; channel: Channel; warning?: string }
+  | { ok: true; edges: [number, number][] }
   | { ok: false; error: string } {
   if (expect.produces === "channel") {
     // The producer already DECLARED + stored the channel (its data rides
@@ -531,6 +538,39 @@ export function validateModValues(
       }
     }
     return { ok: true, commands: values as string[] };
+  }
+  if (expect.produces === "edges") {
+    // A list of [i, j] INTEGER index pairs (new edges). Fail-closed: reject a
+    // non-list, a non-pair element, a non-integer index, an out-of-range index
+    // (each must be in [0, nPoints)), and a self-loop (i === j — an edge needs
+    // two distinct endpoints). The wire carries DATA only — an edge is [i, j],
+    // NEVER appearance (contract/SPEC.md); styling stays one layer up in the
+    // existing colorbonds/dashbonds verbs. Never partial: any violation → error.
+    if (!Array.isArray(values)) {
+      return { ok: false, error: `an edges mod must return a list of [i, j] index pairs, not ${typeof values}` };
+    }
+    const n = expect.nPoints;
+    const edges: [number, number][] = [];
+    for (let k = 0; k < values.length; k++) {
+      const e = values[k];
+      if (!Array.isArray(e) || e.length !== 2) {
+        return { ok: false, error: `edges[${k}] must be a pair [i, j]` };
+      }
+      const [i, j] = e as unknown[];
+      if (!Number.isInteger(i) || !Number.isInteger(j)) {
+        return { ok: false, error: `edges[${k}] indices must be integers (got [${String(i)}, ${String(j)}])` };
+      }
+      const a = i as number;
+      const b = j as number;
+      if (a < 0 || a >= n || b < 0 || b >= n) {
+        return { ok: false, error: `edges[${k}] index out of range [0, ${n}) (got [${a}, ${b}])` };
+      }
+      if (a === b) {
+        return { ok: false, error: `edges[${k}] is a self-loop (${a} → ${b}) — an edge needs two distinct points` };
+      }
+      edges.push([a, b]);
+    }
+    return { ok: true, edges };
   }
   if (expect.produces === "figure") {
     // THE one figure validator (plotmodel.validateFigure) — shared with the
