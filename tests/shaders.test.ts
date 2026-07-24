@@ -292,3 +292,161 @@ test("the two-ended passes classify by their DIMMEST end", () => {
       `${name} must classify on min(A, B), not on one end`);
   }
 });
+
+// ---------------------------------------------------------------------------
+// The ribbon's renderer-side CENTRIPETAL CATMULL-ROM spline. One flat quad per
+// segment faceted every turn into a sharp corner (measured median ~83°/step,
+// max ~97°); linear subdivision is a no-op (sub-points stay collinear), only a
+// spline rounds it. The spline evaluates in the vertex shader from the control
+// hull already on the instance (iPrevPoint/iStart/iEnd/iNextPoint), diced into
+// S sub-quads by the base geometry — so no producer/wire/instance change.
+// ---------------------------------------------------------------------------
+
+const RIBBON_V = ribbonShaders().vertex;
+
+test("ribbon: the vertex shader evaluates a CENTRIPETAL Catmull-Rom (α=0.5 knots + Hermite basis)", () => {
+  // centripetal knot spacing is |Δ|^0.5, floored so coincident control points
+  // (chain ends) never divide by zero
+  assert.match(RIBBON_V, /float ribbonKnot\(vec3 a, vec3 b\) \{ return sqrt\(max\(length\(a - b\), 1e-5\)\); \}/);
+  // the Hermite POSITION basis — pos(0)=P1, pos(1)=P2 falls straight out of it
+  assert.match(RIBBON_V, /float h00 = 2\.0 \* ttt - 3\.0 \* tt \+ 1\.0;/);
+  assert.match(RIBBON_V, /float h10 = ttt - 2\.0 \* tt \+ t;/);
+  assert.match(RIBBON_V, /float h01 = -2\.0 \* ttt \+ 3\.0 \* tt;/);
+  assert.match(RIBBON_V, /float h11 = ttt - tt;/);
+  assert.match(RIBBON_V, /vec3 pos = h00 \* P1 \+ h10 \* m1 \+ h01 \* P2 \+ h11 \* m2;/);
+  // and the basis DERIVATIVE — the true tangent that becomes along(t)
+  assert.match(RIBBON_V, /float g00 = 6\.0 \* tt - 6\.0 \* t;/);
+  assert.match(RIBBON_V, /vec3 tangent = g00 \* P1 \+ g10 \* m1 \+ g01 \* P2 \+ g11 \* m2;/);
+  assert.match(RIBBON_V, /vec3 along = tlen < 1e-9 \? chord \/ segLen : tangent \/ tlen;/);
+  // the control hull is the four points the instance already carried
+  assert.match(RIBBON_V, /attribute vec3 iPrevPoint; attribute vec3 iNextPoint;/);
+  assert.match(RIBBON_V, /vec3 P0 = \(modelViewMatrix \* vec4\(iPrevPoint, 1\.0\)\)\.xyz;/);
+  assert.match(RIBBON_V, /vec3 P3 = \(modelViewMatrix \* vec4\(iNextPoint, 1\.0\)\)\.xyz;/);
+  // t is read from the base-geometry corner (the sub-quad's t-subrange)
+  assert.match(RIBBON_V, /float t = aCorner\.y;/);
+});
+
+test("ribbon: across(t) is a SLERP of the two supplied facings, then conditioned ⊥ along", () => {
+  assert.match(RIBBON_V, /vec3 ribbonSlerp\(vec3 a, vec3 b, float t\)/);
+  assert.match(RIBBON_V, /ribbonSlerp\(iAcrossA, iAcrossB, t\)/);
+  // still conditioned exactly as before: view space, ⊥ along, unit
+  assert.match(RIBBON_V, /vec3 acrossView = mat3\(modelViewMatrix\) \* acrossWorld;/);
+  assert.match(RIBBON_V, /vec3 aperp = acrossView - along \* dot\(acrossView, along\);/);
+  // the DEGENERACY rule survives: no defined plane → zero width → collapse
+  assert.match(RIBBON_V, /w = w \* \(alen < 1e-6 \? 0\.0 : 1\.0\);/);
+  assert.match(RIBBON_V, /vec3 across = alen < 1e-6 \? vec3\(0\.0\) : aperp \/ alen;/);
+});
+
+test("ribbon: the MITER is retired — the shared control hull makes joints continuous", () => {
+  // no bisector-slide machinery survives (the spline subsumes it)
+  assert.doesNotMatch(RIBBON_V, /bisector|miter limit|float shift|float denom/i);
+  // the thickness offset is the box normal only — no along-shift term
+  assert.match(RIBBON_V, /vec3 vpos = pos \+ across \* \(aCorner\.x \* w\)\s*\+ nrm \* \(aCorner\.z/);
+  assert.doesNotMatch(RIBBON_V, /along \* shift/);
+});
+
+test("ribbon: exactly the two right varyings, and the per-face normal path intact", () => {
+  // the pass declares vColor (vec4) and vNormal (vec3) — and nothing else
+  assert.match(RIBBON_V, /varying vec4 vColor;/);
+  assert.match(RIBBON_V, /varying vec3 vNormal;/);
+  assert.equal((RIBBON_V.match(/\bvarying\b/g) ?? []).length, 3,
+    "vColor + vNormal + the shared style varying (vStyleParams) — no stray varying");
+  // colour is the per-end LERP (the same interpolation, now sampled at S+1 pts)
+  assert.match(RIBBON_V, /vColor = mix\(iColorA, iColorB, t\);/);
+  // per-face normal (incr 45) composes unchanged: four faces, four normals
+  assert.match(RIBBON_V, /vNormal = aFace < 0\.5 \? nrm\s*: aFace < 1\.5 \? -nrm\s*: aFace < 2\.5 \? across\s*: -across;/);
+  // the fragment still shades two-sided on |nz| via the shared chunk
+  const f = ribbonShaders().fragment;
+  assert.match(f, /float nz = abs\(normalize\(vNormal\)\.z\);/);
+  assert.match(f, /impostorShade\(vColor\.rgb, nz\)/);
+});
+
+// -- a numeric geometry probe: the SAME centripetal Catmull-Rom the shader runs,
+// -- mirrored in JS, proving (a) anchors stay on-curve and (b) angularity drops.
+type V3 = [number, number, number];
+const v3sub = (a: V3, b: V3): V3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const v3add = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const v3scl = (a: V3, s: number): V3 => [a[0] * s, a[1] * s, a[2] * s];
+const v3dot = (a: V3, b: V3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const v3len = (a: V3): number => Math.hypot(a[0], a[1], a[2]);
+const rKnot = (a: V3, b: V3): number => Math.sqrt(Math.max(v3len(v3sub(a, b)), 1e-5));
+
+/** Centripetal Catmull-Rom position at t for segment P1→P2 with neighbours
+ * P0,P3 — the exact math the ribbon vertex shader carries (asserted above). */
+function ribbonPos(P0: V3, P1: V3, P2: V3, P3: V3, t: number): V3 {
+  const chord = v3sub(P2, P1);
+  const d01 = rKnot(P0, P1), d12 = rKnot(P1, P2), d23 = rKnot(P2, P3);
+  const m1: V3 = v3len(v3sub(P1, P0)) < 1e-6 ? chord
+    : v3scl(v3add(v3sub(v3scl(v3sub(P1, P0), 1 / d01), v3scl(v3sub(P2, P0), 1 / (d01 + d12))), v3scl(chord, 1 / d12)), d12);
+  const m2: V3 = v3len(v3sub(P3, P2)) < 1e-6 ? chord
+    : v3scl(v3add(v3sub(v3scl(chord, 1 / d12), v3scl(v3sub(P3, P1), 1 / (d12 + d23))), v3scl(v3sub(P3, P2), 1 / d23)), d12);
+  const tt = t * t, ttt = tt * t;
+  const h00 = 2 * ttt - 3 * tt + 1, h10 = ttt - 2 * tt + t, h01 = -2 * ttt + 3 * tt, h11 = ttt - tt;
+  return v3add(v3add(v3scl(P1, h00), v3scl(m1, h10)), v3add(v3scl(P2, h01), v3scl(m2, h11)));
+}
+
+function maxTurnDeg(pts: V3[]): number {
+  let mx = 0;
+  for (let i = 1; i + 1 < pts.length; i++) {
+    const a = v3sub(pts[i], pts[i - 1]), b = v3sub(pts[i + 1], pts[i]);
+    const la = v3len(a), lb = v3len(b);
+    if (la < 1e-9 || lb < 1e-9) continue;
+    const c = Math.max(-1, Math.min(1, v3dot(a, b) / (la * lb)));
+    mx = Math.max(mx, (Math.acos(c) * 180) / Math.PI);
+  }
+  return mx;
+}
+
+// a representative angular polyline (zigzag, ~90-100° turns, mild z-jitter) —
+// the same kind of angularity RIBBON_SIZING measured on the real trace
+const ANGULAR_POLY: V3[] = [
+  [0, 0, 0], [1, 0, 0.1], [1, 1, 0.0], [2, 1, 0.2], [2, 2, 0.1],
+  [3, 2, 0.0], [3, 3, 0.15], [4, 2.9, 0.05], [4.2, 3.9, 0.1],
+];
+
+test("ribbon: ANCHORS STAY ON-CURVE — the interpolating spline passes through every supplied vertex", () => {
+  // pos(0) == iStart and pos(1) == iEnd EXACTLY for every original segment, so
+  // drawn ≡ supplied holds at the anchors; only the path between them is rounded
+  let anchorErr = 0;
+  for (let i = 0; i + 1 < ANGULAR_POLY.length; i++) {
+    const P0 = i > 0 ? ANGULAR_POLY[i - 1] : ANGULAR_POLY[i];
+    const P1 = ANGULAR_POLY[i], P2 = ANGULAR_POLY[i + 1];
+    const P3 = i + 2 < ANGULAR_POLY.length ? ANGULAR_POLY[i + 2] : ANGULAR_POLY[i + 1];
+    anchorErr = Math.max(anchorErr, v3len(v3sub(ribbonPos(P0, P1, P2, P3, 0), P1)));
+    anchorErr = Math.max(anchorErr, v3len(v3sub(ribbonPos(P0, P1, P2, P3, 1), P2)));
+  }
+  assert.equal(anchorErr, 0, "the Hermite basis pins pos(0)=P1 and pos(1)=P2 exactly");
+  // and it is a source guarantee, not an accident of these points: h00(0)=1 &
+  // h01(1)=1 with the other three basis terms zero at the endpoints
+  const at = (t: number): [number, number, number, number] => {
+    const tt = t * t, ttt = tt * t;
+    return [2 * ttt - 3 * tt + 1, ttt - 2 * tt + t, -2 * ttt + 3 * tt, ttt - tt];
+  };
+  assert.deepEqual(at(0), [1, 0, 0, 0], "h00(0)=1, rest 0 → pos(0)=P1");
+  assert.deepEqual(at(1), [0, 0, 1, 0], "h01(1)=1, rest 0 → pos(1)=P2");
+});
+
+test("ribbon: SMOOTHNESS — S=8 spline sub-vertices drop the max turn from ~97° toward ~35°", () => {
+  const S = 8; // must mirror RIBBON_SEGMENTS
+  // before: flat quads follow the chords, so the drawn turn angles ARE the
+  // polyline's own turn angles
+  const before = maxTurnDeg(ANGULAR_POLY);
+  // after: walk every segment's spline sub-vertices (dropping the duplicated
+  // shared endpoint) — the actual drawn silhouette the shader produces
+  const drawn: V3[] = [];
+  for (let i = 0; i + 1 < ANGULAR_POLY.length; i++) {
+    const P0 = i > 0 ? ANGULAR_POLY[i - 1] : ANGULAR_POLY[i];
+    const P1 = ANGULAR_POLY[i], P2 = ANGULAR_POLY[i + 1];
+    const P3 = i + 2 < ANGULAR_POLY.length ? ANGULAR_POLY[i + 2] : ANGULAR_POLY[i + 1];
+    for (let j = 0; j <= S; j++) {
+      if (i > 0 && j === 0) continue;
+      drawn.push(ribbonPos(P0, P1, P2, P3, j / S));
+    }
+  }
+  const after = maxTurnDeg(drawn);
+  assert.ok(before > 90, `precondition: the polyline is genuinely angular (max turn ${before.toFixed(1)}°)`);
+  assert.ok(after < before * 0.5,
+    `the spline more than halves the max turn (${before.toFixed(1)}° → ${after.toFixed(1)}°)`);
+  assert.ok(after < 45,
+    `the drawn silhouette rounds toward RIBBON_SIZING's ~35° target (got ${after.toFixed(1)}°)`);
+});
