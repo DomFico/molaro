@@ -224,6 +224,12 @@ registerRecipe(rainbow);
 export const MOD_FILE_MAGIC = "# molaro-mod";
 
 const NAME_RE = /^[a-z][a-z0-9_-]*$/;
+/** True iff `name` is a valid mod name — the SINGLE source of the mod-name
+ * rule (parseModFile validates against NAME_RE too). save_rep validates the
+ * name the user gives before writing a file the parser must later accept. */
+export function isValidModName(name: string): boolean {
+  return NAME_RE.test(name);
+}
 /** A channel name must be a single bindable token — MIRRORS the contract's own
  * channel-name rule (contract.ts parseChannelDelta), which re-validates it
  * producer-side, so the two can never disagree. */
