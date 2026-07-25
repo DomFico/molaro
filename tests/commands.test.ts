@@ -29,6 +29,7 @@ import {
 import {
   getRecipe,
   listRecipes,
+  parseModFile,
   registerRecipe,
   unregisterRecipe,
   type AnalysisMod,
@@ -92,6 +93,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
   const modRuns: { name: string; points: number[]; expr: string }[] = [];
   const modRunCode: string[] = [];
   const rmArms: string[][] = [];
+  const saveRepCalls: { name: string; source: string }[] = [];
   const edgeOps: { edgeIds: number[]; rgb: [number, number, number] }[] = [];
   const endsOps: { ids: number[]; a: number[]; b: number[] }[] = [];
   // the endpoint-snapshot READ source: three distinct per-point RGBs so a
@@ -446,6 +448,28 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     armRmDeletion: (names) => {
       rmArms.push([...names]);
     },
+    // save_rep: a minimal DEFAULT snapshot (nothing customized) — tests that
+    // need a captured look override repSnapshot per case. saveRep records the
+    // written source so the round-trip can be asserted.
+    repSnapshot: () => ({
+      nPoints: header.n_points,
+      color: new Float32Array(header.n_points * 3).fill(0.9),
+      size: new Float32Array(header.n_points).fill(3),
+      opacity: new Float32Array(header.n_points).fill(1),
+      style: new Float32Array(header.n_points),
+      styleNames: ["standard", "matte"],
+      bindings: bindingReg.all(),
+      background: [0x1e / 255, 0x1e / 255, 0x1e / 255] as [number, number, number],
+      backgroundDefault: [0x1e / 255, 0x1e / 255, 0x1e / 255] as [number, number, number],
+      shapes: (["point", "edge", "vertex"] as const).map((domain) => ({
+        domain, names: shapeState[domain] ?? [], active: shapeActive[domain] ?? null,
+      })),
+      edgeCustomized: false,
+      traceCustomized: false,
+    }),
+    saveRep: (name, source) => {
+      saveRepCalls.push({ name, source });
+    },
     // Produced-edge surface: reads over the test fixture, writes recorded.
     producedEdges: {
       groups: () => produced.groups.map((g) => ({ ...g })),
@@ -503,6 +527,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     calls, commits, hiddenState, refOps, memberOps,
     colorOps, colorEachOps, eachOps, edgeOps, endsOps, traceOps, sizeOps, dashOps, opacityOps, modRuns, modRunCode, rmArms, sels,
     bindCalls, bindingReg, orientationOps, offsetOps, elemEachOps, styleOps, shapeOps, shapeActive, bgOps,
+    saveRepCalls,
     produced, producedOps, strokeEvents,
   };
 }
@@ -2359,6 +2384,50 @@ test("rm: a deletable selector prompts (confirm:true) and arms EXACTLY the works
   } finally {
     unregisterRecipe("zz_rm_a");
     unregisterRecipe("zz_rm_b");
+  }
+});
+
+// -- save_rep: name validation, built-in refusal, empty scene, the write ----------
+
+test("save_rep: usage, bad name, and the built-in refusal never write", () => {
+  const { registry, saveRepCalls } = makeRegistry();
+  assert.match(registry.runCommand("save_rep").message, /needs a name/);
+  assert.equal(registry.runCommand("save_rep").status, "error");
+  assert.match(registry.runCommand("save_rep My Rep").message, /one name, no spaces/);
+  assert.match(registry.runCommand("save_rep 1bad").message, /invalid mod name/);
+  const builtin = registry.runCommand("save_rep colorpoints");
+  assert.equal(builtin.status, "error");
+  assert.match(builtin.message, /"colorpoints" is a built-in command/);
+  assert.equal(saveRepCalls.length, 0, "no refusal ever reached the writer");
+});
+
+test("save_rep: a default scene captures nothing (nomatch, no write)", () => {
+  const { registry, saveRepCalls } = makeRegistry();
+  const r = registry.runCommand("save_rep myrep");
+  assert.equal(r.status, "nomatch");
+  assert.match(r.message, /the scene is at its default look — nothing to capture/);
+  assert.equal(saveRepCalls.length, 0);
+});
+
+test("save_rep: a styled scene writes a valid replayable mod and reports the count", () => {
+  const { registry, ctx, saveRepCalls } = makeRegistry();
+  // paint a couple of points red through the REAL color verb (writes the stub
+  // buffer path is separate, so drive repSnapshot directly for the capture)
+  const snap = ctx.repSnapshot();
+  const color = new Float32Array(snap.color as Float32Array); // copy so we can edit
+  for (const p of [0, 1]) { color[p * 3] = 1; color[p * 3 + 1] = 0; color[p * 3 + 2] = 0; }
+  ctx.repSnapshot = () => ({ ...snap, color });
+  const r = registry.runCommand("save_rep myrep");
+  assert.equal(r.status, "ok");
+  assert.match(r.message, /captured 1 command — saving as "myrep"…/);
+  assert.equal(saveRepCalls.length, 1);
+  assert.equal(saveRepCalls[0].name, "myrep");
+  // the written source is a valid produces:commands mod carrying the capture
+  const parsed = parseModFile(saveRepCalls[0].source, "workspace");
+  assert.ok(parsed.ok, parsed.ok ? "" : parsed.error);
+  if (parsed.ok) {
+    assert.equal(parsed.mod.produces, "commands");
+    assert.ok(parsed.mod.code.includes("colorpoints #0-1 #ff0000"));
   }
 });
 

@@ -38,6 +38,11 @@ import {
 import { StreamingPlayer } from "./playback.ts";
 import { Transport, rejectIfErrorPayload } from "./transport.ts";
 import {
+  DEFAULT_EDGE_COLOR,
+  DEFAULT_EDGE_SIZE,
+  DEFAULT_OPACITY,
+  DEFAULT_TRACE_COLOR,
+  DEFAULT_TRACE_SIZE,
   RepresentationLayer,
   type RepresentationState,
 } from "./representation.ts";
@@ -1714,6 +1719,13 @@ async function main(): Promise<void> {
       });
       return;
     }
+    if (msg?.type === "save-mod-result") {
+      // save_rep's host round-trip completed — report the write (the mod was
+      // registered separately by the host's modsLoaded re-push, exactly like
+      // write_mod). A follow-up terminal line, like rm-mods-result.
+      finishSaveRep(msg as unknown as { name?: string; file?: string; backup?: string | null; error?: string });
+      return;
+    }
     transport.handleMessage(e.data);
   });
   // rm wiring — late-bound below (needs the registry). NOT undoable and
@@ -1721,6 +1733,10 @@ async function main(): Promise<void> {
   let confirmRmDeletion: () => void = () => {};
   let cancelRmDeletion: () => void = () => {};
   let finishRmDeletion: (r: { deleted?: string[]; failed?: { name: string; error: string }[] }) => void =
+    () => {};
+  // save_rep wiring — late-bound below (needs asyncLine). NOT undoable (the
+  // filesystem is outside the undo model, the rm precedent).
+  let finishSaveRep: (r: { name?: string; file?: string; backup?: string | null; error?: string }) => void =
     () => {};
   // late-bound once the player exists (the listener is live before boot ends)
   let seekFrame: (frame: number) => void = () => {};
@@ -3086,6 +3102,17 @@ async function main(): Promise<void> {
     if (lines.length === 0) lines.push("rm: nothing was deleted");
     asyncLine(hardFail ? "error" : "ok", lines.join("\n"));
   };
+  finishSaveRep = (r): void => {
+    if (r.error) {
+      asyncLine("error", `save_rep: could not write "${r.name ?? "?"}" — ${r.error}`);
+      return;
+    }
+    // The host re-scanned + re-pushed modsLoaded, so <name> is now a verb; the
+    // backup note (if the write DISPLACED an existing mod of that name) mirrors
+    // write_mod's replacement discipline — reported so nothing is lost silently.
+    const replaced = r.backup ? ` (REPLACED an existing mod of that name; the previous file was kept at ${r.backup})` : "";
+    asyncLine("ok", `save_rep: saved "${r.name ?? "?"}" → ${r.file ?? "?"} — run \`${r.name ?? "?"}\` to replay${replaced}`);
+  };
   let modRunSeq = 0;
   /**
    * Mirror a producer-declared channel into the viewer (B-3). The producer
@@ -3728,6 +3755,61 @@ async function main(): Promise<void> {
     armRmDeletion: (names: string[]) => {
       pendingRm = names; // single slot — a newer rm replaces it
     },
+    // save_rep: a live snapshot of the representation state the serializer
+    // turns into replay commands (saverep.ts). Reads only. Background is
+    // returned in sRGB fractions (the space parseColor/rgbToHex speak) —
+    // backgroundColor holds a LINEAR THREE.Color, so both the live value and
+    // the default are read back through getRGB(SRGBColorSpace) so an unchanged
+    // scene compares byte-equal and emits nothing.
+    repSnapshot: () => {
+      const bgLive = backgroundColor.getRGB(new THREE.Color(), THREE.SRGBColorSpace);
+      const bgDefault = new THREE.Color(BACKGROUND).getRGB(new THREE.Color(), THREE.SRGBColorSpace);
+      // Header-edge / trace per-element attributes are DEFERRED (not
+      // point-index-addressable) — detect whether any exist so save_rep can
+      // report the omission instead of misleading the user (saverep.ts).
+      const s = rep.state;
+      const anyNe = (buf: Float32Array, def: number): boolean => {
+        for (let i = 0; i < buf.length; i++) if (buf[i] !== def) return true;
+        return false;
+      };
+      const anyNeRgb = (buf: Float32Array, def: readonly [number, number, number]): boolean => {
+        for (let i = 0; i < buf.length; i++) if (buf[i] !== def[i % 3]) return true;
+        return false;
+      };
+      const edgeCustomized =
+        anyNeRgb(s.edgeColorA, DEFAULT_EDGE_COLOR) || anyNeRgb(s.edgeColorB, DEFAULT_EDGE_COLOR) ||
+        anyNe(s.edgeSize, DEFAULT_EDGE_SIZE) || anyNe(s.edgeDash, 0) ||
+        anyNe(s.edgeOpacity, DEFAULT_OPACITY) || anyNe(s.edgeStyle, 0);
+      const traceCustomized =
+        anyNeRgb(s.traceColor, DEFAULT_TRACE_COLOR) ||
+        anyNe(s.traceSize, DEFAULT_TRACE_SIZE) || anyNe(s.traceOpacity, DEFAULT_OPACITY) ||
+        anyNe(s.traceStyle, 0) || anyNe(s.orientation, 0);
+      return {
+        nPoints: header.n_points,
+        color: s.color,
+        size: s.size,
+        opacity: s.opacity,
+        style: s.style,
+        styleNames: listStyles().map((st) => st.name),
+        bindings: bindingRegistry.all(),
+        background: [bgLive.r, bgLive.g, bgLive.b] as [number, number, number],
+        backgroundDefault: [bgDefault.r, bgDefault.g, bgDefault.b] as [number, number, number],
+        shapes: (["point", "edge", "vertex"] as const).map((domain) => ({
+          domain,
+          names: registry.available(domain),
+          active: registry.activeOf(domain),
+        })),
+        edgeCustomized,
+        traceCustomized,
+      };
+    },
+    // save_rep: hand the built mod source to the host mod-file writer (the
+    // same .molaro/mods/<name>.py path write_mod/rm act on), then let the
+    // host re-push modsLoaded so <name> registers as a verb. Fire-and-forget
+    // like rm — the host's save-mod-result comes back as a follow-up line.
+    saveRep: (name: string, source: string) => {
+      host.postMessage({ type: "save-mod", name, source });
+    },
     // Produced-edge surface (mid-session authored edges): the reads the
     // %group axis and the point-target produced arm resolve through, plus
     // the writer family the edge verbs' produced arms write through.
@@ -3807,6 +3889,7 @@ async function main(): Promise<void> {
     opacityPoints: () => 0, opacityEdges: () => 0, opacityTrace: () => 0,
     runAnalysisMod: () => {}, // never reached — mod-invocation verbs refused first
     armRmDeletion: () => {}, // never reached — rm refused first
+    saveRep: () => {}, // no-op: a validation pass must never write a mod file
     // reads stay REAL (a macro resolves %groups for pre-validation); writes no-op
     producedEdges: {
       groups: () => producedLayer.groups(),

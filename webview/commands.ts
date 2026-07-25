@@ -58,6 +58,7 @@ import {
   listRecipes,
   rainbow,
   resolveChannelDependency,
+  isValidModName,
   resolveModSelector,
   resolveParameters,
   type AnalysisMod,
@@ -67,6 +68,7 @@ import {
   channelConsumers,
   machineryNote,
 } from "./recipes.ts";
+import { buildRepMod, serializeRepCommands, type RepSnapshot } from "./saverep.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
 
 /** The hold gesture's default command template. `{target}` is replaced by the
@@ -350,6 +352,17 @@ export interface CommandContext {
    * so the registry re-derives from disk truth. NOT undoable and NOT on
    * the undo stack — the filesystem is outside the undo model. */
   armRmDeletion(names: string[]): void;
+  /** save_rep: a live snapshot of the representation state (rep buffers, the
+   * binding registry, the shape registry, the background) the serializer
+   * turns into replay commands. Read-only; gathered by main.ts where those
+   * live. */
+  repSnapshot(): RepSnapshot;
+  /** save_rep: write the captured look to `.molaro/mods/<name>.py` via the
+   * host mod-file writer, then re-register so `<name>` becomes a verb. Async
+   * like rm — the sync return is the "saving…" line; the host's result
+   * arrives as a follow-up terminal line. NOT undoable (the filesystem is
+   * outside the undo model, the rm precedent). */
+  saveRep(name: string, source: string): void;
   /** MID-SESSION AUTHORED EDGES (the isolated produced-edge pass): the read
    * surface over the group registry plus the writer family — the header-edge
    * edge writers' grow-safe siblings over the ProducedEdgeLayer buffers.
@@ -512,6 +525,56 @@ export function makeCreateSeleHandler(ctx: CommandContext): CommandHandler {
     const result = ctx.commitEntries(entries, split.name);
     if ("error" in result) return { status: "error", message: result.error };
     return { status: "ok", message: `created "${result.name}" — ${result.points} points` };
+  };
+}
+
+/**
+ * `save_rep <name>` — capture the CURRENT representation as a replayable mod.
+ * Introspects the live rep state (per-point color/size/opacity/style, channel
+ * BINDINGS incl. the offset/smoothing axis, shape swaps, and the background),
+ * serializes only what DIFFERS from the default into primitive commands
+ * (serializeRepCommands), and writes them as a `produces: commands` mod named
+ * by the user — so running `<name>` later replays the look through the exact
+ * command path. Named like create_sele; validated with the mod-name rule
+ * (write_mod's rule) and refused if the name is a built-in verb. What is NOT
+ * captured (header-edge / trace attributes, selections/hidden state) is
+ * reported, never silently dropped — see saverep.ts.
+ */
+export function makeSaveRepHandler(ctx: CommandContext, registry: CommandRegistry): CommandHandler {
+  return (args: string): CommandResult => {
+    const name = args.trim();
+    if (name === "") {
+      return { status: "error", message: "save_rep needs a name — save_rep <name> (like create_sele)" };
+    }
+    if (/\s/.test(name)) {
+      return { status: "error", message: `save_rep takes one name, no spaces — got "${name}"` };
+    }
+    if (!isValidModName(name)) {
+      return {
+        status: "error",
+        message: `invalid mod name "${name}" — start with a lowercase letter, then lowercase letters, digits, "_" or "-"`,
+      };
+    }
+    if (registry.isBuiltin(name)) {
+      return {
+        status: "error",
+        message: `"${name}" is a built-in command — pick another name (a mod can't shadow the grammar)`,
+      };
+    }
+    const { commands, warnings } = serializeRepCommands(ctx.repSnapshot());
+    if (commands.length === 0) {
+      const note = warnings.length ? ` (${warnings.join("; ")})` : "";
+      return {
+        status: "nomatch",
+        message: `save_rep: the scene is at its default look — nothing to capture${note}`,
+      };
+    }
+    ctx.saveRep(name, buildRepMod(name, commands));
+    const warnLine = warnings.length ? `\n  ⚠ ${warnings.join("\n  ⚠ ")}` : "";
+    return {
+      status: "ok",
+      message: `save_rep: captured ${commands.length} command${commands.length === 1 ? "" : "s"} — saving as "${name}"…${warnLine}`,
+    };
   };
 }
 
@@ -2855,6 +2918,11 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "create_sele",
     makeCreateSeleHandler(ctx),
     "commit the resolved target as a new selection: create_sele <target> [name]",
+  );
+  registry.register(
+    "save_rep",
+    makeSaveRepHandler(ctx, registry),
+    "capture the current representation (per-point color/size/opacity/style, bindings incl. offset/smoothing, shapes, background) as a replayable mod named like create_sele; run <name> later to restore the look: save_rep <name>",
   );
   registry.register(
     "hide",
