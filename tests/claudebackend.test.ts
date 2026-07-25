@@ -614,6 +614,65 @@ test("system prompt teaches the run-use correctness rules folded in the 2026-07-
   assert.match(p, /lower `dpi`/);
 });
 
+// -- the 2026-07-25 attended prompt pass: the authorable-edges chapter
+// (produces: edges + the choice param type + save_rep) folded from
+// reports/PROMPT_DELTA.md's "Since incr 52" section. Each guards a shipped
+// user-facing surface the prompt previously never taught, so a user asking to
+// "show the H-bonds" / "connect these" can actually reach produces: edges.
+test("system prompt teaches produces: edges — the new mod kind (PROMPT_DELTA 2026-07-25)", () => {
+  const p = buildSystemPrompt(sampleContext());
+  assert.match(p, /produces: edges/);
+  // it is in the decision ladder as its own rung (draw NEW edges not in the topology)
+  assert.match(p, /NEW edges to DRAW/);
+  // the header declares the group (single token like # channel:), rendered live into a %group
+  assert.match(p, /# edge-group: <name>/);
+  assert.match(p, /%<group>/);
+  // the return shape is stated INLINE (the cartoon-test discipline): a bare pair
+  // list for static, or a {pairs, visibility} dict for per-frame existence
+  assert.match(p, /return \[\[i, j\], \[k, l\], \.\.\.\]/);
+  assert.match(p, /"pairs":/);
+  assert.match(p, /"visibility":/);
+  assert.match(p, /\[n_frames\]\[n_pairs\]/);
+  // the ONE difference from a channel: an edges mod RESPECTS the selection
+  assert.match(p, /an edges mod RESPECTS the selection/);
+  // appearance is styled with the edge verbs on the %group (data, never appearance)
+  assert.match(p, /colorbonds %<group> yellow/);
+  assert.match(p, /dashbonds %<group> 0\.6/);
+  // the worked examples it cannot open (the source of truth is the inline shape)
+  assert.match(p, /hbonds\.py/);
+  assert.match(p, /trace_gaps\.py/);
+});
+
+test("system prompt teaches the choice param type and its write_mod limitation (PROMPT_DELTA 2026-07-25)", () => {
+  const p = buildSystemPrompt(sampleContext());
+  assert.match(p, /# param: <name> choice <opt1> <opt2>/);
+  assert.match(p, /first option is its default/);
+  // the honest write_mod fail-closed limitation (cannot carry the option list)
+  assert.match(p, /write_mod limitation/);
+  assert.match(p, /use\s+`string` for a choice-shaped param/);
+});
+
+test("system prompt teaches the save_rep command (PROMPT_DELTA 2026-07-25)", () => {
+  const p = buildSystemPrompt(sampleContext());
+  assert.match(p, /save_rep <name>/);
+  assert.match(p, /replayable `produces: commands` mod/);
+  // the honest limit: header-edge / per-vertex-trace attrs are not captured
+  assert.match(p, /per-vertex-trace attributes are NOT captured/);
+});
+
+test("get_context advertises a produces: edges mod's %group (the edge-group gap)", async () => {
+  // an edges mod that declares `# edge-group: hbonds` must surface its group in
+  // the mod line, so the assistant knows the name to style without guessing.
+  const withEdges = mockDeps({
+    getContext: async () => ({
+      ...sampleContext(),
+      mods: [{ name: "hbonds", produces: "edges", edgeGroup: "hbonds", description: "per-frame H-bonds" }],
+    }),
+  });
+  const res = await buildToolDefs(withEdges).get_context.handler({}, {});
+  assert.match(text(res), /hbonds \(edges → %hbonds\)/);
+});
+
 test("system prompt without context still instructs get_context first", () => {
   assert.match(buildSystemPrompt(null), /Call get_context/);
 });
