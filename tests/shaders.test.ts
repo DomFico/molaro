@@ -359,7 +359,11 @@ test("ribbon: across(t) CONDITIONS AT THE ANCHORS, then interpolates ⊥ along(t
   // …and the INTERPOLATION happens inside the plane ⊥ along(t): each conditioned
   // anchor facing is TRANSPORTED into that plane first, so the slerp cannot leave
   // it. It is NOT a slerp of the raw facings re-projected afterwards.
-  assert.match(RIBBON_V, /vec3 qBc = dot\(qA, qB\) < 0\.0 \? -qB : qB;/);
+  assert.match(RIBBON_V,
+    /vec3 qBc = dot\(qA, ribbonTransport\(qB, alongB, alongA\)\) < 0\.0 \? -qB : qB;/);
+  // and never the raw anchor-frame dot, which manufactures an antiparallel pair
+  // past 90° of within-segment tangent rotation
+  assert.doesNotMatch(RIBBON_V, /vec3 qBc = dot\(qA, qB\)/);
   assert.match(RIBBON_V, /vec3 acrossS = noPlane \? vec3\(0\.0\) : ribbonSlerp\(\s*ribbonTransport\(qA, alongA, along\), ribbonTransport\(qBc, alongB, along\), t\);/);
   assert.doesNotMatch(RIBBON_V, /ribbonSlerp\(iAcrossA, iAcrossB, t\)/,
     "the raw supplied facings must NOT be slerped before conditioning (that is the defect)");
@@ -676,7 +680,10 @@ function acrossNow(H0: V3, H1: V3, H2: V3, H3: V3, A: V3, B: V3, t: number, M: V
   const noPlane = degA && degB;
   const qA: V3 = flatA ? (flatB ? [0, 0, 0] : rTransport(pB, alongB, alongA)) : pA;
   const qB: V3 = flatB ? (flatA ? [0, 0, 0] : rTransport(pA, alongA, alongB)) : pB;
-  const flipped = v3dot(qA, qB) < 0;
+  // the sign is tested in a COMMON plane (qB transported into A's frame) — the
+  // dot the slerp actually consumes, not the raw anchor-frame dot, which can
+  // invert its sign past 90° of tangent rotation and manufacture an antipode
+  const flipped = v3dot(qA, rTransport(qB, alongB, alongA)) < 0;
   const qBc: V3 = flipped ? v3scl(qB, -1) : qB;
   const acrossS: V3 = noPlane ? [0, 0, 0]
     : ribbonSlerp(rTransport(qA, alongA, along), rTransport(qBc, alongB, along), t);
@@ -1161,51 +1168,97 @@ function worstOverFacings(hull: [V3, V3, V3, V3], N: number, minAbsZ = 0): numbe
   return worst;
 }
 
-test("ribbon: the fold bound is scoped by GEOMETRY — where it holds, and the boundary where it does not", () => {
-  // The bound above is not uniform over geometry, and pretending otherwise would
-  // be the false claim. Measured over a 24×24 grid of supplied facing pairs on a
-  // symmetric planar turn, as the WITHIN-SEGMENT tangent rotation grows:
-  //   60° → 16.1°   80° → 22.3°   90° → 28.7°   ← holds
-  //   95° → 174.2°  110° → 174.7°  135° → 176.2°  ← breaches, coplanar only
-  // The breach needs BOTH a tangent rotation past ~90° AND a facing lying in the
-  // plane the segment bends in: with the facing forced off-plane the same sweep
-  // stays at 33.0° (100°), 36.8° (110°), 49.1° (135°).
+test("ribbon: the fold bound is scoped by GEOMETRY — and the 174° class was the SIGN RULE's, not the mechanism's", () => {
+  // The fold bound above is not uniform over geometry, and the shape of its
+  // failure depends on WHICH sign rule decides coherence. Measured over a 24×24
+  // grid of supplied facing pairs on a symmetric planar turn, worst adjacent
+  // sub-sample rotation as the WITHIN-SEGMENT tangent rotation grows:
   //
-  // WHY, derived: for a coplanar configuration pA and pB are each ±the in-plane
-  // normal at their own anchor, so the angle between them EQUALS the tangent
-  // rotation. Past 90° the anchor-frame test dot(pA, pB) goes negative and flips
-  // qB — but the quantity that governs the arc is the angle AFTER transport into
-  // the common plane, and there the flip makes the pair EXACTLY antiparallel
-  // (measured 180.0° at the 110° case, where dot(pA,pB) = -0.1125 while
-  // dot(pA, transport(pB, alongB, alongA)) = +0.3290). ribbonSlerp's nlerp
-  // fallback then nulls at t=0.5 and the face flips 180°.
+  //   turn      anchor-frame rule    transported-frame rule (shipped)
+  //    60°            16.1°                 15.1°
+  //    90°            28.7°                 23.4°
+  //    95°           174.2°                 25.3°
+  //   110°           174.7°                 32.3°
+  //   135°           176.2°                 48.0°
+  //   150°           177.4°                 60.2°
+  //
+  // WHY, derived. qA and qB live in different planes (⊥ alongA, ⊥ alongB). For a
+  // coplanar facing the angle between them EQUALS the tangent rotation, so past
+  // 90° the anchor-frame dot goes negative on a pair that is sign-coherent in the
+  // plane the slerp works in: the flip then MANUFACTURES an exactly antiparallel
+  // transported pair (180.0° at the 110° case; dot(pA,pB) = -0.1125 vs
+  // transported dot = +0.3290) and ribbonSlerp's nlerp fallback nulls at t=0.5 —
+  // a 174° fold CREATED by the rule. The shipped rule tests the sign of the dot
+  // the slerp actually consumes and cannot construct that antipode; what remains
+  // is a smooth residual that grows with the turn and crosses the 60° bound only
+  // near ~150° of within-segment tangent rotation.
   //
   // REAL-DATA EVIDENCE, not a guarantee: the shipped fixture reaches 97.6° of
-  // within-segment tangent rotation and never breaches (its turns are 3-D, so an
-  // exactly-coplanar facing is not sampled), and the real 214-vertex polyline this
-  // increment was diagnosed on measures mean 54.4°, max 85.6° — below the onset.
-  // Both are measurements of particular data, not properties of the rule.
-  for (const deg of [60, 80, 90]) {
-    assert.ok(worstOverFacings(symmetricTurn(deg), 24) < 60,
-      `at ${deg}° of within-segment tangent rotation the bound must hold ` +
-      `(worst ${worstOverFacings(symmetricTurn(deg), 24).toFixed(1)}°)`);
+  // within-segment tangent rotation, and the real 214-vertex polyline this
+  // increment was diagnosed on measures mean 54.4°, max 85.6° — well below the
+  // ~150° residual crossing. Both are measurements of particular data.
+  for (const deg of [60, 90, 95, 110, 135]) {
+    const worst = worstOverFacings(symmetricTurn(deg), 24);
+    assert.ok(worst < 60,
+      `at ${deg}° of within-segment tangent rotation the bound must hold (worst ${worst.toFixed(1)}°)`);
   }
-  // KNOWN BOUNDARY, pinned so it cannot be forgotten: the coplanar case past ~90°
-  // still folds. If this ever STOPS breaching, the scoping above is obsolete and
-  // must be rewritten — do not simply delete the assertion.
-  const breach = worstOverFacings(symmetricTurn(110), 24);
-  assert.ok(breach > 120,
-    `KNOWN BOUNDARY: the coplanar 110° case is expected to still fold (worst ${breach.toFixed(1)}°). ` +
-    `If it no longer does, rewrite the scoping comment above.`);
-  // off-plane facings on the SAME hull do not breach — the breach is the coplanar
-  // degeneracy, not the turn angle by itself
-  const offPlane = worstOverFacings(symmetricTurn(110), 24, 0.2);
-  assert.ok(offPlane < 60,
-    `the same 110° hull with off-plane facings must stay bounded (worst ${offPlane.toFixed(1)}°)`);
+  // the residual is MONOTONE-ish growth, not a cliff: pin the measured shape so a
+  // future cliff (a manufactured class reappearing) cannot hide inside "under 60"
+  const at90 = worstOverFacings(symmetricTurn(90), 24);
+  const at135 = worstOverFacings(symmetricTurn(135), 24);
+  assert.ok(at90 < 30 && at135 < 55 && at90 < at135,
+    `the residual grows smoothly with the turn (90° → ${at90.toFixed(1)}°, 135° → ${at135.toFixed(1)}°)`);
+  // KNOWN BOUNDARY of the shipped rule: past ~150° the genuine residual exceeds
+  // 60°. Pinned so the scope cannot be forgotten — if this stops failing the
+  // bound, the scoping comment above is stale and must be rewritten.
+  const far = worstOverFacings(symmetricTurn(160), 24);
+  assert.ok(far > 60,
+    `KNOWN BOUNDARY: at 160° the genuine residual exceeds the fixture bound (worst ${far.toFixed(1)}°)`);
+  // and the CONTRAST that justifies the shipped rule: an anchor-frame variant of
+  // the same pipeline, run on the same 110° hull and grid, manufactures the fold
+  // the shipped rule does not. This is the measured "difference in KIND".
+  const anchorFrameWorst = (() => {
+    const [P0, P1, P2, P3] = symmetricTurn(110);
+    let worst = 0;
+    for (let ai = 0; ai < 24; ai++) {
+      for (let bi = 0; bi < 24; bi++) {
+        const fa = (ai * 2 * Math.PI) / 24, fb = (bi * 2 * Math.PI) / 24;
+        const A: V3 = [Math.cos(fa) * 0.3, Math.sin(fa), Math.cos(fa) * 0.6];
+        const B: V3 = [Math.cos(fb) * 0.3, Math.sin(fb), Math.cos(fb) * 0.6];
+        // the same conditioned pipeline, but the ANCHOR-FRAME sign decision
+        const { chord, m1, m2 } = catmullMs(P0, P1, P2, P3);
+        const cd = v3scl(chord, 1 / v3len(chord));
+        const alongA = rAlong(m1, cd), alongB = rAlong(m2, cd);
+        const pA = rPerp(v3norm(A), alongA), pB = rPerp(v3norm(B), alongB);
+        const pBc = v3dot(pA, pB) < 0 ? v3scl(pB, -1) : pB;
+        let prev: V3 | null = null;
+        for (let j = 0; j <= COND_S; j++) {
+          const t = j / COND_S;
+          const along = rAlong(ribbonTangent(P0, P1, P2, P3, t), cd);
+          const aS = ribbonSlerp(rTransport(pA, alongA, along), rTransport(pBc, alongB, along), t);
+          const ap = t <= 0 ? pA : t >= 1 ? pBc : rPerp(aS, along);
+          const al = v3len(ap);
+          const across: V3 = al < 1e-6 ? [0, 0, 0] : v3scl(ap, 1 / al);
+          if (prev && v3len(prev) > 0.5 && v3len(across) > 0.5) {
+            const c = Math.max(-1, Math.min(1, v3dot(prev, across)));
+            worst = Math.max(worst, (Math.acos(c) * 180) / Math.PI);
+          }
+          prev = across;
+        }
+      }
+    }
+    return worst;
+  })();
+  assert.ok(anchorFrameWorst > 120,
+    `the anchor-frame rule on the same hull manufactures the fold (worst ${anchorFrameWorst.toFixed(1)}°) — ` +
+    `the 174° class was the rule's, not the mechanism's`);
+  assert.ok(worstOverFacings(symmetricTurn(110), 24) < 60,
+    "…and the shipped transported-frame rule on the identical input does not");
 });
 
 test("ribbon: the SIGN-COHERENCE FLIP is discrete — its cost, measured and disclosed", () => {
-  // dot(qA, qB) < 0 is a per-segment branch with no continuity guard, so there is
+  // dot(qA, transport(qB, B→A)) < 0 is a per-segment branch with no continuity
+  // guard, so there is
   // a boundary in the supplied data across which the interior interpolates the
   // other way. This is the cost of the rule and it is real: an infinitesimal
   // change in the supplied facing rolls the mid-segment cross-section by ~90°.
@@ -1217,18 +1270,22 @@ test("ribbon: the SIGN-COHERENCE FLIP is discrete — its cost, measured and dis
   const cd = v3scl(chord, 1 / v3len(chord));
   const alongA = rAlong(m1, cd), alongB = rAlong(m2, cd);
   const A = v3norm(rPerp([0.2, -0.3, 1], alongA));
-  // sweep B through the plane ⊥ alongB; at φ = π/2 the flip decision flips
+  // sweep B through the plane ⊥ alongB. The boundary sits where the TRANSPORTED
+  // dot crosses zero — dot(A, T(B, alongB→alongA)) = 0 — so locate it there
+  // rather than at the anchor-frame π/2 (the two differ by the tangent rotation).
   const u = v3norm(rPerp(A, alongB)), v = v3cross(alongB, u);
+  const Tu = rTransport(u, alongB, alongA), Tv = rTransport(v, alongB, alongA);
+  const boundary = Math.atan2(v3dot(A, Tv), v3dot(A, Tu)) + Math.PI / 2;
   const eps = 1e-12;
   const bAt = (phi: number): V3 => v3add(v3scl(u, Math.cos(phi)), v3scl(v, Math.sin(phi)));
-  const lo = acrossNow(P0, P1, P2, P3, A, bAt(Math.PI / 2 - eps), 0.5, M_ID);
-  const hi = acrossNow(P0, P1, P2, P3, A, bAt(Math.PI / 2 + eps), 0.5, M_ID);
+  const lo = acrossNow(P0, P1, P2, P3, A, bAt(boundary - eps), 0.5, M_ID);
+  const hi = acrossNow(P0, P1, P2, P3, A, bAt(boundary + eps), 0.5, M_ID);
   assert.notEqual(lo.flipped, hi.flipped, "precondition: the two samples straddle the flip boundary");
   const roll = (Math.acos(Math.max(-1, Math.min(1, Math.abs(v3dot(lo.across, hi.across))))) * 180) / Math.PI;
   assert.ok(roll > 80 && roll < 100,
     `the disclosed cost is a ~90° roll of the cross-section across the boundary (measured ${roll.toFixed(1)}°)`);
   // and BOTH sides are quarter-turns, not folds: neither breaches the fold bound
-  for (const phi of [Math.PI / 2 - eps, Math.PI / 2 + eps]) {
+  for (const phi of [boundary - eps, boundary + eps]) {
     let prev: V3 | null = null, worst = 0;
     for (let j = 0; j <= COND_S; j++) {
       const o = acrossNow(P0, P1, P2, P3, A, bAt(phi), j / COND_S, M_ID);

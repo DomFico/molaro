@@ -572,13 +572,15 @@ export function focusFlashShaders(): { vertex: string; fragment: string } {
  * That 838 is now STALE, and not because of this constant: the across(t)
  * CONDITIONING fix (project at the anchors and interpolate inside the plane
  * ⊥ along(t), instead of slerping the raw facings and projecting after) moved it
- * to 227, and the SIGN-COHERENCE half of the same increment moved it back to
- * 362 — a 9.05× margin over the `> 40` threshold. Movement in either direction
- * is expected and is not a weakening of the assertion: the differential measures
- * how much the band's projected AREA moves between two frames, and both the old
- * ordering's mid-segment near-cancellations and its long-way-round twists added
- * area swings of their own — a fold, a pinch to zero width, or a band driven
- * edge-on mid-segment all change the footprint more than a smooth twist does.
+ * to 227, the SIGN-COHERENCE half of the same increment moved it back to 362,
+ * and the transported-frame flip decision moved it to 648 — a 16.2× margin over
+ * the `> 40` threshold (f20 5184 → 5470 as some segments' flip inverted; f40
+ * unchanged at 4822). Movement in either direction is expected and is not a
+ * weakening of the assertion: the differential measures how much the band's
+ * projected AREA moves between two frames, and both the old ordering's
+ * mid-segment near-cancellations and its long-way-round twists added area
+ * swings of their own — a fold, a pinch to zero width, or a band driven edge-on
+ * mid-segment all change the footprint more than a smooth twist does.
  * Re-measure this line, not just S44, whenever the ribbon's geometry moves.
  *
  * PICKING never tracked the thickness: `webview/picking.ts` builds the click
@@ -855,16 +857,21 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         //   conditioning fix alone   157.2° / 42.0° / 38.4° / 34.2° / 22.8°
         //   with this                 38.5° / 37.4° / 38.4° / 34.2° / 22.8°
         // Worst case 38.5°, in the range of the S=8 spline's own ~35° silhouette
-        // target. SCOPE: that is measured over arbitrary FACINGS on THIS fixture's
-        // turn-angle distribution (70–110° per step, within-segment tangent
-        // rotation max 97.6°). It is NOT a bound over arbitrary GEOMETRY — a
-        // facing lying in the plane a segment bends in folds once the
-        // within-segment tangent rotation passes ~90°, because there the
-        // anchor-frame sign test disagrees with the transported-frame one and
-        // manufactures an exactly-antiparallel pair. The geometry-scope test pins
-        // that boundary, the off-plane control, and the real-data turn maximum.
+        // target; the transported-frame decision leaves every one of these fixture
+        // numbers unmoved (measured — the two rules never disagree on it). SCOPE:
+        // that is measured over arbitrary FACINGS on THIS fixture's turn-angle
+        // distribution (70–110° per step, within-segment tangent rotation max
+        // 97.6°). It is NOT a bound over arbitrary GEOMETRY: the residual
+        // worst-case grows with the within-segment tangent rotation — measured
+        // 23.4° at 90°, 48.0° at 135°, 60.2° at 150° on the coplanar sweep — so
+        // sufficiently long turns twist harder than the fixture's bound. That
+        // growth is genuine geometry. The 174° fold class that used to appear
+        // past ~95° was NOT: it was a property of the earlier ANCHOR-FRAME sign
+        // rule (see the block above), not of the mechanism, and is gone. The
+        // geometry-scope test pins the holding range, the growth, the
+        // anchor-frame comparison, and the real-data turn maximum.
         //
-        // THE COST, stated because it is real: dot(qA, qB) < 0 is a DISCRETE
+        // THE COST, stated because it is real: the flip decision is a DISCRETE
         // per-segment branch with no continuity guard. Across the boundary an
         // infinitesimal change in the supplied facing rolls the mid-segment
         // cross-section by ~90° (measured in the FLIP DISCONTINUITY test), and
@@ -873,6 +880,30 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // choices at the boundary are equal-magnitude quarter-turns, so neither is
         // a fold; removing the pop entirely needs a frame propagated ALONG the
         // polyline, which is serial state this per-instance pass does not have.
+        //
+        // THE TEST IS TAKEN IN A COMMON PLANE — dot(qA, transport(qB, B→A)) —
+        // NOT between the two anchor-frame vectors directly. The distinction is
+        // one of KIND, derived and measured: qA and qB live in two different
+        // planes (⊥ alongA and ⊥ alongB), and for a facing lying in the plane
+        // the segment bends in, the angle between them EQUALS the within-segment
+        // tangent rotation. Past 90° of turn the anchor-frame dot goes negative
+        // even when the pair is sign-COHERENT in the plane the slerp works in —
+        // so an anchor-frame rule would flip qB and MANUFACTURE an exactly
+        // antiparallel transported pair (measured 180.0° at a 110° coplanar
+        // turn, where dot(pA,pB) = -0.1125 but the transported dot = +0.3290),
+        // dropping ribbonSlerp into the nlerp fallback that nulls at t = 0.5: a
+        // 174° fold CREATED by the sign rule, on data whose conditioning is
+        // perfect. Testing the sign of the dot the slerp actually consumes (its
+        // two inputs at t = 0 differ from this pair only by the same rotation)
+        // cannot construct that antipode. Measured over a 48×48 facing grid on a
+        // symmetric planar turn: the anchor-frame rule folds 174.2°–177.4° for
+        // every turn past ~95°; this rule reads 25.3° at 95°, rising smoothly to
+        // 60.2° at 150° — residual genuine geometry, no manufactured class.
+        // COST: one extra ribbonTransport in the decision (~1 cross, 2 dot, 1
+        // cross, ~18 mul total) per vertex, uniform over a segment's 16·S
+        // corners; the pass stays fill-bound. Still ONE decision per segment —
+        // every corner of an instance computes the same sign from the same
+        // instance attributes.
         //
         // WHY NEGATING AN END IS NOT A LIE ABOUT THE DATA. vpos offsets by
         // across·(±w) and nrm·(±k·w) with nrm = cross(along, across), so
@@ -888,10 +919,13 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // TRIANGLES therefore differ even though the ring they span does not. What
         // makes the sign unobservable in the end is the fragment shader: it shades
         // on abs(normalize(vNormal).z), which is even in the normal's sign.
-        // The decision is camera-invariant: pA and pB are both rotated by the same
-        // mat3(modelViewMatrix), so dot(pA, pB) does not depend on the view.
-        // qA is never flipped, so the t=0 anchor is unaffected by this rule.
-        vec3 qBc = dot(qA, qB) < 0.0 ? -qB : qB;
+        // The decision is camera-invariant: qA, qB, alongA and alongB all rotate
+        // by the same mat3(modelViewMatrix), and ribbonTransport is equivariant
+        // (T(Mv, Ma, Mb) = M·T(v, a, b)), so the sign does not depend on the
+        // view — measured: 0 flip mismatches and worst |Δ| 2.7e-14 between a
+        // rotated camera and the rotated result. qA is never flipped, so the
+        // t=0 anchor is unaffected by this rule.
+        vec3 qBc = dot(qA, ribbonTransport(qB, alongB, alongA)) < 0.0 ? -qB : qB;
         // transport is LINEAR in v, so the UNNORMALIZED qA/qBc are fine here —
         // the slerp normalizes, and their lengths only scale its inputs.
         vec3 acrossS = noPlane ? vec3(0.0) : ribbonSlerp(

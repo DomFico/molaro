@@ -7662,6 +7662,10 @@ async function S44(): Promise<void> {
         // B's plane, so a supplied pair over 90° apart no longer half-turns
         // inside one segment) moved these four patches NOT AT ALL — measured
         // identical, so the crossings the finder selects sit on coherent pairs.
+        // The transported-frame flip decision (the sign read in a common plane
+        // rather than between the two anchor frames) ALSO left all four patches
+        // byte-identical, 3 runs — the finder's crossings never straddle the
+        // flip boundary — even though it moved S43's frame-20 footprint.
         // The threshold is LEFT at `> 2×`
         // — the gate still passes and a passing gate is not loosened — but the
         // f72 margin is ONE pixel, not two. 16 > 2·7 = 14 looks like two, but the
