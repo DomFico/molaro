@@ -916,6 +916,21 @@ const producedEdgeTubesGenerator: ShapeGenerator<ProducedEdgePass> = {
         edgeGeo.setAttribute(name, next); // the SHARED geometry — mesh + alpha twin both see it
       }
       cap = n;
+      // THE GROW-SIDE GPU CLAMP INVALIDATION (three r185): a WebGLRenderer draws
+      // Math.min(geometry.instanceCount, geometry._maxInstanceCount) instances.
+      // WebGLBindingStates sets _maxInstanceCount from the instanced attributes'
+      // count the FIRST time the VAO binds (= our INITIAL capacity) and ONLY
+      // when it is undefined — it is otherwise cleared solely by
+      // geometry.dispose(), NEVER by a setAttribute swap. Left stale, it pins
+      // every draw to the first `initialCapacity` (64) instances forever: a
+      // grown group draws truncated, and a re-declared group appended ABOVE the
+      // clamp (retire + append) vanishes entirely (the drawn window is all
+      // retired slots). We just replaced the attributes at the new capacity, so
+      // clear the cached clamp — the swap already dirties the VAO, so three
+      // re-derives it from the GROWN attributes on the next bind. Both the
+      // opaque mesh and its alpha twin read this one geometry, so one clear
+      // covers both. (delete, matching WebGLGeometries' dispose path.)
+      delete (edgeGeo as unknown as { _maxInstanceCount?: number })._maxInstanceCount;
     };
     // Allocate the floor up front so the geometry always carries every named
     // attribute the shader program declares (a program attribute with no
