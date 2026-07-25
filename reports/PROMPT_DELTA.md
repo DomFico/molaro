@@ -346,3 +346,63 @@ What already lands and should NOT be disturbed: the inline channel return shape
 coherence pattern (present in every vector channel mod), the float64 and
 `trajectory is None` correctness rules, `bind` vs `bake` for motion, and the
 dependency order (bind orientation before the ribbon swap).
+
+---
+
+## Since incr 52 — the authorable-edges chapter + completion + save_rep (2026-07-24/25 session)
+
+**Standing-practice reminder that was MISSED all session:** these six increments each added a
+user-facing surface and NONE appended here in-commit. Catching up now. The big one — `produces:
+edges` — is a WHOLE NEW MOD KIND the assistant currently cannot use (claudeprompt teaches
+per-frame-series/per-point-scalar/scatter/commands/channel only).
+
+### NEW mod kind `produces: edges` — author new bonds/edges (incr 56, 57, 58; ships `36b668e`..`b9e7e31`, run-time group `915d5d3`)
+> **STATUS: PENDING an attended prompt pass** — the assistant has no `produces: edges` teaching, so it
+> would never reach for it (e.g. "show H-bonds", "connect these", "draw the contacts"). This is the
+> exact recurring "prompt behind the surface" gap. Teach it mirroring the `produces: channel` section.
+- **What it is:** a mod that AUTHORS NEW edges that aren't in the topology — H-bond networks,
+  contacts, double-bond/aromatic reps, a dashed connector across a gap. Declares `# produces: edges`
+  + `# edge-group: <name>` (a SINGLE TOKEN like `# channel:`). The edges render LIVE mid-session into
+  a `%<edge-group>` group — no reload.
+- **Return shape — inline (the source of truth; do NOT restate a schema):** either a flat list of
+  integer index PAIRS, or (for per-frame existence) a dict:
+
+      return [[i, j], [k, l], ...]           # static edges — bare pair list
+
+      return {                                # per-frame edges (appear/vanish as you scrub)
+          "pairs": [[i, j], ...],             # the UNION of every pair that EVER exists
+          "visibility": [ [1, 0, 1, ...],     # [n_frames][n_pairs] mask, 0/1 — is pair p a
+                          [0, 1, 1, ...] ],    # bond in frame f? refills iVisible per flip
+      }
+
+  Each `[i, j]` is a pair of point indices in `[0, n_points)`, `i != j`. `visibility` MUST be exactly
+  `[n_frames][n_pairs]`, values in `[0,1]` (fail-closed otherwise). Omit `visibility` for a static set.
+- **UNLIKE a channel, a produces:edges mod RESPECTS the selection.** It runs on `target_indices` = the
+  user's SELECTION (not the whole system). Author edges FOR the selection. (This is the ONE place a
+  produced mod differs from the whole-system channel rule.)
+- **Appearance is NOT in the mod — style the group with the primitives** (data-never-appearance):
+  `colorbonds %<group> yellow`, `dashbonds %<group> 0.6`, `bicolorbonds`/`bondsize`/`bondopacity %<group>`.
+  Pair the edges mod with a `# produces: commands` companion that emits those (the two-mod pattern, like
+  cartoon), OR the user styles by hand. A POINT target (`dashbonds @sel`) reaches BOTH covalent and
+  produced edges.
+- **Run-time group:** declare `# param: group string <default>`; `<mod> <sel> ?group=D` authors into
+  `%D` (overrides `# edge-group:`), so one mod holds several coexisting sets.
+- **Point at (cannot open):** `~/.molaro/mods/hbonds.py` (per-frame H-bonds: `{pairs, visibility}`,
+  `?scope=within|any`, `?cutoff`, `?angle`, heavy-atom N/O donor-acceptor, covalent-neighbour exclusion)
+  and `~/.molaro/mods/trace_gaps.py` (static gap connectors). These are the worked examples.
+
+### NEW mod-param type `choice` — a fixed option set (incr 53 follow-on, `a42d571`)
+- Declare `# param: <name> choice <opt1> <opt2> …` — a whitespace option list, **the FIRST option is the
+  default** (so a choice always has one, is never required). The value coerces to one of the options
+  (fail-closed, "must be one of …"); the `?<name>=` slot tab-completes them. Use it for a fixed-set
+  string parameter (e.g. `# param: scope choice within any`) instead of `string`.
+- **write_mod LIMITATION (fail-closed, know this):** write_mod can declare `type: "choice"` but CANNOT
+  supply the option list (that field isn't in the tool schema) → an assistant-authored choice mod
+  fails-closed at re-parse ("needs at least one option"). So for a choice param, either author the file
+  by hand, or use `string` when writing via write_mod.
+
+### NEW command `save_rep <name>` (incr 60, `72bc0dc`) — run via run_command
+- Captures the CURRENT representation — point colors/sizes/opacity/styles + bindings (incl the
+  `offset`/smoothing axis) + shape swaps + background — into a replayable `# produces: commands` mod
+  named `<name>` (like `create_sele` names a selection). Running `<name>` restores the look. Header-edge
+  and per-vertex-trace attributes are DEFERRED (not captured — noted to the user).
