@@ -9775,14 +9775,18 @@ async function S57(): Promise<void> {
     // -- run on a DIFFERENT subset ("solvent", the bulk category) → a DIFFERENT
     //    count, still scoped to that selection: the discrimination a whole-system
     //    override would erase (both would report 3000). Re-declaring the same
-    //    group replaces it in place — the pass now carries solvent's count. -----
+    //    group replaces its ACTIVE span in place with solvent's count. (The
+    //    changed count retires the old ids and appends fresh ones, so the pass's
+    //    global instanceCount now also spans the retired-but-invisible alpha
+    //    slots — an S58-pinned re-declaration artifact; the per-group ACTIVE
+    //    count is the authored+drawn truth for THIS selection.) --------------
     const b = await runOnTarget("solvent");
     check("S57: a DIFFERENT subset authors a DIFFERENT count (per-selection, not whole-system)",
       b.reported === Math.floor(b.points / 2) && b.reported !== a.reported && b.namedTarget === b.points,
       `A: reported=${a.reported} pts=${a.points} | B: reported=${b.reported} pts=${b.points} named=${b.namedTarget}`);
-    check("S57: ...and the produced pass carries EXACTLY that subset's edges (reported == authored == drawn)",
-      b.groupCount === b.reported && b.instances === b.reported,
-      `group=${b.groupCount} instances=${b.instances} reported=${b.reported}`);
+    check("S57: ...and the produced group carries EXACTLY that subset's active edges (reported == authored)",
+      b.groupCount === b.reported && b.groupCount === Math.floor(b.points / 2),
+      `group=${b.groupCount} reported=${b.reported} want=${Math.floor(b.points / 2)}`);
   });
 
   // -- Part B: the mod ON (spawned with --edge-mods) → the edges RENDER --------
