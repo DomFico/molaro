@@ -61,7 +61,7 @@ import {
 } from "./commands.ts";
 import { parseTarget, resolveTarget, type Completion } from "./address.ts";
 import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
-import { pickPoint, selectionBounds } from "./picking.ts";
+import { pickElement, selectionBounds, type PickSegments } from "./picking.ts";
 import {
   CAMERA_FOV_DEG,
   FRAME_DISTANCE_FACTOR,
@@ -3874,6 +3874,52 @@ async function main(): Promise<void> {
   registry.visibilityChange();
 
   // -- picking + 3D gestures + keys --------------------------------------------
+  //
+  // Size-aware pick candidates. A click resolves to the element whose RENDERED
+  // extent covers the cursor — a sphere by its projected radius, a tube/ribbon
+  // body by its projected half-width — so the hit test matches what is drawn
+  // (see picking.ts). The STATIC connectivity is built once here; the half-width
+  // VALUES are refreshed from the live rep buffers before each pick, so every
+  // size command (pointsize/bondsize/tracesize) is reflected immediately.
+  //
+  // Edges size uniformly per edge (edgeSize[e]); trace/ribbon segments per end
+  // (traceSize[vertex]). The trace tube and the ribbon both draw traceSize as
+  // their half-width, so one segment set serves whichever shape is active.
+  const pickTraceSeg = traceSegments(header.polylines);
+  const pickSegCount = header.edges.length + pickTraceSeg.count;
+  const pickSegPointA = new Uint32Array(pickSegCount);
+  const pickSegPointB = new Uint32Array(pickSegCount);
+  // per segment: an edge index (≥0 ⇒ read edgeSize[e]) OR, for trace segments
+  // (edge index −1), the two flat-axis vertex ids that read traceSize.
+  const pickSegEdge = new Int32Array(pickSegCount).fill(-1);
+  const pickSegVertA = new Uint32Array(pickSegCount);
+  const pickSegVertB = new Uint32Array(pickSegCount);
+  {
+    let s = 0;
+    for (let e = 0; e < header.edges.length; e++) {
+      pickSegPointA[s] = header.edges[e][0];
+      pickSegPointB[s] = header.edges[e][1];
+      pickSegEdge[s] = e;
+      s++;
+    }
+    for (let t = 0; t < pickTraceSeg.count; t++) {
+      pickSegPointA[s] = pickTraceSeg.pointA[t];
+      pickSegPointB[s] = pickTraceSeg.pointB[t];
+      pickSegVertA[s] = pickTraceSeg.vertexA[t];
+      pickSegVertB[s] = pickTraceSeg.vertexB[t];
+      s++;
+    }
+  }
+  // Reused every pick (no per-click allocation).
+  const pickSegHalfA = new Float32Array(pickSegCount);
+  const pickSegHalfB = new Float32Array(pickSegCount);
+  const pickSegments: PickSegments | null = pickSegCount > 0
+    ? {
+        count: pickSegCount, pointA: pickSegPointA, pointB: pickSegPointB,
+        halfA: pickSegHalfA, halfB: pickSegHalfB,
+      }
+    : null;
+
   const vp = new THREE.Matrix4();
   const pickAt = (clientX: number, clientY: number): number => {
     const rect = renderer.domElement.getBoundingClientRect();
@@ -3881,7 +3927,21 @@ async function main(): Promise<void> {
     const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
     camera.updateMatrixWorld();
     vp.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    const r = pickPoint(
+    if (pickSegments) {
+      // refresh each segment's half-width VALUE from the live size buffers
+      const es = rep.state.edgeSize;
+      const ts = rep.state.traceSize;
+      for (let s = 0; s < pickSegCount; s++) {
+        const e = pickSegEdge[s];
+        if (e >= 0) {
+          pickSegHalfA[s] = pickSegHalfB[s] = es[e];
+        } else {
+          pickSegHalfA[s] = ts[pickSegVertA[s]];
+          pickSegHalfB[s] = ts[pickSegVertB[s]];
+        }
+      }
+    }
+    const r = pickElement(
       positionAttr.array as Float32Array,
       header.n_points,
       rep.state.visible,
@@ -3891,6 +3951,12 @@ async function main(): Promise<void> {
       rect.width,
       rect.height,
       PICK_PIXEL_THRESHOLD,
+      {
+        pointSize: rep.state.size,
+        worldPerSize: sizing.uWorldPerSize.value,
+        tanHalfFov: TAN_HALF_FOV,
+        segments: pickSegments,
+      },
     );
     return r.index;
   };
