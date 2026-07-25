@@ -10828,7 +10828,85 @@ async function S63(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63 };
+// ==== S64: save_rep — capture the look, write a mod, replay it back ===========
+// The end-to-end round-trip of save_rep through the REAL host mod-file write:
+// style a scene, `save_rep myrep` (viewer→host save-mod → the bridge's node
+// /save-mod writes via the SAME saveModFile the extension host uses, into the
+// TEMP E2E_MODS_DIR — never the real .molaro/mods — then re-pushes modsLoaded
+// so `myrep` registers), reset the look, then run `myrep` and prove the
+// captured buffers come back. Isolated (its own process) so its async producer
+// round-trip isn't starved in a parallel pool. Buffer-level assertions (not
+// pixels) keep it low-flake; the produces:commands run path itself is pixel-
+// proven by S31.
+async function S64(): Promise<void> {
+  console.log("S64 — save_rep: capture the representation → write a replayable mod → replay it back");
+  const modsDir = mkdtempSync(join(tmpdir(), "molaro-s64-mods-"));
+  try {
+    process.env.E2E_MODS_DIR = modsDir;
+    await withDriver(async (d) => {
+      const cmd = (text: string) =>
+        d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+      const colorR = (p: number) => d.evaluate<number>(`${V}.rep.state.color[${p * 3}]`);
+      const colorB = (p: number) => d.evaluate<number>(`${V}.rep.state.color[${p * 3 + 2}]`);
+      const sizeAt = (p: number) => d.evaluate<number>(`${V}.rep.state.size[${p}]`);
+      // async follow-up lines (the save-mod-result and the macro replay both
+      // ride commandResult id=-1, exactly like rm and the mod-run path)
+      await d.evaluate(`void (window.__lines = [],
+        window.addEventListener('message', (e) => {
+          if (e.data?.type === 'commandResult' && e.data.id === -1) window.__lines.push(e.data);
+        }))`);
+      await d.evaluate(`${V}.setPlaying(false)`);
+
+      // -- style a scene: a color bucket, a size bucket, a background ----------
+      check("S64: colorpoints paints the target red", (await cmd("colorpoints #0-99 red")).status === "ok");
+      check("S64: pointsize sizes a sub-range", (await cmd("pointsize #0-9 5")).status === "ok");
+      check("S64: background is set", (await cmd("background navy")).status === "ok");
+      check("S64: the captured look is live before save (point 5 is red, point 5 is size 5)",
+        (await colorR(5)) === 1 && (await colorB(5)) === 0 && (await sizeAt(5)) === 5,
+        `r=${await colorR(5)} b=${await colorB(5)} size=${await sizeAt(5)}`);
+
+      // -- save_rep myrep: the host write round-trip --------------------------
+      const save = await cmd("save_rep myrep");
+      check("S64: save_rep acknowledges with a captured-command count", save.status === "ok" && /captured \d+ commands? — saving as "myrep"/.test(save.message), JSON.stringify(save));
+      await d.waitFor(`window.__lines.some(l => /save_rep: saved "myrep"/.test(l.message))`, 20000)
+        .catch(() => {});
+      check("S64: the host reported the write back to the terminal",
+        await d.evaluate<boolean>(`window.__lines.some(l => /save_rep: saved "myrep"/.test(l.message))`),
+        JSON.stringify(await d.evaluate(`window.__lines.map(l=>l.message)`)));
+
+      // the file is really on disk (the feasibility gate, proven in the harness)
+      const file = join(modsDir, "myrep.py");
+      check("S64: myrep.py was written to the mods dir", existsSync(file));
+      const src = existsSync(file) ? readFileSync(file, "utf-8") : "";
+      check("S64: the written mod is a produces:commands mod carrying the captured verbs",
+        /# produces: commands/.test(src) && /colorpoints #0-99 #ff0000/.test(src) &&
+          /pointsize #0-9 5/.test(src) && /background #000080/.test(src), src);
+      check("S64: myrep registered as a runnable verb (the modsLoaded re-push)",
+        /myrep/.test((await cmd("mods")).message), (await cmd("mods")).message);
+
+      // -- reset the look, then REPLAY it via the saved mod -------------------
+      check("S64: reset repaints the target blue and shrinks it", (await cmd("colorpoints #0-99 blue")).status === "ok" && (await cmd("pointsize #0-9 3")).status === "ok");
+      check("S64: the reset took (point 5 is now blue, size default)",
+        (await colorR(5)) === 0 && (await colorB(5)) === 1 && (await sizeAt(5)) === 3,
+        `r=${await colorR(5)} b=${await colorB(5)} size=${await sizeAt(5)}`);
+
+      const replay = await cmd("myrep");
+      check("S64: running myrep hands off to the producer round-trip", replay.status === "ok", JSON.stringify(replay));
+      // the replay's commands re-color and re-size — wait for the buffers to
+      // return to the captured values (the async run path lands them)
+      await d.waitFor(`${V}.rep.state.color[15] === 1 && ${V}.rep.state.color[17] === 0 && ${V}.rep.state.size[5] === 5`, 20000)
+        .catch(() => {});
+      check("S64: REPLAY restored the captured look (point 5 red again, size 5 again)",
+        (await colorR(5)) === 1 && (await colorB(5)) === 0 && (await sizeAt(5)) === 5,
+        `r=${await colorR(5)} b=${await colorB(5)} size=${await sizeAt(5)}`);
+    }, 1180, 780, "/terminal");
+  } finally {
+    delete process.env.E2E_MODS_DIR;
+    rmSync(modsDir, { recursive: true, force: true });
+  }
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -10839,9 +10917,13 @@ const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S
  * series never draws (chronic pre-chapter flake; the stub plot scenarios
  * S25/S28/S45 pass under identical pool load, so the plot PATH is sound —
  * it is CPU starvation of the heavy scenario, not a product race). Alone,
- * S30 is reliably green (8/8). Single-sourced here; the runner reads it
+ * S30 is reliably green (8/8). S64 (save_rep) runs alone because it drives an
+ * async producer round-trip (the produces:commands replay) whose settling it
+ * polls — the same starvation that flakes S30 would flake it in a pool — AND
+ * it sets process.env.E2E_MODS_DIR for its own bridge child, which must not
+ * bleed into a co-scheduled scenario. Single-sourced here; the runner reads it
  * via --list. */
-const EXCLUSIVE: readonly string[] = ["S30"];
+const EXCLUSIVE: readonly string[] = ["S30", "S64"];
 // (review fix) EXCLUSIVE must name real scenarios — a typo would silently
 // drop the member from BOTH lanes (the runner filters by membership)
 for (const n of EXCLUSIVE) {
@@ -10869,7 +10951,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
   S58: "fast", S59: "fast", S60: "fast", S61: "fast", S62: "fast",
-  S63: "fast",
+  S63: "fast", S64: "full",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {

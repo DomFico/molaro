@@ -3773,7 +3773,11 @@ async function main(): Promise<void> {
         return false;
       };
       const anyNeRgb = (buf: Float32Array, def: readonly [number, number, number]): boolean => {
-        for (let i = 0; i < buf.length; i++) if (buf[i] !== def[i % 3]) return true;
+        // Compare in FLOAT32 space (Math.fround): the buffer holds the float32
+        // of the default fraction, not the double, so a pristine edge/trace
+        // buffer must not read as customized (the DEFAULT_COLOR lesson).
+        const d = [Math.fround(def[0]), Math.fround(def[1]), Math.fround(def[2])];
+        for (let i = 0; i < buf.length; i++) if (buf[i] !== d[i % 3]) return true;
         return false;
       };
       const edgeCustomized =
