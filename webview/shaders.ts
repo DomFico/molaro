@@ -510,12 +510,66 @@ export function focusFlashShaders(): { vertex: string; fragment: string } {
  * is exactly what breaking symmetry means).
  */
 /** Ribbon thickness as a fraction of the band's HALF width, so the box is
- * 2·w wide and 2·RIBBON_THICKNESS·w thick — i.e. thickness is 15% of width.
- * Chosen by eye against the miter shots: thin enough to still read as a ribbon
- * rather than a bar, thick enough that the edge catches light at a glancing
- * angle, which is the whole point of having one. Proportional rather than
- * absolute so a thin coil and a wide helix keep the same slenderness. */
-export const RIBBON_THICKNESS = 0.15;
+ * 2·w wide and 2·RIBBON_THICKNESS·w thick — i.e. thickness is 30% of width.
+ * Thin enough to still read as a band rather than a bar, thick enough that the
+ * narrow face catches light at a glancing angle, which is the whole point of
+ * having one. Proportional rather than absolute so a thin band and a wide band
+ * keep the same slenderness.
+ *
+ * WAS 0.15, raised on rendered evidence: at 15% a band rotating through
+ * edge-on shrank to sub-pixel and briefly VANISHED before flaring back, and a
+ * fold read as a crease because there was no substantial narrow face to shade.
+ * 0.30 doubles the narrow face without touching the cross-section's shape (the
+ * box is still a box, the same 16·S corners, the same four face normals) —
+ * comparable band renderers sit near this ratio.
+ *
+ * It does NOT abolish the vanishing, and must not be read as doing so: the
+ * edge-on projected width is 2·k·w·pxPerWorld/depth, PROPORTIONAL to w, so no
+ * k < 1 removes sub-pixel collapse — 0.30 only halves the width (or doubles the
+ * distance) at which it happens. Removing it outright needs a screen-space
+ * pixel floor, which this constant is not. Nor is 0.30 DERIVED by anything in
+ * this repo: every in-repo coupling is monotone in k with no threshold nearby
+ * (see the gates below), so the defensible range is roughly (0.15, 0.40] and
+ * the rendered evidence is the only load-bearing justification for the value.
+ *
+ * WHAT THIS CONSTANT BOUNDS, for the depth-composition gates. It bounds the
+ * THICKNESS component ONLY — not the band's total reach in front of the
+ * centreline the pixel finders model. With
+ * `vpos = pos + across·(±w) + nrm·(±k·w)` and across ⊥ nrm ⊥ along orthonormal,
+ * the width and thickness terms compose in QUADRATURE, not additively:
+ *   - sup over all pixels of the solid's forward reach = w·√(1+k²), i.e.
+ *     1.0112·w → 1.0440·w: +3.2%. The ±w WIDTH term dominates — the half-
+ *     extents are w : k·w = 3.33 : 1.
+ *   - at the pixel a finder actually samples (the ray through the modelled AXIS
+ *     point) the reach is D = min(w/|u|, k·w/|v|) with u = across·d, v = nrm·d.
+ *     MORE than arctan(k) ≈ 17° off edge-on, the thickness slab is the face
+ *     that ray exits, so there D scales LINEARLY in k and DOUBLES: worst case
+ *     max(D(0.30) − D(0.15)) = 0.522·w, at 16.7° off edge-on. WITHIN 17° of
+ *     edge-on the width faces govern instead and D ≈ w, unchanged by k. So
+ *     "+3.2%" is the silhouette story and is NOT the whole story for a finder.
+ *   - 0.30·w is exactly the FACE-ON case and understates the sup by 3.5×.
+ * S44's crossing finder models the band at ZERO thickness (the anchor-to-anchor
+ * AXIS depth) and skips crossings nearer than `sep < 0.15·rWorld`. That guard
+ * never bounded this model error: at S44's settings (`tracesize 5`,
+ * `pointsize 8` → w = 5·uWorldPerSize, guard = 1.20·uWorldPerSize) the sup
+ * reach exceeded it 4.21× BEFORE this change and 4.35× after, and the 0.522·w
+ * worst case is 2.610·uWorldPerSize — pre-existing, not introduced here.
+ *
+ * THE TWO COUPLED PIXEL GATES. S44 (the crossing matrix) moved AWAY from
+ * failing — see its audit block for the measurements and for what its
+ * sphere-wins half does and does not prove. S43 is the one ribbon assertion
+ * that moves TOWARD failing: its frame-difference check
+ * `Math.abs(r40 - r20) > 40` measured 1059 → 838, a 20.9% compression against a
+ * 17.6% first-principles prediction, so it still holds with ~21× margin. S43 is
+ * therefore what erodes FIRST if this constant is ever raised again.
+ *
+ * PICKING never tracked the thickness: `webview/picking.ts` builds the click
+ * capsule at radius exactly w (the across half-width), so it does not bound the
+ * drawn solid and never did — the drawn corner sits at 1.044·w now and sat at
+ * 1.011·w at 0.15. The uncovered sliver grows 1.1% → 4.4% of w, sub-pixel at
+ * realistic w (hence S63 green), while the capsule's over-coverage in the THIN
+ * direction drops 6.7× → 3.3×, so picking is more faithful on average. */
+export const RIBBON_THICKNESS = 0.30;
 
 /** Renderer-side spline sampling: how many sub-quads each ORIGINAL polyline
  * segment is diced into before the centripetal Catmull-Rom is evaluated across
