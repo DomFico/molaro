@@ -431,3 +431,59 @@ per-frame-series/per-point-scalar/scatter/commands/channel only).
   `offset`/smoothing axis) + shape swaps + background — into a replayable `# produces: commands` mod
   named `<name>` (like `create_sele` names a selection). Running `<name>` restores the look. Header-edge
   and per-vertex-trace attributes are DEFERRED (not captured — noted to the user).
+
+---
+
+## Since incr 61 — path idealization on the `offset` axis (2026-07-25 cartoon chapter, incr 62)
+
+> **STATUS: NOT APPLIED.** Nothing below is in `claudeprompt.ts` yet. It is a capability
+> class the assistant currently cannot reach, plus three traps that cost real time to find.
+
+### NEW capability: a mod can idealize the PATH a band/trace is drawn along
+The `offset` position axis (incr 47) was introduced for temporal effects (`smooth`, `delay`),
+and the prompt teaches it that way. It is **also the seam for geometric idealization**, because
+a bound `per_point_per_frame` 3-wide channel displaces the **shared** drawn positions that the
+polyline / ribbon / tube vertex passes read (`webview/main.ts:1394` and `:1146` read
+`positionAttr`; `:2864-2869` repoints it to `shown = raw + offset`). So *"the drawn backbone
+band follows a smoothed / idealized path"* is a **channel mod with zero engine change** — no
+new axis, no contract touch. The polyline's vertices ARE point indices, so a mod can **move**
+an anchor but can never **add** one.
+
+- **Flow is TWO commands** (see the `requires-channel` trap below): `idealize` then
+  `bind all idealize offset`, then the styling mod.
+- **Worked example the assistant cannot open:** `~/.molaro/mods/idealize.py` — per-motif
+  low-pass on the trace anchors, `?strand` / `?helix` / `?coil` blend factors.
+- **Domain default worth teaching if it ever writes one:** the reference consensus is
+  **strands idealized, helices and loops FAITHFUL** (PyMOL `cartoon_flat_sheets` ON,
+  `cartoon_smooth_loops` OFF, `cartoon_cylindrical_helices` OFF; ChimeraX strand 1.0 /
+  helix 0.0 / coil 0.0). Do not idealize a helix by default, and never by projecting a whole
+  run onto one straight axis — that flattens genuine curvature.
+
+### TRAP 1 — the offset axis moves EVERYTHING at that point, not just the band
+The position attribute is shared across passes, so a displaced point drags its own sphere and
+every bond drawn to it. On a real system the anchor displacement (up to ~2.4 Å) **exceeds a
+covalent bond length (~1.53 Å)**, so a co-displayed wireframe visibly tears. Two rules:
+**(a)** write an offset of **exactly 0.0** for every point you do not mean to move — do not
+rely on it being small; **(b)** say so in the mod's description and name the remedy (drop the
+context layer), because the user will otherwise read the skew as a bug.
+
+### TRAP 2 — `# requires-channel:` takes ONE token, one level deep
+`webview/recipes.ts:345-347` validates it as a single token and `:906-951` refuses a provider
+that itself requires a channel. So a styling mod that needs **two** providers (e.g. an
+orientation channel *and* an offset channel) **cannot** auto-chain both — its one slot is
+already spent. Tell the user the multi-command order instead of emitting a dependency that
+fails closed. (Widening the header to a whitespace LIST is the obvious engine follow-up, and
+the edges chapter wants the same thing for edge groups.)
+
+### TRAP 3 — an even-width "centred" running mean is NOT centred
+A centred boxcar of even width leads (or lags) by half a sample. Measured: a width-4 mean over
+trace anchors slid the drawn path **+0.846 Å along the helix axis** (predicted +0.76 Å = half
+the per-residue rise). Use the symmetrized odd kernel — averaging the two width-4 windows gives
+`[1,2,2,2,1]/8`, which measured **+0.008 Å** of slide and removed slightly *more* of the
+target signal. Applies to any smoothing/offset mod, not just this one.
+
+### Honesty note for any claim about a filter's effect
+`[1,2,1]/4` has an exact null at the 2-sample period, and it is tempting to state that as
+"removes 100% of a 2-residue pleat". On real data it removes **72–76%**, because a real strand
+also twists and curves and the low-frequency part passes straight through. State a measured
+figure or none.

@@ -253,6 +253,43 @@ exercises trace tubes rather than bonds.
 
 **Wrong if.** 15% reads as too thin or too thick on real curves. It is one constant.
 
+**→ WRONG-IF FIRED, 2026-07-25 · `7f709c8` (raised to 0.30).** 15% read as too THIN on
+real curves, exactly the condition this record named. Rendered evidence: a band rotating
+through edge-on shrank to sub-pixel and briefly **vanished** before flaring back, and a
+fold read as a crease because no substantial narrow face caught light. At 58–62° of face
+rotation per segment the band passes edge-on roughly every 1.5 vertices, so at 0.15 it
+disappeared at every crossing. Comparable band renderers sit near a 0.30 ratio.
+
+The prediction that **"it is one constant" held exactly** — one line, sole functional
+consumer `webview/shaders.ts:694`, no attribute/uniform/wire/contract surface touched.
+Gates: typecheck 0, npm 626, S43 10/10, S44 7/7 (the crossing moved *away* from failing,
+f72 17r/6b → 18r/5b = 2.83× → 3.60×, threshold left at `> 2×`), S63 17/17.
+
+**Proportional (i) vs absolute (ii) was NOT reopened; the original ruling stands.** But its
+price is now measured rather than asserted: because thickness scales with width, a band
+whose width tapers thins in *both* dimensions, so a taper reads as a wedge rather than a
+chisel. Absolute thickness was scoped and declined — it would draw a `2T` chisel where an
+orientation-unbound ribbon must draw **nothing** (breaking the degeneracy rule S43's
+`collapsed < 40` asserts; the `shaders.ts:614` early-out cannot catch it because it tests
+the PRE-degeneracy widths), it would put an unbounded offset in front of the modelled axis
+at small `w`, and it would let a visible band escape its own `w`-radius pick capsule.
+
+**Two corrections this increment made to the record's own framing.** (a) The claim that the
+constant bounds the drawn surface's depth deviation is false: the width and thickness
+offsets are orthogonal and compose in **quadrature**, so the sup of forward reach is
+`w·√(1+k²)` = 1.0112·w → 1.0440·w (+3.2%), with the `±w` width term dominating 3.33 : 1 —
+though at the pixel S44's finder samples, `D = min(w/|u|, k·w/|v|)` *doubles* more than
+`arctan(k)` ≈ 17° off edge-on (worst +0.522·w). (b) The pick capsule has radius exactly
+`w` while the drawn corner sits at 1.044·w, so it never bounded the drawn solid at either
+value; the uncovered sliver grew 1.1% → 4.4% of `w` (sub-pixel, hence S63 green), while
+thin-direction over-coverage fell 6.7× → 3.3×, making picking *more* faithful on average.
+
+**What erodes first if this is ever raised again:** S43's `Math.abs(r40 - r20) > 40`
+differential, 1059 → 838 (a 20.9% compression against a 17.6% first-principles prediction).
+0.30 is **not derived** by anything in this repo — every in-repo coupling is monotone in `k`
+with no threshold nearby, so the defensible range is roughly (0.15, 0.40] and the rendered
+evidence is the only load-bearing justification.
+
 ---
 
 ## C2 — the hold gesture: key `F`, refuse on no selection, newest on several · `74f0808`
