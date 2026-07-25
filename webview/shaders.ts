@@ -500,8 +500,11 @@ export function focusFlashShaders(): { vertex: string; fragment: string } {
  * own tangent, BEFORE the interpolation rather than after it (see the
  * conditioning note on across(t): the other order near-cancels mid-segment).
  * The DEGENERACY RULE (the ruled collapse-to-zero): a zero across, or one
- * parallel to along, has no defined plane — that end's half-width collapses
- * to zero. An UNBOUND orientation buffer is all zeros, so a ribbon without
+ * parallel to that anchor's own tangent, has no defined plane — that end's
+ * half-width collapses to zero. Both cases are ruled on PER END and BEFORE the
+ * interpolation, because the parallel case conditions to a zero vector and a
+ * zero vector reaching normalize() is NaN, not a collapse — see the per-end
+ * degeneracy block, which is where that is enforced. An UNBOUND orientation buffer is all zeros, so a ribbon without
  * orientation data draws NOTHING — honest, and the reason the tube stays the
  * default shape.
  *
@@ -568,16 +571,15 @@ export function focusFlashShaders(): { vertex: string; fragment: string } {
  *
  * That 838 is now STALE, and not because of this constant: the across(t)
  * CONDITIONING fix (project at the anchors and interpolate inside the plane
- * ⊥ along(t), instead of slerping the raw facings and projecting after) took it
- * to 227, a 5.7× margin. Expected in that direction and not a weakening of the
- * assertion: the differential measures how much the band's projected AREA moves
- * between two frames, and the old ordering's mid-segment near-cancellations
- * added area swings of their own — a fold or a pinch to zero width changes the
- * footprint far more than a smooth twist does. The null this gate discriminates
- * against (a facing that stops re-deriving per frame) measures ~6 on the same
- * fixture — the f20/f21 adjacent-frame difference — so 227 still sits 38× above
- * the null it must separate from. Re-measure this line, not just S44, whenever
- * the ribbon's geometry moves.
+ * ⊥ along(t), instead of slerping the raw facings and projecting after) moved it
+ * to 227, and the SIGN-COHERENCE half of the same increment moved it back to
+ * 362 — a 9.05× margin over the `> 40` threshold. Movement in either direction
+ * is expected and is not a weakening of the assertion: the differential measures
+ * how much the band's projected AREA moves between two frames, and both the old
+ * ordering's mid-segment near-cancellations and its long-way-round twists added
+ * area swings of their own — a fold, a pinch to zero width, or a band driven
+ * edge-on mid-segment all change the footprint more than a smooth twist does.
+ * Re-measure this line, not just S44, whenever the ribbon's geometry moves.
  *
  * PICKING never tracked the thickness: `webview/picking.ts` builds the click
  * capsule at radius exactly w (the across half-width), so it does not bound the
@@ -730,17 +732,53 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         vec3 tangent = g00 * P1 + g10 * m1 + g01 * P2 + g11 * m2;
         vec3 chordDir = chord / segLen;
         vec3 along = ribbonAlong(tangent, chordDir);
-        // PER-END DEGENERACY (drawn ≡ supplied): an end whose supplied facing is
-        // zero has NO defined plane, so the band collapses to zero width THERE —
-        // the old per-end rule, preserved across the spline. Crucially the facing
-        // is never INVENTED: at a partially-bound segment (one anchor zero, one
-        // not) the width TAPERS from the bound end to zero at the unbound anchor,
-        // exactly the wedge the flat quad drew — rather than borrowing the
-        // neighbour's facing at full width. Both zero (unbound orientation) →
-        // width zero everywhere → the whole ribbon collapses.
+        // PER-END DEGENERACY (drawn ≡ supplied). An end with NO defined plane
+        // collapses the band to zero width THERE — the old per-end rule, preserved
+        // across the spline. The facing is never INVENTED: at a partially-degenerate
+        // segment the width TAPERS from the good end to zero at the bad anchor,
+        // exactly the wedge the flat quad drew, rather than borrowing the
+        // neighbour's facing at full width. Both ends bad → width zero everywhere →
+        // the whole ribbon collapses.
+        //
+        // TWO ways an end has no plane, and BOTH are caught here:
+        //   (1) the supplied facing is ZERO (an unbound orientation buffer);
+        //   (2) the supplied facing is NONZERO but PARALLEL to its own anchor
+        //       tangent — it conditions to a zero vector, which has no direction.
+        // (2) is why this block is evaluated BEFORE the width: it can only be
+        // detected AFTER conditioning, and it must be caught before the
+        // conditioned facing reaches ribbonSlerp — whose first act is
+        // normalize(), and GLSL normalize(vec3(0)) is NaN, not zero. A NaN
+        // survives the alen belt below (NaN < 1e-6 is FALSE, so w keeps FULL
+        // width) and reaches gl_Position in a depthWrite pass. Measured on a
+        // GLSL-faithful float32 mirror with both facings parallel to their own
+        // tangents, 9 hulls × 9 sub-samples: 42 NaN, every one at nonzero width,
+        // where the pre-change ordering produced 0. Hence the gate is on the
+        // CONDITIONED length, not the supplied one.
         float lenA = length(iAcrossA), lenB = length(iAcrossB);
-        float wA_def = lenA < 1e-9 ? 0.0 : wA;
-        float wB_def = lenB < 1e-9 ? 0.0 : wB;
+        bool zeroA = lenA < 1e-9, zeroB = lenB < 1e-9;
+        bool zeroBoth = zeroA && zeroB;
+        vec3 rawA = zeroA ? iAcrossB : iAcrossA;
+        vec3 rawB = zeroB ? iAcrossA : iAcrossB;
+        vec3 alongA = ribbonAlong(m1, chordDir);
+        vec3 alongB = ribbonAlong(m2, chordDir);
+        vec3 pA = zeroBoth ? vec3(0.0) : ribbonPerp(mat3(modelViewMatrix) * normalize(rawA), alongA);
+        vec3 pB = zeroBoth ? vec3(0.0) : ribbonPerp(mat3(modelViewMatrix) * normalize(rawB), alongB);
+        // 1e-6 is the SAME threshold the alen belt below has always used — this
+        // moves the test earlier and per-END, it does not retune it. Between 1e-6
+        // and ~1e-4 the residue's direction is weakly determined in float32 but is
+        // computed ONCE PER SEGMENT, so it is arbitrary-yet-consistent along the
+        // whole segment: a slightly wrong plane, never a fold.
+        bool flatA = length(pA) < 1e-6, flatB = length(pB) < 1e-6;
+        bool degA = zeroA || flatA;
+        bool degB = zeroB || flatB;
+        bool noPlane = degA && degB;
+        // the surviving end's conditioned facing, TRANSPORTED into the dead end's
+        // frame, keeps the interior finite and ⊥ from one end alone. Both dead →
+        // zero, and noPlane routes around the slerp entirely.
+        vec3 qA = flatA ? (flatB ? vec3(0.0) : ribbonTransport(pB, alongB, alongA)) : pA;
+        vec3 qB = flatB ? (flatA ? vec3(0.0) : ribbonTransport(pA, alongA, alongB)) : pB;
+        float wA_def = degA ? 0.0 : wA;
+        float wB_def = degB ? 0.0 : wB;
         // WIDTH + COLOUR: linear resample across the segment — the SAME two-end
         // interpolation the flat quad had, now sampled at S+1 points not 2.
         float w = mix(wA_def, wB_def, t);
@@ -766,8 +804,10 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // common case) the projected pair sits within a few degrees of the raw
         // pair, so the interpolated arc — and its crossing with the tangent —
         // barely moves. Measured on a 214-vertex synthetic angular polyline
-        // (within-segment tangent rotation mean 47.6°, max 97.6°) over six
-        // supplied-facing regimes, the smallest INTERIOR residue length went
+        // (within-segment tangent rotation mean 47.6°, max 97.6°) over the four
+        // band-filling supplied-facing regimes (the fifth COND_REGIMES sweeps,
+        // "parallel", collapses an anchor by construction and arrived later with
+        // the conditioned-length gate), the smallest INTERIOR residue length went
         // 0.0116→0.0600 on the worst regime but 0.1030→0.0776 — WORSE — on a
         // facing that points where the tangent is going, and the worst
         // adjacent-sub-sample face rotation stayed at 175°. It is a reordering
@@ -778,7 +818,8 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // (ribbonTransport) before the slerp. A slerp of two vectors that both
         // lie in one plane through the origin stays in that plane, so across(t)
         // is ⊥ along(t) BY CONSTRUCTION — measured interior residue length
-        // 1.000000 in all six regimes, against 0.0116–0.1030 before — and the
+        // 1.000000 in all five COND_REGIMES regimes, against 0.0116–0.1030 (and
+        // 0.0195 on "parallel") before — and the
         // final ribbonPerp is a rounding-level correction rather than a
         // cancellation. The only place the residue can still be short is AT an
         // anchor, where it is exactly the supplied facing's own ⊥ component:
@@ -792,17 +833,10 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // transports and one ribbonPerp per vertex; this pass is fill-bound, not
         // vertex-bound (16·S corners per SEGMENT, not per point).
         //
-        // Where ONE end is zero the width already tapered to it, so the
-        // surviving end's facing carries the (vanishing) width — no facing is
-        // fabricated at the collapsed anchor. Both zero → no plane at all, and
-        // the zero flows through to a zero across exactly as before.
-        bool noPlane = lenA < 1e-9 && lenB < 1e-9;
-        vec3 rawA = lenA < 1e-9 ? iAcrossB : iAcrossA;
-        vec3 rawB = lenB < 1e-9 ? iAcrossA : iAcrossB;
-        vec3 alongA = ribbonAlong(m1, chordDir);
-        vec3 alongB = ribbonAlong(m2, chordDir);
-        vec3 pA = noPlane ? vec3(0.0) : ribbonPerp(mat3(modelViewMatrix) * normalize(rawA), alongA);
-        vec3 pB = noPlane ? vec3(0.0) : ribbonPerp(mat3(modelViewMatrix) * normalize(rawB), alongB);
+        // The per-end degeneracy block above already conditioned both anchors
+        // (pA/pB) and substituted the surviving end where one is dead (qA/qB), so
+        // what is left here is the interpolation itself.
+        //
         // SIGN COHERENCE — the second, independent fold mechanism. A band's
         // facing is a PLANE, not an arrow: across and -across span the same box
         // (see below), so a supplied pair more than 90° apart describes two
@@ -814,49 +848,78 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // removes it: it is present before and after the conditioning fix, on a
         // pair whose conditioning is a perfect 1.0 at both anchors.
         //
-        // So the interpolation takes the SHORT arc between the two planes. On the
-        // same 214-vertex fixture the worst face rotation between adjacent
-        // sub-samples was 157.2° / 111.8° / 111.3° / 38.4° across the four facing
-        // regimes with the conditioning fix alone, and 38.5° / 38.4° / 37.4° /
-        // 38.4° with this — a uniform bound where there was none, in the same
-        // range as the S=8 spline's own ~35° silhouette target.
+        // So the interpolation takes the SHORT arc between the two planes. Worst
+        // face rotation between adjacent sub-samples, on the 214-vertex fixture,
+        // per regime in the order COND_REGIMES lists them (perp-twist /
+        // perp-chase / tilted / world-fixed / parallel):
+        //   conditioning fix alone   157.2° / 42.0° / 38.4° / 34.2° / 22.8°
+        //   with this                 38.5° / 37.4° / 38.4° / 34.2° / 22.8°
+        // Worst case 38.5°, in the range of the S=8 spline's own ~35° silhouette
+        // target. SCOPE: that is measured over arbitrary FACINGS on THIS fixture's
+        // turn-angle distribution (70–110° per step, within-segment tangent
+        // rotation max 97.6°). It is NOT a bound over arbitrary GEOMETRY — a
+        // facing lying in the plane a segment bends in folds once the
+        // within-segment tangent rotation passes ~90°, because there the
+        // anchor-frame sign test disagrees with the transported-frame one and
+        // manufactures an exactly-antiparallel pair. The geometry-scope test pins
+        // that boundary, the off-plane control, and the real-data turn maximum.
+        //
+        // THE COST, stated because it is real: dot(qA, qB) < 0 is a DISCRETE
+        // per-segment branch with no continuity guard. Across the boundary an
+        // infinitesimal change in the supplied facing rolls the mid-segment
+        // cross-section by ~90° (measured in the FLIP DISCONTINUITY test), and
+        // since orientation is a per-point-per-FRAME bindable channel, a facing
+        // that drifts through the boundary during playback pops once. Both
+        // choices at the boundary are equal-magnitude quarter-turns, so neither is
+        // a fold; removing the pop entirely needs a frame propagated ALONG the
+        // polyline, which is serial state this per-instance pass does not have.
         //
         // WHY NEGATING AN END IS NOT A LIE ABOUT THE DATA. vpos offsets by
         // across·(±w) and nrm·(±k·w) with nrm = cross(along, across), so
-        // across → -across also sends nrm → -nrm: the cross-section is ROTATED
-        // 180° about the tangent, which maps corner (x,z) onto the position of
-        // corner (-x,-z). The base geometry's corner set is symmetric under that
-        // map (broad faces 0↔1, edge faces 2↔3) and each face's declared normal
-        // lands on the value the face it replaces declared, so the drawn box —
-        // positions, per-face normals, colours — is IDENTICAL; only which vertex
-        // sits at which corner permutes. It is a 180° rotation (det +1) so the
-        // winding is preserved too, and the pass is DoubleSide regardless. The
-        // decision is also camera-invariant: pA and pB are both rotated by the
-        // same mat3(modelViewMatrix), so dot(pA, pB) does not depend on the view.
-        // pA is never flipped, so the t=0 anchor stays bit-identical as well.
-        vec3 pBc = dot(pA, pB) < 0.0 ? -pB : pB;
-        // transport is LINEAR in v, so the UNNORMALIZED pA/pBc are fine here —
+        // across → -across also sends nrm → -nrm: the CROSS-SECTION is ROTATED
+        // 180° about the tangent, mapping corner (x,z) onto the position of corner
+        // (-x,-z). The base geometry's corner ring is symmetric under that map
+        // (broad faces 0↔1, edge faces 2↔3) and each face's declared normal lands
+        // on the value the face it replaces declared, so the cross-section — its
+        // corner positions, its per-face normals, its colours — is IDENTICAL.
+        // Scoped deliberately to the cross-section: the index buffer is FIXED, so
+        // the permutation re-splits each sub-quad on the other diagonal, and a
+        // sub-quad between two cross-sections is not planar in general — the drawn
+        // TRIANGLES therefore differ even though the ring they span does not. What
+        // makes the sign unobservable in the end is the fragment shader: it shades
+        // on abs(normalize(vNormal).z), which is even in the normal's sign.
+        // The decision is camera-invariant: pA and pB are both rotated by the same
+        // mat3(modelViewMatrix), so dot(pA, pB) does not depend on the view.
+        // qA is never flipped, so the t=0 anchor is unaffected by this rule.
+        vec3 qBc = dot(qA, qB) < 0.0 ? -qB : qB;
+        // transport is LINEAR in v, so the UNNORMALIZED qA/qBc are fine here —
         // the slerp normalizes, and their lengths only scale its inputs.
         vec3 acrossS = noPlane ? vec3(0.0) : ribbonSlerp(
-          ribbonTransport(pA, alongA, along), ribbonTransport(pBc, alongB, along), t);
+          ribbonTransport(qA, alongA, along), ribbonTransport(qBc, alongB, along), t);
         // AT THE ANCHORS take the conditioned anchor facing ITSELF. Transport
         // and slerp both reduce to it in exact arithmetic (transport a→a is the
         // identity; the slerp returns its own endpoint at t=0 and t=1), but a
         // float projection is not idempotent through normalize-and-renormalize,
-        // and the anchors are where drawn ≡ supplied is a PROMISE. Taking pA/pBc
-        // makes that promise structural: the anchor aperp — direction AND length,
-        // so the belt below too — is bit-for-bit the expression the old ordering
-        // evaluated there, up to the sign coherence above (which draws the
-        // identical box). t = j/S is exact in float32 and never leaves [0,1]. The
-        // t>=1 anchor MUST use the same representative the interior interpolated
-        // toward, or the last sub-facet would carry the whole 180° flip.
-        vec3 aperp = t <= 0.0 ? pA : t >= 1.0 ? pBc : ribbonPerp(acrossS, along);
+        // and the anchors are where drawn ≡ supplied is a PROMISE. Taking qA/qBc
+        // makes that promise structural: at an anchor that DRAWS, the aperp —
+        // direction AND length, so the belt below too — is bit-for-bit the
+        // expression the old ordering evaluated there, up to the sign coherence
+        // above. At an anchor that does NOT draw (degA/degB above zeroed its
+        // width) the value is the transported survivor instead, which is the whole
+        // point of qA/qB; nothing is drawn there either way. t = j/S is exact in
+        // float32 and never leaves [0,1]. The t>=1 anchor MUST use the same
+        // representative the interior interpolated toward, or the last sub-facet
+        // would carry the whole 180° flip.
+        vec3 aperp = t <= 0.0 ? qA : t >= 1.0 ? qBc : ribbonPerp(acrossS, along);
         float alen = length(aperp);
-        // DEGENERACY: no defined plane (a facing parallel to its own anchor's
-        // tangent, or no facing at all) → zero width. Kept as a BELT, and it is
-        // now exactly the per-ANCHOR rule it was written to be: mid-segment the
-        // residue is a unit vector's ⊥ component in a plane it already lies in,
-        // measured 1.000000, so this cannot fire there.
+        // DEGENERACY BELT. The per-END rule above is what actually rules on a
+        // missing or tangent-parallel facing, and it now does so BEFORE the
+        // conditioned facing can reach a normalize(). This stays as a belt for the
+        // paths it still covers: the noPlane collapse (where aperp is exactly
+        // zero), and any residue that becomes short for a reason not enumerated
+        // above. Mid-segment, when a plane exists, the residue is a unit vector's
+        // ⊥ component in a plane it already lies in — measured 1.000000 in double
+        // and 0.999998569 in float32 — so it does not fire there.
         w = w * (alen < 1e-6 ? 0.0 : 1.0);
         vec3 across = alen < 1e-6 ? vec3(0.0) : aperp / alen;
         // THIN BOX CROSS-SECTION. The band gets thickness through its own plane

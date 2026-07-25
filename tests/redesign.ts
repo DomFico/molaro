@@ -7664,8 +7664,11 @@ async function S44(): Promise<void> {
         // identical, so the crossings the finder selects sit on coherent pairs.
         // The threshold is LEFT at `> 2×`
         // — the gate still passes and a passing gate is not loosened — but the
-        // f72 margin is now TWO red pixels (16 > 2·7 = 14), so record plainly
-        // what that does and does not mean:
+        // f72 margin is ONE pixel, not two. 16 > 2·7 = 14 looks like two, but the
+        // patch is 5×5 = 25 px and 16r + 7b = 23, so TWO pixels are unclassified
+        // and both single-pixel failure paths are "a pixel turns blue":
+        // red→blue gives 15 > 2·8 = 16, false; unclassified→blue gives
+        // 16 > 2·8 = 16, false. Record plainly what that does and does not mean:
         //   - the DIRECTION here is NOT a theorem, unlike the thickness change.
         //     That one was a pointwise superset (same width, twice the thickness)
         //     so the surface could only move toward the camera. This one ROTATES

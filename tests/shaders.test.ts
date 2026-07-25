@@ -335,19 +335,36 @@ test("ribbon: across(t) CONDITIONS AT THE ANCHORS, then interpolates ⊥ along(t
   assert.match(RIBBON_V, /vec3 alongB = ribbonAlong\(m2, chordDir\);/);
   // same space and same operation as before: view space (rotation only), ⊥, unit
   assert.match(RIBBON_V,
-    /vec3 pA = noPlane \? vec3\(0\.0\) : ribbonPerp\(mat3\(modelViewMatrix\) \* normalize\(rawA\), alongA\);/);
+    /vec3 pA = zeroBoth \? vec3\(0\.0\) : ribbonPerp\(mat3\(modelViewMatrix\) \* normalize\(rawA\), alongA\);/);
   assert.match(RIBBON_V,
-    /vec3 pB = noPlane \? vec3\(0\.0\) : ribbonPerp\(mat3\(modelViewMatrix\) \* normalize\(rawB\), alongB\);/);
+    /vec3 pB = zeroBoth \? vec3\(0\.0\) : ribbonPerp\(mat3\(modelViewMatrix\) \* normalize\(rawB\), alongB\);/);
+  // THE NaN GATE. The degeneracy test must be on the CONDITIONED length, not the
+  // supplied one: a nonzero facing parallel to its own anchor tangent projects to
+  // zero, and GLSL normalize(vec3(0)) is NaN — at FULL width, since NaN < 1e-6 is
+  // false and the alen belt therefore never fires. Pin all four lines.
+  assert.match(RIBBON_V, /bool flatA = length\(pA\) < 1e-6, flatB = length\(pB\) < 1e-6;/);
+  assert.match(RIBBON_V, /bool degA = zeroA \|\| flatA;/);
+  assert.match(RIBBON_V, /bool degB = zeroB \|\| flatB;/);
+  assert.match(RIBBON_V, /bool noPlane = degA && degB;/);
+  // the surviving end is TRANSPORTED into the dead end's frame — never normalized
+  // from zero, and never a fabricated direction
+  assert.match(RIBBON_V,
+    /vec3 qA = flatA \? \(flatB \? vec3\(0\.0\) : ribbonTransport\(pB, alongB, alongA\)\) : pA;/);
+  assert.match(RIBBON_V,
+    /vec3 qB = flatB \? \(flatA \? vec3\(0\.0\) : ribbonTransport\(pA, alongA, alongB\)\) : pB;/);
+  // and the width taper reads the CONDITIONED verdict, so a planeless end collapses
+  assert.match(RIBBON_V, /float wA_def = degA \? 0\.0 : wA;/);
+  assert.match(RIBBON_V, /float wB_def = degB \? 0\.0 : wB;/);
   assert.match(RIBBON_V, /vec3 ribbonPerp\(vec3 v, vec3 u\) \{ return v - u \* dot\(v, u\); \}/);
   // …and the INTERPOLATION happens inside the plane ⊥ along(t): each conditioned
   // anchor facing is TRANSPORTED into that plane first, so the slerp cannot leave
   // it. It is NOT a slerp of the raw facings re-projected afterwards.
-  assert.match(RIBBON_V, /vec3 pBc = dot\(pA, pB\) < 0\.0 \? -pB : pB;/);
-  assert.match(RIBBON_V, /vec3 acrossS = noPlane \? vec3\(0\.0\) : ribbonSlerp\(\s*ribbonTransport\(pA, alongA, along\), ribbonTransport\(pBc, alongB, along\), t\);/);
+  assert.match(RIBBON_V, /vec3 qBc = dot\(qA, qB\) < 0\.0 \? -qB : qB;/);
+  assert.match(RIBBON_V, /vec3 acrossS = noPlane \? vec3\(0\.0\) : ribbonSlerp\(\s*ribbonTransport\(qA, alongA, along\), ribbonTransport\(qBc, alongB, along\), t\);/);
   assert.doesNotMatch(RIBBON_V, /ribbonSlerp\(iAcrossA, iAcrossB, t\)/,
     "the raw supplied facings must NOT be slerped before conditioning (that is the defect)");
   // the anchors take the conditioned anchor facing itself — bit-exactly
-  assert.match(RIBBON_V, /vec3 aperp = t <= 0\.0 \? pA : t >= 1\.0 \? pBc : ribbonPerp\(acrossS, along\);/);
+  assert.match(RIBBON_V, /vec3 aperp = t <= 0\.0 \? qA : t >= 1\.0 \? qBc : ribbonPerp\(acrossS, along\);/);
   // the DEGENERACY rule survives: no defined plane → zero width → collapse
   assert.match(RIBBON_V, /w = w \* \(alen < 1e-6 \? 0\.0 : 1\.0\);/);
   assert.match(RIBBON_V, /vec3 across = alen < 1e-6 \? vec3\(0\.0\) : aperp \/ alen;/);
@@ -390,7 +407,10 @@ const v3add = (a: V3, b: V3): V3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 const v3scl = (a: V3, s: number): V3 => [a[0] * s, a[1] * s, a[2] * s];
 const v3dot = (a: V3, b: V3): number => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const v3len = (a: V3): number => Math.hypot(a[0], a[1], a[2]);
-const v3norm = (a: V3): V3 => { const l = v3len(a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+// NO zero-guard, deliberately: GLSL normalize(vec3(0)) is NaN, not zero, and a
+// mirror with `|| 1` here silently absorbs exactly the defect class this suite
+// exists to catch (it made the isFinite3 assertions below inert once already).
+const v3norm = (a: V3): V3 => { const l = v3len(a); return [a[0] / l, a[1] / l, a[2] / l]; };
 const rKnot = (a: V3, b: V3): number => Math.sqrt(Math.max(v3len(v3sub(a, b)), 1e-5));
 
 /** The two non-uniform (centripetal Barry-Goldman) Hermite tangents at P1 and
@@ -606,11 +626,16 @@ test("ribbon: a PARTIALLY-bound segment TAPERS — a zero-facing anchor draws no
   // drawn ≡ supplied at partial binding: the width collapses at the unbound end
   // and grows to the bound end, rather than borrowing the neighbour's facing at
   // full width. Pin the per-end taper in the shader source.
-  assert.match(RIBBON_V, /float wA_def = lenA < 1e-9 \? 0\.0 : wA;/);
-  assert.match(RIBBON_V, /float wB_def = lenB < 1e-9 \? 0\.0 : wB;/);
+  // the per-end verdict now covers BOTH ways an end can lack a plane (a zero
+  // facing, and a nonzero one parallel to its own anchor tangent)
+  assert.match(RIBBON_V, /bool zeroA = lenA < 1e-9, zeroB = lenB < 1e-9;/);
+  assert.match(RIBBON_V, /float wA_def = degA \? 0\.0 : wA;/);
+  assert.match(RIBBON_V, /float wB_def = degB \? 0\.0 : wB;/);
   assert.match(RIBBON_V, /float w = mix\(wA_def, wB_def, t\);/);
   // and it must NOT be the old full-width mix over the raw widths
   assert.doesNotMatch(RIBBON_V, /float w = mix\(wA, wB, t\);/);
+  // nor may the taper regress to testing only the SUPPLIED length
+  assert.doesNotMatch(RIBBON_V, /float wA_def = lenA < 1e-9 \? 0\.0 : wA;/);
 });
 
 // ---------------------------------------------------------------------------
@@ -626,23 +651,40 @@ test("ribbon: a PARTIALLY-bound segment TAPERS — a zero-facing anchor draws no
 /** the drawn face direction at t: the CURRENT ordering (condition at each
  * anchor against that anchor's own tangent, transport both into the plane
  * ⊥ along(t), slerp there). `M` is mat3(modelViewMatrix). */
-function acrossNow(P0: V3, P1: V3, P2: V3, P3: V3, A: V3, B: V3, t: number, M: V3[]): { across: V3; alen: number; along: V3 } {
+function acrossNow(H0: V3, H1: V3, H2: V3, H3: V3, A: V3, B: V3, t: number, M: V3[], wA = 1, wB = 1): {
+  across: V3; alen: number; along: V3; w: number; degA: boolean; degB: boolean; flipped: boolean;
+} {
+  // M is a CAMERA: the shader transforms the control hull to view space too, so
+  // the hull and the facing must rotate TOGETHER here. Applying M to the facing
+  // alone would leave a rotation changing the geometry, which no rotation may do.
+  const P0 = mat3mul(M, H0), P1 = mat3mul(M, H1), P2 = mat3mul(M, H2), P3 = mat3mul(M, H3);
   const { chord, m1, m2 } = catmullMs(P0, P1, P2, P3);
   const chordDir = v3scl(chord, 1 / v3len(chord));
   const along = rAlong(ribbonTangent(P0, P1, P2, P3, t), chordDir);
   const lenA = v3len(A), lenB = v3len(B);
-  const noPlane = lenA < 1e-9 && lenB < 1e-9;
-  const rawA: V3 = lenA < 1e-9 ? B : A;
-  const rawB: V3 = lenB < 1e-9 ? A : B;
+  const zeroA = lenA < 1e-9, zeroB = lenB < 1e-9, zeroBoth = zeroA && zeroB;
+  const rawA: V3 = zeroA ? B : A;
+  const rawB: V3 = zeroB ? A : B;
   const alongA = rAlong(m1, chordDir), alongB = rAlong(m2, chordDir);
-  const pA: V3 = noPlane ? [0, 0, 0] : rPerp(mat3mul(M, v3norm(rawA)), alongA);
-  const pB: V3 = noPlane ? [0, 0, 0] : rPerp(mat3mul(M, v3norm(rawB)), alongB);
-  const pBc: V3 = v3dot(pA, pB) < 0 ? v3scl(pB, -1) : pB;
+  const pA: V3 = zeroBoth ? [0, 0, 0] : rPerp(mat3mul(M, v3norm(rawA)), alongA);
+  const pB: V3 = zeroBoth ? [0, 0, 0] : rPerp(mat3mul(M, v3norm(rawB)), alongB);
+  // the CONDITIONED-length gate: a nonzero facing parallel to its own anchor
+  // tangent projects to zero, and a zero reaching ribbonSlerp's normalize() is
+  // NaN at FULL width (the belt cannot see it — NaN < 1e-6 is false).
+  const flatA = v3len(pA) < 1e-6, flatB = v3len(pB) < 1e-6;
+  const degA = zeroA || flatA, degB = zeroB || flatB;
+  const noPlane = degA && degB;
+  const qA: V3 = flatA ? (flatB ? [0, 0, 0] : rTransport(pB, alongB, alongA)) : pA;
+  const qB: V3 = flatB ? (flatA ? [0, 0, 0] : rTransport(pA, alongA, alongB)) : pB;
+  const flipped = v3dot(qA, qB) < 0;
+  const qBc: V3 = flipped ? v3scl(qB, -1) : qB;
   const acrossS: V3 = noPlane ? [0, 0, 0]
-    : ribbonSlerp(rTransport(pA, alongA, along), rTransport(pBc, alongB, along), t);
-  const aperp = t <= 0 ? pA : t >= 1 ? pBc : rPerp(acrossS, along);
+    : ribbonSlerp(rTransport(qA, alongA, along), rTransport(qBc, alongB, along), t);
+  const aperp = t <= 0 ? qA : t >= 1 ? qBc : rPerp(acrossS, along);
   const alen = v3len(aperp);
-  return { across: alen < 1e-6 ? [0, 0, 0] : v3scl(aperp, 1 / alen), alen, along };
+  const wAd = degA ? 0 : wA, wBd = degB ? 0 : wB;
+  const w = (wAd + t * (wBd - wAd)) * (alen < 1e-6 ? 0 : 1);
+  return { across: alen < 1e-6 ? [0, 0, 0] : v3scl(aperp, 1 / alen), alen, along, w, degA, degB, flipped };
 }
 
 /** the drawn face direction at t under the PRE-CHANGE ordering (slerp the raw
@@ -650,7 +692,8 @@ function acrossNow(P0: V3, P1: V3, P2: V3, P3: V3, A: V3, B: V3, t: number, M: V
  * reference the anchors must still reproduce bit-for-bit. It is deliberately
  * NOT what the shader does any more — the interior test below asserts the two
  * disagree, so this cannot quietly become a copy of `acrossNow`. */
-function acrossInterpolateThenProject(P0: V3, P1: V3, P2: V3, P3: V3, A: V3, B: V3, t: number, M: V3[]): { across: V3; alen: number } {
+function acrossInterpolateThenProject(H0: V3, H1: V3, H2: V3, H3: V3, A: V3, B: V3, t: number, M: V3[], wA = 1, wB = 1): { across: V3; alen: number; w: number } {
+  const P0 = mat3mul(M, H0), P1 = mat3mul(M, H1), P2 = mat3mul(M, H2), P3 = mat3mul(M, H3);
   const { chord } = catmullMs(P0, P1, P2, P3);
   const chordDir = v3scl(chord, 1 / v3len(chord));
   const along = rAlong(ribbonTangent(P0, P1, P2, P3, t), chordDir);
@@ -659,7 +702,9 @@ function acrossInterpolateThenProject(P0: V3, P1: V3, P2: V3, P3: V3, A: V3, B: 
     : lenA < 1e-9 ? v3norm(B) : lenB < 1e-9 ? v3norm(A) : ribbonSlerp(A, B, t);
   const aperp = rPerp(mat3mul(M, acrossWorld), along);
   const alen = v3len(aperp);
-  return { across: alen < 1e-6 ? [0, 0, 0] : v3scl(aperp, 1 / alen), alen };
+  const wAd = lenA < 1e-9 ? 0 : wA, wBd = lenB < 1e-9 ? 0 : wB;
+  const w = (wAd + t * (wBd - wAd)) * (alen < 1e-6 ? 0 : 1);
+  return { across: alen < 1e-6 ? [0, 0, 0] : v3scl(aperp, 1 / alen), alen, w };
 }
 
 const mat3mul = (M: V3[], v: V3): V3 => [
@@ -693,7 +738,7 @@ function condPoly(n: number, seed: number): V3[] {
   }
   return p;
 }
-type Regime = "perp-twist" | "perp-chase" | "tilted" | "world-fixed";
+type Regime = "perp-twist" | "perp-chase" | "tilted" | "world-fixed" | "parallel";
 function condFacings(p: V3[], regime: Regime, seed: number): V3[] {
   const r = lcg(seed);
   const T = p.map((_, i) => v3norm(v3sub(i + 1 < p.length ? p[i + 1] : p[i], i > 0 ? p[i - 1] : p[i])));
@@ -718,10 +763,25 @@ function condFacings(p: V3[], regime: Regime, seed: number): V3[] {
       case "tilted": return v3add(spun, v3scl(tv, 2.5 * (r() - 0.5) * 2));
       // one fixed world direction for every anchor
       case "world-fixed": return [0, 1, 0];
+      // the facing is the SPLINE's own anchor tangent — NONZERO but exactly
+      // parallel to it, so it conditions to a zero vector. The four regimes above
+      // never ill-condition an anchor (measured anchor floors 0.9986 / 0.9975 /
+      // 0.3672 / 0.0508), which is why this class went undetected.
+      case "parallel": {
+        const j = Math.max(1, Math.min(p.length - 2, i));
+        const { chord, m1, m2 } = catmullMs(p[j - 1], p[j], p[j + 1], j + 2 < p.length ? p[j + 2] : p[j + 1]);
+        const cd = v3scl(chord, 1 / v3len(chord));
+        return i <= j ? rAlong(m1, cd) : rAlong(m2, cd);
+      }
     }
   });
 }
-const COND_REGIMES: Regime[] = ["perp-twist", "perp-chase", "tilted", "world-fixed"];
+const COND_REGIMES: Regime[] = ["perp-twist", "perp-chase", "tilted", "world-fixed", "parallel"];
+/** "parallel" makes each segment's A-end facing EXACTLY its own anchor tangent,
+ * so |pA| is exactly zero there while the B end stays healthy: the segment draws
+ * the documented per-END taper, and its A anchor is the input that used to NaN.
+ * The other four never ill-condition an anchor at all. */
+const COLLAPSES_AN_ANCHOR = (r: Regime): boolean => r === "parallel";
 const COND_S = 8; // must mirror RIBBON_SEGMENTS
 
 /** walk every segment × every sub-sample of a regime, reporting the two things
@@ -729,6 +789,7 @@ const COND_S = 8; // must mirror RIBBON_SEGMENTS
  * direction can swing between two ADJACENT sub-samples. */
 function condStats(p: V3[], F: V3[], M: V3[], mode: "now" | "pre") {
   let interiorMin = Infinity, anchorMin = Infinity, worstRotDeg = 0;
+  let allFinite = true, anyDrawn = false;
   for (let i = 0; i + 1 < p.length; i++) {
     const P0 = i > 0 ? p[i - 1] : p[i], P1 = p[i], P2 = p[i + 1];
     const P3 = i + 2 < p.length ? p[i + 2] : p[i + 1];
@@ -738,16 +799,23 @@ function condStats(p: V3[], F: V3[], M: V3[], mode: "now" | "pre") {
       const o = mode === "now"
         ? acrossNow(P0, P1, P2, P3, F[i], F[i + 1], t, M)
         : acrossInterpolateThenProject(P0, P1, P2, P3, F[i], F[i + 1], t, M);
-      if (j === 0 || j === COND_S) anchorMin = Math.min(anchorMin, o.alen);
-      else interiorMin = Math.min(interiorMin, o.alen);
-      if (prev) {
+      if (!isFinite3(o.across) || !Number.isFinite(o.alen) || !Number.isFinite(o.w)) allFinite = false;
+      if (o.w > 1e-9) anyDrawn = true;
+      // a collapsed sub-sample has no plane and no residue to score — the
+      // conditioning floor is about samples where a plane EXISTS
+      if (o.alen > 1e-6) {
+        if (j === 0 || j === COND_S) anchorMin = Math.min(anchorMin, o.alen);
+        else interiorMin = Math.min(interiorMin, o.alen);
+      }
+      // likewise the fold metric: an angle between two zero vectors is not a fold
+      if (prev && v3len(prev) > 0.5 && v3len(o.across) > 0.5) {
         const c = Math.max(-1, Math.min(1, v3dot(prev, o.across)));
         worstRotDeg = Math.max(worstRotDeg, (Math.acos(c) * 180) / Math.PI);
       }
       prev = o.across;
     }
   }
-  return { interiorMin, anchorMin, worstRotDeg };
+  return { interiorMin, anchorMin, worstRotDeg, allFinite, anyDrawn };
 }
 
 test("ribbon: ribbonTransport carries a ⊥ facing into the NEXT tangent's plane (never cancels)", () => {
@@ -786,13 +854,24 @@ test("ribbon: the ANCHORS are BIT-IDENTICAL to the pre-change ordering (drawn �
   for (const M of [M_ID, M_ROT]) {
     for (const regime of COND_REGIMES) {
       const F = condFacings(p, regime, 999);
-      let checked = 0;
+      let checked = 0, skippedCollapsed = 0;
       for (let i = 0; i + 1 < p.length; i++) {
         const P0 = i > 0 ? p[i - 1] : p[i], P1 = p[i], P2 = p[i + 1];
         const P3 = i + 2 < p.length ? p[i + 2] : p[i + 1];
         for (const t of [0, 1]) {
           const now = acrossNow(P0, P1, P2, P3, F[i], F[i + 1], t, M);
           const pre = acrossInterpolateThenProject(P0, P1, P2, P3, F[i], F[i + 1], t, M);
+          // An anchor whose own facing has NO plane (zero, or parallel to its own
+          // tangent) draws nothing: its width is zeroed per-end. The promise is
+          // about anchors that DRAW — there is no "drawn" to equal "supplied"
+          // otherwise, and the value there is deliberately the transported
+          // survivor rather than the old ordering's near-zero residue.
+          if ((t <= 0 ? now.degA : now.degB)) {
+            assert.equal(now.w, 0, `${regime} seg ${i} t=${t}: a planeless anchor must draw nothing`);
+            assert.equal(pre.w, 0, `${regime} seg ${i} t=${t}: …and did not draw before either`);
+            skippedCollapsed++;
+            continue;
+          }
           assert.equal(now.alen, pre.alen, `${regime} seg ${i} t=${t}: anchor residue LENGTH must be identical`);
           // t=0 is identical outright (pA is never the flipped end). t=1 is
           // identical UP TO THE SIGN, because sign coherence may pick the other
@@ -810,7 +889,15 @@ test("ribbon: the ANCHORS are BIT-IDENTICAL to the pre-change ordering (drawn �
           checked++;
         }
       }
-      assert.ok(checked === 118, `every anchor of every segment was compared (got ${checked})`);
+      assert.equal(checked + skippedCollapsed, 118,
+        `every anchor of every segment was accounted for (compared ${checked}, collapsed ${skippedCollapsed})`);
+      if (COLLAPSES_AN_ANCHOR(regime)) {
+        assert.ok(skippedCollapsed > 0 && checked > 0,
+          `${regime}: this regime exists to exercise BOTH — a collapsed anchor and a drawn one ` +
+          `(collapsed ${skippedCollapsed}, compared ${checked})`);
+      } else {
+        assert.equal(skippedCollapsed, 0, `${regime}: every anchor has a plane, so every anchor must be compared`);
+      }
     }
   }
   // and the PARTIALLY-bound anchors too: one end zero (the taper case) still
@@ -869,17 +956,51 @@ test("ribbon: CONDITIONING FLOOR — the interior residue is ⊥ by construction
       const F = condFacings(p, regime, 999);
       const now = condStats(p, F, M, "now");
       const pre = condStats(p, F, M, "pre");
+      // THE NaN NET. GLSL normalize(vec3(0)) is NaN, so a conditioned facing that
+      // collapses to zero must be caught BEFORE the slerp. With the "parallel"
+      // regime present and no `|| 1` in v3norm, gating on the SUPPLIED length
+      // alone fails here — at full width, which the alen belt cannot see.
+      assert.ok(now.allFinite, `${regime}: every drawn value must be finite (no NaN reaches gl_Position)`);
       assert.ok(now.interiorMin > 1 - 1e-9,
         `${regime}: the interior residue must be ⊥ by construction (min ${now.interiorMin.toFixed(9)})`);
       // …and the ANCHOR floor is untouched: it is the supplied facing's own ⊥
       // component, a property of the DATA, which no ordering may improve (that
       // would mean inventing a facing) or worsen.
-      assert.equal(now.anchorMin, pre.anchorMin,
-        `${regime}: the anchor conditioning floor is the supplied data's, unchanged`);
+      if (!COLLAPSES_AN_ANCHOR(regime)) {
+        assert.equal(now.anchorMin, pre.anchorMin,
+          `${regime}: the anchor conditioning floor is the supplied data's, unchanged`);
+      }
       // the whole-segment floor is therefore exactly the anchor floor
       assert.ok(Math.min(now.interiorMin, now.anchorMin) === now.anchorMin,
         `${regime}: conditioning is never worse inside a segment than at its anchors`);
     }
+  }
+  // A ROTATION MAY NOT CHANGE THE PICTURE. M_ROT rotates the hull AND the facing,
+  // so the drawn face direction must come out exactly rotated and the discrete
+  // flip decision must be unchanged — otherwise the conditioning would depend on
+  // where the camera happens to be. (Measured worst deviation 2.7e-14 in double.)
+  {
+    let worstDev = 0, flipMismatch = 0, compared = 0;
+    for (const regime of COND_REGIMES) {
+      const F2 = condFacings(p, regime, 999);
+      for (let i = 0; i + 1 < p.length; i++) {
+        const P0 = i > 0 ? p[i - 1] : p[i], P1 = p[i], P2 = p[i + 1];
+        const P3 = i + 2 < p.length ? p[i + 2] : p[i + 1];
+        for (let j = 0; j <= COND_S; j++) {
+          const t = j / COND_S;
+          const a = acrossNow(P0, P1, P2, P3, F2[i], F2[i + 1], t, M_ID);
+          const b = acrossNow(P0, P1, P2, P3, F2[i], F2[i + 1], t, M_ROT);
+          if (a.flipped !== b.flipped) flipMismatch++;
+          if (v3len(a.across) < 0.5) continue;
+          const want = mat3mul(M_ROT, a.across);
+          worstDev = Math.max(worstDev, Math.max(...b.across.map((x, c) => Math.abs(x - want[c]))));
+          compared++;
+        }
+      }
+    }
+    assert.equal(flipMismatch, 0, "the sign-coherence decision must be camera-invariant");
+    assert.ok(compared > 5000, `the invariance check must actually run (compared ${compared})`);
+    assert.ok(worstDev < 1e-12, `a camera rotation must simply rotate across(t) (worst |Δ| ${worstDev.toExponential(2)})`);
   }
   // and the pre-change ordering DID break that: on the adversarial regime the
   // interior conditioned an order of magnitude worse than the anchors it came from
@@ -890,7 +1011,7 @@ test("ribbon: CONDITIONING FLOOR — the interior residue is ⊥ by construction
     `(interior ${pre.interiorMin.toFixed(4)} vs anchor ${pre.anchorMin.toFixed(4)})`);
 });
 
-test("ribbon: NEGATING across draws the IDENTICAL box — what makes sign coherence honest", () => {
+test("ribbon: NEGATING across draws the IDENTICAL CROSS-SECTION — what makes sign coherence honest", () => {
   // Sign coherence interpolates toward the OTHER representative of end B's plane
   // when the supplied pair is more than 90° apart. That is only legitimate if a
   // facing and its negation draw the same solid, so prove it on the real corner
@@ -926,7 +1047,7 @@ test("ribbon: NEGATING across draws the IDENTICAL box — what makes sign cohere
   const across: V3 = v3norm(rPerp([0.2, -0.3, 1], along));
   const plus = build(across), minus = build(v3scl(across, -1));
   const key = (v: V3) => v.map((x) => x.toFixed(9)).join(",");
-  // (a) the SET of drawn positions is identical
+  // (a) the SET of drawn corner positions is identical
   assert.deepEqual(
     plus.map((e) => key(e.p)).sort(),
     minus.map((e) => key(e.p)).sort(),
@@ -941,8 +1062,21 @@ test("ribbon: NEGATING across draws the IDENTICAL box — what makes sign cohere
   };
   assert.deepEqual(mapOf(plus), mapOf(minus),
     "each face's declared normal lands on the value the face it replaces declared");
-  // (c) it is a rotation (det +1), so winding survives — and the pass is
-  // DoubleSide anyway (webview/main.ts), so culling cannot depend on it
+  // (c) SCOPE, stated precisely. What is proven identical is the CROSS-SECTION:
+  // this corner ring and the normal at each of its positions. NOT the drawn
+  // triangle list — the index buffer is fixed, so permuting which vertex sits at
+  // which corner re-splits each sub-quad on the other diagonal, and a sub-quad
+  // spanning two cross-sections is not planar in general, so individual triangles
+  // genuinely differ. No claim is made here about how much of the rasterized
+  // surface coincides; that was not measured and no figure is asserted.
+  //
+  // What makes the sign unobservable in the end is the FRAGMENT shader: it shades
+  // on abs(normalize(vNormal).z), which is even in the normal's sign, so the two
+  // labellings cannot differ in output even where the triangles do. Pinned here
+  // because this test's whole purpose is to justify the flip.
+  assert.match(ribbonShaders().fragment, /float nz = abs\(normalize\(vNormal\)\.z\);/);
+  // and it is a rotation (det +1), so winding survives; the pass is DoubleSide
+  // anyway (webview/main.ts), so culling cannot depend on it either
   assert.equal(plus.length, minus.length);
 });
 
@@ -954,14 +1088,20 @@ test("ribbon: FOLD BOUND — no two adjacent sub-samples may swing the face dire
   // crease or a bowtie: the band twists through a half-turn inside one eighth of
   // a segment, with the ⊥ residue never getting short and nothing else complaining.
   //
-  // MEASURED on the 214-vertex fixture, worst adjacent sub-sample rotation over
-  // the four facing regimes:
-  //   pre-change ordering                         137.6° … 174.6°
-  //   conditioning fix alone (long arc still on)    38.4° … 157.2°
-  //   with sign coherence (this)                    37.3° …  38.5°
-  // The bound is set at 60°, comfortably above the 38.5° measured worst case and
-  // far below the ~112-175° any of the fold mechanisms produced. It is a real net:
-  // every variant that leaves either mechanism in place breaks it.
+  // MEASURED on the 214-vertex fixture, worst adjacent sub-sample rotation, per
+  // regime in COND_REGIMES order (perp-twist / perp-chase / tilted / world-fixed /
+  // parallel):
+  //   pre-change ordering                     161.7 / 171.8 / 149.8 / 137.6 / 174.2
+  //   conditioning fix alone (long arc on)    157.2 /  42.0 /  38.4 /  34.2 /  22.8
+  //   with sign coherence (this)               38.5 /  37.4 /  38.4 /  34.2 /  22.8
+  // So the bound is set at 60°: above the 38.5° worst case, below everything any
+  // fold mechanism produced. A real net — every variant leaving either mechanism
+  // in place breaks it, and reverting the conditioned-length gate breaks it too.
+  //
+  // WHAT THIS BOUND IS AND IS NOT. It is measured over ARBITRARY facings on THIS
+  // fixture's turn-angle distribution — condPoly turns 70–110° per step, giving a
+  // WITHIN-SEGMENT tangent rotation of mean 47.6°, max 97.6°. It is NOT a bound
+  // over arbitrary GEOMETRY, and the boundary is pinned below.
   const p = condPoly(214, 12345);
   for (const M of [M_ID, M_ROT]) {
     for (const regime of COND_REGIMES) {
@@ -988,6 +1128,148 @@ test("ribbon: FOLD BOUND — no two adjacent sub-samples may swing the face dire
     prev = o.across;
   }
   assert.ok(worst < 60, `an antipodal supplied pair describes ONE plane and must not half-turn (worst ${worst.toFixed(1)}°)`);
+});
+
+/** a symmetric PLANAR turn of `deg` at both joints — within-segment tangent
+ * rotation comes out equal to `deg` for this hull, which is the axis that
+ * actually governs the fold bound. */
+function symmetricTurn(deg: number): [V3, V3, V3, V3] {
+  const th = (deg * Math.PI) / 180;
+  return [[-Math.cos(th), -Math.sin(th), 0], [0, 0, 0], [1, 0, 0], [1 + Math.cos(th), -Math.sin(th), 0]];
+}
+/** worst adjacent-sub-sample rotation over a grid of supplied facing pairs. */
+function worstOverFacings(hull: [V3, V3, V3, V3], N: number, minAbsZ = 0): number {
+  const [P0, P1, P2, P3] = hull;
+  let worst = 0;
+  for (let ai = 0; ai < N; ai++) {
+    for (let bi = 0; bi < N; bi++) {
+      const fa = (ai * 2 * Math.PI) / N, fb = (bi * 2 * Math.PI) / N;
+      const A: V3 = [Math.cos(fa) * 0.3, Math.sin(fa), Math.cos(fa) * 0.6];
+      const B: V3 = [Math.cos(fb) * 0.3, Math.sin(fb), Math.cos(fb) * 0.6];
+      if (minAbsZ > 0 && (Math.abs(v3norm(A)[2]) < minAbsZ || Math.abs(v3norm(B)[2]) < minAbsZ)) continue;
+      let prev: V3 | null = null;
+      for (let j = 0; j <= COND_S; j++) {
+        const o = acrossNow(P0, P1, P2, P3, A, B, j / COND_S, M_ID);
+        if (prev && v3len(prev) > 0.5 && v3len(o.across) > 0.5) {
+          const c = Math.max(-1, Math.min(1, v3dot(prev, o.across)));
+          worst = Math.max(worst, (Math.acos(c) * 180) / Math.PI);
+        }
+        prev = o.across;
+      }
+    }
+  }
+  return worst;
+}
+
+test("ribbon: the fold bound is scoped by GEOMETRY — where it holds, and the boundary where it does not", () => {
+  // The bound above is not uniform over geometry, and pretending otherwise would
+  // be the false claim. Measured over a 24×24 grid of supplied facing pairs on a
+  // symmetric planar turn, as the WITHIN-SEGMENT tangent rotation grows:
+  //   60° → 16.1°   80° → 22.3°   90° → 28.7°   ← holds
+  //   95° → 174.2°  110° → 174.7°  135° → 176.2°  ← breaches, coplanar only
+  // The breach needs BOTH a tangent rotation past ~90° AND a facing lying in the
+  // plane the segment bends in: with the facing forced off-plane the same sweep
+  // stays at 33.0° (100°), 36.8° (110°), 49.1° (135°).
+  //
+  // WHY, derived: for a coplanar configuration pA and pB are each ±the in-plane
+  // normal at their own anchor, so the angle between them EQUALS the tangent
+  // rotation. Past 90° the anchor-frame test dot(pA, pB) goes negative and flips
+  // qB — but the quantity that governs the arc is the angle AFTER transport into
+  // the common plane, and there the flip makes the pair EXACTLY antiparallel
+  // (measured 180.0° at the 110° case, where dot(pA,pB) = -0.1125 while
+  // dot(pA, transport(pB, alongB, alongA)) = +0.3290). ribbonSlerp's nlerp
+  // fallback then nulls at t=0.5 and the face flips 180°.
+  //
+  // REAL-DATA EVIDENCE, not a guarantee: the shipped fixture reaches 97.6° of
+  // within-segment tangent rotation and never breaches (its turns are 3-D, so an
+  // exactly-coplanar facing is not sampled), and the real 214-vertex polyline this
+  // increment was diagnosed on measures mean 54.4°, max 85.6° — below the onset.
+  // Both are measurements of particular data, not properties of the rule.
+  for (const deg of [60, 80, 90]) {
+    assert.ok(worstOverFacings(symmetricTurn(deg), 24) < 60,
+      `at ${deg}° of within-segment tangent rotation the bound must hold ` +
+      `(worst ${worstOverFacings(symmetricTurn(deg), 24).toFixed(1)}°)`);
+  }
+  // KNOWN BOUNDARY, pinned so it cannot be forgotten: the coplanar case past ~90°
+  // still folds. If this ever STOPS breaching, the scoping above is obsolete and
+  // must be rewritten — do not simply delete the assertion.
+  const breach = worstOverFacings(symmetricTurn(110), 24);
+  assert.ok(breach > 120,
+    `KNOWN BOUNDARY: the coplanar 110° case is expected to still fold (worst ${breach.toFixed(1)}°). ` +
+    `If it no longer does, rewrite the scoping comment above.`);
+  // off-plane facings on the SAME hull do not breach — the breach is the coplanar
+  // degeneracy, not the turn angle by itself
+  const offPlane = worstOverFacings(symmetricTurn(110), 24, 0.2);
+  assert.ok(offPlane < 60,
+    `the same 110° hull with off-plane facings must stay bounded (worst ${offPlane.toFixed(1)}°)`);
+});
+
+test("ribbon: the SIGN-COHERENCE FLIP is discrete — its cost, measured and disclosed", () => {
+  // dot(qA, qB) < 0 is a per-segment branch with no continuity guard, so there is
+  // a boundary in the supplied data across which the interior interpolates the
+  // other way. This is the cost of the rule and it is real: an infinitesimal
+  // change in the supplied facing rolls the mid-segment cross-section by ~90°.
+  // Since orientation is a per-point-per-FRAME bindable channel, a facing drifting
+  // through the boundary during playback pops once. Both sides are equal-magnitude
+  // quarter-turns, so neither is a fold — that is why the trade is worth making.
+  const P0: V3 = [0, 0, 0], P1: V3 = [1, 0, 0.1], P2: V3 = [1, 1, 0], P3: V3 = [2, 1, 0.3];
+  const { chord, m1, m2 } = catmullMs(P0, P1, P2, P3);
+  const cd = v3scl(chord, 1 / v3len(chord));
+  const alongA = rAlong(m1, cd), alongB = rAlong(m2, cd);
+  const A = v3norm(rPerp([0.2, -0.3, 1], alongA));
+  // sweep B through the plane ⊥ alongB; at φ = π/2 the flip decision flips
+  const u = v3norm(rPerp(A, alongB)), v = v3cross(alongB, u);
+  const eps = 1e-12;
+  const bAt = (phi: number): V3 => v3add(v3scl(u, Math.cos(phi)), v3scl(v, Math.sin(phi)));
+  const lo = acrossNow(P0, P1, P2, P3, A, bAt(Math.PI / 2 - eps), 0.5, M_ID);
+  const hi = acrossNow(P0, P1, P2, P3, A, bAt(Math.PI / 2 + eps), 0.5, M_ID);
+  assert.notEqual(lo.flipped, hi.flipped, "precondition: the two samples straddle the flip boundary");
+  const roll = (Math.acos(Math.max(-1, Math.min(1, Math.abs(v3dot(lo.across, hi.across))))) * 180) / Math.PI;
+  assert.ok(roll > 80 && roll < 100,
+    `the disclosed cost is a ~90° roll of the cross-section across the boundary (measured ${roll.toFixed(1)}°)`);
+  // and BOTH sides are quarter-turns, not folds: neither breaches the fold bound
+  for (const phi of [Math.PI / 2 - eps, Math.PI / 2 + eps]) {
+    let prev: V3 | null = null, worst = 0;
+    for (let j = 0; j <= COND_S; j++) {
+      const o = acrossNow(P0, P1, P2, P3, A, bAt(phi), j / COND_S, M_ID);
+      if (prev) {
+        const c = Math.max(-1, Math.min(1, v3dot(prev, o.across)));
+        worst = Math.max(worst, (Math.acos(c) * 180) / Math.PI);
+      }
+      prev = o.across;
+    }
+    assert.ok(worst < 60, `either side of the boundary is a bounded twist, not a fold (worst ${worst.toFixed(1)}°)`);
+  }
+});
+
+test("ribbon: BOTH facings parallel to their own tangents — the case the header names, verbatim", () => {
+  // shaders.ts documents "a zero across, or one parallel to that anchor's own
+  // tangent, has no defined plane — that end's half-width collapses to zero".
+  // Before the conditioned-length gate this input did NOT collapse: the
+  // conditioned facing was exactly zero, reached ribbonSlerp's normalize(), and
+  // NaN'd the whole segment interior at FULL width — measured 42 of 81 samples
+  // NaN on a float32 mirror where the pre-change ordering produced 0. Verify the
+  // documented behaviour on the exact input the doc describes.
+  let checked = 0;
+  for (let ring = 0; ring < 9; ring++) {
+    const a = (ring * 2 * Math.PI) / 9;
+    const P0: V3 = [Math.cos(a), Math.sin(a), 0];
+    const P1: V3 = [1 + Math.cos(a), Math.sin(a) * 0.5, 0.1];
+    const P2: V3 = [2, 1, 0.2 * Math.sin(a)];
+    const P3: V3 = [3, 1 + Math.cos(a), 0.3];
+    const { chord, m1, m2 } = catmullMs(P0, P1, P2, P3);
+    const cd = v3scl(chord, 1 / v3len(chord));
+    const A = rAlong(m1, cd), B = rAlong(m2, cd);   // each facing ∥ its OWN tangent
+    for (let j = 0; j <= COND_S; j++) {
+      const o = acrossNow(P0, P1, P2, P3, A, B, j / COND_S, M_ID);
+      assert.ok(isFinite3(o.across) && Number.isFinite(o.alen) && Number.isFinite(o.w),
+        `ring ${ring} @${j}: must be finite, got across=${JSON.stringify(o.across)} w=${o.w}`);
+      assert.equal(o.w, 0, `ring ${ring} @${j}: no plane at either end → the band collapses, per the header`);
+      assert.ok(o.degA && o.degB, `ring ${ring} @${j}: both ends must be ruled planeless`);
+      checked++;
+    }
+  }
+  assert.equal(checked, 81, "9 hulls × 9 sub-samples");
 });
 
 test("ribbon: ISOLATION — exactly where the reordering is provably a no-op", () => {
