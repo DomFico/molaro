@@ -115,7 +115,7 @@ export interface SceneContext {
   /** e.g. "alpha.group-0" — a few real, constructible target examples. */
   targetExamples: string[];
   committedSelections: string;
-  mods: { name: string; produces: ModProduces; axis?: ModAxis; channel?: string; requiresChannel?: string; description?: string; params?: ModParam[] }[];
+  mods: { name: string; produces: ModProduces; axis?: ModAxis; channel?: string; edgeGroup?: string; requiresChannel?: string; description?: string; params?: ModParam[] }[];
   /** How the coordinates were prepared before streaming (e.g. periodic-image
    * centering), or empty. The viewer and the mods see the SAME coordinates, so
    * an analysis describes exactly what is displayed; this states what that
@@ -277,8 +277,12 @@ export function buildToolDefs(deps: ToolDeps) {
               ? ` [params: ${m.params.map((p) => `${p.name}:${p.type}${p.default !== undefined ? `=${p.default}` : " (required)"}`).join(", ")}]`
               : "";
             const chan = m.channel ? ` → ${m.channel}` : "";
+            // a produces: edges mod advertises the %group it authors into (the
+            // `# edge-group:` header token), so the assistant knows the name to
+            // style — colorbonds/dashbonds %<group> — without guessing it.
+            const grp = m.edgeGroup ? ` → %${m.edgeGroup}` : "";
             const needs = m.requiresChannel ? ` [requires channel: ${m.requiresChannel}]` : "";
-            return `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${chan})${machinery}${needs}${params}${m.description ? `: ${m.description}` : ""}`;
+            return `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${chan}${grp})${machinery}${needs}${params}${m.description ? `: ${m.description}` : ""}`;
           }).join("\n")
         : "  (none yet)";
       const kinds = c.subgroupKinds.length

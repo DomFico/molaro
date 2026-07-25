@@ -412,6 +412,7 @@ function openPanel(
     const mods = loadWorkspaceMods(producerLog, modPaths).map((m) => ({
       name: m.name, produces: m.produces, axis: m.axis, description: m.description,
       ...(m.channel ? { channel: m.channel } : {}),
+      ...(m.edgeGroup ? { edgeGroup: m.edgeGroup } : {}),
       ...(m.requiresChannel ? { requiresChannel: m.requiresChannel } : {}),
       ...(m.params ? { params: m.params } : {}),
     }));

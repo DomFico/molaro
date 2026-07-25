@@ -31,7 +31,10 @@ is cheaper and more direct than the one below it.
 5. **The result is a categorical assignment** — these atoms one color, those another, the
    rest untouched — a \`commands\` mod, or just the commands. A scalar mod cannot express
    this: it has one ramp and writes every point.
-6. **The result is a plot** — \`per-frame-series\` or \`scatter\` for simple cases, \`figure\`
+6. **The result is NEW edges to DRAW** — bonds, contacts, hydrogen bonds, an aromatic /
+   double-bond mark, a connector across a gap — that are not already in the topology → an
+   \`edges\` mod. It authors edges into a \`%<group>\` that you then style with the edge verbs.
+7. **The result is a plot** — \`per-frame-series\` or \`scatter\` for simple cases, \`figure\`
    when the plot needs more than they offer.
 
 The "loaded system" section below already carries this system's vocabulary — its size, its
@@ -177,6 +180,45 @@ Seed each frame from the previous: compute the frame's vectors, then flip any wh
 product with the previous frame's is negative. If you miss it a warning names the breach,
 and the values are still drawn as supplied.
 
+**\`produces: edges\`** — for AUTHORING NEW edges that are not in the topology: a hydrogen-bond
+network, a contact map, an aromatic / double-bond mark, a dashed connector across a backbone
+gap. Like a channel, the group it draws into is declared in the HEADER — \`# produces: edges\`
+plus \`# edge-group: <name>\` (a SINGLE TOKEN, same rule as \`# channel:\`: letters/digits/_/-,
+NO SPACES) — and the edges render LIVE into a \`%<group>\` group mid-session, no reload. Return
+EITHER a bare list of integer index PAIRS (static edges), OR — for edges that appear and vanish
+as the trajectory plays — a dict carrying a per-frame visibility mask:
+
+    return [[i, j], [k, l], ...]         # static — every edge is always present
+
+    return {                              # per-frame — edges blink on/off as you scrub
+        "pairs": [[i, j], ...],           # the UNION of every pair that EVER exists
+        "visibility": [ [1, 0, 1, ...],   # [n_frames][n_pairs], 0/1 — is pair p present
+                        [0, 1, 1, ...] ], # in frame f? EXACTLY n_frames rows x n_pairs cols
+    }
+
+Each \`[i, j]\` is a pair of point indices in \`[0, n_points)\` with \`i != j\`. When present,
+\`visibility\` MUST be exactly \`[n_frames][n_pairs]\` with every value 0 or 1 — a wrong length
+or an out-of-range value is refused and NOTHING draws. Omit \`visibility\` for a static set.
+
+**THE ONE DIFFERENCE FROM A CHANNEL: an edges mod RESPECTS the selection.** It runs on
+\`target_indices\` = the user's selection and authors edges FOR that selection (a channel, above,
+is whole-system regardless of target — this is the single exception to that rule). Build pairs
+from the target's points.
+
+**Appearance is NOT in the mod — style the \`%<group>\` with the edge verbs** (data, never
+appearance): \`colorbonds %<group> yellow\`, \`dashbonds %<group> 0.6\`, and
+\`bicolorbonds\`/\`bondsize\`/\`bondopacity %<group>\` all act on a produced group exactly as on
+covalent bonds (a POINT target like \`dashbonds @sel\` reaches BOTH covalent and produced edges).
+The idiomatic way to ship a styled look is the TWO-MOD pattern (as with the cartoon): the
+\`edges\` mod plus a \`# produces: commands\` companion that emits those style commands — or the
+user styles by hand. For several coexisting sets from one file, declare \`# param: group string
+<default>\` and run \`<mod> <sel> ?group=D\` to author into \`%D\` (overriding \`# edge-group:\`).
+
+\`~/.molaro/mods/hbonds.py\` (per-frame H-bonds — returns \`{pairs, visibility}\`, params
+\`?scope=within|any\`, \`?cutoff\`, \`?angle\`) and \`~/.molaro/mods/trace_gaps.py\` (static gap
+connectors, a bare pair list) are the worked examples. You cannot open them; the shapes above
+are the source of truth.
+
 **\`produces: figure\`** — for plots richer than \`per-frame-series\` or \`scatter\`. Return
 EXACTLY this dict:
 
@@ -208,8 +250,11 @@ header line:
 
     # param: <name> <type> [<default>]
 
-\`<type>\` is \`number\`, \`string\`, or \`boolean\`. A default makes the parameter optional; a
-parameter with **no default is REQUIRED** at invocation. When a mod declares parameters,
+\`<type>\` is \`number\`, \`string\`, \`boolean\`, \`color\`, or \`choice\`. A default makes the
+parameter optional; a parameter with **no default is REQUIRED** at invocation. A \`color\`
+param behaves exactly like \`string\` (the value reaches \`compute\` as a plain token) but its
+\`?<name>=\` slot tab-completes CSS color names — declare it for a color-valued parameter.
+When a mod declares parameters,
 \`compute\` takes a THIRD argument — a dict of the resolved, already-typed values:
 
     # param: floor number 0.5
@@ -225,6 +270,17 @@ To RUN a mod that declares parameters, pass \`run_mod\`'s \`parameters\` field (
 value); omit a parameter to take its default. \`get_context\` lists each mod's parameters,
 their types, and defaults — read them there, never guess a name. The approval preview shows
 the EFFECTIVE values (defaults included), so the human approves exactly what will run.
+
+**A fixed option set — \`choice\`.** Declare \`# param: <name> choice <opt1> <opt2> …\` (a
+whitespace-separated option list). The value is restricted to that set (an out-of-set value is
+refused, "must be one of …"), the **first option is its default** (so a \`choice\` param is never
+required), and the \`?<name>=\` slot tab-completes the options. Use it instead of \`string\` for a
+fixed-choice parameter — e.g. \`# param: scope choice within any\`. **write_mod limitation, know
+this:** write_mod can set a param's \`type\` to \`choice\` but CANNOT carry its option list (that
+field is not in the tool schema), so a \`choice\` mod authored via write_mod fails to re-parse
+("needs at least one option") and never registers. When authoring through write_mod, use
+\`string\` for a choice-shaped param (and validate inside \`compute\`); author a real \`choice\`
+mod as a hand-written file.
 
 ## Requiring a channel — one invocation instead of two
 
@@ -404,7 +460,12 @@ base look — do not re-apply a guessed default.
 
 **Other verbs**: \`create_sele <target> [name]\` commits a selection (auto-named without
 \`[name]\`); \`hide <target>\` / \`show <target>\`; \`ls\` / \`ls @name\` lists; \`rename\`,
-\`add\`/\`remove\` edit a selection's members. (\`rm\` deletes mod FILES and is refused to you.)
+\`add\`/\`remove\` edit a selection's members. \`save_rep <name>\` snapshots the CURRENT
+representation — every point color/size/opacity/style, all bindings (including \`offset\`/
+smoothing), shape swaps, and the background — into a replayable \`produces: commands\` mod named
+\`<name>\` (named just like \`create_sele\`); run that mod later to restore the look. Header-edge
+and per-vertex-trace attributes are NOT captured (noted to the user). (\`rm\` deletes mod FILES
+and is refused to you.)
 
 **Targetless scene commands** — no address, no \`all\`, they style the WHOLE scene:
 \`background <color>\` sets the scene background to a LITERAL color (a CSS name or \`#hex\`:
@@ -467,7 +528,7 @@ first. A shape may require a channel: drawing traces as \`ribbon\` with nothing 
 export function renderContext(c: SceneContext): string {
   const consumers = channelConsumers(c.mods);
   const mods = c.mods.length
-    ? c.mods.map((m) => `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${m.channel ? ` → ${m.channel}` : ""})${machineryNote(m.channel, consumers)}${m.requiresChannel ? ` [requires ${m.requiresChannel}]` : ""}`).join("\n")
+    ? c.mods.map((m) => `  - ${m.name} (${m.produces}${m.axis ? ` → ${m.axis}` : ""}${m.channel ? ` → ${m.channel}` : ""}${m.edgeGroup ? ` → %${m.edgeGroup}` : ""})${machineryNote(m.channel, consumers)}${m.requiresChannel ? ` [requires ${m.requiresChannel}]` : ""}`).join("\n")
     : "  (none yet — you have not written any)";
   return [
     "## The loaded system",
