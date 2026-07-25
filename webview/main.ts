@@ -51,7 +51,7 @@ import { AXIS_DOMAIN, BIND_DASH_MAX, BIND_SIZE_MAX, mapScalar, OFFSET_AXIS, ORIE
 import { bindTypedResult } from "./claudebind.ts";
 import { PLOT_RESULT_KINDS } from "./claudemodel.ts";
 import { parseTypedResult } from "./claudemodel.ts";
-import { getRecipe, listRecipes, rainbow, registerRecipe, resolveChannelDependency, resolveParameters, unregisterRecipe, validateModValues, type AnalysisMod, type ParamValue } from "./recipes.ts";
+import { EDGE_GROUP_RE, getRecipe, listRecipes, rainbow, registerRecipe, resolveChannelDependency, resolveParameters, unregisterRecipe, validateModValues, type AnalysisMod, type ParamValue } from "./recipes.ts";
 import {
   installModList,
   isFileAlreadyGone,
@@ -3225,6 +3225,26 @@ async function main(): Promise<void> {
         // truthful than forcing range(n_points) to mirror a path this run never
         // takes. (`points` is the resolver's output for the invocation target.)
         const targetIndices = points;
+        // produces:edges — the GROUP this run authors into, resolved ONCE and
+        // reused at BOTH seams below (the request AND the echoed-group assert),
+        // so the truthfulness check stays exact (echoed === what we asked for).
+        // A reserved `?group` param is a RUN-TIME override of the static
+        // `# edge-group:` header: the same mod can author into different
+        // %groups on different invocations. Absent, it falls back to the header
+        // then the mod name — byte-identical to before (a mod only has a `group`
+        // param if it DECLARES one, so existing edges mods are unaffected). Only
+        // produces:edges consults it; other kinds are untouched. A supplied but
+        // malformed value is a LOUD error (never a silently-wrong group) — it
+        // must obey the SAME token rule a `%group` target accepts (EDGE_GROUP_RE).
+        const groupParam =
+          typeof params?.group === "string" && params.group.length > 0 ? params.group : undefined;
+        if (mod.produces === "edges" && groupParam !== undefined && !EDGE_GROUP_RE.test(groupParam)) {
+          asyncLine("error",
+            `${mod.name} failed: invalid ?group "${groupParam}" — a produced-edge group must be a ` +
+            `single token like %contacts (${EDGE_GROUP_RE}); nothing authored`);
+          return false;
+        }
+        const edgeGroup = groupParam ?? mod.edgeGroup ?? mod.name;
         const bytes = await transport.request({
           type: "run_mod",
           code: mod.code,
@@ -3243,7 +3263,7 @@ async function main(): Promise<void> {
           // name — the webview single source; mirrors the channel_name
           // threading). The producer echoes the group beside the pairs.
           ...(mod.produces === "edges"
-            ? { produces: "edges" as const, edge_group: mod.edgeGroup ?? mod.name }
+            ? { produces: "edges" as const, edge_group: edgeGroup }
             : {}),
         });
         const reply = JSON.parse(new TextDecoder().decode(bytes)) as {
@@ -3335,9 +3355,10 @@ async function main(): Promise<void> {
           // above): the edges are authored FOR the user's selection, and the
           // reported count is exactly what that selection produced and now
           // draws — the truthful-count contract, scoped to the selection. The
-          // group name is the webview's (header/default); the producer's echo is
-          // asserted equal so an in-flight drift can never be silent.
-          const group = mod.edgeGroup ?? mod.name;
+          // group name is the webview's (the ?group param, else header/default);
+          // the producer's echo is asserted equal to that SAME resolved value so
+          // an in-flight drift can never be silent.
+          const group = edgeGroup;
           if (checked.group !== undefined && checked.group !== group) {
             asyncLine("error",
               `${mod.name} failed: the producer echoed edge group "${checked.group}" for a run ` +

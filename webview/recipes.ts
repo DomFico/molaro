@@ -227,8 +227,11 @@ const CHANNEL_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
 /** A produced-edge GROUP name: the same single-token shape as a channel name
  * (a distinct rule that happens to coincide today — kept separate so tightening
  * one never silently tightens the other). It must stay a clean token because a
- * later increment addresses groups from the command grammar. */
-const EDGE_GROUP_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
+ * later increment addresses groups from the command grammar. Exported so a
+ * RUN-TIME `?group` param (main.ts runModOnce) validates against the SAME rule
+ * a `%group` target accepts — one source, so a declarable group is always
+ * addressable and a bad `?group` is refused up front, never silently wrong. */
+export const EDGE_GROUP_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
 export type ModParseResult =
   | { ok: true; mod: AnalysisMod }
