@@ -2937,20 +2937,70 @@ test("completeCommand: chaining excludes names already used in EARLIER segments"
   } finally { done(); }
 });
 
-test("completeCommand: ?param VALUES — boolean enumerates, number/string are no-ops", () => {
+test("completeCommand: ?param VALUES — boolean enumerates, number offers its default, string is a no-op", () => {
   const { comp, done } = makeCompletionFixture();
   try {
-    // boolean: the two literals (sorted — the one shared settle path)
+    // boolean: the two literals (sorted — the one shared settle path). An EMPTY
+    // value completes the WHOLE pool, no typed prefix needed.
     assert.deepEqual(comp("compmod c0 ?flag="),
       { start: 17, candidates: ["false", "true"], applied: "", kind: "value" });
     assert.deepEqual(comp("compmod c0 ?flag=t"),
       { start: 17, candidates: ["true"], applied: "rue", kind: "value" });
-    // number and string values are unenumerable — empty, never a guess
-    assert.deepEqual(comp("compmod c0 ?floor=").candidates, []);
+    // number WITH a default: an empty slot offers (and Tabs in) the default — the
+    // lone unique candidate, so it auto-applies and prints no list.
+    assert.deepEqual(comp("compmod c0 ?floor="),
+      { start: 18, candidates: ["0.5"], applied: "0.5", kind: "value" });
+    // a matching prefix still narrows/extends; a non-matching one is empty
+    assert.deepEqual(comp("compmod c0 ?floor=0.").candidates, ["0.5"]);
+    assert.deepEqual(comp("compmod c0 ?floor=9").candidates, []);
+    // string values stay unenumerable — empty, never a guess
     assert.deepEqual(comp("compmod c0 ?label=").candidates, []);
     // an unknown name's value slot is inert too
     assert.deepEqual(comp("compmod c0 ?bogus=").candidates, []);
   } finally { done(); }
+});
+
+test("completeCommand: ?param VALUES — a number param WITHOUT a default offers nothing", () => {
+  // a REQUIRED number param (no default) has no suggestion to make — its empty
+  // value slot stays an inert no-op (never invents a guess).
+  const fx = makeRegistry();
+  const mod: AnalysisMod = {
+    name: "reqnum", kind: "analysis", produces: "commands", origin: "workspace",
+    params: [{ name: "n", type: "number" }], // required, no default
+    code: "def compute(data, target_indices, params):\n    return []",
+  };
+  registerRecipe(mod);
+  fx.registry.register("reqnum", makeAnalysisModHandler(fx.ctx, mod), "test mod");
+  const comp = (text: string) => completeCommand(fx.ctx, fx.registry, text, text.length);
+  try {
+    assert.deepEqual(comp("reqnum c0 ?n=").candidates, []);
+  } finally { unregisterRecipe("reqnum"); }
+});
+
+test("completeCommand: ?param VALUES — a choice param completes its options; empty offers all, prefix filters", () => {
+  // a mod with a choice parameter, installed under its own verb (its options are
+  // the value vocabulary; VALIDATION restricts to the set, completion offers it).
+  const fx = makeRegistry();
+  const mod: AnalysisMod = {
+    name: "scopemod", kind: "analysis", produces: "commands", origin: "workspace",
+    params: [{ name: "scope", type: "choice", default: "within", options: ["within", "any"] }],
+    code: "def compute(data, target_indices, params):\n    return []",
+  };
+  registerRecipe(mod);
+  fx.registry.register("scopemod", makeAnalysisModHandler(fx.ctx, mod), "test mod");
+  const comp = (text: string) => completeCommand(fx.ctx, fx.registry, text, text.length);
+  try {
+    // empty value → ALL options, sorted, kind "value" (no typed prefix needed)
+    assert.deepEqual(comp("scopemod c0 ?scope="),
+      { start: 19, candidates: ["any", "within"], applied: "", kind: "value" });
+    // a prefix narrows and extends to the unique match
+    assert.deepEqual(comp("scopemod c0 ?scope=w"),
+      { start: 19, candidates: ["within"], applied: "ithin", kind: "value" });
+    assert.deepEqual(comp("scopemod c0 ?scope=a"),
+      { start: 19, candidates: ["any"], applied: "ny", kind: "value" });
+    // a non-option prefix is empty (nothing to guess)
+    assert.deepEqual(comp("scopemod c0 ?scope=z").candidates, []);
+  } finally { unregisterRecipe("scopemod"); }
 });
 
 test("completeCommand: ?param VALUES — a color param completes CSS names, exactly like the color slot", () => {

@@ -3200,9 +3200,11 @@ export function modInstallReport(outcome: ModInstallOutcome, name: string): Comm
  *   no `=` yet → complete the parameter NAME from the declared schema MINUS
  *     the names already used in EARLIER segments (resolveParameters'
  *     duplicate rule, mirrored); a unique match appends `=`;
- *   after `=` → complete the VALUE — enumerable only for a boolean
- *     parameter (true/false); number/string values are unenumerable (empty,
- *     never a guess).
+ *   after `=` → complete the VALUE — enumerable for a boolean (true/false), a
+ *     color (CSS names), a choice (its options), or a number WITH a default
+ *     (offered as the suggestion); an EMPTY value completes the whole pool
+ *     (capped). A string value — or a number with no default — is unenumerable
+ *     (empty, never a guess).
  * Settling is completeToken's — identical two-stage behavior to paths. */
 function completeModInvocation(
   mod: AnalysisMod,
@@ -3231,16 +3233,23 @@ function completeModInvocation(
     const pool = declared.map((p) => p.name).filter((n) => !used.has(n));
     return completeToken(segStart + lead, token, pool, { uniqueSuffix: "=", kind: "param" });
   }
-  // VALUE slot: enumerable for a boolean (true/false) or a `color` (CSS color
+  // VALUE slot: enumerable for a boolean (true/false), a `color` (CSS color
   // NAMES — the SAME pool + settle path the colorpoints/background color slot
   // uses, single-sourced via colorSlot(); hex stays open input, exactly like
-  // that slot). number/string values are unenumerable (empty, never a guess).
+  // that slot), a `choice` (its declared option set), or a `number` WITH a
+  // default (offered as the lone suggestion — an empty slot Tabs in the
+  // default). An EMPTY value token completes the WHOLE pool (completeToken's
+  // startsWith("") + the shared cap), so `?flag=`/`?scope=`/`?color=` offer
+  // everything, capped, without a typed prefix; a prefix still filters. A
+  // string value — or a number with no default — stays unenumerable.
   const param = declared.find((p) => p.name === seg.slice(0, eq).trim());
   if (!param) return none;
   let pool: string[];
   if (param.type === "boolean") pool = ["true", "false"];
   else if (param.type === "color") pool = colorSlot().pool();
-  else return none; // number / string — no enumerable value vocabulary
+  else if (param.type === "choice") pool = param.options ?? [];
+  else if (param.type === "number") pool = param.default !== undefined ? [String(param.default)] : [];
+  else return none; // string — no enumerable value vocabulary
   const value = seg.slice(eq + 1);
   const lead = value.length - value.trimStart().length;
   return completeToken(segStart + eq + 1 + lead, value.slice(lead), pool, {
