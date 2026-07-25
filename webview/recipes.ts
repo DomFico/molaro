@@ -233,6 +233,34 @@ const CHANNEL_NAME_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
  * addressable and a bad `?group` is refused up front, never silently wrong. */
 export const EDGE_GROUP_RE = /^[A-Za-z][A-Za-z0-9_-]*$/;
 
+/**
+ * Resolve the produced-edge GROUP a `produces: edges` run authors into.
+ * Precedence: a reserved RUN-TIME `?group` param (validated against
+ * EDGE_GROUP_RE — the SAME token rule a `%group` target accepts) overrides the
+ * static `# edge-group:` header, which overrides the mod name. A supplied but
+ * malformed `?group` is a loud refusal (never a silently-wrong group). With no
+ * `?group`, this is byte-identical to the pre-param behavior (`edgeGroup ??
+ * name`). Pure — the caller (main.ts runModOnce) uses the ONE returned value at
+ * both the request and the echoed-group assertion so the truthfulness check
+ * (echoed === requested) stays exact. Only produces:edges should call this.
+ */
+export function resolveEdgeGroup(
+  mod: Pick<AnalysisMod, "edgeGroup" | "name">,
+  params?: Record<string, ParamValue>,
+): { ok: true; group: string } | { ok: false; error: string } {
+  const p = params?.group;
+  if (typeof p === "string" && p.length > 0) {
+    if (!EDGE_GROUP_RE.test(p)) {
+      return {
+        ok: false,
+        error: `invalid ?group "${p}" — a produced-edge group must be a single token like %contacts (${EDGE_GROUP_RE})`,
+      };
+    }
+    return { ok: true, group: p };
+  }
+  return { ok: true, group: mod.edgeGroup ?? mod.name };
+}
+
 export type ModParseResult =
   | { ok: true; mod: AnalysisMod }
   | { ok: false; error: string };

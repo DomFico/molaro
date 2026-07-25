@@ -51,7 +51,7 @@ import { AXIS_DOMAIN, BIND_DASH_MAX, BIND_SIZE_MAX, mapScalar, OFFSET_AXIS, ORIE
 import { bindTypedResult } from "./claudebind.ts";
 import { PLOT_RESULT_KINDS } from "./claudemodel.ts";
 import { parseTypedResult } from "./claudemodel.ts";
-import { EDGE_GROUP_RE, getRecipe, listRecipes, rainbow, registerRecipe, resolveChannelDependency, resolveParameters, unregisterRecipe, validateModValues, type AnalysisMod, type ParamValue } from "./recipes.ts";
+import { getRecipe, listRecipes, rainbow, registerRecipe, resolveChannelDependency, resolveEdgeGroup, resolveParameters, unregisterRecipe, validateModValues, type AnalysisMod, type ParamValue } from "./recipes.ts";
 import {
   installModList,
   isFileAlreadyGone,
@@ -3229,22 +3229,21 @@ async function main(): Promise<void> {
         // reused at BOTH seams below (the request AND the echoed-group assert),
         // so the truthfulness check stays exact (echoed === what we asked for).
         // A reserved `?group` param is a RUN-TIME override of the static
-        // `# edge-group:` header: the same mod can author into different
-        // %groups on different invocations. Absent, it falls back to the header
-        // then the mod name — byte-identical to before (a mod only has a `group`
-        // param if it DECLARES one, so existing edges mods are unaffected). Only
-        // produces:edges consults it; other kinds are untouched. A supplied but
-        // malformed value is a LOUD error (never a silently-wrong group) — it
-        // must obey the SAME token rule a `%group` target accepts (EDGE_GROUP_RE).
-        const groupParam =
-          typeof params?.group === "string" && params.group.length > 0 ? params.group : undefined;
-        if (mod.produces === "edges" && groupParam !== undefined && !EDGE_GROUP_RE.test(groupParam)) {
-          asyncLine("error",
-            `${mod.name} failed: invalid ?group "${groupParam}" — a produced-edge group must be a ` +
-            `single token like %contacts (${EDGE_GROUP_RE}); nothing authored`);
+        // `# edge-group:` header: the same mod authors into different %groups on
+        // different invocations. Absent, it falls back to the header then the
+        // mod name — byte-identical to before (a mod only has a `group` param if
+        // it DECLARES one, so existing edges mods are unaffected). Only
+        // produces:edges consults params.group; other kinds keep header/name. A
+        // supplied but malformed value is a LOUD refusal (never a silently-wrong
+        // group). resolveEdgeGroup is the single-sourced, unit-tested rule.
+        const groupResolved = mod.produces === "edges"
+          ? resolveEdgeGroup(mod, params)
+          : ({ ok: true, group: mod.edgeGroup ?? mod.name } as const);
+        if (!groupResolved.ok) {
+          asyncLine("error", `${mod.name} failed: ${groupResolved.error}; nothing authored`);
           return false;
         }
-        const edgeGroup = groupParam ?? mod.edgeGroup ?? mod.name;
+        const edgeGroup = groupResolved.group;
         const bytes = await transport.request({
           type: "run_mod",
           code: mod.code,

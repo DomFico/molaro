@@ -83,11 +83,13 @@ import {
   resolveChannelDependency,
   parseModFile,
   parseParamLine,
+  resolveEdgeGroup,
   resolveModSelector,
   resolveParameters,
   serializeMod,
   unregisterRecipe,
   validateModValues,
+  EDGE_GROUP_RE,
   MOD_AXES,
   MOD_FILE_MAGIC,
   MOD_PARAM_TYPES,
@@ -95,7 +97,9 @@ import {
   type AnalysisMod,
   type Mod,
   type ModParam,
+  type ParamValue,
 } from "../webview/recipes.ts";
+import { parseGroupExpr } from "../webview/address.ts";
 
 const GOOD_FILE = `# molaro-mod
 # name: index_ramp
@@ -407,6 +411,49 @@ def compute(data, target_indices):
     return [0.0]
 `, "workspace");
   assert.ok(!wrongKind.ok && /edge-group is only valid/.test(wrongKind.error), JSON.stringify(wrongKind));
+});
+
+test("resolveEdgeGroup: a run-time ?group overrides header/name, is token-validated, and falls back", () => {
+  const mod: Pick<AnalysisMod, "edgeGroup" | "name"> = { edgeGroup: "hdr", name: "hb" };
+
+  // FALLBACK (no ?group): the header wins, else the name — byte-identical to the
+  // pre-param behavior. undefined params, empty params, and an empty-string
+  // ?group all resolve the same way.
+  const fallbackParams: (Record<string, ParamValue> | undefined)[] = [undefined, {}, { group: "" }];
+  for (const params of fallbackParams) {
+    const r = resolveEdgeGroup(mod, params);
+    assert.deepEqual(r, { ok: true, group: "hdr" }, JSON.stringify(params));
+  }
+  // no header → the mod name is the fallback
+  assert.deepEqual(resolveEdgeGroup({ name: "hb" }, undefined), { ok: true, group: "hb" });
+  // a NON-string ?group (a mod could declare a numeric `group` param) is ignored
+  // → fallback, never coerced into a group name
+  assert.deepEqual(resolveEdgeGroup(mod, { group: 3 }), { ok: true, group: "hdr" });
+
+  // OVERRIDE: a valid ?group token wins over BOTH header and name
+  assert.deepEqual(resolveEdgeGroup(mod, { group: "alpha" }), { ok: true, group: "alpha" });
+  assert.deepEqual(resolveEdgeGroup(mod, { group: "beta" }), { ok: true, group: "beta" });
+  // single-token shapes that EDGE_GROUP_RE accepts
+  for (const g of ["A", "a1", "con-tacts", "d_2", "Z9_-"]) {
+    assert.deepEqual(resolveEdgeGroup(mod, { group: g }), { ok: true, group: g }, g);
+  }
+
+  // MALFORMED ?group: a LOUD refusal (never a silently-wrong group), and the
+  // rejected set is EXACTLY what EDGE_GROUP_RE and a `%group` target reject.
+  for (const bad of ["1abc", "-x", "_y", "has space", "a.b", "c/d", "e!", "%f"]) {
+    const r = resolveEdgeGroup(mod, { group: bad });
+    assert.ok(!r.ok && /invalid \?group/.test(r.error), `${bad}: ${JSON.stringify(r)}`);
+    assert.equal(EDGE_GROUP_RE.test(bad), false, `EDGE_GROUP_RE should reject ${bad}`);
+    // the SAME token rule a %group target accepts — %<bad> must NOT parse as a
+    // well-formed group expr, proving one source of truth
+    const g = parseGroupExpr(`%${bad}`);
+    assert.ok(g !== null && "error" in g, `%${bad} should be a %group parse error: ${JSON.stringify(g)}`);
+  }
+  // conversely, every accepted token IS addressable as %<token>
+  for (const g of ["alpha", "beta", "con-tacts", "d_2"]) {
+    assert.ok(EDGE_GROUP_RE.test(g));
+    assert.deepEqual(parseGroupExpr(`%${g}`), { names: [g] }, g);
+  }
 });
 
 test("parseModFile: produces scatter is accepted; axis on a scatter is rejected", () => {
