@@ -4310,11 +4310,16 @@ async function main(): Promise<void> {
           dashEdges: producedDashEdges,
           styleEdges: producedStyleEdges,
         },
-        declare: (group: string, pairs: [number, number][]) =>
+        declare: (group: string, pairs: [number, number][], mask?: number[]) =>
           declareProducedEdges(
             { name: "testhook", kind: "analysis", produces: "edges", origin: "workspace", code: "" },
             pairs,
             group,
+            undefined,
+            // 2C seam: an optional per-frame mask ([frame * n_pairs + pair]).
+            // Exercises the masked re-declare-and-grow path with no producer
+            // round-trip (S61) — the exact shape declareProducedEdges validates.
+            mask ? Float32Array.from(mask) : undefined,
           ),
       },
       geometryMaterials: materials,

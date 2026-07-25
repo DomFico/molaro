@@ -10396,7 +10396,139 @@ async function S60(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60 };
+// = S61: re-declaring a MASKED produced-edge group across a capacity grow =====
+// The user's real repro (a 1-frame scene): a produces:edges mod authored a
+// group WITH a per-frame visibility mask, then a SECOND run RE-DECLARED the
+// SAME group name with a DIFFERENT edge count. The new edges did not appear AND
+// the first set vanished — after the second run nothing drew. That path is the
+// hard one: retire-old-span + append-at-fresh-ids + a capacity GROW (a full GPU
+// attribute reallocation via setAttribute on the shared geometry, which BOTH
+// the opaque mesh and its alpha twin draw). Crucially, on a scene where NO
+// frame-flip follows the declaration, the ONLY visibility fill is the one
+// inside sync() — a multi-frame scene refills again on the next seek and could
+// paper the bug over, so this runs BOTH a 1-frame scene (the user's) and a
+// multi-frame scene, and NEVER seeks after the re-declaration.
+//
+// Group 1 = 100 edges (crosses the 64 initial capacity → grow #1), styled RED.
+// Group 2 = the SAME name re-declared with 200 edges → old span [0,100) retired,
+// group re-appended at ids [100,300), crossing ANOTHER capacity boundary
+// (128 → 512, grow #2), styled GREEN. Both masks are all-1 so every edge is
+// visible at frame 0 (where pixels are sampled): the mask is PRESENT (the user's
+// condition) but never the reason an edge is hidden. The assertion: after the
+// re-declaration, WITHOUT any seek, the NEW group DRAWS (green) while the
+// retired old span does NOT (no red). Diagnostics capture instanceCount, the
+// iVisible/iStart buffers, and capacity so a failure names which invariant broke
+// (instanceCount, iVisible/endpoints on the CPU, or the GPU re-bind the pixels
+// alone can see).
+async function S61body(nFrames: number, tagBase: string): Promise<void> {
+  const N1 = 100, N2 = 200;
+  const redCountJs = (b64: string) => `(async () => {
+    const app = document.getElementById('app').getBoundingClientRect();
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+    const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+    const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+    const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+      Math.round(app.width), Math.round(app.height) - 60).data;
+    let n = 0;
+    for (let i = 0; i < px.length; i += 4) if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) n++;
+    return n;
+  })()`;
+  await withDriver(async (d) => {
+    await d.evaluate(`${V}.player.seek(0)`);
+    await sleep(400);
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const snap = async (tag: string): Promise<string> => {
+      await d.evaluate(`(async () => { for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r)); })()`);
+      return d.captureB64(`${REPORT}/S61_${tag}.png`);
+    };
+    const redAt = async (tag: string): Promise<number> => d.evaluate<number>(redCountJs(await snap(tag)));
+    const greenAt = async (tag: string): Promise<number> => greenCount(d, await snap(`${tag}_g`));
+
+    // isolate: only the produced pass can put edge pixels up
+    await cmd("pointopacity all 0");
+    await cmd("traceopacity all 0");
+    await cmd("bondsize all 0");
+
+    // -- group 1: 100 masked edges, RED (crosses the initial capacity) --------
+    await d.evaluate(`(()=>{
+      const pairs = Array.from({length: ${N1}}, (_, i) => [i, 3000 + i]);
+      const mask = Array.from({length: ${nFrames * N1}}, () => 1);
+      ${V}.produced.declare("hb", pairs, mask);
+      const ids = ${V}.produced.groupIds("hb");
+      ${V}.produced.writers.colorEdges(ids, [1, 0, 0]);
+      ${V}.produced.writers.sizeEdges(ids, 6);
+    })()`);
+    await sleep(300);
+    const cap1 = await d.evaluate<number>(`${V}.produced.pass.gpuCapacity()`);
+    const red1 = await redAt(`${tagBase}_g1_red`);
+    check(`S61(${tagBase}): group 1 (100 masked edges) DRAWS red (sanity — the first run drew fine)`,
+      red1 > 40, `red=${red1} cap=${cap1}`);
+    check(`S61(${tagBase}): group 1 crossed the initial GPU capacity (grow #1)`,
+      cap1 > 64, `cap=${cap1}`);
+
+    // -- group 2: SAME name, 200 edges → retire + append + grow, styled GREEN --
+    await d.evaluate(`(()=>{
+      const pairs = Array.from({length: ${N2}}, (_, i) => [i, 3000 + i]);
+      const mask = Array.from({length: ${nFrames * N2}}, () => 1);
+      ${V}.produced.declare("hb", pairs, mask);
+      const ids = ${V}.produced.groupIds("hb");
+      ${V}.produced.writers.colorEdges(ids, [0, 1, 0]);
+      ${V}.produced.writers.sizeEdges(ids, 6);
+    })()`);
+    await sleep(300); // NO seek — the user's scene never flips after the re-run
+
+    // CPU-side diagnostics at the failing moment
+    const diag = await d.evaluate<{
+      ic: number; cap: number; span: number; baseId: number; newCount: number;
+      newVisAll1: boolean; oldVisAll0: boolean; endpointsSet: boolean;
+    }>(`(()=>{
+      const p = ${V}.produced;
+      const ids = p.groupIds("hb");            // [100, 300)
+      const iv = p.pass.attrArray("iVisible");
+      const is = p.pass.attrArray("iStart");
+      const s = ids[0] * 3;
+      return {
+        ic: p.pass.instanceCount(), cap: p.pass.gpuCapacity(), span: p.activeSpan(),
+        baseId: ids[0], newCount: ids.length,
+        newVisAll1: ids.every(id => iv[id] === 1),
+        oldVisAll0: Array.from({length: ${N1}}, (_, id) => iv[id]).every(v => v === 0),
+        endpointsSet: !(is[s] === 0 && is[s+1] === 0 && is[s+2] === 0),
+      };
+    })()`);
+    console.log(`S61(${tagBase}) diag: ${JSON.stringify(diag)} cap1=${cap1}`);
+
+    check(`S61(${tagBase}): CPU — the group re-appended at ids [${N1}, ${N1 + N2}) (retire + append)`,
+      diag.baseId === N1 && diag.newCount === N2, JSON.stringify(diag));
+    check(`S61(${tagBase}): CPU — instanceCount grew to the new active span (${N1 + N2})`,
+      diag.ic === N1 + N2 && diag.span === N1 + N2, JSON.stringify(diag));
+    check(`S61(${tagBase}): CPU — the re-declaration crossed ANOTHER capacity boundary (grow #2)`,
+      diag.cap > cap1, JSON.stringify(diag));
+    check(`S61(${tagBase}): CPU — the NEW slots' iVisible are all 1 (mask row at frame 0)`,
+      diag.newVisAll1, JSON.stringify(diag));
+    check(`S61(${tagBase}): CPU — the retired old slots collapsed to iVisible 0`,
+      diag.oldVisAll0, JSON.stringify(diag));
+    check(`S61(${tagBase}): CPU — the new slots' endpoints were filled from the positions`,
+      diag.endpointsSet, JSON.stringify(diag));
+
+    // THE PIXEL PROOF (the user's symptom): after the re-declaration, with NO
+    // seek, the NEW group must DRAW and the retired old span must NOT.
+    const greenAfter = await greenAt(`${tagBase}_g2_green`);
+    const redAfter = await redAt(`${tagBase}_g2_red`);
+    check(`S61(${tagBase}): PIXELS — the re-declared group DRAWS (green on screen)`,
+      greenAfter > 40, `green=${greenAfter} (red=${redAfter}) diag=${JSON.stringify(diag)}`);
+    check(`S61(${tagBase}): PIXELS — the retired old span does NOT draw (no red)`,
+      redAfter < 5, `red=${redAfter}`);
+  }, 1180, 780, "/", ["--n-points", "6000", "--n-frames", String(nFrames)]);
+}
+async function S61(): Promise<void> {
+  console.log("S61 — re-declaring a masked produced-edge group across a capacity grow");
+  await S61body(1, "1frame");   // the user's scene: no flip ever refills visibility
+  await S61body(150, "multi");  // a multi-frame scene: still no seek after the re-run
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -10436,7 +10568,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
   S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
-  S58: "fast", S59: "fast", S60: "fast",
+  S58: "fast", S59: "fast", S60: "fast", S61: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {
