@@ -1,6 +1,7 @@
 import { HOLD_MS } from "../webview/tree.ts";
 import { DEFAULT_HOLD_COMMAND } from "../webview/commands.ts";
 import { DASH_SCALE } from "../webview/shaders.ts";
+import { CAMERA_FOV_DEG } from "../webview/geometry.ts";
 /**
  * Interaction-redesign validation — drives the REAL webview over the REAL
  * synthetic producer via CDP and asserts the new model end-to-end:
@@ -10664,7 +10665,170 @@ async function S62(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62 };
+// ==== S63: SIZE-AWARE picking — the hit box follows each element's RENDERED size
+//
+// The bug: clicking a visibly-large/thick element (a fat sphere, a thick tube /
+// edge, a wide trace / ribbon) snapped to a nearer-CENTER smaller point instead
+// of the thing under the cursor, because the pick projected only point centers
+// and accepted the nearest within a FIXED 12px radius — blind to how big each
+// element is drawn. The fix (webview/picking.ts pickElement) gives every
+// candidate the hit extent it is DRAWN with. This scenario clicks the BODY of
+// enlarged elements and asserts the pick resolves to THAT element, while a
+// small/precise element still picks exactly and empty space over-grabs nothing.
+//
+// The legacy fixed threshold (webview/main.ts PICK_PIXEL_THRESHOLD).
+const PICK_THRESHOLD_PX = 12;
+async function S63(): Promise<void> {
+  console.log("S63 — size-aware picking: the click hit box follows each element's rendered size");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const pick = (x: number, y: number) => d.evaluate<number>(`${V}.debug.pick(${x}, ${y})`);
+    const TAN_HALF = Math.tan((CAMERA_FOV_DEG / 2) * Math.PI / 180);
+    // CSS-px screen radius the impostor draws a size-`sz` element with at
+    // `depth` (independent of pickElement — projectPoint uses camera.project).
+    const rectH = await d.evaluate<number>(
+      `document.querySelector('canvas').getBoundingClientRect().height`);
+    const wps = await d.evaluate<number>(`${V}.sizing.worldPerSize`);
+    const screenRadius = (sz: number, depth: number) => wps * sz * (rectH / (2 * TAN_HALF)) / depth;
+
+    // -- A) FAT SPHERE: clicking off-center but inside the drawn sphere picks it -
+    // A structured, on-screen, front-facing point (a category-0 member).
+    const F = await d.evaluate<number>(`(()=>{
+      const pts=${V}.hierarchy.pointsOf({level:'category',id:0});
+      for (const p of pts) if (${V}.debug.projectPoint(p).front) return p;
+      return pts[0];
+    })()`);
+    const FAT = 160;
+    check("S63: pointsize enlarges the target sphere", (await cmd(`pointsize #${F} ${FAT}`)).status === "ok");
+    const fp = await d.evaluate<{ x: number; y: number; depth: number }>(`${V}.debug.projectPoint(${F})`);
+    const rFat = screenRadius(FAT, fp.depth);
+    // click HALF a radius off-center — well inside the drawn sphere, and far
+    // beyond the 12px the legacy center-only test could ever reach.
+    const offX = rFat * 0.5;
+    check("S63: the fat sphere is drawn far larger than the legacy pick threshold",
+      offX > PICK_THRESHOLD_PX + 6, `off=${offX.toFixed(1)}px radius=${rFat.toFixed(1)}px`);
+    const pickFat = await pick(fp.x + offX, fp.y);
+    check("S63: clicking the fat sphere's BODY (off-center) picks THAT sphere",
+      pickFat === F, `pick=${pickFat} want=${F}`);
+    // Prove the legacy nearest-center-within-12px test could NOT have returned F
+    // at this click — the size-aware reach is what makes it correct.
+    const legacy = await d.evaluate<{ idx: number; dist: number }>(`(()=>{
+      const cx=${fp.x + offX}, cy=${fp.y}; const vis=${V}.rep.state.visible;
+      let best=-1, bd=Infinity;
+      for (let p=0;p<vis.length;p++){ if (vis[p]<0.5) continue;
+        const pr=${V}.debug.projectPoint(p); if(!pr.front) continue;
+        const dd=Math.hypot(pr.x-cx, pr.y-cy); if(dd<bd){bd=dd; best=p;} }
+      return {idx:best, dist:bd};
+    })()`);
+    check("S63: legacy center-pick would MISS the fat sphere (its center is out of threshold reach)",
+      legacy.idx !== F || legacy.dist > PICK_THRESHOLD_PX,
+      `nearest-center=${legacy.idx} dist=${legacy.dist.toFixed(1)}px (fat sphere is ${F})`);
+    await d.screenshot(`${REPORT}/S63_fat_sphere.png`);
+    await cmd(`pointsize #${F} 3`); // reset so it can't shadow the later parts
+
+    // Shared: click the BODY of a thick segment perpendicular to its axis, D px
+    // off the centerline — inside the drawn half-width, but > 12px from BOTH
+    // endpoint centers (so the legacy center-pick structurally cannot reach an
+    // endpoint), and assert the pick resolves to one of the two endpoints.
+    const bodyPickCheck = async (
+      tag: string,
+      seg: { a: number; b: number; ax: number; ay: number; bx: number; by: number; depth: number },
+      sz: number,
+    ): Promise<void> => {
+      const L = Math.hypot(seg.bx - seg.ax, seg.by - seg.ay);
+      const half = screenRadius(sz, seg.depth); // projected tube half-width (px)
+      check(`S63: the thick ${tag} is drawn wide enough to test off-axis (${half.toFixed(1)}px)`,
+        half > PICK_THRESHOLD_PX + 10, `half=${half.toFixed(1)}px`);
+      const D = Math.min(half * 0.6, half - 4);
+      const mx = (seg.ax + seg.bx) / 2, my = (seg.ay + seg.by) / 2;
+      const px = -(seg.by - seg.ay) / L, py = (seg.bx - seg.ax) / L; // unit perpendicular
+      const cx = mx + px * D, cy = my + py * D;
+      // distance from this click to the NEARER endpoint center (≥ D > 12px)
+      const toEnd = Math.min(
+        Math.hypot(cx - seg.ax, cy - seg.ay), Math.hypot(cx - seg.bx, cy - seg.by));
+      check(`S63: the ${tag} body click is beyond legacy center reach of either endpoint`,
+        D > PICK_THRESHOLD_PX && toEnd > PICK_THRESHOLD_PX,
+        `D=${D.toFixed(1)}px nearestEnd=${toEnd.toFixed(1)}px`);
+      const got = await pick(cx, cy);
+      check(`S63: clicking the thick ${tag} BODY resolves to one of its endpoints`,
+        got === seg.a || got === seg.b, `pick=${got} ends=[${seg.a},${seg.b}]`);
+    };
+
+    // -- B) THICK TRACE: clicking the wide trace body picks an anchor endpoint --
+    const traceSeg = await d.evaluate<
+      { a: number; b: number; ax: number; ay: number; bx: number; by: number; depth: number } | null
+    >(`(()=>{
+      const tv=${V}.traceVertices; let best=null, bl=-1;
+      for (let i=0;i+1<tv.length;i++){
+        const a=tv[i], b=tv[i+1];
+        const pa=${V}.debug.projectPoint(a), pb=${V}.debug.projectPoint(b);
+        if(!pa.front||!pb.front) continue;
+        const L=Math.hypot(pa.x-pb.x, pa.y-pb.y);
+        if(L>bl){bl=L; best={a,b,ax:pa.x,ay:pa.y,bx:pb.x,by:pb.y,depth:(pa.depth+pb.depth)/2};}
+      }
+      return best;
+    })()`);
+    check("S63: found an on-screen trace segment to thicken", traceSeg !== null);
+    if (traceSeg) {
+      const TSZ = 200;
+      check("S63: tracesize thickens the segment's anchors",
+        (await cmd(`tracesize #${traceSeg.a} ${TSZ}`)).status === "ok" &&
+          (await cmd(`tracesize #${traceSeg.b} ${TSZ}`)).status === "ok");
+      await bodyPickCheck("trace", traceSeg, TSZ);
+      await d.screenshot(`${REPORT}/S63_thick_trace.png`);
+      await cmd(`tracesize #${traceSeg.a} 1`);
+      await cmd(`tracesize #${traceSeg.b} 1`);
+    }
+
+    // -- C) THICK EDGE/TUBE: clicking the wide bond body picks a bonded atom ----
+    const edgeSeg = await d.evaluate<
+      { a: number; b: number; ax: number; ay: number; bx: number; by: number; depth: number } | null
+    >(`(()=>{
+      const es=${V}.edges; let best=null, bl=-1;
+      for (let i=0;i<es.length;i++){
+        const a=es[i][0], b=es[i][1];
+        const pa=${V}.debug.projectPoint(a), pb=${V}.debug.projectPoint(b);
+        if(!pa.front||!pb.front) continue;
+        const L=Math.hypot(pa.x-pb.x, pa.y-pb.y);
+        if(L>bl){bl=L; best={a,b,ax:pa.x,ay:pa.y,bx:pb.x,by:pb.y,depth:(pa.depth+pb.depth)/2};}
+      }
+      return best;
+    })()`);
+    check("S63: found an on-screen edge to thicken", edgeSeg !== null);
+    if (edgeSeg) {
+      const ESZ = 200;
+      check("S63: bondsize thickens the edge",
+        (await cmd(`bondsize #${edgeSeg.a},#${edgeSeg.b} ${ESZ}`)).status === "ok");
+      await bodyPickCheck("edge", edgeSeg, ESZ);
+      await d.screenshot(`${REPORT}/S63_thick_edge.png`);
+      await cmd(`bondsize #${edgeSeg.a},#${edgeSeg.b} 1`);
+    }
+
+    // -- D) NO REGRESSION: small/precise still picks exactly; empty over-grabs nothing
+    const P = await d.evaluate<number>(`(()=>{
+      const pts=${V}.hierarchy.pointsOf({level:'category',id:1});
+      for (const p of pts) if (${V}.debug.projectPoint(p).front) return p;
+      return pts[0];
+    })()`);
+    const pp = await d.evaluate<{ x: number; y: number }>(`${V}.debug.projectPoint(${P})`);
+    check("S63: a small/precise (default-size) point still picks EXACTLY at its center",
+      (await pick(pp.x, pp.y)) === P, `pick=${await pick(pp.x, pp.y)} want=${P}`);
+    const empty = await d.evaluate<{ x: number; y: number } | null>(`(()=>{
+      const r=document.getElementById('app').getBoundingClientRect();
+      const spots=[[r.left+16,r.bottom-16],[r.left+16,r.top+80],[r.right-16,r.bottom-16],[r.right-16,r.top+80]];
+      for (const [x,y] of spots) if (${V}.debug.pick(x,y) < 0) return {x,y};
+      return null;
+    })()`);
+    check("S63: found an empty pixel", empty !== null);
+    if (empty) {
+      check("S63: clicking empty space near small elements over-grabs NOTHING (pick = -1)",
+        (await pick(empty.x, empty.y)) === -1);
+    }
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -10705,6 +10869,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
   S58: "fast", S59: "fast", S60: "fast", S61: "fast", S62: "fast",
+  S63: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {
