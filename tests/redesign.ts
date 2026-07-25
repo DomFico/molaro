@@ -9609,36 +9609,43 @@ async function S56(): Promise<void> {
 // pairs are appended to header.edges at LOAD (they render as ordinary edge
 // tubes and style through the existing verbs), and an INTERACTIVE run now
 // AUTHORS LIVE into the isolated produced-edge pass (the former honest defer
-// ENDED — this is the "later increment"). Default OFF → the served header is
-// byte-identical. The mod is TARGET-RESPECTING (it reads target_indices; its
-// count DEPENDS on the target size), which pins the truthfulness contract: an
-// interactive run is computed over the WHOLE system — even when invoked on a
-// subset — so the count it reports (and now DRAWS) EQUALS what load-time
-// --edge-mods authors (a constant-return mod would mask a subset-vs-whole
-// divergence). Proven two ways on synthetic data:
-//   Part A (mod OFF, default load) — the control: the first authored pair is not
-//     already an edge; addressing a not-yet-existent edge by #e nomatches and
-//     draws nothing; then the mod run interactively ON A SUBSET reports (and
-//     renders) the WHOLE-SYSTEM count through the produced pass — while
+// ENDED). Default OFF → the served header is byte-identical. The mod is
+// TARGET-RESPECTING (it reads target_indices; its count DEPENDS on the target
+// size), which pins the NEW truthfulness contract: an interactive run authors
+// edges for exactly the RESOLVED SELECTION and draws them live — so the count
+// it reports EQUALS what that selection produced and now draws. (The old
+// contract forced range(n_points) to mirror the load-time --edge-mods path;
+// that is obsolete now that the interactive run renders live instead of
+// deferring to a reload, and per-selection is strictly more truthful.) The
+// load-time --edge-mods path is a SEPARATE function with no selection and
+// stays whole-system — so the two counts now legitimately DIFFER, which this
+// test asserts rather than equates. Proven two ways on synthetic data:
+//   Part A (mod OFF, default load) — the control establishes #e<L0> nomatches
+//     and draws nothing; then the mod run interactively ON A SUBSET reports
+//     (and renders) exactly THAT SUBSET's count (len(subset)//2) through the
+//     produced pass — a DIFFERENT subset yields a DIFFERENT count — while
 //     header.edges NEVER grows (isolation) and #e stays a header-edge axis.
-//   Part B (mod ON, spawned with --edge-mods) — the header grows by EXACTLY the
-//     interactively-reported count, the pairs are the mod's, and the first
-//     authored edge DRAWS as pixels where none was, addressable by #e.
+//   Part B (mod ON, spawned with --edge-mods) — load-time apply appends the
+//     WHOLE-SYSTEM count (unchanged; no selection at load), the pairs are the
+//     mod's, and the first authored edge DRAWS as pixels where none was,
+//     addressable by #e. The whole-system load count is asserted to DIFFER
+//     from the per-selection interactive count (the new contract).
 async function S57(): Promise<void> {
-  console.log("S57 — produces:edges: load-time authoring draws via the header; an interactive run draws LIVE via the produced pass");
+  console.log("S57 — produces:edges: load-time authoring draws via the header (whole system); an interactive run draws LIVE via the produced pass, scoped to the selection");
   // The TARGET-RESPECTING mod: link t[i] → t[i + len//2] for the first half —
-  // count = len(target)//2, so a subset target would yield a DIFFERENT count
-  // than the whole system (the discrimination the constant mod lacked). On the
-  // whole system (6000): 3000 pairs [i, i+3000] — none pre-exist (the synthetic
-  // chain links consecutive points only).
+  // count = len(target)//2, so a subset target yields a count SCOPED to that
+  // subset (the discrimination a constant-return mod would lack), and a
+  // different subset a different count. None pre-exist as edges (the synthetic
+  // chain links consecutive points only; every pair spans len//2 apart).
   const MOD_CODE =
     "def compute(data, target_indices):\n" +
     "    t = target_indices\n" +
     "    h = len(t) // 2\n" +
     "    return [[t[i], t[i + h]] for i in range(h)]";
   const N = 6000;
-  const WANT = N / 2; // the whole-system count the mod must yield
-  // the FIRST authored pair (point 0 structured, 3000 bulk — never chain-linked)
+  const WHOLE = N / 2; // the WHOLE-SYSTEM count (load-time apply, Part B)
+  // the FIRST load-time-authored pair (point 0 structured, 3000 bulk — never
+  // chain-linked): load runs on the whole system, so pair 0 = [t[0], t[3000]]
   const AUTH_A = 0, AUTH_B = N / 2;
   // the red-pixel classifier (S56's), as a JS-expression builder over a b64
   const redCountJs = (b64: string) => `(async () => {
@@ -9677,7 +9684,7 @@ async function S57(): Promise<void> {
       }))`);
 
     L0 = await edgeCount();
-    check("S57: (control) the authored pair is NOT already an edge (genuinely new)",
+    check("S57: (control) a spanning pair is NOT already an edge (the synthetic chain links consecutive points only)",
       !(await hasPair(AUTH_A, AUTH_B)), `${AUTH_A},${AUTH_B}`);
 
     // isolate the edge layer and collapse every edge, then address #e<L0> — one
@@ -9695,9 +9702,9 @@ async function S57(): Promise<void> {
     check("S57: (control) nothing draws for that index with the mod OFF", offRed === 0, `red=${offRed}`);
 
     // -- interactive LIVE authoring: register the TARGET-RESPECTING mod, run it
-    //    ON A SUBSET — the reported count is the WHOLE-SYSTEM count, the pairs
-    //    render NOW through the isolated produced-edge pass, and header.edges
-    //    never grows (isolation by construction) ------------------------------
+    //    ON A SUBSET — the reported count is scoped to THAT SELECTION (len//2),
+    //    the pairs render NOW through the isolated produced-edge pass, and
+    //    header.edges never grows (isolation by construction) ------------------
     // JSON.stringify escapes the newlines in the Python source correctly.
     await d.evaluate(`window.postMessage({ type: "modsLoaded", mods: [{
       name: "link_defer", kind: "analysis", produces: "edges", origin: "workspace",
@@ -9705,34 +9712,52 @@ async function S57(): Promise<void> {
     }] }, "*")`);
     await sleep(200);
     const before = await edgeCount();
-    // invoke on a small SUBSET ("alpha") — a target-DEPENDENT mod would author
-    // len(alpha)//2 pairs here; the whole-system override must make it 3000
-    const subsetPts = (await d.evaluate<number[]>(`${V}.debug.resolvePoints("alpha")`)).length;
-    const run = await cmd("link_defer alpha");
-    check("S57: the produces:edges mod is invokable and acknowledges", run.status === "ok", JSON.stringify(run));
-    await d.waitFor(`window.__lines.some(l => /authored \\d+ edges \\(computed over the whole system\\)/.test(l.message))`, 20000)
-      .catch(() => { /* timeout → the check below goes red */ });
-    const line = await d.evaluate<{ status: string; message: string } | null>(`window.__lines.at(-1) ?? null`);
-    const mCount = line ? /authored (\d+) edges/.exec(line.message) : null;
-    interactiveCount = mCount ? Number(mCount[1]) : -1;
-    check("S57: an interactive run reports the WHOLE-SYSTEM count, not the subset (truthful)",
-      interactiveCount === WANT && subsetPts < WANT,
-      `reported=${interactiveCount} want=${WANT} subsetPts=${subsetPts}`);
+
+    // Run the mod on a target and read back the SELECTION-scoped result: the
+    // resolved point count, the count the status line REPORTS (with its named
+    // target size), and the count the produced pass actually carries + draws.
+    const runOnTarget = async (target: string): Promise<{
+      points: number; reported: number; namedTarget: number;
+      groupCount: number; instances: number; line: { status: string; message: string } | null;
+    }> => {
+      const points = (await d.evaluate<number[]>(`${V}.debug.resolvePoints(${JSON.stringify(target)})`)).length;
+      const baseLen = await d.evaluate<number>(`window.__lines.length`);
+      const run = await cmd(`link_defer ${target}`);
+      check(`S57: the produces:edges mod is invokable on "${target}" and acknowledges`,
+        run.status === "ok", JSON.stringify(run));
+      await d.waitFor(`window.__lines.length > ${baseLen}`, 20000)
+        .catch(() => { /* timeout → the checks below go red */ });
+      const line = await d.evaluate<{ status: string; message: string } | null>(`window.__lines.at(-1) ?? null`);
+      const m = line ? /authored (\d+) edges for the (\d+)-point target/.exec(line.message) : null;
+      const groupCount = await d.evaluate<number>(
+        `(()=>{ const g = ${V}.produced.groups().find(g => g.name === "link_defer"); return g && g.active ? g.count : -1; })()`);
+      const instances = await d.evaluate<number>(`${V}.produced.pass.instanceCount()`);
+      return {
+        points, reported: m ? Number(m[1]) : -1, namedTarget: m ? Number(m[2]) : -1,
+        groupCount, instances, line,
+      };
+    };
+
+    // -- run on subset A ("alpha", 400 pts) → count = 200, scoped to alpha -----
+    const a = await runOnTarget("alpha");
+    interactiveCount = a.reported; // carried to Part B to assert it DIFFERS from the whole-system load count
+    check("S57: an interactive run reports the SELECTION count (len(target)//2), NOT the whole system",
+      a.reported === Math.floor(a.points / 2) && a.reported !== WHOLE && a.points < N,
+      `reported=${a.reported} want=${Math.floor(a.points / 2)} whole=${WHOLE} points=${a.points}`);
+    check("S57: ...and the status line NAMES the resolved target size (scope is explicit)",
+      a.namedTarget === a.points, `named=${a.namedTarget} points=${a.points}`);
     check("S57: ...the line names the group (default = the mod name) and claims the LIVE draw",
-      !!line && line.status === "ok" &&
-        /as group "link_defer"/.test(line.message) &&
-        /drawn live, no reload/.test(line.message),
-      JSON.stringify(line));
+      !!a.line && a.line.status === "ok" &&
+        /as group "link_defer"/.test(a.line.message) &&
+        /drawn live, no reload/.test(a.line.message),
+      JSON.stringify(a.line));
+    check("S57: the produced pass carries EXACTLY the selection's edges, live (reported == authored == drawn)",
+      a.groupCount === a.reported && a.instances === a.reported,
+      `group=${a.groupCount} instances=${a.instances} reported=${a.reported}`);
     check("S57: header.edges NEVER grows from an interactive run (produced edges are isolated)",
       (await edgeCount()) === before, `${before} → ${await edgeCount()}`);
     check("S57: #e stays a HEADER-edge axis — one past the last header edge still nomatches",
       (await cmd(`colorbonds #e${L0} red`)).status === "nomatch");
-    check("S57: the produced pass carries the whole authored group, live",
-      await d.evaluate<boolean>(`(()=>{
-        const g = ${V}.produced.groups().find(g => g.name === "link_defer");
-        return !!g && g.active && g.count === ${WANT} &&
-          ${V}.produced.pass.instanceCount() === ${WANT};
-      })()`));
     // pixel proof: the scene is already isolated (points/traces transparent,
     // header-edge tubes collapsed — and `bondsize all 0` provably never reached
     // the produced pass, or nothing would draw below). Paint the authored
@@ -9746,11 +9771,28 @@ async function S57(): Promise<void> {
     const liveRed = await d.evaluate<number>(redCountJs(await snap("live")));
     check("S57: the authored edges DRAW LIVE where the control drew zero red pixels",
       liveRed > 20, `red=${liveRed}`);
+
+    // -- run on a DIFFERENT subset ("solvent", the bulk category) → a DIFFERENT
+    //    count, still scoped to that selection: the discrimination a whole-system
+    //    override would erase (both would report 3000). Re-declaring the same
+    //    group replaces it in place — the pass now carries solvent's count. -----
+    const b = await runOnTarget("solvent");
+    check("S57: a DIFFERENT subset authors a DIFFERENT count (per-selection, not whole-system)",
+      b.reported === Math.floor(b.points / 2) && b.reported !== a.reported && b.namedTarget === b.points,
+      `A: reported=${a.reported} pts=${a.points} | B: reported=${b.reported} pts=${b.points} named=${b.namedTarget}`);
+    check("S57: ...and the produced pass carries EXACTLY that subset's edges (reported == authored == drawn)",
+      b.groupCount === b.reported && b.instances === b.reported,
+      `group=${b.groupCount} instances=${b.instances} reported=${b.reported}`);
   });
 
   // -- Part B: the mod ON (spawned with --edge-mods) → the edges RENDER --------
-  // The SAME target-respecting mod, at load time (whole system) — so the count
-  // it authors must EQUAL the whole-system count the interactive run reported.
+  // The SAME target-respecting mod, at LOAD time — a SEPARATE path (serve.py
+  // apply_edge_mods) with no selection, so it runs on the WHOLE system and its
+  // count is WHOLE = N/2 = 3000. This is unchanged by the per-selection
+  // interactive contract, and the two counts now legitimately DIFFER: Part A's
+  // interactive run authored only its selection's edges (200 for alpha), while
+  // load-time authors the whole system. The old contract equated them; the new
+  // one asserts they differ (see the cross-check below).
   const tmp = mkdtempSync(join(tmpdir(), "s57-edges-"));
   const modPath = join(tmp, "link_load.py");
   writeFileSync(modPath,
@@ -9772,10 +9814,11 @@ async function S57(): Promise<void> {
       };
 
       const L = await edgeCount();
-      check("S57: load-time --edge-mods appends EXACTLY the whole-system count",
-        L === L0 + WANT, `off=${L0} on=${L} want+${WANT}`);
-      check("S57: ...which EQUALS the interactive run's reported count (truthful: same set)",
-        L - L0 === interactiveCount, `grew=${L - L0} reported=${interactiveCount}`);
+      check("S57: load-time --edge-mods appends EXACTLY the whole-system count (no selection at load)",
+        L === L0 + WHOLE, `off=${L0} on=${L} whole+${WHOLE}`);
+      check("S57: ...which DIFFERS from the per-selection interactive count (the new contract: interactive is scoped to the selection, load is whole-system)",
+        L - L0 === WHOLE && interactiveCount !== WHOLE && interactiveCount > 0,
+        `loadGrew=${L - L0} whole=${WHOLE} interactive=${interactiveCount}`);
       // the FIRST appended pair sits at index L0 (load appends original + pairs,
       // in the mod's return order — pair 0 = [t[0], t[3000]] = [AUTH_A, AUTH_B])
       const first = await pairAt(L0);
