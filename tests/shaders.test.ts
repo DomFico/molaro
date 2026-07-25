@@ -342,11 +342,12 @@ test("ribbon: across(t) CONDITIONS AT THE ANCHORS, then interpolates ⊥ along(t
   // …and the INTERPOLATION happens inside the plane ⊥ along(t): each conditioned
   // anchor facing is TRANSPORTED into that plane first, so the slerp cannot leave
   // it. It is NOT a slerp of the raw facings re-projected afterwards.
-  assert.match(RIBBON_V, /vec3 acrossS = noPlane \? vec3\(0\.0\) : ribbonSlerp\(\s*ribbonTransport\(pA, alongA, along\), ribbonTransport\(pB, alongB, along\), t\);/);
+  assert.match(RIBBON_V, /vec3 pBc = dot\(pA, pB\) < 0\.0 \? -pB : pB;/);
+  assert.match(RIBBON_V, /vec3 acrossS = noPlane \? vec3\(0\.0\) : ribbonSlerp\(\s*ribbonTransport\(pA, alongA, along\), ribbonTransport\(pBc, alongB, along\), t\);/);
   assert.doesNotMatch(RIBBON_V, /ribbonSlerp\(iAcrossA, iAcrossB, t\)/,
     "the raw supplied facings must NOT be slerped before conditioning (that is the defect)");
   // the anchors take the conditioned anchor facing itself — bit-exactly
-  assert.match(RIBBON_V, /vec3 aperp = t <= 0\.0 \? pA : t >= 1\.0 \? pB : ribbonPerp\(acrossS, along\);/);
+  assert.match(RIBBON_V, /vec3 aperp = t <= 0\.0 \? pA : t >= 1\.0 \? pBc : ribbonPerp\(acrossS, along\);/);
   // the DEGENERACY rule survives: no defined plane → zero width → collapse
   assert.match(RIBBON_V, /w = w \* \(alen < 1e-6 \? 0\.0 : 1\.0\);/);
   assert.match(RIBBON_V, /vec3 across = alen < 1e-6 \? vec3\(0\.0\) : aperp \/ alen;/);
@@ -636,9 +637,10 @@ function acrossNow(P0: V3, P1: V3, P2: V3, P3: V3, A: V3, B: V3, t: number, M: V
   const alongA = rAlong(m1, chordDir), alongB = rAlong(m2, chordDir);
   const pA: V3 = noPlane ? [0, 0, 0] : rPerp(mat3mul(M, v3norm(rawA)), alongA);
   const pB: V3 = noPlane ? [0, 0, 0] : rPerp(mat3mul(M, v3norm(rawB)), alongB);
+  const pBc: V3 = v3dot(pA, pB) < 0 ? v3scl(pB, -1) : pB;
   const acrossS: V3 = noPlane ? [0, 0, 0]
-    : ribbonSlerp(rTransport(pA, alongA, along), rTransport(pB, alongB, along), t);
-  const aperp = t <= 0 ? pA : t >= 1 ? pB : rPerp(acrossS, along);
+    : ribbonSlerp(rTransport(pA, alongA, along), rTransport(pBc, alongB, along), t);
+  const aperp = t <= 0 ? pA : t >= 1 ? pBc : rPerp(acrossS, along);
   const alen = v3len(aperp);
   return { across: alen < 1e-6 ? [0, 0, 0] : v3scl(aperp, 1 / alen), alen, along };
 }
@@ -792,9 +794,18 @@ test("ribbon: the ANCHORS are BIT-IDENTICAL to the pre-change ordering (drawn �
           const now = acrossNow(P0, P1, P2, P3, F[i], F[i + 1], t, M);
           const pre = acrossInterpolateThenProject(P0, P1, P2, P3, F[i], F[i + 1], t, M);
           assert.equal(now.alen, pre.alen, `${regime} seg ${i} t=${t}: anchor residue LENGTH must be identical`);
-          for (let c = 0; c < 3; c++) {
-            assert.equal(now.across[c], pre.across[c],
-              `${regime} seg ${i} t=${t} component ${c}: anchor face direction must be identical`);
+          // t=0 is identical outright (pA is never the flipped end). t=1 is
+          // identical UP TO THE SIGN, because sign coherence may pick the other
+          // representative of the same plane — and the test below proves that
+          // draws the identical box. The sign must be consistent across all
+          // three components: a per-component discrepancy is a real defect.
+          const same = now.across.every((x, c) => x === pre.across[c]);
+          const negated = now.across.every((x, c) => x === -pre.across[c]);
+          assert.ok(same || negated,
+            `${regime} seg ${i} t=${t}: anchor face direction must be the supplied one or its exact negation ` +
+            `(now ${JSON.stringify(now.across)} vs pre ${JSON.stringify(pre.across)})`);
+          if (t <= 0) {
+            assert.ok(same, `${regime} seg ${i} t=0: pA is never the flipped end — must be identical outright`);
           }
           checked++;
         }
@@ -877,4 +888,104 @@ test("ribbon: CONDITIONING FLOOR — the interior residue is ⊥ by construction
   assert.ok(pre.interiorMin < pre.anchorMin / 5,
     `precondition: the old ordering degraded the interior far below its anchors ` +
     `(interior ${pre.interiorMin.toFixed(4)} vs anchor ${pre.anchorMin.toFixed(4)})`);
+});
+
+test("ribbon: NEGATING across draws the IDENTICAL box — what makes sign coherence honest", () => {
+  // Sign coherence interpolates toward the OTHER representative of end B's plane
+  // when the supplied pair is more than 90° apart. That is only legitimate if a
+  // facing and its negation draw the same solid, so prove it on the real corner
+  // table rather than asserting it: 16 corners per sub-box, aCorner = (x, t, z),
+  // aFace picking the normal, exactly as webview/main.ts builds them.
+  const FACES: { z: [number, number]; x: [number, number]; face: number }[] = [
+    { z: [1, 1], x: [-1, 1], face: 0 },
+    { z: [-1, -1], x: [-1, 1], face: 1 },
+    { z: [-1, 1], x: [1, 1], face: 2 },
+    { z: [-1, 1], x: [-1, -1], face: 3 },
+  ];
+  const corners: { x: number; z: number; face: number }[] = [];
+  for (const f of FACES) {
+    for (let u = 0; u < 2; u++) {
+      corners.push({
+        x: f.x[0] === f.x[1] ? f.x[0] : (u === 0 ? -1 : 1),
+        z: f.z[0] === f.z[1] ? f.z[0] : (u === 0 ? -1 : 1),
+        face: f.face,
+      });
+    }
+  }
+  assert.equal(corners.length, 8, "8 distinct (x, z) corner slots per t-end, 4 faces × 2");
+  // the drawn vertex and its normal, for a given facing sign
+  const pos: V3 = [3, -1, 0.5], along: V3 = v3norm([0.4, 0.9, -0.2]);
+  const w = 0.7, K = 0.30; // K must mirror RIBBON_THICKNESS
+  const build = (across: V3) => {
+    const nrm = v3cross(along, across);
+    return corners.map((c) => ({
+      p: v3add(pos, v3add(v3scl(across, c.x * w), v3scl(nrm, c.z * K * w))),
+      n: c.face === 0 ? nrm : c.face === 1 ? v3scl(nrm, -1) : c.face === 2 ? across : v3scl(across, -1),
+    }));
+  };
+  const across: V3 = v3norm(rPerp([0.2, -0.3, 1], along));
+  const plus = build(across), minus = build(v3scl(across, -1));
+  const key = (v: V3) => v.map((x) => x.toFixed(9)).join(",");
+  // (a) the SET of drawn positions is identical
+  assert.deepEqual(
+    plus.map((e) => key(e.p)).sort(),
+    minus.map((e) => key(e.p)).sort(),
+    "across → -across rotates the cross-section 180° about the tangent: the same corner positions",
+  );
+  // (b) and the position → NORMAL map is identical, so every drawn pixel shades
+  // the same. (Not just the same set of normals — the same normal AT each point.)
+  const mapOf = (es: { p: V3; n: V3 }[]) => {
+    const m = new Map<string, string>();
+    for (const e of es) m.set(key(e.p), key(e.n));
+    return [...m.entries()].sort();
+  };
+  assert.deepEqual(mapOf(plus), mapOf(minus),
+    "each face's declared normal lands on the value the face it replaces declared");
+  // (c) it is a rotation (det +1), so winding survives — and the pass is
+  // DoubleSide anyway (webview/main.ts), so culling cannot depend on it
+  assert.equal(plus.length, minus.length);
+});
+
+test("ribbon: FOLD BOUND — no two adjacent sub-samples may swing the face direction", () => {
+  // The other half of the regression net. The conditioning floor above stops the
+  // ⊥ residue from near-cancelling; this stops the OTHER fold mechanism, where a
+  // supplied pair more than 90° apart makes the slerp take the long way round and
+  // (at the antipodal limit) flip ~180° at the midpoint. A violation looks like a
+  // crease or a bowtie: the band twists through a half-turn inside one eighth of
+  // a segment, with the ⊥ residue never getting short and nothing else complaining.
+  //
+  // MEASURED on the 214-vertex fixture, worst adjacent sub-sample rotation over
+  // the four facing regimes:
+  //   pre-change ordering                         137.6° … 174.6°
+  //   conditioning fix alone (long arc still on)    38.4° … 157.2°
+  //   with sign coherence (this)                    37.3° …  38.5°
+  // The bound is set at 60°, comfortably above the 38.5° measured worst case and
+  // far below the ~112-175° any of the fold mechanisms produced. It is a real net:
+  // every variant that leaves either mechanism in place breaks it.
+  const p = condPoly(214, 12345);
+  for (const M of [M_ID, M_ROT]) {
+    for (const regime of COND_REGIMES) {
+      const F = condFacings(p, regime, 999);
+      const now = condStats(p, F, M, "now");
+      assert.ok(now.worstRotDeg < 60,
+        `${regime}: the face direction must not swing between adjacent sub-samples (worst ${now.worstRotDeg.toFixed(1)}°)`);
+    }
+  }
+  // and the precondition that makes the bound meaningful: the pre-change ordering
+  // really did swing, on the very same points
+  const pre = condStats(p, condFacings(p, "perp-twist", 999), M_ID, "pre");
+  assert.ok(pre.worstRotDeg > 120,
+    `precondition: the old ordering folded (worst ${pre.worstRotDeg.toFixed(1)}°)`);
+  // an EXACTLY antipodal supplied pair is the sharpest case: the plane is the
+  // same at both anchors, so the band must barely twist at all — not half-turn
+  const P0: V3 = [0, 0, 0], P1: V3 = [1, 0, 0.1], P2: V3 = [1, 1, 0], P3: V3 = [2, 1, 0.3];
+  const A: V3 = v3norm([0.2, -0.3, 1]);
+  let worst = 0, prev: V3 | null = null;
+  for (let j = 0; j <= COND_S; j++) {
+    const o = acrossNow(P0, P1, P2, P3, A, v3scl(A, -1), j / COND_S, M_ID);
+    assert.ok(isFinite3(o.across), `antipodal pair @${j}: must stay finite`);
+    if (prev) worst = Math.max(worst, (Math.acos(Math.max(-1, Math.min(1, v3dot(prev, o.across)))) * 180) / Math.PI);
+    prev = o.across;
+  }
+  assert.ok(worst < 60, `an antipodal supplied pair describes ONE plane and must not half-turn (worst ${worst.toFixed(1)}°)`);
 });

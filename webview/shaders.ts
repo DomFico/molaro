@@ -803,19 +803,54 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         vec3 alongB = ribbonAlong(m2, chordDir);
         vec3 pA = noPlane ? vec3(0.0) : ribbonPerp(mat3(modelViewMatrix) * normalize(rawA), alongA);
         vec3 pB = noPlane ? vec3(0.0) : ribbonPerp(mat3(modelViewMatrix) * normalize(rawB), alongB);
-        // transport is LINEAR in v, so the UNNORMALIZED pA/pB are fine here —
+        // SIGN COHERENCE — the second, independent fold mechanism. A band's
+        // facing is a PLANE, not an arrow: across and -across span the same box
+        // (see below), so a supplied pair more than 90° apart describes two
+        // planes that are LESS than 90° apart, and slerping between the supplied
+        // representatives takes the long way round — a near-half-turn crammed
+        // into one segment. At the antipodal limit it is worse than long: the
+        // slerp's nlerp fallback nulls at t=0.5 and flips ~180° between two
+        // adjacent sub-samples. That is a fold, and NO ordering of the projection
+        // removes it: it is present before and after the conditioning fix, on a
+        // pair whose conditioning is a perfect 1.0 at both anchors.
+        //
+        // So the interpolation takes the SHORT arc between the two planes. On the
+        // same 214-vertex fixture the worst face rotation between adjacent
+        // sub-samples was 157.2° / 111.8° / 111.3° / 38.4° across the four facing
+        // regimes with the conditioning fix alone, and 38.5° / 38.4° / 37.4° /
+        // 38.4° with this — a uniform bound where there was none, in the same
+        // range as the S=8 spline's own ~35° silhouette target.
+        //
+        // WHY NEGATING AN END IS NOT A LIE ABOUT THE DATA. vpos offsets by
+        // across·(±w) and nrm·(±k·w) with nrm = cross(along, across), so
+        // across → -across also sends nrm → -nrm: the cross-section is ROTATED
+        // 180° about the tangent, which maps corner (x,z) onto the position of
+        // corner (-x,-z). The base geometry's corner set is symmetric under that
+        // map (broad faces 0↔1, edge faces 2↔3) and each face's declared normal
+        // lands on the value the face it replaces declared, so the drawn box —
+        // positions, per-face normals, colours — is IDENTICAL; only which vertex
+        // sits at which corner permutes. It is a 180° rotation (det +1) so the
+        // winding is preserved too, and the pass is DoubleSide regardless. The
+        // decision is also camera-invariant: pA and pB are both rotated by the
+        // same mat3(modelViewMatrix), so dot(pA, pB) does not depend on the view.
+        // pA is never flipped, so the t=0 anchor stays bit-identical as well.
+        vec3 pBc = dot(pA, pB) < 0.0 ? -pB : pB;
+        // transport is LINEAR in v, so the UNNORMALIZED pA/pBc are fine here —
         // the slerp normalizes, and their lengths only scale its inputs.
         vec3 acrossS = noPlane ? vec3(0.0) : ribbonSlerp(
-          ribbonTransport(pA, alongA, along), ribbonTransport(pB, alongB, along), t);
+          ribbonTransport(pA, alongA, along), ribbonTransport(pBc, alongB, along), t);
         // AT THE ANCHORS take the conditioned anchor facing ITSELF. Transport
         // and slerp both reduce to it in exact arithmetic (transport a→a is the
         // identity; the slerp returns its own endpoint at t=0 and t=1), but a
         // float projection is not idempotent through normalize-and-renormalize,
-        // and the anchors are where drawn ≡ supplied is a PROMISE. Taking pA/pB
+        // and the anchors are where drawn ≡ supplied is a PROMISE. Taking pA/pBc
         // makes that promise structural: the anchor aperp — direction AND length,
         // so the belt below too — is bit-for-bit the expression the old ordering
-        // evaluated there. t = j/S is exact in float32 and never leaves [0,1].
-        vec3 aperp = t <= 0.0 ? pA : t >= 1.0 ? pB : ribbonPerp(acrossS, along);
+        // evaluated there, up to the sign coherence above (which draws the
+        // identical box). t = j/S is exact in float32 and never leaves [0,1]. The
+        // t>=1 anchor MUST use the same representative the interior interpolated
+        // toward, or the last sub-facet would carry the whole 180° flip.
+        vec3 aperp = t <= 0.0 ? pA : t >= 1.0 ? pBc : ribbonPerp(acrossS, along);
         float alen = length(aperp);
         // DEGENERACY: no defined plane (a facing parallel to its own anchor's
         // tangent, or no facing at all) → zero width. Kept as a BELT, and it is

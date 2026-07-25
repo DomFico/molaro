@@ -7657,7 +7657,12 @@ async function S44(): Promise<void> {
         // its own anchor and interpolate inside the plane ⊥ along(t), instead of
         // slerping the raw facings and projecting afterwards). Measured, 3 runs,
         // identical every time: f68 25r/0b → 20r/2b, f72 18r/5b → 16r/7b, and the
-        // sphere-wins half unchanged at 0r/25b. The threshold is LEFT at `> 2×`
+        // sphere-wins half unchanged at 0r/25b. The SIGN-COHERENCE half of that
+        // same increment (interpolating toward the nearer representative of end
+        // B's plane, so a supplied pair over 90° apart no longer half-turns
+        // inside one segment) moved these four patches NOT AT ALL — measured
+        // identical, so the crossings the finder selects sit on coherent pairs.
+        // The threshold is LEFT at `> 2×`
         // — the gate still passes and a passing gate is not loosened — but the
         // f72 margin is now TWO red pixels (16 > 2·7 = 14), so record plainly
         // what that does and does not mean:
