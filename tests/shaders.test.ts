@@ -1106,8 +1106,10 @@ test("ribbon: FOLD BOUND — no two adjacent sub-samples may swing the face dire
   // in place breaks it, and reverting the conditioned-length gate breaks it too.
   //
   // WHAT THIS BOUND IS AND IS NOT. It is measured over ARBITRARY facings on THIS
-  // fixture's turn-angle distribution — condPoly turns 70–110° per step, giving a
-  // WITHIN-SEGMENT tangent rotation of mean 47.6°, max 97.6°. It is NOT a bound
+  // fixture's turn-angle distribution — condPoly's per-step turn PARAMETER is
+  // 70–110°, but the rotation axis is not ⊥ the direction, so the REALIZED turns
+  // span 9.0–109.2° (mean 70.2°, only ~58% inside [70,110]); the resulting
+  // WITHIN-SEGMENT tangent rotation is mean 47.6°, max 97.6°. It is NOT a bound
   // over arbitrary GEOMETRY, and the boundary is pinned below.
   const p = condPoly(214, 12345);
   for (const M of [M_ID, M_ROT]) {
@@ -1170,9 +1172,11 @@ function worstOverFacings(hull: [V3, V3, V3, V3], N: number, minAbsZ = 0): numbe
 
 test("ribbon: the fold bound is scoped by GEOMETRY — and the 174° class was the SIGN RULE's, not the mechanism's", () => {
   // The fold bound above is not uniform over geometry, and the shape of its
-  // failure depends on WHICH sign rule decides coherence. Measured over a 24×24
-  // grid of supplied facing pairs on a symmetric planar turn, worst adjacent
-  // sub-sample rotation as the WITHIN-SEGMENT tangent rotation grows:
+  // failure depends on WHICH sign rule decides coherence. Measured over a 48×48
+  // grid of supplied facing pairs on a symmetric planar turn (the assertions
+  // below RUN a 24×24 grid for cost, which reads a few tenths lower — 23.3 /
+  // 25.1 / 31.9 / 47.8 at 90/95/110/135°), worst adjacent sub-sample rotation
+  // as the WITHIN-SEGMENT tangent rotation grows:
   //
   //   turn      anchor-frame rule    transported-frame rule (shipped)
   //    60°            16.1°                 15.1°
@@ -1194,8 +1198,9 @@ test("ribbon: the fold bound is scoped by GEOMETRY — and the 174° class was t
   // near ~150° of within-segment tangent rotation.
   //
   // REAL-DATA EVIDENCE, not a guarantee: the shipped fixture reaches 97.6° of
-  // within-segment tangent rotation, and the real 214-vertex polyline this
-  // increment was diagnosed on measures mean 54.4°, max 85.6° — well below the
+  // within-segment tangent rotation, and the real trace this increment was
+  // diagnosed on (a DIFFERENT polyline from the synthetic fixture, though both
+  // happen to have 214 vertices) measures mean 54.4°, max 85.6° — well below the
   // ~150° residual crossing. Both are measurements of particular data.
   for (const deg of [60, 90, 95, 110, 135]) {
     const worst = worstOverFacings(symmetricTurn(deg), 24);
@@ -1304,9 +1309,11 @@ test("ribbon: BOTH facings parallel to their own tangents — the case the heade
   // tangent, has no defined plane — that end's half-width collapses to zero".
   // Before the conditioned-length gate this input did NOT collapse: the
   // conditioned facing was exactly zero, reached ribbonSlerp's normalize(), and
-  // NaN'd the whole segment interior at FULL width — measured 42 of 81 samples
-  // NaN on a float32 mirror where the pre-change ordering produced 0. Verify the
-  // documented behaviour on the exact input the doc describes.
+  // NaN'd the whole segment interior at FULL width — NaN on most interior
+  // sub-samples (42/81 on one faithful float32 mirror, 35/81 on an independent
+  // one; which hulls land on an exact zero is rounding-dependent) where the
+  // pre-change ordering produced 0. Verify the documented behaviour on the exact
+  // input the doc describes.
   let checked = 0;
   for (let ring = 0; ring < 9; ring++) {
     const a = (ring * 2 * Math.PI) / 9;

@@ -7688,8 +7688,9 @@ async function S44(): Promise<void> {
         //     a ribbon-side depth regression.
         //   - the DETECTION property is intact and is much wider than the
         //     threshold: the defect this guards (a ribbon-side depth bug pushing
-        //     the band BACK) flips the majority, which needs red ≤ 7 from 16 —
-        //     nine pixels, not two. If the NEXT legitimate ribbon-geometry move
+        //     the band BACK) flips the majority: with 16r + 7b = 23 classified,
+        //     red ≤ blue first happens at 11r/12b — FIVE red→blue conversions,
+        //     not one. If the NEXT legitimate ribbon-geometry move
         //     erodes `> 2×`, do not shave it again: re-state it AT the detection
         //     property (`red > blue` with the `red >= 12` coverage floor), or
         //     take the TIGHTEN route above and model the band's own surface.

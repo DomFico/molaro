@@ -751,11 +751,14 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // conditioned facing reaches ribbonSlerp — whose first act is
         // normalize(), and GLSL normalize(vec3(0)) is NaN, not zero. A NaN
         // survives the alen belt below (NaN < 1e-6 is FALSE, so w keeps FULL
-        // width) and reaches gl_Position in a depthWrite pass. Measured on a
-        // GLSL-faithful float32 mirror with both facings parallel to their own
-        // tangents, 9 hulls × 9 sub-samples: 42 NaN, every one at nonzero width,
-        // where the pre-change ordering produced 0. Hence the gate is on the
-        // CONDITIONED length, not the supplied one.
+        // width) and reaches gl_Position in a depthWrite pass. Measured on
+        // GLSL-faithful float32 mirrors with both facings parallel to their own
+        // tangents, 9 hulls × 9 sub-samples: NaN on MOST interior sub-samples,
+        // every one at nonzero width, where the pre-change ordering produced 0.
+        // (The exact count is mirror-arithmetic dependent — which hulls'
+        // conditioned facings land on an exact float32 zero varies with rounding:
+        // one faithful mirror read 42/81, an independent one 35/81.) Hence the
+        // gate is on the CONDITIONED length, not the supplied one.
         float lenA = length(iAcrossA), lenB = length(iAcrossB);
         bool zeroA = lenA < 1e-9, zeroB = lenB < 1e-9;
         bool zeroBoth = zeroA && zeroB;
@@ -777,6 +780,16 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // the surviving end's conditioned facing, TRANSPORTED into the dead end's
         // frame, keeps the interior finite and ⊥ from one end alone. Both dead →
         // zero, and noPlane routes around the slerp entirely.
+        //
+        // The sign decision below cannot fire on a substituted end: with flatB,
+        // qB is pA carried B-ward and the decision dots pA against qB carried
+        // BACK — a round trip that in exact arithmetic is the identity
+        // (R_b→a = R_a→b⁻¹) and yields |pA|² > 0. In float32 near the d → 0
+        // pole that identity does NOT hold to working precision (the round trip
+        // drifts up to ~45% in length; worst normalized dot measured 0.5508 at
+        // d = 1.43e-6) — but THE SIGN SURVIVES, which is all the decision reads:
+        // 0 sign inversions in 600k round-trip samples, min |T(v)|/|v| = 0.742,
+        // and the flip fired on 0 of 1,635,354 single-substituted-end samples.
         vec3 qA = flatA ? (flatB ? vec3(0.0) : ribbonTransport(pB, alongB, alongA)) : pA;
         vec3 qB = flatB ? (flatA ? vec3(0.0) : ribbonTransport(pA, alongA, alongB)) : pB;
         float wA_def = degA ? 0.0 : wA;
@@ -809,10 +822,11 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // (within-segment tangent rotation mean 47.6°, max 97.6°) over the four
         // band-filling supplied-facing regimes (the fifth COND_REGIMES sweeps,
         // "parallel", collapses an anchor by construction and arrived later with
-        // the conditioned-length gate), the smallest INTERIOR residue length went
-        // 0.0116→0.0600 on the worst regime but 0.1030→0.0776 — WORSE — on a
-        // facing that points where the tangent is going, and the worst
-        // adjacent-sub-sample face rotation stayed at 175°. It is a reordering
+        // the conditioned-length gate), the MIN-over-regimes of the smallest
+        // INTERIOR residue length went 0.0116 → 0.0600 (per regime it moved
+        // 0.0561→0.0600, 0.1030→0.0776 — WORSE, on the facing that points where
+        // the tangent is going — and 0.0116→0.1736), and the worst
+        // adjacent-sub-sample face rotation stayed at 165°. It is a reordering
         // that leaves the same cancellation in place.
         //
         // WHAT IS DONE INSTEAD. Each anchor's facing is conditioned against THAT
@@ -858,16 +872,27 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         //   with this                 38.5° / 37.4° / 38.4° / 34.2° / 22.8°
         // Worst case 38.5°, in the range of the S=8 spline's own ~35° silhouette
         // target; the transported-frame decision leaves every one of these fixture
-        // numbers unmoved (measured — the two rules never disagree on it). SCOPE:
-        // that is measured over arbitrary FACINGS on THIS fixture's turn-angle
-        // distribution (70–110° per step, within-segment tangent rotation max
+        // numbers unmoved — but NOT because the rules agree everywhere. Measured:
+        // they disagree on 21 of 1065 fixture segment decisions per camera
+        // (8 perp-twist / 3 perp-chase / 6 tilted / 4 world-fixed / 0 parallel,
+        // identical under both cameras); the QUARTET is unmoved because no
+        // disagreeing segment sets its regime's maximum, and on the disagreeing
+        // segments the transported rule is the TIGHTER one (29.3/26.5/27.3/25.9
+        // vs 34.2/28.8/33.6/27.7). Independent corroboration that they disagree:
+        // S43's f20 red count moved 5184 → 5470 when the rule changed, which
+        // would be impossible if the decisions never differed. SCOPE: that is
+        // measured over arbitrary FACINGS on THIS fixture's turn-angle
+        // distribution (a 70–110° per-step turn PARAMETER whose realized turns
+        // span 9.0–109.2°, mean 70.2°; within-segment tangent rotation max
         // 97.6°). It is NOT a bound over arbitrary GEOMETRY: the residual
         // worst-case grows with the within-segment tangent rotation — measured
         // 23.4° at 90°, 48.0° at 135°, 60.2° at 150° on the coplanar sweep — so
         // sufficiently long turns twist harder than the fixture's bound. That
         // growth is genuine geometry. The 174° fold class that used to appear
-        // past ~95° was NOT: it was a property of the earlier ANCHOR-FRAME sign
-        // rule (see the block above), not of the mechanism, and is gone. The
+        // past 90° (onset measured at 90.001° — the derivation above says
+        // exactly 90°, and the measurement agrees) was NOT: it was a property of
+        // the earlier ANCHOR-FRAME sign rule (see the block above), not of the
+        // mechanism, and is gone. The
         // geometry-scope test pins the holding range, the growth, the
         // anchor-frame comparison, and the real-data turn maximum.
         //
@@ -896,12 +921,14 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // perfect. Testing the sign of the dot the slerp actually consumes (its
         // two inputs at t = 0 differ from this pair only by the same rotation)
         // cannot construct that antipode. Measured over a 48×48 facing grid on a
-        // symmetric planar turn: the anchor-frame rule folds 174.2°–177.4° for
-        // every turn past ~95°; this rule reads 25.3° at 95°, rising smoothly to
-        // 60.2° at 150° — residual genuine geometry, no manufactured class.
-        // COST: one extra ribbonTransport in the decision (~1 cross, 2 dot, 1
-        // cross, ~18 mul total) per vertex, uniform over a segment's 16·S
-        // corners; the pass stays fill-bound. Still ONE decision per segment —
+        // symmetric planar turn: the anchor-frame rule folds for every turn past
+        // 90° (174.2° at 95°, rising to 179.1° at 170°); this rule reads 25.3°
+        // at 95°, rising smoothly to 60.2° at 150° — residual genuine geometry,
+        // no manufactured class.
+        // COST: one extra ribbonTransport in the decision — 24 source-level
+        // multiplies + 1 divide (cross 6, dot 3, c·v 3, cross 6, dot 3, k·s 3),
+        // 27 multiplies with the consuming dot(qA, ·) — per vertex, uniform over
+        // a segment's 16·S corners; the pass stays fill-bound. Still ONE decision per segment —
         // every corner of an instance computes the same sign from the same
         // instance attributes.
         //
@@ -953,7 +980,11 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // zero), and any residue that becomes short for a reason not enumerated
         // above. Mid-segment, when a plane exists, the residue is a unit vector's
         // ⊥ component in a plane it already lies in — measured 1.000000 in double
-        // and 0.999998569 in float32 — so it does not fire there.
+        // and unit to within float32 rounding, staying ≥ 0.98 even where one
+        // end's facing is the transported survivor of a collapsed anchor — so it
+        // sits four orders of magnitude above the 1e-6 belt and does not fire
+        // there. (Float32 figures are mirror-dependent in their last digits; the
+        // margin is not.)
         w = w * (alen < 1e-6 ? 0.0 : 1.0);
         vec3 across = alen < 1e-6 ? vec3(0.0) : aperp / alen;
         // THIN BOX CROSS-SECTION. The band gets thickness through its own plane
