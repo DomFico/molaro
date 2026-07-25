@@ -10528,7 +10528,143 @@ async function S61(): Promise<void> {
   await S61body(150, "multi");  // a multi-frame scene: still no seek after the re-run
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61 };
+// ==== S62: a run-time ?group param picks the produced-edge group ==============
+// A produces:edges mod that DECLARES `# param: group string g0` chooses its
+// produced-edge GROUP per invocation: `?group=alpha` authors into %alpha,
+// `?group=beta` authors a SEPARATE coexisting group %beta (both drawn, distinct
+// id spans, each addressable/stylable through its own %group). An invalid
+// `?group` token is a LOUD refusal (nothing authored). And a mod WITHOUT the
+// param authors into its `# edge-group:` header exactly as before — the
+// byte-identical fallback. End to end on the REAL producer round-trip.
+async function S62(): Promise<void> {
+  console.log("S62 — run-time ?group: one edges mod authors into different %groups per invocation");
+  // mod A: declares a `group` param; compute reads it to place each group's edges
+  // at DISJOINT points so alpha and beta occupy different screen regions (both
+  // visible at once). 40 edges/group — alpha at [0,40)+[3000,3040), beta at
+  // [1500,1540)+[4500,4540).
+  const MOD_A =
+    "def compute(data, target_indices, params):\n" +
+    "    base = 0 if params['group'] == 'alpha' else 1500\n" +
+    "    return [[base + i, 3000 + base + i] for i in range(40)]";
+  // mod B: NO group param, a `# edge-group:` header of "hdr" — the fallback path.
+  const MOD_B =
+    "def compute(data, target_indices):\n" +
+    "    return [[i, 3000 + i] for i in range(20)]";
+  const redCountJs = (b64: string) => `(async () => {
+    const app = document.getElementById('app').getBoundingClientRect();
+    const img = new Image();
+    await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${b64}"; });
+    const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
+    const g = c.getContext('2d'); g.drawImage(img, 0, 0);
+    const px = g.getImageData(Math.round(app.left), Math.round(app.top) + 60,
+      Math.round(app.width), Math.round(app.height) - 60).data;
+    let n = 0;
+    for (let i = 0; i < px.length; i += 4) if (px[i] > px[i+1] + 60 && px[i] > px[i+2] + 60) n++;
+    return n;
+  })()`;
+  await withDriver(async (d) => {
+    await d.evaluate(`${V}.player.seek(0)`);
+    await sleep(400);
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const snap = async (tag: string): Promise<string> => {
+      await d.evaluate(`(async () => { for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r)); })()`);
+      return d.captureB64(`${REPORT}/S62_${tag}.png`);
+    };
+    const redAt = async (tag: string): Promise<number> => d.evaluate<number>(redCountJs(await snap(tag)));
+    const greenAt = async (tag: string): Promise<number> => greenCount(d, await snap(`${tag}_g`));
+    await d.evaluate(`void (window.__lines = [],
+      window.addEventListener('message', (e) => {
+        if (e.data?.type === 'commandResult' && e.data.id === -1) window.__lines.push(e.data);
+      }))`);
+    // run a mod and WAIT for a NEW async outcome line (a fresh one each call).
+    const runAndWait = async (text: string): Promise<{ status: string; message: string }> => {
+      const before = await d.evaluate<number>(`window.__lines.length`);
+      const r = await cmd(text);
+      await d.waitFor(`window.__lines.length > ${before}`, 20000).catch(() => {});
+      await d.evaluate(`(async () => { for (let i = 0; i < 2; i++) await new Promise(r => requestAnimationFrame(r)); })()`);
+      return r;
+    };
+    const groupNames = () => d.evaluate<string[]>(`${V}.produced.groups().map(g => g.name)`);
+
+    // isolate: only produced edges can put edge pixels up
+    await cmd("pointopacity all 0");
+    await cmd("traceopacity all 0");
+    await cmd("bondsize all 0");
+
+    await d.evaluate(`window.postMessage({ type: "modsLoaded", mods: [
+      { name: "ge", kind: "analysis", produces: "edges", origin: "workspace",
+        params: [{ name: "group", type: "string", default: "g0" }], code: ${JSON.stringify(MOD_A)} },
+      { name: "plain", kind: "analysis", produces: "edges", origin: "workspace",
+        edgeGroup: "hdr", code: ${JSON.stringify(MOD_B)} }
+    ] }, "*")`);
+    await sleep(200);
+
+    // -- run 1: ?group=alpha authors into %alpha; style it red -----------------
+    const rA = await runAndWait("ge all ?group=alpha");
+    check("S62: `ge all ?group=alpha` acknowledges", rA.status === "ok", JSON.stringify(rA));
+    await d.waitFor(`window.__lines.some(l => /authored 40 edges .* as group "alpha"/.test(l.message))`, 20000)
+      .catch(() => {});
+    check("S62: the run authored into the %alpha group (the ?group param chose it)",
+      (await groupNames()).includes("alpha"), JSON.stringify(await groupNames()));
+    const styA = await cmd("colorbonds %alpha red");
+    const szA = await cmd("bondsize %alpha 6");
+    check("S62: %alpha styles through the edge verbs", styA.status === "ok" && szA.status === "ok",
+      JSON.stringify({ styA, szA }));
+    const redAfterA = await redAt("alpha");
+    check("S62: %alpha DRAWS (red on screen)", redAfterA > 40, `red=${redAfterA}`);
+
+    // -- run 2: ?group=beta authors a SEPARATE coexisting %beta; style green ---
+    const rB = await runAndWait("ge all ?group=beta");
+    check("S62: `ge all ?group=beta` acknowledges", rB.status === "ok", JSON.stringify(rB));
+    await d.waitFor(`window.__lines.some(l => /authored 40 edges .* as group "beta"/.test(l.message))`, 20000)
+      .catch(() => {});
+    const styB = await cmd("colorbonds %beta green");
+    const szB = await cmd("bondsize %beta 6");
+    check("S62: %beta styles through the edge verbs", styB.status === "ok" && szB.status === "ok",
+      JSON.stringify({ styB, szB }));
+    check("S62: %alpha and %beta COEXIST as distinct groups (both registered, disjoint id spans)",
+      await d.evaluate<boolean>(`(()=>{
+        const gs = ${V}.produced.groups();
+        const a = gs.find(g => g.name === "alpha"), b = gs.find(g => g.name === "beta");
+        if (!a || !b || !a.active || !b.active) return false;
+        if (a.count !== 40 || b.count !== 40) return false;
+        // contiguous, non-overlapping id spans (the append discipline)
+        return a.baseId !== b.baseId && (a.baseId + a.count <= b.baseId || b.baseId + b.count <= a.baseId);
+      })()`), JSON.stringify(await d.evaluate(`${V}.produced.groups()`)));
+    const redBoth = await redAt("both_red");
+    const greenBoth = await greenAt("both");
+    check("S62: BOTH draw at once — %alpha still red AND %beta green (distinct, coexisting)",
+      redBoth > 40 && greenBoth > 40, `red=${redBoth} green=${greenBoth}`);
+
+    // -- an invalid ?group token is a LOUD refusal (nothing authored) ----------
+    const beforeBad = await d.evaluate<number>(`window.__lines.length`);
+    const rBad = await cmd("ge all ?group=1bad");
+    check("S62: `?group=1bad` is dispatched (a string param accepts it) then refused downstream",
+      rBad.status === "ok", JSON.stringify(rBad));
+    await d.waitFor(`window.__lines.length > ${beforeBad}`, 20000).catch(() => {});
+    check("S62: an invalid ?group token is a LOUD error — nothing authored",
+      await d.evaluate<boolean>(
+        `window.__lines.some(l => l.status === "error" && /invalid \\?group "1bad".*nothing authored/.test(l.message))`),
+      JSON.stringify(await d.evaluate(`window.__lines.at(-1)`)));
+    check("S62: ...and no group named \"1bad\" was created",
+      !(await groupNames()).includes("1bad"), JSON.stringify(await groupNames()));
+
+    // -- the FALLBACK: a mod WITHOUT a group param authors into its header -----
+    const rP = await runAndWait("plain all");
+    check("S62: `plain all` (no group param) acknowledges", rP.status === "ok", JSON.stringify(rP));
+    await d.waitFor(`window.__lines.some(l => /authored 20 edges .* as group "hdr"/.test(l.message))`, 20000)
+      .catch(() => {});
+    check("S62: the no-param mod authored into its # edge-group: header (\"hdr\"), unchanged",
+      await d.evaluate<boolean>(`(()=>{
+        const gs = ${V}.produced.groups();
+        const h = gs.find(g => g.name === "hdr");
+        return !!h && h.active && h.count === 20 && !gs.some(g => g.name === "plain");
+      })()`), JSON.stringify(await groupNames()));
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -10568,7 +10704,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
   S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
-  S58: "fast", S59: "fast", S60: "fast", S61: "fast",
+  S58: "fast", S59: "fast", S60: "fast", S61: "fast", S62: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {
