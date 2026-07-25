@@ -143,8 +143,16 @@ export interface PickGeometry {
  * depth) wins — matching what the user sees on top when drawn shapes overlap.
  * If NOTHING covers the cursor, it falls back to the legacy nearest-CENTER test
  * within `basePixelThreshold`, so a small/precise element still picks exactly
- * and clicking empty space near it never over-grabs (byte-for-byte the old
- * behavior — the size-aware paths only ADD reach where an element is enlarged).
+ * and clicking empty space near it never over-grabs.
+ *
+ * The size-aware reach only EXTENDS the legacy pick — it never shrinks or
+ * reorders it. A point is a "cover" candidate only where its DRAWN radius
+ * exceeds `basePixelThreshold`: within that base radius the precise
+ * nearest-center rule stays authoritative, so a default-size scene resolves
+ * byte-for-byte as before (two default dots a couple of px apart still pick by
+ * proximity, never by depth). Front-most ordering therefore engages only among
+ * genuinely large silhouettes — the enlarged spheres and thick tube/ribbon
+ * bodies this fix is about — which is exactly where "what's on top" matters.
  *
  * Pure math, CPU-side, no GPU readback — same cost class as `pickPoint`.
  *
@@ -215,14 +223,17 @@ export function pickElement(
     const dpx = sx - clickPxX;
     const dpy = sy - clickPxY;
     const d2 = dpx * dpx + dpy * dpy;
-    // size-aware: does the drawn sphere cover the cursor?
+    // size-aware reach: an ENLARGED sphere (drawn radius past the base
+    // threshold) covers the cursor out to its silhouette. Small default
+    // spheres are NOT cover candidates — they resolve through the legacy
+    // nearest-center fallback below, so default scenes are unchanged.
     const rPx = k * pointSize[p] * pxScale / w;
-    if (d2 <= rPx * rPx && w < coverDepth) {
+    if (rPx > basePixelThreshold && d2 <= rPx * rPx && w < coverDepth) {
       coverDepth = w;
       coverIndex = p;
       coverDist = Math.sqrt(d2);
     }
-    // legacy nearest-center fallback (unchanged): closest within threshold.
+    // legacy nearest-center pick (unchanged): closest center within threshold.
     if (d2 < fbPixel2) {
       fbPixel2 = d2;
       fbIndex = p;

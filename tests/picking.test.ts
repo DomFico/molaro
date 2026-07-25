@@ -136,12 +136,26 @@ test("pickElement: a body-click outside the half-width does NOT cover", () => {
 
 test("pickElement: among covering candidates the FRONT-MOST (least depth) wins", () => {
   // Two big spheres on the same screen ray: BACK at z=4 (index 0), FRONT at z=1
-  // (index 1). Both project to px (0,0); the click is dead-center.
+  // (index 1). Both project to px (0,0); the click is dead-center. Size 60 keeps
+  // BOTH drawn radii above the 12px threshold (BACK is 60/4=15px), so both are
+  // genuine cover candidates and the winner is decided purely by DEPTH.
   const positions = new Float32Array([0, 0, 4, 0, 0, 1]);
   const visible = new Float32Array([1, 1]);
-  const g = geom({ pointSize: new Float32Array([5, 5]) });
+  const g = geom({ pointSize: new Float32Array([60, 60]) });
   const r = pickElement(positions, 2, visible, PERSP_DEPTH, 0, 0, 200, 200, 12, g);
   assert.equal(r.index, 1); // FRONT wins despite being second in the array
+});
+
+test("pickElement: a SMALL sphere never overrides the nearest-center pick by depth", () => {
+  // Two DEFAULT-size dots ~4px apart on screen: BEHIND at index 0 (z close),
+  // IN-FRONT at index 1 (z closer). Their drawn radii (~a few px) never exceed
+  // the 12px threshold, so neither is a cover candidate — a click on dot 0's
+  // center resolves by proximity to dot 0, NOT to the front dot. This is the
+  // default-scene invariant the whole existing suite relies on.
+  const positions = new Float32Array([0, 0, 2, 0.04, 0, 1]);
+  const g = geom({ pointSize: new Float32Array([2, 2]) });
+  const r = pickElement(positions, 2, new Float32Array([1, 1]), PERSP_DEPTH, 0, 0, 200, 200, 12, g);
+  assert.equal(r.index, 0); // the clicked dot, not the nearer-in-front neighbour
 });
 
 test("pickElement: nothing covers ⇒ legacy nearest-center fallback (small element still picks)", () => {
