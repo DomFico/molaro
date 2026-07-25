@@ -3145,6 +3145,11 @@ async function main(): Promise<void> {
     mod: AnalysisMod,
     edges: readonly (readonly [number, number])[],
     group: string,
+    // The size of the RESOLVED target the mod computed over. Reported in the
+    // status line so the count's SCOPE is explicit — produced edges are authored
+    // for exactly the user's selection now, never the whole system. Undefined
+    // only on the low-level test-hook `declare` path (no user target there).
+    targetCount?: number,
     // 2C: the optional PER-FRAME visibility mask, already validated and
     // flattened ([frame * n_pairs + pair], values in [0,1]) — rides the
     // group; absent = a static group (the pre-2C declaration, unchanged).
@@ -3169,10 +3174,14 @@ async function main(): Promise<void> {
         return [];
       });
     }
-    // the STATIC wording is pinned (S57); a masked declaration says what is
-    // different about it — its edges appear/vanish with the displayed frame
+    // the count reports exactly what THIS selection produced and now draws; the
+    // scope clause names the target size so the count is never mistaken for a
+    // whole-system number (absent only on the test-hook path). A masked
+    // declaration adds what is different about it — its edges appear/vanish with
+    // the displayed frame.
+    const scope = targetCount !== undefined ? ` for the ${targetCount}-point target` : "";
     asyncLine("ok",
-      `${mod.name} → authored ${edges.length} edges (computed over the whole system) as ` +
+      `${mod.name} → authored ${edges.length} edges${scope} as ` +
       `group "${group}" — drawn live, no reload` +
       (visibility !== undefined
         ? ` · per-frame visibility (${visibility.length / Math.max(edges.length, 1)} frames)`
@@ -3191,14 +3200,16 @@ async function main(): Promise<void> {
     params?: Record<string, ParamValue>,
   ): Promise<boolean> => {
       try {
-        // produces:edges runs on the WHOLE system, never the resolved subset:
-        // load-time apply (serve.py apply_edge_mods) has no selection — it always
-        // runs the mod on range(n_points) — so a target-respecting mod's
-        // interactive count must be computed over the SAME set, or the reported
-        // number would differ from what load-apply actually authors (untruthful).
-        const targetIndices = mod.produces === "edges"
-          ? Array.from({ length: header.n_points }, (_, i) => i)
-          : points;
+        // Every mod kind — produces:edges INCLUDED — runs on the RESOLVED target.
+        // An interactive edges run now draws LIVE into the isolated produced-edge
+        // pass (it no longer defers to a reload), so its target no longer has to
+        // match the load-time --edge-mods path (a SEPARATE function,
+        // serve.py apply_edge_mods, which has no selection and stays whole-system).
+        // Authoring edges for exactly the user's selection — and reporting the
+        // count of what that selection produced+renders — is strictly MORE
+        // truthful than forcing range(n_points) to mirror a path this run never
+        // takes. (`points` is the resolver's output for the invocation target.)
+        const targetIndices = points;
         const bytes = await transport.request({
           type: "run_mod",
           code: mod.code,
@@ -3305,11 +3316,11 @@ async function main(): Promise<void> {
           // pass as a named group and DRAW NOW — header.edges, its
           // serialization, and every rep.state edge buffer stay untouched
           // (--edge-mods at load remains the header-baked sibling path). The
-          // run stays computed over the WHOLE system (the targetIndices
-          // override above): load-time apply has no selection either, so the
-          // interactive count and the load-time count are the SAME number —
-          // the truthful-count contract, now with pixels behind it. The group
-          // name is the webview's (header/default); the producer's echo is
+          // run was computed over the RESOLVED target (targetIndices === points
+          // above): the edges are authored FOR the user's selection, and the
+          // reported count is exactly what that selection produced and now
+          // draws — the truthful-count contract, scoped to the selection. The
+          // group name is the webview's (header/default); the producer's echo is
           // asserted equal so an in-flight drift can never be silent.
           const group = mod.edgeGroup ?? mod.name;
           if (checked.group !== undefined && checked.group !== group) {
@@ -3318,7 +3329,7 @@ async function main(): Promise<void> {
               `requesting "${group}" — nothing authored`);
             return false;
           }
-          declareProducedEdges(mod, checked.edges, group, checked.visibility);
+          declareProducedEdges(mod, checked.edges, group, points.length, checked.visibility);
           return true;
         }
         return true;
