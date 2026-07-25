@@ -756,6 +756,32 @@ function openPanel(
       void panel.webview.postMessage({ type: "rm-mods-result", deleted, failed });
       return;
     }
+    if (msg?.type === "save-mod") {
+      // save_rep's host mod-file write: write ONLY <modsDir()>/<name>.py via the
+      // SAME backup-preserving writer write_mod uses (saveModFile), then re-scan
+      // disk (which also refreshes modPaths) and re-push modsLoaded so <name>
+      // registers as a live verb — exactly as write_mod's re-push and the
+      // hot-reload watcher do. The write is NOT the registration; the re-push is,
+      // so it goes out BEFORE the result line. NOT undoable (the filesystem is
+      // outside the undo model — the rm precedent). Reply with what happened.
+      const name = (msg as unknown as { name?: string }).name ?? "";
+      const source = (msg as unknown as { source?: string }).source ?? "";
+      try {
+        const { file, backup } = saveModFile(modsDir(), name, source);
+        void panel.webview.postMessage({
+          type: "modsLoaded",
+          mods: loadWorkspaceMods(producerLog, modPaths),
+        });
+        void panel.webview.postMessage({ type: "save-mod-result", name, file, backup });
+      } catch (err) {
+        void panel.webview.postMessage({
+          type: "save-mod-result",
+          name,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
     if (msg?.type === "toProducer" && msg.request) {
       // The webview's first request (its boot header ask) proves its listener is
       // live — flush any loading status that was emitted before then, so the
