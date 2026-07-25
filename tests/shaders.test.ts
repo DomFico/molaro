@@ -317,7 +317,8 @@ test("ribbon: the vertex shader evaluates a CENTRIPETAL Catmull-Rom (α=0.5 knot
   // and the basis DERIVATIVE — the true tangent that becomes along(t)
   assert.match(RIBBON_V, /float g00 = 6\.0 \* tt - 6\.0 \* t;/);
   assert.match(RIBBON_V, /vec3 tangent = g00 \* P1 \+ g10 \* m1 \+ g01 \* P2 \+ g11 \* m2;/);
-  assert.match(RIBBON_V, /vec3 along = tlen < 1e-9 \? chord \/ segLen : tangent \/ tlen;/);
+  assert.match(RIBBON_V, /vec3 chordDir = chord \/ segLen;/);
+  assert.match(RIBBON_V, /vec3 along = ribbonAlong\(tangent, chordDir\);/);
   // the control hull is the four points the instance already carried
   assert.match(RIBBON_V, /attribute vec3 iPrevPoint; attribute vec3 iNextPoint;/);
   assert.match(RIBBON_V, /vec3 P0 = \(modelViewMatrix \* vec4\(iPrevPoint, 1\.0\)\)\.xyz;/);
@@ -326,15 +327,34 @@ test("ribbon: the vertex shader evaluates a CENTRIPETAL Catmull-Rom (α=0.5 knot
   assert.match(RIBBON_V, /float t = aCorner\.y;/);
 });
 
-test("ribbon: across(t) is a SLERP of the two supplied facings, then conditioned ⊥ along", () => {
+test("ribbon: across(t) CONDITIONS AT THE ANCHORS, then interpolates ⊥ along(t)", () => {
   assert.match(RIBBON_V, /vec3 ribbonSlerp\(vec3 a, vec3 b, float t\)/);
-  assert.match(RIBBON_V, /ribbonSlerp\(iAcrossA, iAcrossB, t\)/);
-  // still conditioned exactly as before: view space, ⊥ along, unit
-  assert.match(RIBBON_V, /vec3 acrossView = mat3\(modelViewMatrix\) \* acrossWorld;/);
-  assert.match(RIBBON_V, /vec3 aperp = acrossView - along \* dot\(acrossView, along\);/);
+  // conditioning happens per ANCHOR, against that anchor's OWN tangent — and the
+  // anchor tangents come free from m1/m2 (the derivative basis at t=0 and t=1)
+  assert.match(RIBBON_V, /vec3 alongA = ribbonAlong\(m1, chordDir\);/);
+  assert.match(RIBBON_V, /vec3 alongB = ribbonAlong\(m2, chordDir\);/);
+  // same space and same operation as before: view space (rotation only), ⊥, unit
+  assert.match(RIBBON_V,
+    /vec3 pA = noPlane \? vec3\(0\.0\) : ribbonPerp\(mat3\(modelViewMatrix\) \* normalize\(rawA\), alongA\);/);
+  assert.match(RIBBON_V,
+    /vec3 pB = noPlane \? vec3\(0\.0\) : ribbonPerp\(mat3\(modelViewMatrix\) \* normalize\(rawB\), alongB\);/);
+  assert.match(RIBBON_V, /vec3 ribbonPerp\(vec3 v, vec3 u\) \{ return v - u \* dot\(v, u\); \}/);
+  // …and the INTERPOLATION happens inside the plane ⊥ along(t): each conditioned
+  // anchor facing is TRANSPORTED into that plane first, so the slerp cannot leave
+  // it. It is NOT a slerp of the raw facings re-projected afterwards.
+  assert.match(RIBBON_V, /vec3 acrossS = noPlane \? vec3\(0\.0\) : ribbonSlerp\(\s*ribbonTransport\(pA, alongA, along\), ribbonTransport\(pB, alongB, along\), t\);/);
+  assert.doesNotMatch(RIBBON_V, /ribbonSlerp\(iAcrossA, iAcrossB, t\)/,
+    "the raw supplied facings must NOT be slerped before conditioning (that is the defect)");
+  // the anchors take the conditioned anchor facing itself — bit-exactly
+  assert.match(RIBBON_V, /vec3 aperp = t <= 0\.0 \? pA : t >= 1\.0 \? pB : ribbonPerp\(acrossS, along\);/);
   // the DEGENERACY rule survives: no defined plane → zero width → collapse
   assert.match(RIBBON_V, /w = w \* \(alen < 1e-6 \? 0\.0 : 1\.0\);/);
   assert.match(RIBBON_V, /vec3 across = alen < 1e-6 \? vec3\(0\.0\) : aperp \/ alen;/);
+  // the along fallback is SINGLE-SOURCED now that three tangents need it
+  assert.match(RIBBON_V, /vec3 ribbonAlong\(vec3 deriv, vec3 chordDir\) \{\s*float l = length\(deriv\);\s*return l < 1e-9 \? chordDir : deriv \/ l;\s*\}/);
+  assert.match(RIBBON_V, /vec3 along = ribbonAlong\(tangent, chordDir\);/);
+  // and the transport is the exact expanded half-way-quaternion Rodrigues form
+  assert.match(RIBBON_V, /vec3 ribbonTransport\(vec3 v, vec3 a, vec3 b\) \{\s*vec3 k = cross\(a, b\);\s*float c = dot\(a, b\);\s*float d = 1\.0 \+ c;\s*return d < 1e-6 \? v : c \* v \+ cross\(k, v\) \+ k \* \(dot\(k, v\) \/ d\);\s*\}/);
 });
 
 test("ribbon: the MITER is retired — the shared control hull makes joints continuous", () => {
@@ -402,6 +422,25 @@ function ribbonTangent(P0: V3, P1: V3, P2: V3, P3: V3, t: number): V3 {
   const tt = t * t;
   const g00 = 6 * tt - 6 * t, g10 = 3 * tt - 4 * t + 1, g01 = -6 * tt + 6 * t, g11 = 3 * tt - 2 * t;
   return v3add(v3add(v3scl(P1, g00), v3scl(m1, g10)), v3add(v3scl(P2, g01), v3scl(m2, g11)));
+}
+
+const v3cross = (a: V3, b: V3): V3 =>
+  [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+
+/** ribbonAlong / ribbonPerp / ribbonTransport, mirrored expression-for-expression
+ * (the grouping matters: these are the operations whose ORDER against the
+ * interpolation is the whole subject of the conditioning fix). */
+const rAlong = (deriv: V3, chordDir: V3): V3 => {
+  const l = v3len(deriv);
+  return l < 1e-9 ? chordDir : v3scl(deriv, 1 / l);
+};
+const rPerp = (v: V3, u: V3): V3 => v3sub(v, v3scl(u, v3dot(v, u)));
+function rTransport(v: V3, a: V3, b: V3): V3 {
+  const k = v3cross(a, b);
+  const c = v3dot(a, b);
+  const d = 1 + c;
+  if (d < 1e-6) return v;
+  return v3add(v3add(v3scl(v, c), v3cross(k, v)), v3scl(k, v3dot(k, v) / d));
 }
 
 /** The shader's ribbonSlerp, mirrored — guards BOTH poles with a nlerp fallback. */
@@ -571,4 +610,271 @@ test("ribbon: a PARTIALLY-bound segment TAPERS — a zero-facing anchor draws no
   assert.match(RIBBON_V, /float w = mix\(wA_def, wB_def, t\);/);
   // and it must NOT be the old full-width mix over the raw widths
   assert.doesNotMatch(RIBBON_V, /float w = mix\(wA, wB, t\);/);
+});
+
+// ---------------------------------------------------------------------------
+// across(t) — THE CONDITIONING. The ribbon's face direction comes from a
+// 3-wide channel bound to the orientation axis. Conditioning it (view space,
+// ⊥ the local tangent, unit) and INTERPOLATING it are two operations whose
+// ORDER decides whether the band twists smoothly or folds: projecting AFTER
+// the interpolation is a near-cancellation wherever the interpolated facing
+// approaches the tangent, and the tangent rotates a lot WITHIN one segment.
+// Both orderings are mirrored below so the fix is proved, not asserted.
+// ---------------------------------------------------------------------------
+
+/** the drawn face direction at t: the CURRENT ordering (condition at each
+ * anchor against that anchor's own tangent, transport both into the plane
+ * ⊥ along(t), slerp there). `M` is mat3(modelViewMatrix). */
+function acrossNow(P0: V3, P1: V3, P2: V3, P3: V3, A: V3, B: V3, t: number, M: V3[]): { across: V3; alen: number; along: V3 } {
+  const { chord, m1, m2 } = catmullMs(P0, P1, P2, P3);
+  const chordDir = v3scl(chord, 1 / v3len(chord));
+  const along = rAlong(ribbonTangent(P0, P1, P2, P3, t), chordDir);
+  const lenA = v3len(A), lenB = v3len(B);
+  const noPlane = lenA < 1e-9 && lenB < 1e-9;
+  const rawA: V3 = lenA < 1e-9 ? B : A;
+  const rawB: V3 = lenB < 1e-9 ? A : B;
+  const alongA = rAlong(m1, chordDir), alongB = rAlong(m2, chordDir);
+  const pA: V3 = noPlane ? [0, 0, 0] : rPerp(mat3mul(M, v3norm(rawA)), alongA);
+  const pB: V3 = noPlane ? [0, 0, 0] : rPerp(mat3mul(M, v3norm(rawB)), alongB);
+  const acrossS: V3 = noPlane ? [0, 0, 0]
+    : ribbonSlerp(rTransport(pA, alongA, along), rTransport(pB, alongB, along), t);
+  const aperp = t <= 0 ? pA : t >= 1 ? pB : rPerp(acrossS, along);
+  const alen = v3len(aperp);
+  return { across: alen < 1e-6 ? [0, 0, 0] : v3scl(aperp, 1 / alen), alen, along };
+}
+
+/** the drawn face direction at t under the PRE-CHANGE ordering (slerp the raw
+ * supplied facings, then project ⊥ along(t)). FROZEN: it exists only as the
+ * reference the anchors must still reproduce bit-for-bit. It is deliberately
+ * NOT what the shader does any more — the interior test below asserts the two
+ * disagree, so this cannot quietly become a copy of `acrossNow`. */
+function acrossInterpolateThenProject(P0: V3, P1: V3, P2: V3, P3: V3, A: V3, B: V3, t: number, M: V3[]): { across: V3; alen: number } {
+  const { chord } = catmullMs(P0, P1, P2, P3);
+  const chordDir = v3scl(chord, 1 / v3len(chord));
+  const along = rAlong(ribbonTangent(P0, P1, P2, P3, t), chordDir);
+  const lenA = v3len(A), lenB = v3len(B);
+  const acrossWorld: V3 = (lenA < 1e-9 && lenB < 1e-9) ? [0, 0, 0]
+    : lenA < 1e-9 ? v3norm(B) : lenB < 1e-9 ? v3norm(A) : ribbonSlerp(A, B, t);
+  const aperp = rPerp(mat3mul(M, acrossWorld), along);
+  const alen = v3len(aperp);
+  return { across: alen < 1e-6 ? [0, 0, 0] : v3scl(aperp, 1 / alen), alen };
+}
+
+const mat3mul = (M: V3[], v: V3): V3 => [
+  M[0][0] * v[0] + M[0][1] * v[1] + M[0][2] * v[2],
+  M[1][0] * v[0] + M[1][1] * v[1] + M[1][2] * v[2],
+  M[2][0] * v[0] + M[2][1] * v[1] + M[2][2] * v[2],
+];
+const M_ID: V3[] = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+// an arbitrary camera rotation, so the view-space conditioning is exercised with
+// a modelView that actually mixes the axes (yaw 0.7, pitch 0.4)
+const M_ROT: V3[] = (() => {
+  const cy = Math.cos(0.7), sy = Math.sin(0.7), cp = Math.cos(0.4), sp = Math.sin(0.4);
+  return [[cy, -sy * cp, sy * sp], [sy, cy * cp, -cy * sp], [0, sp, cp]];
+})();
+
+/** a deterministic angular polyline + per-anchor facings, in several regimes —
+ * a swept range of facing/tangent configurations rather than one lucky case. */
+function lcg(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
+}
+function condPoly(n: number, seed: number): V3[] {
+  const r = lcg(seed); const p: V3[] = [[0, 0, 0]];
+  let dir: V3 = [1, 0, 0];
+  for (let i = 1; i < n; i++) {
+    const ax = v3norm([r() - 0.5, r() - 0.5, r() - 0.5]);
+    const ang = (70 + 40 * r()) * Math.PI / 180;   // a hard turn every step
+    const kk = v3scl(ax, v3dot(ax, dir));
+    dir = v3norm(v3add(v3add(v3scl(v3sub(dir, kk), Math.cos(ang)), v3scl(v3cross(ax, dir), Math.sin(ang))), kk));
+    p.push(v3add(p[i - 1], v3scl(dir, 0.35 + 0.05 * r())));
+  }
+  return p;
+}
+type Regime = "perp-twist" | "perp-chase" | "tilted" | "world-fixed";
+function condFacings(p: V3[], regime: Regime, seed: number): V3[] {
+  const r = lcg(seed);
+  const T = p.map((_, i) => v3norm(v3sub(i + 1 < p.length ? p[i + 1] : p[i], i > 0 ? p[i - 1] : p[i])));
+  return T.map((tv, i) => {
+    const refRaw: V3 = [0.3, 0.9, 0.31];
+    const u = v3norm(rPerp(Math.abs(v3dot(tv, refRaw)) > 0.95 ? [1, 0, 0] : refRaw, tv));
+    const v = v3cross(tv, u);
+    const phi = (i * 25 + 20 * (r() - 0.5)) * Math.PI / 180;
+    const spun = v3add(v3scl(u, Math.cos(phi)), v3scl(v, Math.sin(phi)));
+    switch (regime) {
+      // ⊥ its own tangent, twisting along the path (anchor conditioning ~1)
+      case "perp-twist": return spun;
+      // ⊥ its own tangent but pointing where the tangent is GOING — the
+      // adversarial case: anchor conditioning is perfect and the interior
+      // still crosses the tangent, so a merely-reordered projection cannot help
+      case "perp-chase": {
+        const nxt = i + 1 < T.length ? T[i + 1] : T[i];
+        const q = rPerp(nxt, tv);
+        return v3len(q) < 1e-6 ? u : v3norm(q);
+      }
+      // a large TANGENTIAL component: poorly conditioned AT the anchors too
+      case "tilted": return v3add(spun, v3scl(tv, 2.5 * (r() - 0.5) * 2));
+      // one fixed world direction for every anchor
+      case "world-fixed": return [0, 1, 0];
+    }
+  });
+}
+const COND_REGIMES: Regime[] = ["perp-twist", "perp-chase", "tilted", "world-fixed"];
+const COND_S = 8; // must mirror RIBBON_SEGMENTS
+
+/** walk every segment × every sub-sample of a regime, reporting the two things
+ * the fold was made of: how short the ⊥ residue gets, and how far the face
+ * direction can swing between two ADJACENT sub-samples. */
+function condStats(p: V3[], F: V3[], M: V3[], mode: "now" | "pre") {
+  let interiorMin = Infinity, anchorMin = Infinity, worstRotDeg = 0;
+  for (let i = 0; i + 1 < p.length; i++) {
+    const P0 = i > 0 ? p[i - 1] : p[i], P1 = p[i], P2 = p[i + 1];
+    const P3 = i + 2 < p.length ? p[i + 2] : p[i + 1];
+    let prev: V3 | null = null;
+    for (let j = 0; j <= COND_S; j++) {
+      const t = j / COND_S;
+      const o = mode === "now"
+        ? acrossNow(P0, P1, P2, P3, F[i], F[i + 1], t, M)
+        : acrossInterpolateThenProject(P0, P1, P2, P3, F[i], F[i + 1], t, M);
+      if (j === 0 || j === COND_S) anchorMin = Math.min(anchorMin, o.alen);
+      else interiorMin = Math.min(interiorMin, o.alen);
+      if (prev) {
+        const c = Math.max(-1, Math.min(1, v3dot(prev, o.across)));
+        worstRotDeg = Math.max(worstRotDeg, (Math.acos(c) * 180) / Math.PI);
+      }
+      prev = o.across;
+    }
+  }
+  return { interiorMin, anchorMin, worstRotDeg };
+}
+
+test("ribbon: ribbonTransport carries a ⊥ facing into the NEXT tangent's plane (never cancels)", () => {
+  // the one property the interior conditioning rests on: v ⊥ a ⟹ Rv ⊥ b. A
+  // PROJECTION would instead subtract two nearly-equal vectors as v → b.
+  const r = lcg(4242);
+  let worstResidual = 0, worstLenDrift = 0;
+  for (let n = 0; n < 4000; n++) {
+    const a = v3norm([r() - 0.5, r() - 0.5, r() - 0.5]);
+    const b = v3norm([r() - 0.5, r() - 0.5, r() - 0.5]);
+    const v = v3norm(rPerp([r() - 0.5, r() - 0.5, r() - 0.5], a)); // v ⊥ a, unit
+    const out = rTransport(v, a, b);
+    worstResidual = Math.max(worstResidual, Math.abs(v3dot(v3norm(out), b)));
+    worstLenDrift = Math.max(worstLenDrift, Math.abs(v3len(out) - 1)); // a rotation is an isometry
+  }
+  assert.ok(worstResidual < 1e-12, `transported facing must stay ⊥ the target tangent (worst |cos| ${worstResidual.toExponential(2)})`);
+  assert.ok(worstLenDrift < 1e-12, `transport must preserve length (worst drift ${worstLenDrift.toExponential(2)})`);
+  // a → a is the identity (so the anchors are reached by the same vector), and
+  // the b ≈ -a pole passes v through — still ⊥, still finite, never NaN
+  const a: V3 = v3norm([0.3, -0.7, 0.5]);
+  const v: V3 = v3norm(rPerp([1, 0.2, -0.4], a));
+  for (let c = 0; c < 3; c++) assert.ok(Math.abs(rTransport(v, a, a)[c] - v[c]) < 1e-15, "a→a is the identity");
+  const flipped = rTransport(v, a, v3scl(a, -1));
+  assert.ok(isFinite3(flipped) && Math.abs(v3dot(v3norm(flipped), a)) < 1e-15,
+    "at the b ≈ -a pole the facing passes through, still ⊥ (v ⊥ a ⟹ v ⊥ -a)");
+});
+
+test("ribbon: the ANCHORS are BIT-IDENTICAL to the pre-change ordering (drawn ≡ supplied)", () => {
+  // The reordering is allowed to move the segment INTERIOR and nothing else. At
+  // t=0 and t=1 both orderings reduce to projecting iAcrossA / iAcrossB against
+  // that anchor's own tangent — but only because the shader TAKES pA / pB there
+  // rather than re-projecting a renormalized slerp (float projection is not
+  // idempotent). Exact equality, not a tolerance: aperp's direction AND its
+  // length, which is what the alen belt reads.
+  const p = condPoly(60, 12345);
+  for (const M of [M_ID, M_ROT]) {
+    for (const regime of COND_REGIMES) {
+      const F = condFacings(p, regime, 999);
+      let checked = 0;
+      for (let i = 0; i + 1 < p.length; i++) {
+        const P0 = i > 0 ? p[i - 1] : p[i], P1 = p[i], P2 = p[i + 1];
+        const P3 = i + 2 < p.length ? p[i + 2] : p[i + 1];
+        for (const t of [0, 1]) {
+          const now = acrossNow(P0, P1, P2, P3, F[i], F[i + 1], t, M);
+          const pre = acrossInterpolateThenProject(P0, P1, P2, P3, F[i], F[i + 1], t, M);
+          assert.equal(now.alen, pre.alen, `${regime} seg ${i} t=${t}: anchor residue LENGTH must be identical`);
+          for (let c = 0; c < 3; c++) {
+            assert.equal(now.across[c], pre.across[c],
+              `${regime} seg ${i} t=${t} component ${c}: anchor face direction must be identical`);
+          }
+          checked++;
+        }
+      }
+      assert.ok(checked === 118, `every anchor of every segment was compared (got ${checked})`);
+    }
+  }
+  // and the PARTIALLY-bound anchors too: one end zero (the taper case) still
+  // conditions the surviving facing against the tangent it always did
+  const P0: V3 = [0, 0, 0], P1: V3 = [1, 0, 0.1], P2: V3 = [1, 1, 0], P3: V3 = [2, 1, 0.3];
+  for (const [A, B] of [[[0, 0, 0], [0.2, 1, 0.3]], [[0.2, 1, 0.3], [0, 0, 0]], [[0, 0, 0], [0, 0, 0]]] as [V3, V3][]) {
+    for (const t of [0, 1]) {
+      const now = acrossNow(P0, P1, P2, P3, A, B, t, M_ROT);
+      const pre = acrossInterpolateThenProject(P0, P1, P2, P3, A, B, t, M_ROT);
+      for (let c = 0; c < 3; c++) {
+        assert.equal(now.across[c], pre.across[c], `partial binding ${JSON.stringify([A, B])} t=${t}: anchor identical`);
+      }
+    }
+  }
+});
+
+test("ribbon: the INTERIOR is where the two orderings differ — this net is not vacuous", () => {
+  // If the shader were ever reverted to slerp-then-project, the anchor test above
+  // would still pass (the anchors coincide) and the conditioning test below would
+  // be the only thing to catch it. Pin that the mirrors genuinely differ inside
+  // the segment, so the pre-change reference cannot rot into a copy.
+  const p = condPoly(60, 12345);
+  const F = condFacings(p, "perp-twist", 999);
+  let maxInteriorDelta = 0;
+  for (let i = 0; i + 1 < p.length; i++) {
+    const P0 = i > 0 ? p[i - 1] : p[i], P1 = p[i], P2 = p[i + 1];
+    const P3 = i + 2 < p.length ? p[i + 2] : p[i + 1];
+    for (let j = 1; j < COND_S; j++) {
+      const t = j / COND_S;
+      const now = acrossNow(P0, P1, P2, P3, F[i], F[i + 1], t, M_ID);
+      const pre = acrossInterpolateThenProject(P0, P1, P2, P3, F[i], F[i + 1], t, M_ID);
+      for (let c = 0; c < 3; c++) maxInteriorDelta = Math.max(maxInteriorDelta, Math.abs(now.across[c] - pre.across[c]));
+    }
+  }
+  assert.ok(maxInteriorDelta > 0.1,
+    `the two orderings must visibly disagree in the segment interior (max |Δ| ${maxInteriorDelta.toFixed(4)})`);
+});
+
+test("ribbon: CONDITIONING FLOOR — the interior residue is ⊥ by construction, never a near-cancellation", () => {
+  // THE REGRESSION NET FOR THIS CLASS OF BUG. A violation looks like this: some
+  // sub-sample's ⊥ residue gets short, so the face direction is the normalized
+  // difference of two nearly-equal vectors; it reverses as the interpolated
+  // facing crosses the tangent, and the band shows a hard fold (and pinches to
+  // zero width where the residue falls under the 1e-6 belt).
+  //
+  // MEASURED on a 214-vertex polyline of hard turns (within-segment tangent
+  // rotation mean 47.6°, max 97.6°), over four supplied-facing regimes:
+  //   pre-change (slerp raw, then project)  interior residue min 0.0116 … 0.1030
+  //   now        (condition, transport, slerp inside the plane)  min 1.000000
+  // The floor is 1 rather than "large" because the interpolation happens INSIDE
+  // the plane ⊥ along(t): a slerp of two vectors of one plane through the origin
+  // stays in it, so the final ribbonPerp removes only rounding.
+  const p = condPoly(214, 12345);
+  for (const M of [M_ID, M_ROT]) {
+    for (const regime of COND_REGIMES) {
+      const F = condFacings(p, regime, 999);
+      const now = condStats(p, F, M, "now");
+      const pre = condStats(p, F, M, "pre");
+      assert.ok(now.interiorMin > 1 - 1e-9,
+        `${regime}: the interior residue must be ⊥ by construction (min ${now.interiorMin.toFixed(9)})`);
+      // …and the ANCHOR floor is untouched: it is the supplied facing's own ⊥
+      // component, a property of the DATA, which no ordering may improve (that
+      // would mean inventing a facing) or worsen.
+      assert.equal(now.anchorMin, pre.anchorMin,
+        `${regime}: the anchor conditioning floor is the supplied data's, unchanged`);
+      // the whole-segment floor is therefore exactly the anchor floor
+      assert.ok(Math.min(now.interiorMin, now.anchorMin) === now.anchorMin,
+        `${regime}: conditioning is never worse inside a segment than at its anchors`);
+    }
+  }
+  // and the pre-change ordering DID break that: on the adversarial regime the
+  // interior conditioned an order of magnitude worse than the anchors it came from
+  const F = condFacings(p, "perp-chase", 999);
+  const pre = condStats(p, F, M_ID, "pre");
+  assert.ok(pre.interiorMin < pre.anchorMin / 5,
+    `precondition: the old ordering degraded the interior far below its anchors ` +
+    `(interior ${pre.interiorMin.toFixed(4)} vs anchor ${pre.anchorMin.toFixed(4)})`);
 });

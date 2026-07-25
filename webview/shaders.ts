@@ -496,11 +496,14 @@ export function focusFlashShaders(): { vertex: string; fragment: string } {
  *
  * The across is consumed RAW (O-1 stores it unnormalized, by design) and
  * conditioned HERE, where the geometry lives: transformed to view space,
- * projected ⊥ along, then normalized. The DEGENERACY RULE (the ruled
- * collapse-to-zero): a zero across, or one parallel to along, has no
- * defined plane — that end's half-width collapses to zero. An UNBOUND
- * orientation buffer is all zeros, so a ribbon without orientation data
- * draws NOTHING — honest, and the reason the tube stays the default shape.
+ * projected ⊥ along, then normalized — AT EACH ANCHOR, against that anchor's
+ * own tangent, BEFORE the interpolation rather than after it (see the
+ * conditioning note on across(t): the other order near-cancels mid-segment).
+ * The DEGENERACY RULE (the ruled collapse-to-zero): a zero across, or one
+ * parallel to along, has no defined plane — that end's half-width collapses
+ * to zero. An UNBOUND orientation buffer is all zeros, so a ribbon without
+ * orientation data draws NOTHING — honest, and the reason the tube stays the
+ * default shape.
  *
  * Width = uWorldPerSize × traceSize per END (the tube's radius scale, so
  * tube↔ribbon swaps keep footprint); RGBA per end interpolates along the
@@ -562,6 +565,19 @@ export function focusFlashShaders(): { vertex: string; fragment: string } {
  * `Math.abs(r40 - r20) > 40` measured 1059 → 838, a 20.9% compression against a
  * 17.6% first-principles prediction, so it still holds with ~21× margin. S43 is
  * therefore what erodes FIRST if this constant is ever raised again.
+ *
+ * That 838 is now STALE, and not because of this constant: the across(t)
+ * CONDITIONING fix (project at the anchors and interpolate inside the plane
+ * ⊥ along(t), instead of slerping the raw facings and projecting after) took it
+ * to 227, a 5.7× margin. Expected in that direction and not a weakening of the
+ * assertion: the differential measures how much the band's projected AREA moves
+ * between two frames, and the old ordering's mid-segment near-cancellations
+ * added area swings of their own — a fold or a pinch to zero width changes the
+ * footprint far more than a smooth twist does. The null this gate discriminates
+ * against (a facing that stops re-deriving per frame) measures ~6 on the same
+ * fixture — the f20/f21 adjacent-frame difference — so 227 still sits 38× above
+ * the null it must separate from. Re-measure this line, not just S44, whenever
+ * the ribbon's geometry moves.
  *
  * PICKING never tracked the thickness: `webview/picking.ts` builds the click
  * capsule at radius exactly w (the across half-width), so it does not bound the
@@ -639,6 +655,34 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         return (sin((1.0 - t) * ang) / s) * na + (sin(t * ang) / s) * nb;
       }
 
+      // the unit tangent from a spline derivative, with the chord as the
+      // fallback when the derivative vanishes. SINGLE-SOURCED because it is now
+      // evaluated THREE times — at t and at both anchors — and a divergence
+      // between those three is exactly the conditioning failure this block
+      // exists to prevent.
+      vec3 ribbonAlong(vec3 deriv, vec3 chordDir) {
+        float l = length(deriv);
+        return l < 1e-9 ? chordDir : deriv / l;
+      }
+
+      // v with its component along the UNIT direction u removed.
+      vec3 ribbonPerp(vec3 v, vec3 u) { return v - u * dot(v, u); }
+
+      // v carried by the MINIMAL rotation taking unit a onto unit b — the
+      // half-way-quaternion form of Rodrigues (q = (1 + a·b, a×b)), expanded.
+      // The property that matters: v ⊥ a  ⟹  the result is ⊥ b. So this moves a
+      // facing INTO the plane ⊥ b, where PROJECTING it there would instead
+      // subtract two nearly-equal vectors whenever v is close to b. A rotation
+      // cannot near-cancel; a projection can. The 1+c → 0 pole is b ≈ -a (the
+      // tangent reversing inside one segment, which the centripetal knots make
+      // cusp-free); there v ⊥ a already implies v ⊥ b, so v passes through.
+      vec3 ribbonTransport(vec3 v, vec3 a, vec3 b) {
+        vec3 k = cross(a, b);
+        float c = dot(a, b);
+        float d = 1.0 + c;
+        return d < 1e-6 ? v : c * v + cross(k, v) + k * (dot(k, v) / d);
+      }
+
       void main() {
         vStyleParams = styleParams(iStyle);
         float t = aCorner.y;
@@ -684,8 +728,8 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         float g01 = -6.0 * tt + 6.0 * t;
         float g11 = 3.0 * tt - 2.0 * t;
         vec3 tangent = g00 * P1 + g10 * m1 + g01 * P2 + g11 * m2;
-        float tlen = length(tangent);
-        vec3 along = tlen < 1e-9 ? chord / segLen : tangent / tlen;
+        vec3 chordDir = chord / segLen;
+        vec3 along = ribbonAlong(tangent, chordDir);
         // PER-END DEGENERACY (drawn ≡ supplied): an end whose supplied facing is
         // zero has NO defined plane, so the band collapses to zero width THERE —
         // the old per-end rule, preserved across the spline. Crucially the facing
@@ -701,20 +745,83 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
         // interpolation the flat quad had, now sampled at S+1 points not 2.
         float w = mix(wA_def, wB_def, t);
         vColor = mix(iColorA, iColorB, t);
-        // across(t): slerp the supplied facings, then condition where the
-        // geometry lives — world → view (rotation only), ⊥ along, unit (the O-1
-        // raw-store recommendation, evaluated at t). Where ONE end is zero the
-        // width already tapered to it, so the surviving end's facing carries the
-        // (vanishing) width — no facing is fabricated at the collapsed anchor.
-        vec3 acrossWorld =
-          (lenA < 1e-9 && lenB < 1e-9) ? vec3(0.0)
-          : lenA < 1e-9 ? normalize(iAcrossB)
-          : lenB < 1e-9 ? normalize(iAcrossA)
-          : ribbonSlerp(iAcrossA, iAcrossB, t);
-        vec3 acrossView = mat3(modelViewMatrix) * acrossWorld;
-        vec3 aperp = acrossView - along * dot(acrossView, along);
+        // across(t): CONDITION AT THE ANCHORS, THEN INTERPOLATE INSIDE THE PLANE
+        // ⊥ along(t). The conditioning (world → view, rotation only, ⊥ the local
+        // tangent, unit — the O-1 raw-store recommendation) is unchanged in
+        // SUBSTANCE and in SPACE; what changed is its ORDER against the
+        // interpolation, because the old order was ill-conditioned.
+        //
+        // WHAT WENT WRONG. The old order slerped the RAW facings and projected
+        // ⊥ along(t) at every sub-sample. But along(t) rotates substantially
+        // WITHIN a segment while the interpolated facing follows its own arc, so
+        // mid-segment the two can approach each other — and there the projection
+        // is a near-cancellation: the face direction becomes the normalized
+        // residue of two nearly-equal vectors, it REVERSES as the facing arc
+        // crosses the tangent, and under 1e-6 the belt below pinches the band to
+        // zero width. Hard folds and creases instead of a smooth twist.
+        //
+        // WHY MERELY RE-PROJECTING IS NOT THE FIX. Projecting at the anchors and
+        // then re-projecting the slerped result at t does NOT bound the interior:
+        // when the supplied facings are already near-⊥ at their own anchors (the
+        // common case) the projected pair sits within a few degrees of the raw
+        // pair, so the interpolated arc — and its crossing with the tangent —
+        // barely moves. Measured on a 214-vertex synthetic angular polyline
+        // (within-segment tangent rotation mean 47.6°, max 97.6°) over six
+        // supplied-facing regimes, the smallest INTERIOR residue length went
+        // 0.0116→0.0600 on the worst regime but 0.1030→0.0776 — WORSE — on a
+        // facing that points where the tangent is going, and the worst
+        // adjacent-sub-sample face rotation stayed at 175°. It is a reordering
+        // that leaves the same cancellation in place.
+        //
+        // WHAT IS DONE INSTEAD. Each anchor's facing is conditioned against THAT
+        // ANCHOR's own tangent, and then TRANSPORTED into the plane ⊥ along(t)
+        // (ribbonTransport) before the slerp. A slerp of two vectors that both
+        // lie in one plane through the origin stays in that plane, so across(t)
+        // is ⊥ along(t) BY CONSTRUCTION — measured interior residue length
+        // 1.000000 in all six regimes, against 0.0116–0.1030 before — and the
+        // final ribbonPerp is a rounding-level correction rather than a
+        // cancellation. The only place the residue can still be short is AT an
+        // anchor, where it is exactly the supplied facing's own ⊥ component:
+        // that is the documented per-anchor degeneracy rule, is a property of
+        // the supplied data, and is bit-for-bit what it was before this change.
+        //
+        // The anchor tangents are FREE: the Hermite derivative basis is
+        // (0,1,0,0) at t=0 and (0,0,0,1) at t=1, so tangent(0) == m1 and
+        // tangent(1) == m2 exactly — no second spline evaluation. The added ALU
+        // is one more mat3×vec3, two normalize, two length, two Rodrigues
+        // transports and one ribbonPerp per vertex; this pass is fill-bound, not
+        // vertex-bound (16·S corners per SEGMENT, not per point).
+        //
+        // Where ONE end is zero the width already tapered to it, so the
+        // surviving end's facing carries the (vanishing) width — no facing is
+        // fabricated at the collapsed anchor. Both zero → no plane at all, and
+        // the zero flows through to a zero across exactly as before.
+        bool noPlane = lenA < 1e-9 && lenB < 1e-9;
+        vec3 rawA = lenA < 1e-9 ? iAcrossB : iAcrossA;
+        vec3 rawB = lenB < 1e-9 ? iAcrossA : iAcrossB;
+        vec3 alongA = ribbonAlong(m1, chordDir);
+        vec3 alongB = ribbonAlong(m2, chordDir);
+        vec3 pA = noPlane ? vec3(0.0) : ribbonPerp(mat3(modelViewMatrix) * normalize(rawA), alongA);
+        vec3 pB = noPlane ? vec3(0.0) : ribbonPerp(mat3(modelViewMatrix) * normalize(rawB), alongB);
+        // transport is LINEAR in v, so the UNNORMALIZED pA/pB are fine here —
+        // the slerp normalizes, and their lengths only scale its inputs.
+        vec3 acrossS = noPlane ? vec3(0.0) : ribbonSlerp(
+          ribbonTransport(pA, alongA, along), ribbonTransport(pB, alongB, along), t);
+        // AT THE ANCHORS take the conditioned anchor facing ITSELF. Transport
+        // and slerp both reduce to it in exact arithmetic (transport a→a is the
+        // identity; the slerp returns its own endpoint at t=0 and t=1), but a
+        // float projection is not idempotent through normalize-and-renormalize,
+        // and the anchors are where drawn ≡ supplied is a PROMISE. Taking pA/pB
+        // makes that promise structural: the anchor aperp — direction AND length,
+        // so the belt below too — is bit-for-bit the expression the old ordering
+        // evaluated there. t = j/S is exact in float32 and never leaves [0,1].
+        vec3 aperp = t <= 0.0 ? pA : t >= 1.0 ? pB : ribbonPerp(acrossS, along);
         float alen = length(aperp);
-        // DEGENERACY: no defined plane (parallel across) → zero width
+        // DEGENERACY: no defined plane (a facing parallel to its own anchor's
+        // tangent, or no facing at all) → zero width. Kept as a BELT, and it is
+        // now exactly the per-ANCHOR rule it was written to be: mid-segment the
+        // residue is a unit vector's ⊥ component in a plane it already lies in,
+        // measured 1.000000, so this cannot fire there.
         w = w * (alen < 1e-6 ? 0.0 : 1.0);
         vec3 across = alen < 1e-6 ? vec3(0.0) : aperp / alen;
         // THIN BOX CROSS-SECTION. The band gets thickness through its own plane

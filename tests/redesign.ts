@@ -7653,10 +7653,40 @@ async function S44(): Promise<void> {
         // model error — the sup reach exceeded it 4.21× BEFORE the change and
         // 4.35× after. Pre-existing, not new here.
         //
+        // RE-MEASURED at the across(t) CONDITIONING fix (project each facing at
+        // its own anchor and interpolate inside the plane ⊥ along(t), instead of
+        // slerping the raw facings and projecting afterwards). Measured, 3 runs,
+        // identical every time: f68 25r/0b → 20r/2b, f72 18r/5b → 16r/7b, and the
+        // sphere-wins half unchanged at 0r/25b. The threshold is LEFT at `> 2×`
+        // — the gate still passes and a passing gate is not loosened — but the
+        // f72 margin is now TWO red pixels (16 > 2·7 = 14), so record plainly
+        // what that does and does not mean:
+        //   - the DIRECTION here is NOT a theorem, unlike the thickness change.
+        //     That one was a pointwise superset (same width, twice the thickness)
+        //     so the surface could only move toward the camera. This one ROTATES
+        //     the band's interior face direction, and a rotation moves the
+        //     surface both ways; f68 lost 5 red and f72 lost 2 while both gained
+        //     blue. Nothing here licenses "the fix can only improve the ratio".
+        //   - the surface that replaced it is the better-conditioned one: the
+        //     interior face direction is now ⊥ the tangent BY CONSTRUCTION
+        //     (measured residue 1.000000, against 0.0116–0.1030 before), so the
+        //     folds and zero-width pinches that used to sit at exactly this kind
+        //     of sharp turn are gone. A turn that used to fold now twists, and a
+        //     twist presents a different depth profile. That is the change, not
+        //     a ribbon-side depth regression.
+        //   - the DETECTION property is intact and is much wider than the
+        //     threshold: the defect this guards (a ribbon-side depth bug pushing
+        //     the band BACK) flips the majority, which needs red ≤ 7 from 16 —
+        //     nine pixels, not two. If the NEXT legitimate ribbon-geometry move
+        //     erodes `> 2×`, do not shave it again: re-state it AT the detection
+        //     property (`red > blue` with the `red >= 12` coverage floor), or
+        //     take the TIGHTEN route above and model the band's own surface.
+        //
         // The sphere-wins half is the half a thicker band could genuinely have
         // broken (a band poking in front of the sphere would put red in a patch
         // that tolerates ZERO). MEASURED: unchanged at 0r/25b on f12 and f16,
-        // three runs. Stated as the LIMIT of that measurement, because it is
+        // three runs at the thickness change and three more at the conditioning
+        // change. Stated as the LIMIT of that measurement, because it is
         // weaker than it looks: nothing here verifies that the band covers any
         // pixel of a sphere-wins patch — the probe counts red/blue in a 5×5
         // patch and requires `red === 0`. The band's edge-on projected half-
