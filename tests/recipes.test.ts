@@ -553,10 +553,13 @@ test("a commands mod round-trips through serialize → parse (the write_mod file
 
 // -- P-1: parameters — MOD_PARAM_TYPES single source, parse, resolve, round-trip --
 
-test("MOD_PARAM_TYPES is exactly the scalar types plus color, and parseParamLine validates against it", () => {
-  assert.deepEqual([...MOD_PARAM_TYPES].sort(), ["boolean", "color", "number", "string"].sort());
+test("MOD_PARAM_TYPES is exactly the scalar types plus color and choice, and parseParamLine validates against it", () => {
+  assert.deepEqual([...MOD_PARAM_TYPES].sort(), ["boolean", "choice", "color", "number", "string"].sort());
   for (const t of MOD_PARAM_TYPES) {
-    const r = parseParamLine(`p ${t}`);
+    // `choice` alone is malformed (it needs an option list); give it one so the
+    // valid-parse assertion holds for every declared type. Every other type
+    // parses bare (default optional).
+    const r = parseParamLine(t === "choice" ? `p ${t} a b` : `p ${t}`);
     assert.ok(r.ok, `type ${t} must parse${r.ok ? "" : " — " + r.error}`);
     if (r.ok) assert.equal(r.param.type, t);
   }
@@ -564,6 +567,49 @@ test("MOD_PARAM_TYPES is exactly the scalar types plus color, and parseParamLine
   const bad = parseParamLine("p complex");
   assert.ok(!bad.ok);
   if (!bad.ok) for (const t of MOD_PARAM_TYPES) assert.ok(bad.error.includes(t), `error should list ${t}`);
+});
+
+test("choice param type: option-list header, first is the default, validates to the set, round-trips", () => {
+  // header grammar: `<name> choice <opt1> <opt2> …` — the rest is the option list,
+  // the FIRST option is the default (a choice always has one, is never required).
+  assert.deepEqual(parseParamLine("scope choice within any"),
+    { ok: true, param: { name: "scope", type: "choice", default: "within", options: ["within", "any"] } });
+  // extra whitespace between options collapses (split /\s+/ + filter empties)
+  assert.deepEqual(parseParamLine("mode choice  a   b c"),
+    { ok: true, param: { name: "mode", type: "choice", default: "a", options: ["a", "b", "c"] } });
+  // a single-option choice is degenerate but legal (always that value)
+  assert.deepEqual(parseParamLine("only choice x"),
+    { ok: true, param: { name: "only", type: "choice", default: "x", options: ["x"] } });
+  // a choice with NO options is malformed — loud at parse, not at a later run
+  assert.match((parseParamLine("scope choice") as { error: string }).error, /needs at least one option/);
+  // an option carrying a double-quote is refused (it can't round-trip the grammar)
+  assert.match((parseParamLine('scope choice a"b c') as { error: string }).error, /cannot contain a double-quote/);
+
+  // VALIDATION: resolveParameters restricts to the option set, fail-closed
+  const schema: ModParam[] = [{ name: "scope", type: "choice", default: "within", options: ["within", "any"] }];
+  // a listed value passes through as its token
+  assert.deepEqual(resolveParameters(schema, new Map<string, unknown>([["scope", "any"]])),
+    { ok: true, values: { scope: "any" } });
+  // an UNLISTED value is refused, naming the allowed set (like the other typed params)
+  const bad = resolveParameters(schema, new Map<string, unknown>([["scope", "outside"]]));
+  assert.ok(!bad.ok);
+  if (!bad.ok) assert.match(bad.error, /must be one of within, any/);
+  // nothing passed → the first option fills as the default
+  assert.deepEqual(resolveParameters(schema, new Map()), { ok: true, values: { scope: "within" } });
+
+  // round-trips through serialize → parse (the file path stays valid)
+  const mod: AnalysisMod = {
+    name: "scoped", kind: "analysis", produces: "per-frame-series", origin: "workspace",
+    params: [{ name: "scope", type: "choice", default: "within", options: ["within", "any"] }],
+    code: "def compute(data, target_indices, params):\n    return [1.0]",
+  };
+  const back = parseModFile(serializeMod(mod), "workspace");
+  assert.ok(back.ok, back.ok ? "" : back.error);
+  if (back.ok) {
+    assert.deepEqual(back.mod, mod);
+    // the serialized header writes the option list (default NOT duplicated)
+    assert.match(serializeMod(mod), /# param: scope choice within any/);
+  }
 });
 
 test("color param type: coerces its token to a string (a color IS a token), a default round-trips", () => {

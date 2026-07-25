@@ -55,15 +55,16 @@ export type ModAxis = (typeof MOD_AXES)[number];
  * ONLY enumerated thing a parameter schema carries — a param's name and default
  * are per-mod DATA, not an enumerated set. Kept closed and small (three scalars
  * plus `color` — a string-VALUED token, coerced to a string like `string`, whose
- * value slot completes CSS color names; nothing speculative) exactly like
- * MOD_PRODUCES / MOD_AXES, and guarded the same way (tests/recipes.test.ts).
- * Every surface derives from this: the header parser validates against it; the
- * header IS the schema's single source. The wire and the producer carry VALUES,
- * not the type set — so it is a one-language enum, not a cross-language twin (the
- * producer never authors a parameter declaration, it only consumes already-typed
- * values, and a `color` arrives as its plain string token). See
- * reports/MOD_PARAMS_PHASE0.md. */
-export const MOD_PARAM_TYPES = ["number", "string", "boolean", "color"] as const;
+ * value slot completes CSS color names — and `choice`, a string-VALUED token
+ * restricted to a declared option set, whose value slot completes those options;
+ * nothing speculative) exactly like MOD_PRODUCES / MOD_AXES, and guarded the same
+ * way (tests/recipes.test.ts). Every surface derives from this: the header parser
+ * validates against it; the header IS the schema's single source. The wire and
+ * the producer carry VALUES, not the type set — so it is a one-language enum, not
+ * a cross-language twin (the producer never authors a parameter declaration, it
+ * only consumes already-typed values, and a `color`/`choice` arrives as its plain
+ * string token). See reports/MOD_PARAMS_PHASE0.md. */
+export const MOD_PARAM_TYPES = ["number", "string", "boolean", "color", "choice"] as const;
 export type ModParamType = (typeof MOD_PARAM_TYPES)[number];
 
 /** A parameter value once coerced to its declared type. */
@@ -71,11 +72,14 @@ export type ParamValue = number | string | boolean;
 
 /** One declared parameter of an analysis mod (a `# param: <name> <type>
  * [<default>]` header line). `default` present ⟺ the header declared one;
- * absent = the parameter is REQUIRED at invocation. */
+ * absent = the parameter is REQUIRED at invocation. `options` is present ⟺
+ * `type === "choice"` — the string-VALUED set the parameter accepts; the FIRST
+ * option is the default (so a `choice` always has one, is never "required"). */
 export interface ModParam {
   name: string;
   type: ModParamType;
   default?: ParamValue;
+  options?: string[];
 }
 
 /** Metadata every mod carries regardless of kind. */
@@ -389,8 +393,13 @@ export function serializeMod(mod: Mod): string {
     ...(mod.channel ? [`# channel: ${mod.channel}`] : []),
     ...(mod.edgeGroup ? [`# edge-group: ${mod.edgeGroup}`] : []),
     ...(mod.requiresChannel ? [`# requires-channel: ${mod.requiresChannel}`] : []),
-    ...(mod.params ?? []).map(
-      (p) => `# param: ${p.name} ${p.type}${p.default !== undefined ? ` ${p.default}` : ""}`,
+    ...(mod.params ?? []).map((p) =>
+      // A `choice` serializes its OPTION LIST (the default is the first option,
+      // so it round-trips without being written twice); every other type writes
+      // its optional default as the rest-of-line.
+      p.type === "choice"
+        ? `# param: ${p.name} choice ${(p.options ?? []).join(" ")}`
+        : `# param: ${p.name} ${p.type}${p.default !== undefined ? ` ${p.default}` : ""}`,
     ),
     ...(mod.author ? [`# author: ${mod.author}`] : []),
     ...(mod.source ? [`# source: ${mod.source}`] : []),
@@ -418,6 +427,11 @@ const NUMBER_LITERAL_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
 function coerceValue(
   type: ModParamType,
   raw: unknown,
+  // Only consulted for `choice`: the declared option set the value must be one
+  // of. Threaded from the param's own `options` (resolveParameters) — the header
+  // parser passes it too, but a choice default is drawn straight from the list so
+  // it is trivially in-set. Ignored for every other type.
+  options?: readonly string[],
 ): { ok: true; value: ParamValue } | { ok: false; reason: string } {
   if (type === "number") {
     if (typeof raw === "number" && Number.isFinite(raw)) return { ok: true, value: raw };
@@ -446,9 +460,25 @@ function coerceValue(
     }
     return { ok: false, reason: `expects a ${type}, got "${String(raw)}"` };
   }
+  // `choice` coerces to a STRING like `string`/`color`, then FAIL-CLOSED restricts
+  // it to the declared option set — an unlisted value is refused loudly, the same
+  // shape the other typed params refuse a bad value with (the whole point of the
+  // type: the completion offers the options, the validator enforces them).
+  if (type === "choice") {
+    if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean") {
+      const s = String(raw);
+      if (s.includes('"')) return { ok: false, reason: `cannot contain a double-quote, got "${s}"` };
+      const opts = options ?? [];
+      if (!opts.includes(s)) {
+        return { ok: false, reason: `must be one of ${opts.join(", ") || "(no options declared)"}, got "${s}"` };
+      }
+      return { ok: true, value: s };
+    }
+    return { ok: false, reason: `expects one of ${(options ?? []).join(", ")}, got "${String(raw)}"` };
+  }
   // Exhaustiveness (compile-time): MOD_PARAM_TYPES is a closed set; after
-  // number/boolean/string/color, `type` narrows to `never`. A new member added
-  // to MOD_PARAM_TYPES without a coercion branch here fails to compile — the
+  // number/boolean/string/color/choice, `type` narrows to `never`. A new member
+  // added to MOD_PARAM_TYPES without a coercion branch here fails to compile — the
   // two-lists-must-agree guard, enforced by the type system, not just a test.
   const _exhaustive: never = type;
   return { ok: false, reason: `unknown parameter type "${String(_exhaustive)}"` };
@@ -456,10 +486,14 @@ function coerceValue(
 
 const PARAM_NAME_RE = /^[a-z][a-z0-9_-]*$/;
 
-/** Parse one `# param:` header line: `<name> <type> [<default…>]`. The default
- * is the REST of the line (so a string default may hold spaces) and is coerced
- * against the declared type, so a malformed default fails at parse/registration
- * time — loud, before any run. Total: never throws. */
+/** Parse one `# param:` header line. Two grammars, on the declared type:
+ *   any scalar/color: `<name> <type> [<default…>]` — the default is the REST of
+ *     the line (so a string default may hold spaces), coerced against the type;
+ *   `choice`: `<name> choice <opt1> <opt2> …` — the rest is a whitespace-separated
+ *     OPTION LIST (each a plain string token), and the FIRST option is the default
+ *     (a choice always has one). At least one option is required.
+ * A malformed default/option fails at parse/registration time — loud, before any
+ * run. Total: never throws. */
 export function parseParamLine(
   line: string,
 ): { ok: true; param: ModParam } | { ok: false; error: string } {
@@ -475,6 +509,21 @@ export function parseParamLine(
     return { ok: false, error: `parameter "${name}": type must be ${MOD_PARAM_TYPES.join(" | ")} (got "${typeTok}")` };
   }
   const type = typeTok as ModParamType;
+  if (type === "choice") {
+    const options = defRaw === undefined ? [] : defRaw.trim().split(/\s+/).filter((t) => t !== "");
+    if (options.length === 0) {
+      return { ok: false, error: `parameter "${name}" (choice) needs at least one option — want: # param: ${name} choice <opt1> <opt2> …` };
+    }
+    // Each option is a plain string token — validate it (the uniform `"` refusal)
+    // so an unusable option fails at parse, not at a later invocation.
+    for (const o of options) {
+      const c = coerceValue("string", o);
+      if (!c.ok) return { ok: false, error: `parameter "${name}" option ${c.reason}` };
+    }
+    // The first option is the default — a choice is never "required" (it has a
+    // sensible one by construction), and the default is trivially in-set.
+    return { ok: true, param: { name, type, default: options[0], options } };
+  }
   if (defRaw !== undefined && defRaw.trim() !== "") {
     const c = coerceValue(type, defRaw.trim());
     if (!c.ok) return { ok: false, error: `parameter "${name}" default ${c.reason}` };
@@ -505,7 +554,7 @@ export function resolveParameters(
   const values: Record<string, ParamValue> = {};
   for (const p of params) {
     if (passed.has(p.name)) {
-      const c = coerceValue(p.type, passed.get(p.name));
+      const c = coerceValue(p.type, passed.get(p.name), p.options);
       if (!c.ok) return { ok: false, error: `parameter "${p.name}" ${c.reason}` };
       values[p.name] = c.value;
     } else if (p.default !== undefined) {
