@@ -7608,7 +7608,7 @@ async function S44(): Promise<void> {
         // AUDITED RE-BASELINE (the spline increment): at the worst turn the
         // finder selects (f72 on the 6000-pt/150-frame synthetic, fully bound
         // — `flow` is a unit vector, never zero, so this is NOT a partial-
-        // binding taper case) the measured patch is 17 red / 6 blue. The
+        // binding taper case) the measured patch was 17 red / 6 blue. The
         // ribbon surface is provably correct there (anchors-on-curve + the G1
         // tangent-continuity + finite-difference tangent tests in
         // shaders.test.ts pin the geometry), so the 6 blue are the genuinely
@@ -7621,6 +7621,57 @@ async function S44(): Promise<void> {
         // (blue ≥ red), which this fails. If a ribbon defect is ever suspected,
         // TIGHTEN by modelling the band's curve+tilt in the finder (evaluate
         // the spline centreline depth) and asserting exclusivity.
+        //
+        // RE-MEASURED at RIBBON_THICKNESS 0.15 → 0.30 (the thickness
+        // increment). Measured, 3 runs, identical every time: f68 21r/0b →
+        // 25r/0b, f72 17r/6b → 18r/5b — the worst turn's ratio IMPROVES
+        // 2.83× → 3.60×. That DIRECTION is a theorem, not luck: the k=0.30
+        // corner box contains the k=0.15 box pointwise (same width, twice the
+        // thickness, same corners), so the drawn silhouette can only grow and
+        // the visible surface can only move TOWARD the camera. The ribbon can
+        // therefore win pixels it did NOT own before and can never lose one it
+        // did — a monotone SUPERSET, in coverage and in depth ownership. The
+        // threshold is deliberately LEFT at `> 2×`: the gate moved AWAY from
+        // failing, so nothing was loosened, and tightening to the new
+        // measurement would leave one blue pixel of margin (18:6 = 3.0 fails
+        // `> 3×`) — brittle, not stronger.
+        //
+        // How far the thickness moves the surface off THIS finder's model is
+        // NOT 0.30·w. With `vpos = pos + across·(±w) + nrm·(±k·w)` and
+        // across ⊥ nrm ⊥ along orthonormal the two terms compose in QUADRATURE:
+        // the sup over pixels of forward reach is w·√(1+k²) = 1.0112·w →
+        // 1.0440·w (+3.2%), the ±w width term dominating k·w by 3.33 : 1. At
+        // the pixel this finder samples — the ray through the modelled axis
+        // point — the reach is D = min(w/|u|, k·w/|v|), u = across·d,
+        // v = nrm·d; MORE than arctan(k) ≈ 17° off edge-on the thickness slab
+        // is the face that ray exits, so there D scales LINEARLY in k and
+        // DOUBLES, worst case max(D(0.30) − D(0.15)) = 0.522·w = 2.610·
+        // uWorldPerSize at this scene's `tracesize 5`, attained at 16.7° off
+        // edge-on (within 17° of edge-on the width faces govern and D ≈ w,
+        // independent of k). The `sep < 0.15·rWorld` skip above is 1.20·
+        // uWorldPerSize at this scene's `pointsize 8`, so it never bounded that
+        // model error — the sup reach exceeded it 4.21× BEFORE the change and
+        // 4.35× after. Pre-existing, not new here.
+        //
+        // The sphere-wins half is the half a thicker band could genuinely have
+        // broken (a band poking in front of the sphere would put red in a patch
+        // that tolerates ZERO). MEASURED: unchanged at 0r/25b on f12 and f16,
+        // three runs. Stated as the LIMIT of that measurement, because it is
+        // weaker than it looks: nothing here verifies that the band covers any
+        // pixel of a sphere-wins patch — the probe counts red/blue in a 5×5
+        // patch and requires `red === 0`. The band's edge-on projected half-
+        // width ⊥ its own axis is k·(w/rWorld)·rPx = 0.40 px at 0.15 → 0.80 px
+        // at 0.30, at the smallest rPx the ±3px uniform-corner check admits. So
+        // in exactly the edge-on regime this constant was raised to fix, 0r/25b
+        // is as consistent with "no band pixel centre fell in the patch" as
+        // with "the thickness stayed behind the sphere". This half is cleared
+        // EMPIRICALLY on this fixture, NOT analytically: a fixture, camera or
+        // `tracesize` change must re-measure it. Making it analytic is the
+        // TIGHTEN route above, one step further — evaluate the BAND'S OWN
+        // surface in the finder (the spline centreline depth plus the ±k·w
+        // thickness offset) instead of the zero-thickness axis. The detection
+        // property is untouched either way: a ribbon-side depth bug that pushes
+        // the band BACK still flips f68/f72's majority to blue.
         const correct = c.winner === "sphere"
           ? patch.blue > 0 && patch.red === 0
           : patch.red >= 12 && patch.red > 2 * patch.blue;
