@@ -18,10 +18,11 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
 ## Since the last prompt pass
 
 ### New mod-param type `color` — declare `# param: <name> color <default>` (incr 52)
-> **STATUS: PENDING** — new authoring surface; a next-attended-pass decision whether to teach
-> it. NOT a blind spot: `write_mod`'s `type` enum is single-sourced from `MOD_PARAM_TYPES`, so
-> the assistant CAN already emit `type: "color"` and the schema accepts it — this entry is about
-> preferring it over `string`.
+> **STATUS: APPLIED 2026-07-25 (attended pass)** — folded into claudeprompt.ts's Parameters
+> section as part of teaching `choice`: the type-line enumeration now lists `color` and a one
+> clause — "a `color` param behaves exactly like `string` (the value reaches `compute` as a plain
+> token) but its `?<name>=` slot tab-completes CSS color names — declare it for a color-valued
+> parameter." That is the "prefer it over `string`" nudge this entry asked for. Do not re-teach.
 - **What changed:** `MOD_PARAM_TYPES` gained a fourth member, `color`, alongside
   `number`/`string`/`boolean`. A `color` param's VALUE coerces to a plain string token (a CSS
   color name like `lightgreen`, or a hex like `#ff8800`) — same runtime type as `string`, so
@@ -40,9 +41,13 @@ The prompt itself is an ATTENDED artifact — this file only accumulates the del
   webview/commands.ts).
 
 ### Edge appearance surface grew: bicolor + dashed edges (incr 51)
-> **STATUS: PENDING** — new user-facing surface; a next-attended-pass decision whether to teach
-> it. NOT a blind spot: the prompt teaches grammar-by-shape + examples and get_context reports
-> live rep state, so the assistant can discover verbs via `help` and axes via `bind` usage.
+> **STATUS: PARTIAL 2026-07-25 (attended pass)** — the `produces: edges` section now REFERENCES
+> `colorbonds`/`dashbonds`/`bicolorbonds`/`bondsize`/`bondopacity %<group>` as the way to style a
+> produced-edge group (and notes a POINT target reaches both covalent + produced edges), which is
+> the load-bearing hook for the non-covalent-interaction direction. STILL OUTSTANDING for a future
+> pass: the STANDALONE teaching of these verbs' semantics on COVALENT bonds (each half takes its
+> endpoint's current color; the dash scale) and the two bindable edge axes `bondcolorends` /
+> `bonddash`. Left PENDING for that half; NOT a blind spot (discoverable via `help` / get_context).
 - **New verbs:** `bicolorbonds`/`bicolorbondsof <target>` — each bond-half takes its endpoint
   point's CURRENT color (a snapshot; tracks upstream `colorpoints`/`rainbow`). `dashbonds`/
   `dashbondsof <target> <scale>` — 0 = solid, world-length dashes.
@@ -357,9 +362,17 @@ edges` — is a WHOLE NEW MOD KIND the assistant currently cannot use (claudepro
 per-frame-series/per-point-scalar/scatter/commands/channel only).
 
 ### NEW mod kind `produces: edges` — author new bonds/edges (incr 56, 57, 58; ships `36b668e`..`b9e7e31`, run-time group `915d5d3`)
-> **STATUS: PENDING an attended prompt pass** — the assistant has no `produces: edges` teaching, so it
-> would never reach for it (e.g. "show H-bonds", "connect these", "draw the contacts"). This is the
-> exact recurring "prompt behind the surface" gap. Teach it mirroring the `produces: channel` section.
+> **STATUS: APPLIED 2026-07-25 (attended pass, branch `feat/prompt-pass-edges`)** — now in
+> claudeprompt.ts as a full `produces: edges` section (mirrors the channel section: header
+> `# produces: edges` + `# edge-group:` single token, the bare-pair-list AND `{pairs, visibility}`
+> `[n_frames][n_pairs]` return shapes INLINE, the ONE-difference-from-a-channel selection-respect
+> rule, styling the `%<group>` with the edge verbs + the two-mod companion pattern, run-time
+> `?group`, and hbonds.py/trace_gaps.py cited as the can't-open worked examples), PLUS a new
+> decision-ladder rung ("NEW edges to DRAW"). Guarded by a claudebackend prompt-teaching test.
+> ALSO: get_context now advertises a `produces: edges` mod's `→ %<group>` in its mod line
+> (claudetools.ts SceneContext.mods + render; extension.ts threads m.edgeGroup) so the assistant
+> knows the group name to style — the static half of the edge-group gap; the LIVE "which %groups
+> exist right now" verb remains a follow-up (see below). Do not re-teach.
 - **What it is:** a mod that AUTHORS NEW edges that aren't in the topology — H-bond networks,
   contacts, double-bond/aromatic reps, a dashed connector across a gap. Declares `# produces: edges`
   + `# edge-group: <name>` (a SINGLE TOKEN like `# channel:`). The edges render LIVE mid-session into
@@ -392,6 +405,12 @@ per-frame-series/per-point-scalar/scatter/commands/channel only).
   and `~/.molaro/mods/trace_gaps.py` (static gap connectors). These are the worked examples.
 
 ### NEW mod-param type `choice` — a fixed option set (incr 53 follow-on, `a42d571`)
+> **STATUS: APPLIED 2026-07-25 (attended pass)** — now in claudeprompt.ts's Parameters section:
+> the `# param: <name> choice <opt1> <opt2> …` declaration, first-option-is-default (never
+> required), and the honest write_mod fail-closed limitation (can set `type: "choice"` but not the
+> option list → use `string` when authoring via write_mod). The type-line enumeration was updated
+> to list all five types (incl. `color`, with a one-clause note). Guarded by a claudebackend test.
+> Do not re-teach.
 - Declare `# param: <name> choice <opt1> <opt2> …` — a whitespace option list, **the FIRST option is the
   default** (so a choice always has one, is never required). The value coerces to one of the options
   (fail-closed, "must be one of …"); the `?<name>=` slot tab-completes them. Use it for a fixed-set
@@ -402,6 +421,12 @@ per-frame-series/per-point-scalar/scatter/commands/channel only).
   by hand, or use `string` when writing via write_mod.
 
 ### NEW command `save_rep <name>` (incr 60, `72bc0dc`) — run via run_command
+> **STATUS: APPLIED 2026-07-25 (attended pass)** — now in claudeprompt.ts's grammar reference
+> "Other verbs" paragraph: `save_rep <name>` snapshots the current representation (colors/sizes/
+> opacity/styles + bindings incl. offset/smoothing + shapes + background) into a replayable
+> `produces: commands` mod named `<name>`, with the honest "header-edge and per-vertex-trace attrs
+> are NOT captured" limit. Kept OUT of GRAMMAR_EXAMPLES (it takes a mod name, not a resolvable
+> address — same treatment as targetless `background`). Guarded by a claudebackend test. Do not re-teach.
 - Captures the CURRENT representation — point colors/sizes/opacity/styles + bindings (incl the
   `offset`/smoothing axis) + shape swaps + background — into a replayable `# produces: commands` mod
   named `<name>` (like `create_sele` names a selection). Running `<name>` restores the look. Header-edge
