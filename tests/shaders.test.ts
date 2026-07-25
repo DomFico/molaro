@@ -989,3 +989,61 @@ test("ribbon: FOLD BOUND — no two adjacent sub-samples may swing the face dire
   }
   assert.ok(worst < 60, `an antipodal supplied pair describes ONE plane and must not half-turn (worst ${worst.toFixed(1)}°)`);
 });
+
+test("ribbon: ISOLATION — exactly where the reordering is provably a no-op", () => {
+  // Three configurations were expected to be untouched by the reordering. Two
+  // are, BIT-for-bit; the third is not, and the reason is recorded here so the
+  // expectation is not re-derived from scratch later.
+  const straight: V3[] = [[0, 0, 0], [1, 0, 0], [2, 0, 0], [3, 0, 0], [4, 0, 0]];
+  const worstOver = (poly: V3[], A: V3, B: V3, interiorOnly: boolean): number => {
+    let worst = 0;
+    for (let i = 0; i + 1 < poly.length; i++) {
+      const P0 = i > 0 ? poly[i - 1] : poly[i], P1 = poly[i], P2 = poly[i + 1];
+      const P3 = i + 2 < poly.length ? poly[i + 2] : poly[i + 1];
+      for (let j = interiorOnly ? 1 : 0; j <= (interiorOnly ? COND_S - 1 : COND_S); j++) {
+        const t = j / COND_S;
+        const now = acrossNow(P0, P1, P2, P3, A, B, t, M_ID);
+        const pre = acrossInterpolateThenProject(P0, P1, P2, P3, A, B, t, M_ID);
+        worst = Math.max(worst, Math.max(...now.across.map((x, c) => Math.abs(x - pre.across[c]))));
+      }
+    }
+    return worst;
+  };
+  // (1) A STRAIGHT segment, with a coherent facing pair already ⊥ the tangent:
+  // the tangent never rotates, so transport is the identity and there is nothing
+  // for the anchors to condition away. BIT-IDENTICAL.
+  assert.equal(worstOver(straight, [0, 1, 0], [0, Math.cos(1), Math.sin(1)], false), 0,
+    "straight + coherent + already ⊥: the reordering must be a no-op");
+  // (2) EQUAL facings on a straight segment: likewise byte-identical.
+  assert.equal(worstOver(straight, [0, 1, 0.3], [0, 1, 0.3], false), 0,
+    "equal facings on a straight segment: the reordering must be a no-op");
+  // (3) EQUAL facings on a TURNING path are NOT identical, and it is not a bug.
+  // "Equal facings ⟹ both orderings agree" holds only when the two anchors share
+  // a tangent. They do not: the SAME world facing conditioned against alongA and
+  // against alongB gives a conditioned PAIR that differs by as much as the two
+  // anchor tangents do — measured 76.4° apart where the tangents were 75.4°
+  // apart, on the first segment of the fixture below. The old ordering kept one
+  // world facing and re-projected it; this one interpolates between the two
+  // conditioned representatives. The ANCHORS still agree exactly (asserted
+  // above); only the interior moves.
+  const turning = condPoly(40, 12345);
+  const one: V3 = [0.2, -0.3, 1];
+  assert.ok(worstOver(turning, one, one, true) > 0.5,
+    "equal facings on a TURNING path: the interior legitimately differs");
+  const { m1, m2, chord } = catmullMs(turning[0], turning[1], turning[2], turning[3]);
+  const cd = v3scl(chord, 1 / v3len(chord));
+  const angBetween = (a: V3, b: V3): number =>
+    (Math.acos(Math.max(-1, Math.min(1, v3dot(v3norm(a), v3norm(b))))) * 180) / Math.PI;
+  const condPair = angBetween(rPerp(v3norm(one), rAlong(m1, cd)), rPerp(v3norm(one), rAlong(m2, cd)));
+  const tangentPair = angBetween(rAlong(m1, cd), rAlong(m2, cd));
+  assert.ok(condPair > 60 && tangentPair > 60,
+    `the reason, on the fixture: one facing conditions to a pair ${condPair.toFixed(1)}° apart ` +
+    `because the anchor tangents are ${tangentPair.toFixed(1)}° apart`);
+  // (4) and a straight segment with a big TANGENTIAL component DOES move, by
+  // 2.9e-2 here — that is the conditioning itself, not the tangent turning:
+  // projecting before the slerp keeps a different direction than projecting after
+  // whenever there is a tangential component to remove.
+  const tangential = worstOver(straight, [2, 1, 0], [2, 0.3, 0.95], false);
+  assert.ok(tangential > 1e-3 && tangential < 0.1,
+    `straight but tilted: the conditioning alone moves the interior (worst |Δ| ${tangential.toExponential(2)})`);
+});
