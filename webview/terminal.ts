@@ -120,6 +120,27 @@ function main(): void {
           });
         return;
       }
+      if ((e.data as { type?: string } | undefined)?.type === "save-mod") {
+        // save_rep's host mod-file write, emulated: the bridge's node-side
+        // /save-mod endpoint writes under .molaro/mods only and returns the
+        // fresh mod list. Re-push modsLoaded (so <name> registers as a verb)
+        // THEN the save-mod-result line — mirroring the host write_mod re-push.
+        const { name, source } = e.data as { name?: string; source?: string };
+        void fetch("/save-mod", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ name, source }),
+        })
+          .then(async (r) => {
+            const out = (await r.json()) as { name?: string; file?: string; backup?: string | null; error?: string; mods?: unknown[] };
+            if (out.mods) loop({ type: "modsLoaded", mods: out.mods });
+            loop({ type: "save-mod-result", name: out.name, file: out.file, backup: out.backup, error: out.error });
+          })
+          .catch(() => {
+            loop({ type: "save-mod-result", name, error: "bridge save failed" });
+          });
+        return;
+      }
       const cmd = parseClaudeCommand(e.data);
       if (cmd) stub?.handle(cmd);
     });

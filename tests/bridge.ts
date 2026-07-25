@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 
 import { ProducerBroker } from "../src/broker.ts";
+import { saveModFile } from "../src/modfile.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
 import { PLOT_BODY, PLOT_CSS } from "../webview/plothud.ts";
 import { parseModFile, type AnalysisMod } from "../webview/recipes.ts";
@@ -243,8 +244,11 @@ const harnessHtml = (
               // page's own posts loop back for the in-page plot-host glue
               msg.type === "viewerInfo" || msg.type === "frameChanged" ||
               msg.type === "plotSeek" || msg.type === "plot-ready" ||
-              // rm: the confirmation answer and the deletion round-trip
-              msg.type === "confirm-answer" || msg.type === "rm-mods") {
+              // rm: the confirmation answer and the deletion round-trip;
+              // save_rep: the mod-file write round-trip (terminal.ts glue
+              // fetches /save-mod, then re-pushes modsLoaded + save-mod-result)
+              msg.type === "confirm-answer" || msg.type === "rm-mods" ||
+              msg.type === "save-mod") {
             setTimeout(() => window.dispatchEvent(new MessageEvent("message", { data: msg })), 0);
             return;
           }
@@ -350,6 +354,29 @@ const server = http.createServer((req, res) => {
       }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ deleted, failed }));
+    });
+  } else if (req.method === "POST" && req.url === "/save-mod") {
+    // save_rep's host mod-file write, emulated node-side: write via the SAME
+    // saveModFile the extension host uses (backup-preserving), into the ONE
+    // modsDir (E2E_MODS_DIR under test) — never the real .molaro/mods. Return
+    // the freshly-scanned mod list so terminal.ts can re-push modsLoaded and
+    // the new verb registers, exactly as the host's re-push does.
+    const body: Buffer[] = [];
+    req.on("data", (d: Buffer) => body.push(d));
+    req.on("end", () => {
+      let name = "", source = "";
+      try {
+        const parsed = JSON.parse(Buffer.concat(body).toString("utf-8")) as { name?: string; source?: string };
+        name = parsed.name ?? "";
+        source = parsed.source ?? "";
+      } catch { /* fall through to empty → error below */ }
+      res.writeHead(200, { "content-type": "application/json" });
+      try {
+        const { file, backup } = saveModFile(modsDir, name, source);
+        res.end(JSON.stringify({ name, file, backup, mods: harnessMods() }));
+      } catch (err) {
+        res.end(JSON.stringify({ name, error: err instanceof Error ? err.message : String(err) }));
+      }
     });
   } else if (req.method === "POST" && req.url === "/rpc") {
     const body: Buffer[] = [];
