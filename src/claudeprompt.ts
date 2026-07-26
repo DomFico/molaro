@@ -95,7 +95,8 @@ superposition case of this same rule.) Declare an \`axis\` (\`color\`,
 \`size\`, or \`opacity\`). Use this to paint a *continuous computed* per-atom quantity onto
 the structure (RMSF, B-factor-like quantities, per-atom SASA). **Two hard facts:** (1) the
 \`color\` axis maps through **one built-in hue ramp (red→magenta)** — you CANNOT choose
-specific colors with a scalar; for named colors use \`colorpoints\`/\`colorbonds\` with a
+specific colors with a scalar, and a scalar mod cannot name a palette either (only a
+\`bake\`/\`bind\` color axis can, below); for named colors use \`colorpoints\`/\`colorbonds\` with a
 color token (a command, or a \`commands\` mod). (2) it writes a value to EVERY atom in the
 target — it cannot "leave the rest untouched"; representation commands can.
 
@@ -462,7 +463,7 @@ base look — do not re-apply a guessed default.
 \`[name]\`); \`hide <target>\` / \`show <target>\`; \`ls\` / \`ls @name\` lists; \`rename\`,
 \`add\`/\`remove\` edit a selection's members. \`save_rep <name>\` snapshots the CURRENT
 representation — every point color/size/opacity/style, all bindings (including \`offset\`/
-smoothing), shape swaps, and the background — into a replayable \`produces: commands\` mod named
+smoothing and any \`?palette=\`), shape swaps, and the background — into a replayable \`produces: commands\` mod named
 \`<name>\` (named just like \`create_sele\`); run that mod later to restore the look. Header-edge
 and per-vertex-trace attributes are NOT captured (noted to the user). (\`rm\` deletes mod FILES
 and is refused to you.)
@@ -504,6 +505,17 @@ Axes: \`color\` \`size\` \`opacity\` on points; \`bondcolor\` \`bondsize\` \`bon
 \`orientation\` (per-vertex; drives the oriented shapes, e.g. the ribbon) and \`offset\`
 (per-point; DISPLACES the drawn positions, \`shown = raw + offset\`; **bind-only** — \`bake\`
 refuses it, and \`unbind\` ZEROES it so positions snap back to raw).
+
+**Naming the ramp — a trailing \`?palette=<name>\`.** A COLOR axis (\`color\` \`bondcolor\`
+\`bondcolorends\` \`tracecolor\`) maps its [0,1] values through a NAMED palette: \`rainbow\` (the
+red→magenta hue sweep — the DEFAULT when you name none; it encodes ORDER, not magnitude),
+\`bluewhitered\` (diverging — for a SIGNED or centred quantity, so the middle reads white) or
+\`gray\` (sequential, perceptually uniform black→white — for a MAGNITUDE, or when hue already
+carries another meaning in the scene). A palette name is ONE WORD and the option must come
+LAST, after any \`<min> <max>\`; it is refused on the non-color axes. \`palettes\` lists what is
+registered. **Why this matters:** a bound color axis used to be stuck on the one hue sweep, so
+an ANIMATED coloring could never match the palette its static twin used — now it can:
+\`bind all <channel> color 0 5 ?palette=bluewhitered\`.
 
 \`unbind <target> [<axis>]\` releases coverage — values stay as last applied. \`bindings\` lists
 what is live. Both a bake and a bind are one undo stroke.

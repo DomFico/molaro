@@ -660,6 +660,37 @@ test("system prompt teaches the save_rep command (PROMPT_DELTA 2026-07-25)", () 
   assert.match(p, /per-vertex-trace attributes are NOT captured/);
 });
 
+// -- the 2026-07-26 palette increment: `?palette=<name>` on bake/bind. The
+// prompt is the THIRD place the bake/bind grammar is written, so a shipped
+// option it does not know is one the assistant can never offer — a user asking
+// for "colour that follows the trajectory in blue-white-red" had no reachable
+// path to it. Guarded here so the teaching cannot silently rot back out.
+test("system prompt teaches the ?palette= option on a bound color axis (PROMPT_DELTA 2026-07-26)", () => {
+  const p = buildSystemPrompt(sampleContext());
+  // the option, and the four axes it applies to (it is refused elsewhere)
+  assert.match(p, /\?palette=<name>/);
+  assert.match(p, /A COLOR axis \(`color` `bondcolor`/);
+  assert.match(p, /refused on the non-color axes/);
+  // all three REGISTERED names (webview/palettes.ts) with what each is FOR —
+  // an unregistered name is a hard refusal, and a name without its purpose is
+  // a coin flip between the diverging and the sequential ramp
+  assert.match(p, /`rainbow`[\s\S]{0,80}DEFAULT/);
+  assert.match(p, /`bluewhitered`[\s\S]{0,40}diverging/);
+  assert.match(p, /`gray`[\s\S]{0,60}sequential/);
+  // the two grammar constraints a wrong guess turns into a refusal
+  assert.match(p, /ONE WORD and the option must come\s+LAST/);
+  // the CAPABILITY, not the syntax — the whole gap the increment closed
+  assert.match(p, /ANIMATED coloring could never match the palette its static twin used/);
+  assert.match(p, /bind all <channel> color 0 5 \?palette=bluewhitered/);
+  // how it learns what is registered, without guessing
+  assert.match(p, /`palettes` lists what is\s+registered/);
+  // …and the fixed-ramp fact stays SCOPED to the scalar mod path, which has no
+  // palette of its own (claudebind.ts calls applyScalarsToAxis with none), so
+  // the two statements cannot read as a contradiction
+  assert.match(p, /a scalar mod cannot name a palette either/);
+  assert.match(p, /one built-in hue ramp \(red→magenta\)/);
+});
+
 test("get_context advertises a produces: edges mod's %group (the edge-group gap)", async () => {
   // an edges mod that declares `# edge-group: hbonds` must surface its group in
   // the mod line, so the assistant knows the name to style without guessing.

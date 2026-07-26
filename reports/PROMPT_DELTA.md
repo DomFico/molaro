@@ -496,3 +496,47 @@ target signal. Applies to any smoothing/offset mod, not just this one.
 "removes 100% of a 2-residue pleat". On real data it removes **72–76%**, because a real strand
 also twists and curves and the low-frequency part passes straight through. State a measured
 figure or none.
+
+---
+
+## Since incr 62 — a choosable palette for a bound color axis (2026-07-26)
+
+### NEW option `?palette=<name>` on `bake`/`bind` + NEW verb `palettes` (ships `a2268c0`..`e7edf97`)
+> **STATUS: APPLIED 2026-07-26 (THIS commit, branch `feat/palette-docs`)** — now in
+> claudeprompt.ts's bake/bind section as a "Naming the ramp" paragraph: the trailing
+> `?palette=<name>` on the four COLOR axes, the three REGISTERED names each with what it is FOR,
+> ONE WORD + must come LAST, refused on the non-color axes, `palettes` as the way to see what is
+> registered, and — the part that matters — the CAPABILITY: a bound color axis used to be stuck
+> on the one hue sweep, so an ANIMATED coloring could never match the palette its static twin
+> used. Two one-clause corrections rode along so the prompt cannot contradict itself: the
+> per-point-scalar "one built-in hue ramp" hard fact now adds that a scalar mod cannot name a
+> palette either (true — `claudebind.ts:71` calls `applyScalarsToAxis` with no palette), and
+> `save_rep`'s captured-state list names `?palette=`. Guarded by a claudebackend prompt-teaching
+> test (proven live: reverting claudeprompt.ts alone fails it). `docs/COMMANDS.md` caught up in
+> `d125058` (rows + prose). Do not re-teach.
+- **What shipped:** `webview/palettes.ts` — a palette registry in `styles.ts`'s shape
+  (registration order, name → index, `-1` = unknown, a bare listing verb, names single-sourced
+  for the verb / the completion pool / the refusal message). Three entries, one per ramp KIND:
+  `rainbow` (index 0 = **the default**; its `colormap` IS the recipe's own function object, so
+  "the default path is unchanged" is a function-identity fact), `bluewhitered` (diverging, blue
+  → white → **red at the high end**), `gray` (sequential and perceptually uniform — CIE L*
+  linear in `t`).
+- **Grammar:** trailing `?palette=<name>` on **both** `bake` and `bind` (they share one argument
+  parser) — `bake|bind <target> <channel> <axis> [<min> <max>] [?palette=<name>]`. Applies to
+  the **four color axes only** (`color`, `bondcolor`, `bondcolorends`, `tracecolor`); on any
+  other **known** axis it is REFUSED, not accepted-and-ignored. An unregistered name refuses and
+  lists the registry. A name is ONE WORD and the option must come LAST — a value that swallowed
+  trailing words blames the ORDER, never a palette the user never typed. An explicit
+  `?palette=rainbow` NORMALIZES AWAY (canonical: `undefined` ⟺ the default), so an unnamed
+  palette is byte-identical to before the feature existed.
+- **Teach nothing about the ramps' internals** — the assistant picks a name, not a colormap.
+  What it needs is the KIND: diverging for a signed/centred quantity, sequential for a
+  magnitude, the hue sweep for order. `rainbow` is NOT sequential (measured non-monotone
+  lightness, `palettes.ts:59-62`) — do not describe it as one.
+- **Where it is visible:** the palette rides the `Binding`, so every per-flip re-derive maps
+  through it; `bindings` reports it on any NON-default binding; `save_rep` emits `?palette=` on
+  the `bind` lines it writes (without that, a replayed rep silently reverted to the default
+  ramp).
+- **Point at:** `webview/palettes.ts` (the registry + the three descriptions),
+  `splitPaletteOption` / `parseChannelAxisArgs` (`webview/commands.ts`, the grammar and every
+  refusal), `makePalettesHandler` (the listing), `webview/saverep.ts:266-271` (the replay line).
