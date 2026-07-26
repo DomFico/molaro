@@ -56,7 +56,7 @@ import { AXIS_DOMAIN, BIND_DASH_MAX, BIND_SIZE_MAX, mapScalar, OFFSET_AXIS, ORIE
 import { bindTypedResult } from "./claudebind.ts";
 import { PLOT_RESULT_KINDS } from "./claudemodel.ts";
 import { parseTypedResult } from "./claudemodel.ts";
-import { colormapFor, unknownPaletteHitCount } from "./palettes.ts";
+import { colormapFor, paletteResolutionCount, unknownPaletteHitCount } from "./palettes.ts";
 import { getRecipe, listRecipes, registerRecipe, resolveChannelDependency, resolveEdgeGroup, resolveParameters, unregisterRecipe, validateModValues, type AnalysisMod, type ParamValue } from "./recipes.ts";
 import {
   installModList,
@@ -2682,15 +2682,12 @@ async function main(): Promise<void> {
   // — forcing the missing-block behavior to be RULED, not silently inherited
   // as a stale hold. (redesign S-seam asserts debug.missingBoundBlockHits===0.)
   let missingBoundBlockHits = 0;
-  // THE HOT-LOOP INSTRUMENT: how many times the applier resolved a palette.
-  // The re-derive runs over every bound element, so "resolve once per
-  // BINDING, not once per element" is the whole performance requirement of
-  // the palette change — and it is a COUNTABLE claim, not a code-reading
-  // one. Incremented beside each colormapFor call, both of which sit
-  // lexically outside their element loops, so after one frame step this
-  // grows by exactly the number of bound COLOR axes regardless of how many
-  // points they cover. (redesign S65 measures the delta.)
-  let paletteResolutions = 0;
+  // THE PALETTE HOT-LOOP INSTRUMENT lives in palettes.ts, INSIDE colormapFor
+  // itself (paletteResolutionCount — unknownPaletteHits' pattern), so the
+  // count is tied to the resolve by construction: a colormapFor call moved
+  // into an element loop is COUNTED, where a counter merely adjacent to the
+  // call would keep reporting the old number while the once-per-binding
+  // guarantee silently died. S65 measures the delta across pure seeks.
   /** ONE applier, TWO cadence PHASES around the flip copy — the preamble
    * (unbound early-return, static-channel skip, block lookup, the
    * missing-block instrumentation) stays single-sourced across both:
@@ -2772,11 +2769,11 @@ async function main(): Promise<void> {
         const ends = b.axis === "bondcolorends";
         // The palette resolves ONCE PER BINDING PER FLIP — lexically outside
         // the element loop, so the per-element cost is the one colormap call
-        // it always was (debug.paletteResolutions counts these; an E2E steps
-        // one frame and asserts the delta is 1 per bound color axis, which is
-        // what a per-element resolve could not produce).
+        // it always was. colormapFor counts its own calls (the instrument is
+        // INSIDE the resolve, palettes.ts); S65 steps one frame and asserts
+        // the delta is 1 per bound color axis — a count a per-element
+        // resolve could not produce, wherever the call sits.
         const colormap = colormapFor(b.palette);
-        paletteResolutions++;
         for (const e of b.points) {
           const [ea, eb] = header.edges[e];
           const tA = ends ? mapScalar(block[off + ea], lo, hi) : t(e);
@@ -2799,7 +2796,6 @@ async function main(): Promise<void> {
           const buf = b.axis === "color" ? rep.state.color : rep.state.traceColor;
           // ONCE per binding per flip — see the edge-color arm above.
           const colormap = colormapFor(b.palette);
-          paletteResolutions++;
           for (const id of b.points) {
             const [r, g, bl] = colormap(t(id));
             buf[id * 3] = r;
@@ -2821,10 +2817,23 @@ async function main(): Promise<void> {
           for (const id of b.points) buf[id] = t(id) * BIND_DASH_MAX;
           break;
         }
-        default: {
+        case "opacity": case "bondopacity": case "traceopacity": {
           const buf = b.axis === "opacity" ? rep.state.opacity
             : b.axis === "bondopacity" ? rep.state.edgeOpacity : rep.state.traceOpacity;
           for (const id of b.points) buf[id] = t(id);
+          break;
+        }
+        default: {
+          // COMPILE-TIME EXHAUSTIVENESS: the vector axes and the edge-color
+          // pair continue above, so `b.axis` is narrowed to the remaining
+          // scalar axes and every one has a case. A NEW scalar axis widens
+          // BindAxis and this assignment fails the typecheck — forcing the
+          // author to CHOOSE an arm (was a bare `default:` opacity arm,
+          // where a fifth color axis would have silently landed as an
+          // opacity write into the wrong buffer).
+          const missed: never = b.axis;
+          void missed;
+          continue;
         }
       }
       const repChannel = (
@@ -4621,10 +4630,15 @@ async function main(): Promise<void> {
          * a non-zero value means a stale-hold path became reachable and its
          * behavior must be ruled. */
         missingBoundBlockHits: (): number => missingBoundBlockHits,
-        /** Palette resolutions in the per-flip applier — one per bound COLOR
-         * axis per flip. The hot-loop guarantee: this must NOT scale with the
-         * number of bound points. */
-        paletteResolutions: (): number => paletteResolutions,
+        /** Total colormapFor resolutions — counted INSIDE the resolver
+         * (palettes.ts), so the count cannot drift from the resolve. During
+         * pure seeks the only callers are the per-flip applier's per-binding
+         * color arms, so a flip's delta = the number of bound COLOR axes,
+         * never the number of bound elements — the hot-loop guarantee.
+         * Command-cadence applies (bake / a bind's initial write) also land
+         * in colormapFor and count; S65 therefore reads deltas across seeks
+         * with no commands between. */
+        paletteResolutions: (): number => paletteResolutionCount(),
         /** Times the applier was handed a palette name no registered palette
          * carries — asserted unreachable (the grammar refuses an unknown name
          * before a binding exists). A test pins this at 0; non-zero means an

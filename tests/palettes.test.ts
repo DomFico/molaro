@@ -15,19 +15,19 @@ import {
   colormapFor,
   DEFAULT_PALETTE_NAME,
   GRAY_PALETTE,
-  getPalette,
   listPalettes,
   luminanceToLstar,
   lstarToLuminance,
   luminanceToSrgb,
   paletteIndex,
   paletteNames,
+  paletteResolutionCount,
   RAINBOW_PALETTE,
   registerPalette,
   srgbToLuminance,
   unknownPaletteHitCount,
 } from "../webview/palettes.ts";
-import { rainbow } from "../webview/recipes.ts";
+import { hsvToRgb, rainbow } from "../webview/recipes.ts";
 
 // -- the registry surface (styles.ts's shape) --------------------------------
 
@@ -46,7 +46,6 @@ test("paletteIndex: -1 for an unknown name (styleIndex's contract — the member
   assert.equal(paletteIndex("viridis"), -1);
   assert.equal(paletteIndex(""), -1);
   assert.equal(paletteIndex("RAINBOW"), -1, "names are exact, not case-folded");
-  assert.equal(getPalette("viridis"), undefined);
 });
 
 test("every registered palette is total on [0,1] and stays in gamut", () => {
@@ -75,6 +74,21 @@ test("registerPalette appends without disturbing the default (the registry is a 
     // no unregister in the surface (nothing needs one); this file runs in its
     // own process, so the extra entry cannot leak into another suite
   }
+});
+
+test("registerPalette: a name that could not survive save_rep's replay line is REFUSED", () => {
+  // The name is embedded in the emitted `?palette=<name>` command — a space,
+  // `?`, or quote would write a mod file the parser later refuses, at replay
+  // time, far from the mistake. Loud at registration instead (NAME_RE's rule).
+  const before = paletteNames();
+  for (const bad of ["Bad", "two words", "a?b", 'q"uote', "", "-lead", "9lead", "gray extra"]) {
+    assert.throws(
+      () => registerPalette({ name: bad, colormap: () => [0, 0, 0], description: "x" }),
+      /invalid palette name/,
+      JSON.stringify(bad),
+    );
+  }
+  assert.deepEqual(paletteNames(), before, "no refusal registered anything");
 });
 
 // -- THE BYTE-IDENTITY ANCHOR ------------------------------------------------
@@ -163,10 +177,13 @@ test("gray: L* is LINEAR in t — recovered from the emitted RGB, max deviation 
 test("gray: black at the low end, white at the high end (to one ulp), monotone between", () => {
   assert.deepEqual(GRAY_PALETTE.colormap(0), [0, 0, 0]);
   // The high end is 1.055·1^(1/2.4) − 0.055, which in binary64 lands one ulp
-  // short of 1 (measured: 0.9999999999999999). Left honest rather than
-  // special-cased — a branch in a colormap is worse than 1.1e-16 of white.
+  // short of 1 (measured: 0.9999999999999999). Left unbranched because the
+  // ulp is ERASED before it can matter: every destination buffer is a
+  // Float32Array (rep.state.*, representation.ts), and the nearest float32
+  // to that value IS 1 — asserted below, not argued from smallness.
   const hi = GRAY_PALETTE.colormap(1)[0];
   assert.ok(Math.abs(hi - 1) <= 2 ** -52, `high end ${hi} is white to within one ulp`);
+  assert.equal(Math.fround(hi), 1, "the float32 store rounds it to exactly 1 — the ulp never reaches the GPU");
   const N = 512;
   for (let i = 1; i <= N; i++) {
     assert.ok(
@@ -217,7 +234,62 @@ test("the two transfer functions' branches join at their knees, to the measured 
   assert.ok(gap * 255 < 1e-5, "under 1e-5 of an 8-bit level");
 });
 
+// -- the OFF-DOMAIN rule (the belt beyond mapScalar's lens) ------------------
+
+test("off-domain: bluewhitered and gray SATURATE to their endpoint colors", () => {
+  // The meaningful domain is [0,1] and mapScalar is the sole lens; the belt
+  // says a finite off-domain t must come out in-gamut. Without the clamp
+  // bluewhitered would EXTRAPOLATE: t=1.25 → (1, −0.5, −0.5) — pinned here
+  // so removing the belt fails a test, not a screenshot.
+  for (const t of [-1e9, -1.5, -0.001]) {
+    assert.deepEqual(BLUEWHITERED_PALETTE.colormap(t), BLUEWHITERED_PALETTE.colormap(0), `bwr t=${t}`);
+    assert.deepEqual(GRAY_PALETTE.colormap(t), GRAY_PALETTE.colormap(0), `gray t=${t}`);
+  }
+  for (const t of [1.001, 1.25, 2, 1e9]) {
+    assert.deepEqual(BLUEWHITERED_PALETTE.colormap(t), BLUEWHITERED_PALETTE.colormap(1), `bwr t=${t}`);
+    assert.deepEqual(GRAY_PALETTE.colormap(t), GRAY_PALETTE.colormap(1), `gray t=${t}`);
+  }
+  // the non-finite ends ride the same clamp (min/max order): ±Infinity lands
+  // on the endpoints rather than emitting non-finite components
+  assert.deepEqual(BLUEWHITERED_PALETTE.colormap(Infinity), [1, 0, 0]);
+  assert.deepEqual(BLUEWHITERED_PALETTE.colormap(-Infinity), [0, 0, 1]);
+});
+
+test("off-domain: rainbow WRAPS its hue (the recorded exception), staying in gamut", () => {
+  // rainbow's colormap is THE recipe's shared function — the byte-identity
+  // anchor — so it cannot grow a clamp without editing the recipe. Its
+  // historical behavior off-domain is a modulo hue wrap: in-gamut for any
+  // finite t, but NOT saturating. Pinned so the difference is a recorded
+  // fact, never a discovery.
+  assert.deepEqual(RAINBOW_PALETTE.colormap(1.25), hsvToRgb(375, 1, 1), "wraps: 375° ≡ 15°");
+  assert.deepEqual(RAINBOW_PALETTE.colormap(-0.25), hsvToRgb(-75, 1, 1), "wraps below zero too");
+  for (const t of [-2, -0.25, 1.25, 3, 1e6]) {
+    for (const c of RAINBOW_PALETTE.colormap(t)) {
+      assert.ok(Number.isFinite(c) && c >= 0 && c <= 1, `rainbow t=${t}: ${c} out of gamut`);
+    }
+  }
+});
+
 // -- the assert-unreachable instrument --------------------------------------
+
+test("colormapFor COUNTS ITS OWN CALLS — the hot-loop instrument cannot drift from the resolve", () => {
+  // The once-per-binding guarantee is measured via this counter (S65), so
+  // the counter must be tied to the RESOLVE by construction: it increments
+  // inside colormapFor itself, never as a statement adjacent to a call site.
+  // A colormapFor call moved into an element loop is therefore COUNTED — an
+  // adjacent counter would keep reporting the old number while the
+  // guarantee silently died (the inert-assertion defect class).
+  const r0 = paletteResolutionCount();
+  colormapFor(undefined);
+  assert.equal(paletteResolutionCount(), r0 + 1, "the default fast path counts");
+  colormapFor("gray");
+  colormapFor("bluewhitered");
+  assert.equal(paletteResolutionCount(), r0 + 3, "named resolves count");
+  // simulate the bug the instrument exists to catch: a per-element resolve
+  // over 100 elements is 100 counts — visible, not silent
+  for (let i = 0; i < 100; i++) colormapFor("gray");
+  assert.equal(paletteResolutionCount(), r0 + 103);
+});
 
 test("colormapFor: an unknown name COUNTS on the assert-unreachable instrument", () => {
   // The grammar refuses an unknown palette before a Binding exists, so this

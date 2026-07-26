@@ -1638,11 +1638,19 @@ export const PALETTE_OPTION = "palette";
  * baffling "no channel named color". Positional ambiguity is impossible
  * here, not merely unlikely.
  *
- * FAIL-CLOSED, in the shape parseModParams uses: an empty segment, a segment
- * without `=`, an unknown key, a repeated key, or an unregistered palette
- * name is an error naming what was expected — never a silent default, since
- * a silently-ignored palette means the user's chosen coloring quietly isn't
- * what they asked for.
+ * FAIL-CLOSED, in the shape parseModParams uses — including BOTH of its
+ * quote guards (dropping either inverts the grammar's own quoting
+ * convention): an unbalanced `"` is rejected loudly before the split (an
+ * unclosed quote would silently swallow the `?option` into the target), and
+ * a single fully-quoted value unwraps (so `?palette="gray"` names gray, not
+ * `"gray"`). An empty segment, a segment without `=`, an unknown key, a
+ * repeated key, an unregistered palette name, or a value carrying trailing
+ * words is an error naming what was expected — never a silent default,
+ * since a silently-ignored palette means the user's chosen coloring quietly
+ * isn't what they asked for. The trailing-words refusal exists because the
+ * value swallows to the end of its `?` segment: `?palette=gray 0 2.5` must
+ * blame the ORDER (the option comes last), never a palette name the user
+ * did not type.
  *
  * Returns the head text plus the palette name, NORMALIZED: an explicitly
  * named default resolves to `undefined` so "on the default" has one
@@ -1652,6 +1660,12 @@ function splitPaletteOption(
   verb: string,
   args: string,
 ): { head: string; palette: string | undefined } | CommandResult {
+  // parseModParams' unbalanced-quote rejection, verbatim: with an odd quote
+  // count the `?` may sit inside the unclosed quote and never split — the
+  // option would silently vanish into the target. Reject before splitting.
+  if (((args.match(/"/g) ?? []).length) % 2 !== 0) {
+    return { status: "error", message: `${verb}: unbalanced '"' in the invocation` };
+  }
   const segs = splitOnUnquoted(args, "?");
   if (segs.length === 1) return { head: args, palette: undefined };
   let palette: string | undefined;
@@ -1666,7 +1680,7 @@ function splitPaletteOption(
       return { status: "error", message: `${verb}: option "${seg}" must be key=value — ?${PALETTE_OPTION}=<name>` };
     }
     const key = seg.slice(0, eq).trim();
-    const value = seg.slice(eq + 1).trim();
+    let value = seg.slice(eq + 1).trim();
     if (key !== PALETTE_OPTION) {
       return {
         status: "error",
@@ -1677,6 +1691,22 @@ function splitPaletteOption(
       return { status: "error", message: `${verb}: option "${key}" given twice` };
     }
     seen = true;
+    // parseModParams' single-fully-quoted unwrap, verbatim (no interior
+    // quote), so quoting a value follows the grammar's one convention.
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"') &&
+        value.indexOf('"', 1) === value.length - 1) {
+      value = value.slice(1, -1);
+    } else if (/\s/.test(value)) {
+      // The value swallowed trailing words — an out-of-order option
+      // (`?palette=gray 0 2.5`, or the option typed before the target).
+      // Blame the ORDER, not a palette name the user never typed.
+      return {
+        status: "error",
+        message:
+          `${verb}: a palette name is one word and the ?${PALETTE_OPTION}= option must come LAST — ` +
+          `"${value}" carries trailing text; write ${verb} <target> <channel> <axis> [<min> <max>] ?${PALETTE_OPTION}=<name>`,
+      };
+    }
     if (paletteIndex(value) < 0) {
       return {
         status: "error",
@@ -1741,8 +1771,16 @@ function parseChannelAxisArgs(
   if (w4.word === null || w4.expr === "") return needs;
   // A palette is meaningless on an axis that does not map through one (size,
   // opacity, dash, the vector axes): refuse it rather than accept-and-ignore.
-  // COLOR_AXES is the ONE list (channelmap.ts) every consumer reads.
-  if (opt.palette !== undefined && !(COLOR_AXES as readonly string[]).includes(axisWord)) {
+  // Only for a KNOWN axis — an unknown axis word must fall through to the
+  // gate's own `unknown axis "…" — use …` (the message the user actually
+  // needs); refusing here would assert the unknown word IS an axis and
+  // suppress the real error.
+  if (
+    opt.palette !== undefined &&
+    ((SCALAR_AXES as readonly string[]).includes(axisWord) ||
+      (VECTOR_AXES as readonly string[]).includes(axisWord)) &&
+    !(COLOR_AXES as readonly string[]).includes(axisWord)
+  ) {
     return {
       status: "error",
       message: `a palette is meaningless on the ${axisWord} axis — ?${PALETTE_OPTION}= applies to the color axes only: ${COLOR_AXES.join(" | ")}`,

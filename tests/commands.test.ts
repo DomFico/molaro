@@ -2021,6 +2021,20 @@ test("?palette= FAILS CLOSED — unknown names, wrong axes, malformed options; n
       /^bind: unknown option "ramp" — the only option is \?palette=<name>$/],
     ["bind all energy color 0 2.5 ?palette=gray ?palette=rainbow",
       /^bind: option "palette" given twice$/],
+    // OUT-OF-ORDER: the value swallows to the end of its segment, so the
+    // refusal must blame the ORDER — never report a palette name the user
+    // did not type ('unknown palette "gray 0 2.5"' was the adversarial find)
+    ["bind all energy color ?palette=gray 0 2.5",
+      /^bind: a palette name is one word and the \?palette= option must come LAST — "gray 0 2\.5" carries trailing text; write bind <target> <channel> <axis> \[<min> <max>\] \?palette=<name>$/],
+    ["bind ?palette=gray all energy color 0 2.5", /must come LAST — "gray all energy color 0 2\.5" carries trailing text/],
+    ["bake all energy color 0 2.5 ?palette=gray extra", /^bake: a palette name is one word and the \?palette= option must come LAST/],
+    // UNKNOWN AXIS beats the palette refusal: the unknown-word error is the
+    // one the user needs — asserting "meaningless on the bogusaxis axis"
+    // would claim the word IS an axis and suppress the real message
+    ["bind all energy bogusaxis 0 2.5 ?palette=gray", /^unknown axis "bogusaxis" — use /],
+    // the sibling ? grammar's quote guard, inherited: an unclosed quote
+    // would swallow the option into the target — rejected loudly instead
+    ['bind all energy color 0 2.5 ?palette="gray', /^bind: unbalanced '"' in the invocation$/],
   ];
   for (const [cmd, want] of cases) {
     const r = registry.runCommand(cmd);
@@ -2032,6 +2046,22 @@ test("?palette= FAILS CLOSED — unknown names, wrong axes, malformed options; n
     0,
     "no refusal wrote anything or registered anything",
   );
+});
+
+test('?palette="quoted" unwraps by the grammar\'s ONE quoting convention', () => {
+  // parseModParams' single-fully-quoted unwrap, inherited: quoting a value
+  // must never CHANGE it. Before the guard was copied across,
+  // ?palette="gray" reported 'unknown palette ""gray""' — the quoting
+  // convention inverted for this one option.
+  const { registry, bindCalls } = makeRegistry();
+  const r = registry.runCommand('bind all energy color 0 2.5 ?palette="bluewhitered"');
+  assert.equal(r.status, "ok", r.message);
+  assert.equal(bindCalls[0].b.palette, "bluewhitered");
+  // a quoted MULTI-WORD value is a deliberate quote — it reaches the
+  // registry check and is refused under the name the user actually wrote
+  const spaced = registry.runCommand('bind all energy color 0 2.5 ?palette="two words"');
+  assert.equal(spaced.status, "error");
+  assert.match(spaced.message, /^unknown palette "two words" — palettes: /);
 });
 
 test("?palette= cannot be misparsed as a positional argument (the reserved-? property)", () => {

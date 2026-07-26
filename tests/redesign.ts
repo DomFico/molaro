@@ -10993,6 +10993,36 @@ async function S64(): Promise<void> {
       check("S64: REPLAY restored the captured look (point 5 red again, size 5 again)",
         (await colorR(5)) === 1 && (await colorB(5)) === 0 && (await sizeAt(5)) === 5,
         `r=${await colorR(5)} b=${await colorB(5)} size=${await sizeAt(5)}`);
+
+      // -- composed: a NON-DEFAULT palette rides save_rep → file → replay ------
+      // Both halves are unit-pinned (saverep.test emits the ?palette= line;
+      // commands.test parses it back); this is the one place the WHOLE loop
+      // runs — capture a palette-carrying binding, read the emitted line off
+      // disk, release the binding, replay, and see the palette return as
+      // durable registry state.
+      check("S64: a palette-carrying binding registers",
+        (await cmd("bind #0-49 energy color 0 0.004 ?palette=bluewhitered")).status === "ok");
+      const save2 = await cmd("save_rep myrep2");
+      check("S64: save_rep captures the bound look too", save2.status === "ok", JSON.stringify(save2));
+      await d.waitFor(`window.__lines.some(l => /save_rep: saved "myrep2"/.test(l.message))`, 20000)
+        .catch(() => {});
+      const file2 = join(modsDir, "myrep2.py");
+      check("S64: myrep2.py was written", existsSync(file2));
+      const src2 = existsSync(file2) ? readFileSync(file2, "utf-8") : "";
+      check("S64: the emitted bind line CARRIES the palette (else the saved look silently reverts)",
+        src2.includes("bind #0-49 energy color 0 0.004 ?palette=bluewhitered"), src2);
+      check("S64: release the binding before the replay",
+        (await cmd("unbind all color")).status === "ok" &&
+          !/palette/.test((await cmd("bindings")).message),
+        (await cmd("bindings")).message);
+      const replay2 = await cmd("myrep2");
+      check("S64: myrep2 hands off to the replay path", replay2.status === "ok", JSON.stringify(replay2));
+      await d.waitFor(`${V}.command("bindings").message.includes("palette bluewhitered")`, 20000)
+        .catch(() => {});
+      check("S64: REPLAY restored the palette-carrying binding as durable state",
+        /energy → color on "#0-49" — 50 points · range 0\.\.0\.004 · palette bluewhitered/.test(
+          (await cmd("bindings")).message),
+        (await cmd("bindings")).message);
     }, 1180, 780, "/terminal");
   } finally {
     delete process.env.E2E_MODS_DIR;
