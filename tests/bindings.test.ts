@@ -30,6 +30,27 @@ test("add: registers and reports an empty takeover on virgin coverage", () => {
   assert.equal(r.covering(1, "size"), undefined, "coverage is per axis");
 });
 
+test("the palette rides the UNDO SEAM: add/snapshot/restore carry it, canonically", () => {
+  const r = new BindingRegistry();
+  // canonical form: the field is ABSENT on a default binding, so a default
+  // scene's snapshot is byte-identical to before palettes existed
+  r.add(mk());
+  assert.equal(r.all()[0].palette, undefined);
+  assert.ok(!("palette" in r.snapshot()[0]), "no palette key survives into the snapshot");
+  const r2 = new BindingRegistry();
+  r2.add(mk({ palette: "bluewhitered" }));
+  const snap = r2.snapshot();
+  assert.equal(snap[0].palette, "bluewhitered", "snapshot() carries the palette");
+  // one stroke's worth of churn, then restore: the palette comes back with it
+  r2.add(mk({ channel: "mass", points: [0, 1, 2], palette: "gray" }));
+  assert.equal(r2.all().length, 1, "full same-axis overlap replaced it");
+  assert.equal(r2.all()[0].palette, "gray");
+  r2.restore(snap);
+  assert.equal(r2.all().length, 1);
+  assert.equal(r2.all()[0].channel, "energy");
+  assert.equal(r2.all()[0].palette, "bluewhitered", "restore() puts the palette back");
+});
+
 test("add: LAST-BIND-WINS within an axis — overlap released element-level", () => {
   const r = new BindingRegistry();
   r.add(mk({ points: [0, 1, 2] }));

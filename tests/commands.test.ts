@@ -10,6 +10,7 @@ import type { Header } from "../contract/contract.ts";
 import { buildTree } from "../webview/classification.ts";
 import { Hierarchy, type Entry } from "../webview/sets.ts";
 import {
+  applyScalarsToAxis,
   commandMacroRefusal,
   completeCommand,
   createCommandRegistry,
@@ -37,7 +38,8 @@ import {
 import { BIND_SIZE_MAX, bindTypedResult } from "../webview/claudebind.ts";
 import type { ChannelDecl } from "../webview/channelmap.ts";
 import { BindingRegistry, type Binding } from "../webview/bindings.ts";
-import { AXIS_DOMAIN, OFFSET_AXIS, SCALAR_AXES, VECTOR_AXES } from "../webview/channelmap.ts";
+import { AXIS_DOMAIN, COLOR_AXES, OFFSET_AXIS, SCALAR_AXES, VECTOR_AXES } from "../webview/channelmap.ts";
+import { paletteNames } from "../webview/palettes.ts";
 
 function makeHeader(): Header {
   const category = [0, 0, 1];
@@ -1851,6 +1853,232 @@ test("bindings: read-only list with the live notice; empty says so; bare only", 
   assert.match(lines[0], /1 binding \(live: re-derived from the channel as the displayed frame changes\):/);
   assert.equal(lines[1], '  energy → opacity on "all" — 3 points · range 0..2.5');
   assert.equal(registry.runCommand("bindings all").status, "error", "takes no arguments");
+});
+
+// -- palettes: WHICH ramp a bound/baked color axis maps through -------------------
+
+test("palettes: the read-only registry listing (styles'/shapes' shape); bare only", () => {
+  const { registry } = makeRegistry();
+  const r = registry.runCommand("palettes");
+  assert.equal(r.status, "ok");
+  const lines = r.message.split("\n");
+  assert.match(lines[0], /^palettes \(a bound color axis maps through one — bind … \?palette=<name>\):$/);
+  assert.equal(lines.length, 1 + paletteNames().length, "one row per registered palette");
+  assert.match(lines[1], /^ {2}rainbow \(default\) — /, "index 0 is marked the default");
+  assert.match(lines[2], /^ {2}bluewhitered — diverging/);
+  assert.match(lines[3], /^ {2}gray — sequential, perceptually uniform/);
+  assert.equal(registry.runCommand("palettes all").status, "error", "takes no arguments");
+  assert.match(registry.runCommand("help palettes").message, /^palettes — /);
+});
+
+test("DEFAULT BYTE-IDENTITY: no palette named → the sweep's exact colors, and NO palette stored", () => {
+  const { registry, bindCalls, colorEachOps, bindingReg } = makeRegistry();
+  // (a) the WRITE path — bake is the one that reaches the writers in this
+  //     fixture (createBinding is a recording stub, as it has always been):
+  //     t=[0,0.5,1] → red, hue 150, magenta, the exact values the hardcoded
+  //     call produced
+  assert.equal(registry.runCommand("bake all energy color 0 2.5").status, "ok");
+  assert.deepEqual(colorEachOps[0].rgb, [1, 0, 0, 0, 1, 0.5, 1, 0, 1]);
+  // (b) the BINDING path — message character-for-character as before
+  const r = registry.runCommand("bind all energy color 0 2.5");
+  assert.equal(r.status, "ok");
+  assert.equal(
+    r.message,
+    'bound "energy" → color on 3 points of "all" (applied at frame 4, range 0..2.5) — live: re-derives as the displayed frame changes',
+  );
+  // (c) the Binding object has NO palette key at all (canonical form:
+  //     undefined ⟺ the default), so snapshot/restore, the listing and
+  //     save_rep all see exactly the object they saw before palettes existed
+  assert.deepEqual(bindCalls[0].b, {
+    channel: "energy", axis: "color", points: [0, 1, 2], expr: "all", range: [0, 2.5],
+  });
+  assert.ok(!("palette" in bindCalls[0].b), "no palette key on a default binding");
+  assert.equal(bindingReg.all()[0].palette, undefined);
+  // (d) and `bindings` says nothing about a palette
+  const list = registry.runCommand("bindings").message;
+  assert.equal(list.split("\n")[1], '  energy → color on "all" — 3 points · range 0..2.5');
+  assert.doesNotMatch(list, /palette/);
+});
+
+test("bind ?palette=: the named ramp rides the Binding (what the per-flip applier reads)", () => {
+  const { registry, bindCalls, bindingReg } = makeRegistry();
+  const r = registry.runCommand("bind all energy color 0 2.5 ?palette=bluewhitered");
+  assert.equal(r.status, "ok");
+  assert.equal(
+    r.message,
+    'bound "energy" → color on 3 points of "all" (applied at frame 4, range 0..2.5, palette bluewhitered) — live: re-derives as the displayed frame changes',
+  );
+  // the palette is durable scene state: main.ts's createBinding forwards
+  // b.palette to applyScalarsToAxis for the INITIAL write and the per-flip
+  // applier resolves the same field, so first frame and every later frame
+  // map through one ramp
+  assert.equal(bindCalls[0].b.palette, "bluewhitered");
+  assert.equal(bindingReg.all()[0].palette, "bluewhitered");
+  // and that field, through the shared apply, is the diverging ramp:
+  // t=[0,0.5,1] → blue, white, red — not the hue sweep
+  const { ctx, colorEachOps } = makeRegistry();
+  applyScalarsToAxis(ctx, "color", [0, 1, 2], [0, 0.5, 1], bindingReg.all()[0].palette);
+  assert.deepEqual(colorEachOps[0].rgb, [0, 0, 1, 1, 1, 1, 1, 0, 0]);
+});
+
+test("bind ?palette=rainbow NORMALIZES to the default (one representation, not two)", () => {
+  const { registry, bindCalls, colorEachOps } = makeRegistry();
+  const r = registry.runCommand("bind all energy color 0 2.5 ?palette=rainbow");
+  assert.equal(r.status, "ok");
+  assert.ok(!("palette" in bindCalls[0].b), "an explicit default is stored as no palette");
+  assert.doesNotMatch(r.message, /palette/, "and is not reported as a choice");
+  assert.equal(registry.runCommand("bake all energy color 0 2.5 ?palette=rainbow").status, "ok");
+  assert.deepEqual(colorEachOps[0].rgb, [1, 0, 0, 0, 1, 0.5, 1, 0, 1], "the sweep, unchanged");
+});
+
+test("bindings: shows the palette for a NON-default binding only", () => {
+  const { registry } = makeRegistry();
+  registry.runCommand("bind all energy color 0 2.5 ?palette=gray");
+  registry.runCommand("bind all mass size");
+  const list = registry.runCommand("bindings").message.split("\n");
+  assert.equal(list[1], '  energy → color on "all" — 3 points · range 0..2.5 · palette gray');
+  assert.equal(list[2], '  mass → size on "all" — 3 points · range 1..3', "a non-color axis has none");
+});
+
+test("bake ?palette=: the STATIC write takes the same option through the same parser", () => {
+  // bake and bind share one argument parser by design, so the option cannot
+  // work on one and not the other — and the static/animated look of the same
+  // quantity can finally match, which is the whole complaint.
+  const { registry, colorEachOps } = makeRegistry();
+  const r = registry.runCommand("bake all energy color 0 2.5 ?palette=bluewhitered");
+  assert.equal(r.status, "ok");
+  assert.equal(r.message,
+    'baked "energy" → color on 3 points of "all" (frame 4, range 0..2.5, palette bluewhitered)');
+  assert.deepEqual(colorEachOps[0].rgb, [0, 0, 1, 1, 1, 1, 1, 0, 0]);
+});
+
+test("?palette= reaches EVERY color axis — all four, in their own id spaces", () => {
+  // Through bake (the write path this fixture exercises) — bind rides the
+  // same parser and the same apply, and stores the same name.
+  const { registry, colorEachOps, elemEachOps, endsOps, bindingReg } = makeRegistry(ORI_FIXTURE);
+  // point color: t=[0,0.5,1] → blue, white, red
+  assert.equal(registry.runCommand("bake all energy color 0 2.5 ?palette=bluewhitered").status, "ok");
+  assert.deepEqual(colorEachOps[0].rgb, [0, 0, 1, 1, 1, 1, 1, 0, 0]);
+  // tracecolor: vertices [0,1] → points [0,2] → t=[0,1] → blue, red
+  assert.equal(registry.runCommand("bake all energy tracecolor 0 2.5 ?palette=bluewhitered").status, "ok");
+  assert.deepEqual(elemEachOps.at(-1), { axis: "tracecolor", ids: [0, 1], values: [0, 0, 1, 1, 0, 0] });
+  // bondcolor: endpoint MEANS t=[0.25,0.75] → (0.5,0.5,1) and (1,0.5,0.5)
+  assert.equal(registry.runCommand("bake all energy bondcolor 0 2.5 ?palette=bluewhitered").status, "ok");
+  assert.deepEqual(elemEachOps.at(-1), { axis: "bondcolor", ids: [0, 1], values: [0.5, 0.5, 1, 1, 0.5, 0.5] });
+  // bondcolorends: PER-ENDPOINT t — edge0 (0, 0.5), edge1 (0.5, 1)
+  assert.equal(registry.runCommand("bake all energy bondcolorends 0 2.5 ?palette=bluewhitered").status, "ok");
+  assert.deepEqual(endsOps.at(-1)!.a, [0, 0, 1, 1, 1, 1]);
+  assert.deepEqual(endsOps.at(-1)!.b, [1, 1, 1, 1, 0, 0]);
+  // and each one BINDS with the palette recorded — every color axis, not two
+  for (const axis of COLOR_AXES) {
+    assert.equal(registry.runCommand(`bind all energy ${axis} 0 2.5 ?palette=gray`).status, "ok", axis);
+    assert.equal(bindingReg.all().at(-1)!.palette, "gray", axis);
+  }
+});
+
+test("COLOR_AXES is EXACTLY the set of axes a palette CHANGES — derived, not copied", () => {
+  // The completeness guarantee, mechanically and by OUTPUT (stronger than
+  // "the colormap got called"): run every scalar axis through the shared
+  // apply twice — default palette, then a different one — and collect the
+  // axes whose written values differ. A new color axis that forgot to join
+  // COLOR_AXES fails here; so would a listed axis that accepts a palette and
+  // quietly ignores it; and the non-color axes are proven palette-INVARIANT.
+  const changed: string[] = [];
+  for (const axis of SCALAR_AXES) {
+    const runs = ["rainbow", "bluewhitered"].map((palette) => {
+      const f = makeRegistry(ORI_FIXTURE);
+      // two scalars per element covers bondcolorends' interleaved pairs; the
+      // other axes read only the first per element
+      applyScalarsToAxis(f.ctx, axis, [0, 1], [0, 0.5, 1, 0.25], palette);
+      return JSON.stringify([f.colorEachOps, f.elemEachOps, f.endsOps, f.eachOps]);
+    });
+    assert.notEqual(runs[0], "[[],[],[],[]]", `${axis} wrote nothing — the probe is vacuous`);
+    if (runs[0] !== runs[1]) changed.push(axis);
+  }
+  assert.deepEqual(changed, [...COLOR_AXES],
+    "the palette-sensitive axes and COLOR_AXES must be the same list");
+});
+
+test("?palette= FAILS CLOSED — unknown names, wrong axes, malformed options; nothing written", () => {
+  const { registry, colorEachOps, elemEachOps, eachOps, endsOps, bindingReg } = makeRegistry();
+  const cases: [string, RegExp][] = [
+    // an unknown name NAMES the registered ones — never a silent default
+    ["bind all energy color 0 2.5 ?palette=viridis",
+      /^unknown palette "viridis" — palettes: rainbow, bluewhitered, gray$/],
+    ["bake all energy color 0 2.5 ?palette=Gray",
+      /^unknown palette "Gray" — palettes: rainbow, bluewhitered, gray$/],
+    ["bind all energy color 0 2.5 ?palette=",
+      /^unknown palette "" — palettes: rainbow, bluewhitered, gray$/],
+    // a palette on an axis that does not map through one is refused, not ignored
+    ["bind all energy size 0 2.5 ?palette=gray",
+      /^a palette is meaningless on the size axis — \?palette= applies to the color axes only: color \| bondcolor \| bondcolorends \| tracecolor$/],
+    ["bind all energy bonddash 0 2.5 ?palette=gray", /meaningless on the bonddash axis/],
+    ["bind all flow orientation ?palette=gray", /meaningless on the orientation axis/],
+    // malformed option blocks
+    ["bind all energy color 0 2.5 ?", /^bind: empty option — the option is \?palette=<name>$/],
+    ["bind all energy color 0 2.5 ?gray", /^bind: option "gray" must be key=value — \?palette=<name>$/],
+    ["bind all energy color 0 2.5 ?ramp=gray",
+      /^bind: unknown option "ramp" — the only option is \?palette=<name>$/],
+    ["bind all energy color 0 2.5 ?palette=gray ?palette=rainbow",
+      /^bind: option "palette" given twice$/],
+  ];
+  for (const [cmd, want] of cases) {
+    const r = registry.runCommand(cmd);
+    assert.equal(r.status, "error", cmd);
+    assert.match(r.message, want, cmd);
+  }
+  assert.equal(
+    colorEachOps.length + elemEachOps.length + eachOps.length + endsOps.length + bindingReg.count(),
+    0,
+    "no refusal wrote anything or registered anything",
+  );
+});
+
+test("?palette= cannot be misparsed as a positional argument (the reserved-? property)", () => {
+  const { registry, bindCalls } = makeRegistry();
+  // the option is invisible to the back-to-front word walk: the range still
+  // parses, the axis is still the axis, the target still ends where it did
+  assert.equal(registry.runCommand("bind all energy color ?palette=gray").status, "error",
+    "energy declares min only — the range is still REQUIRED, the option did not supply one");
+  assert.match(registry.runCommand("bind all energy color ?palette=gray").message,
+    /does not declare a full min\/max range/);
+  const ok = registry.runCommand("bind c0 energy color 0 2.5 ?palette=gray");
+  assert.equal(ok.status, "ok");
+  assert.deepEqual(bindCalls[0].b.points, [0, 1], "the target resolved as it always did");
+  assert.deepEqual(bindCalls[0].b.range, [0, 2.5]);
+  assert.equal(bindCalls[0].b.palette, "gray");
+  // whitespace around the option is irrelevant; a bare `?` inside a TARGET is
+  // a reserved character and still errors as one (parseTarget's own refusal)
+  assert.equal(registry.runCommand("bind all energy color 0 2.5   ?palette=gray").status, "ok");
+  assert.equal(registry.runCommand("bind a?b energy color 0 2.5").status, "error");
+});
+
+test("?palette= tab-completes: the option NAME then the registry's names", () => {
+  const { registry, ctx } = makeRegistry();
+  const at = (text: string) => completeCommand(ctx, registry, text, text.length);
+  // the option name, with `=` appended on a unique match
+  const name = at("bind all energy color 0 2.5 ?pal");
+  assert.deepEqual(name.candidates, ["palette"]);
+  assert.equal(name.applied, "ette=", "the extension from the cursor, plus the separator");
+  assert.equal(name.kind, "param");
+  assert.equal(name.start, "bind all energy color 0 2.5 ?".length);
+  // an EMPTY value completes the whole registry (completeToken sorts every
+  // slot's candidates — the listing verb is where registration order shows)
+  const empty = at("bind all energy color 0 2.5 ?palette=");
+  assert.deepEqual(empty.candidates, [...paletteNames()].sort());
+  assert.equal(empty.kind, "value");
+  assert.equal(empty.start, "bind all energy color 0 2.5 ?palette=".length);
+  // a prefix filters and settles
+  const one = at("bind all energy color 0 2.5 ?palette=bl");
+  assert.deepEqual(one.candidates, ["bluewhitered"]);
+  assert.equal(one.applied, "uewhitered");
+  // bake completes it identically (one parser, one completer)
+  assert.deepEqual(at("bake all energy color 0 2.5 ?palette=g").candidates, ["gray"]);
+  // an unknown option key enumerates nothing — never a guess
+  assert.deepEqual(at("bind all energy color 0 2.5 ?ramp=g").candidates, []);
+  // and the POSITIONAL slots are untouched: no unquoted `?` → old behavior
+  assert.deepEqual(at("bind all ener").candidates, ["energy"]);
+  assert.equal(at("bind all energy col").kind, "axis");
 });
 
 // -- A-1: per-element edge/trace axes (bond*/trace* — the completeness pass) -----

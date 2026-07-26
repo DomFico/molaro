@@ -116,6 +116,22 @@ test("a color binding is emitted as bind and its points excluded from colorpoint
   assert.deepEqual(r.commands, ["bind #0-2 energy color 0 2.5"]);
 });
 
+test("a NON-DEFAULT palette rides the replay; the default emits the same line as always", () => {
+  // Without the option in the emitted line, a saved look would silently
+  // revert to the default ramp on replay — the invisible-loss class.
+  const named = serializeRepCommands(baseSnap(8, {
+    bindings: [bind({ axis: "color", points: [0, 1, 2], range: [0, 2.5], palette: "bluewhitered" })],
+  }));
+  assert.deepEqual(named.commands, ["bind #0-2 energy color 0 2.5 ?palette=bluewhitered"]);
+  assert.deepEqual(named.warnings, [], "a palette is captured, never deferred");
+  // undefined ⟺ the default (Binding.palette is canonical), so the default
+  // line is byte-identical to the pre-palette one
+  const plain = serializeRepCommands(baseSnap(8, {
+    bindings: [bind({ axis: "color", points: [0, 1, 2], range: [0, 2.5] })],
+  }));
+  assert.deepEqual(plain.commands, ["bind #0-2 energy color 0 2.5"]);
+});
+
 test("an offset binding (smoothing) is emitted with no range", () => {
   const snap = baseSnap(8, {
     bindings: [bind({ channel: "smooth_offset", axis: "offset", points: [4, 5, 6, 7], range: null })],
