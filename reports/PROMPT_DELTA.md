@@ -436,8 +436,17 @@ per-frame-series/per-point-scalar/scatter/commands/channel only).
 
 ## Since incr 61 — path idealization on the `offset` axis (2026-07-25 cartoon chapter, incr 62)
 
-> **STATUS: NOT APPLIED.** Nothing below is in `claudeprompt.ts` yet. It is a capability
-> class the assistant currently cannot reach, plus three traps that cost real time to find.
+> **STATUS: PARTIALLY WITHDRAWN 2026-07-26 — read this before teaching any of it.** The owner
+> retired the `idealize` mod ("not really fun to use and doesn't look much different anyway");
+> it is renamed `~/.molaro/mods/idealize.py.retired-by-owner` and no longer loads. So:
+> **DO NOT teach `idealize` as the worked example, and do not present path idealization as an
+> available capability.** What SURVIVES and is still worth teaching is everything that is a
+> property of the ENGINE rather than of that mod: the `offset` axis genuinely does displace
+> polyline/ribbon/tube vertices (the shipped `smooth` and `delay` mods still ride it), and all
+> three traps below are engine facts that bite any mod on that axis. Teach the seam and the
+> traps; drop the idealization framing and the worked example.
+>
+> **STATUS: NOT APPLIED.** None of this is in `claudeprompt.ts` yet.
 
 ### NEW capability: a mod can idealize the PATH a band/trace is drawn along
 The `offset` position axis (incr 47) was introduced for temporal effects (`smooth`, `delay`),
