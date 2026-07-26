@@ -11000,7 +11000,229 @@ async function S64(): Promise<void> {
   }
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64 };
+// ======== S65: bound palettes — WHICH ramp a live color axis maps through =====
+// A bound color axis re-derives per frame; before palettes it always mapped
+// through the one built-in hue sweep. This scenario pins the four claims that
+// make the change safe:
+//   (a) THE DEFAULT IS BYTE-IDENTICAL — an unnamed palette and an explicitly
+//       named `rainbow` produce color buffers equal under `!==` (exact float
+//       comparison, not a tolerance);
+//   (b) a NAMED palette changes the buffer to the ramp computed from the SAME
+//       chunk the applier reads, AND changes the PIXELS (state without pixels
+//       is this project's standing defect class);
+//   (c) the HOT LOOP resolves the palette ONCE PER BINDING PER FLIP — measured
+//       on debug.paletteResolutions() over one seek with 200 points bound, so a
+//       per-element resolve would be off by two orders of magnitude;
+//   (d) fail-closed: an unknown name is refused naming the registry, a palette
+//       on a non-color axis is refused, and debug.unknownPaletteHits stays 0.
+async function S65(): Promise<void> {
+  console.log("S65 — bound palettes: default byte-identical, a named ramp changes buffer AND pixels, resolution per BINDING");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    const resolutions = () => d.evaluate<number>(`${V}.debug.paletteResolutions()`);
+    const unknownHits = () => d.evaluate<number>(`${V}.debug.unknownPaletteHits()`);
+    const rafs = () => d.evaluate(`(async () => {
+      for (let i = 0; i < 3; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`);
+    const seekTo = async (f: number): Promise<void> => {
+      await d.evaluate(`${V}.player.seek(${f})`);
+      await d.waitFor(`${V}.player.frame === ${f} && ${V}.player.getFrame(${f}) !== null`, 20000);
+      await rafs();
+    };
+    // snapshot / exact-compare the color buffer (`!==`, no tolerance: the
+    // byte-identity claim is exactness, and a tolerance would hide a drift)
+    const snapColor = (name: string) =>
+      d.evaluate(`void (window.${name} = Float32Array.from(${V}.rep.state.color))`);
+    const exactDiff = (name: string) => d.evaluate<number>(`(()=>{
+      const c = ${V}.rep.state.color, s = window.${name}; let n = 0;
+      for (let i = 0; i < c.length; i++) if (c[i] !== s[i]) n++; return n;
+    })()`);
+    const RANGE = "0 0.004"; // S38's pinned lens for `energy`
+
+    await d.evaluate(`${V}.setPlaying(false)`);
+    await seekTo(0);
+    const depth0 = await undoDepth();
+
+    // -- the registry's read face ---------------------------------------------
+    const listing = await cmd("palettes");
+    check("S65: `palettes` lists the registry, index 0 marked default",
+      listing.status === "ok" &&
+        /^palettes \(/.test(listing.message) &&
+        /\n {2}rainbow \(default\) — /.test(listing.message) &&
+        /\n {2}bluewhitered — diverging/.test(listing.message) &&
+        /\n {2}gray — sequential, perceptually uniform/.test(listing.message),
+      JSON.stringify(listing.message));
+
+    // -- (d) fail closed, before anything is bound ----------------------------
+    const unknown = await cmd(`bind #0-199 energy color ${RANGE} ?palette=viridis`);
+    check("S65: an unknown palette is REFUSED naming the registered ones",
+      unknown.status === "error" &&
+        unknown.message === 'unknown palette "viridis" — palettes: rainbow, bluewhitered, gray',
+      JSON.stringify(unknown));
+    const wrongAxis = await cmd(`bind #0-199 energy size ${RANGE} ?palette=gray`);
+    check("S65: a palette on a NON-color axis is refused, not ignored",
+      wrongAxis.status === "error" && /meaningless on the size axis/.test(wrongAxis.message),
+      JSON.stringify(wrongAxis));
+    const badOption = await cmd(`bind #0-199 energy color ${RANGE} ?ramp=gray`);
+    check("S65: an unknown option key is refused",
+      badOption.status === "error" && /unknown option "ramp"/.test(badOption.message),
+      JSON.stringify(badOption));
+    check("S65: no refusal bound anything or recorded a stroke",
+      (await cmd("bindings")).message === "no bindings" && (await undoDepth()) === depth0);
+
+    // -- (a) DEFAULT BYTE-IDENTITY -------------------------------------------
+    const plain = await cmd(`bind #0-199 energy color ${RANGE}`);
+    check("S65: an unnamed bind reports exactly as before (no palette clause)",
+      plain.status === "ok" && !/palette/.test(plain.message), JSON.stringify(plain));
+    check("S65: …and `bindings` shows no palette for a default binding",
+      !/palette/.test((await cmd("bindings")).message), (await cmd("bindings")).message);
+    await seekTo(20);
+    await snapColor("__palDefault");
+    await d.ctrlZ();
+    await sleep(300);
+    const named = await cmd(`bind #0-199 energy color ${RANGE} ?palette=rainbow`);
+    check("S65: naming the DEFAULT palette explicitly is accepted and normalizes away",
+      named.status === "ok" && !/palette/.test(named.message) &&
+        !/palette/.test((await cmd("bindings")).message),
+      JSON.stringify(named));
+    await seekTo(20);
+    const driftFromDefault = await exactDiff("__palDefault");
+    check("S65: BYTE-IDENTICAL — ?palette=rainbow and no palette give bit-equal color buffers",
+      driftFromDefault === 0, `${driftFromDefault} of 18000 floats differ`);
+
+    // -- (b) a named ramp: the buffer matches the ramp of the SAME chunk ------
+    await d.ctrlZ();
+    await sleep(300);
+    const diverging = await cmd(`bind #0-199 energy color ${RANGE} ?palette=bluewhitered`);
+    check("S65: a named palette binds and SAYS so",
+      diverging.status === "ok" && /, palette bluewhitered\)/.test(diverging.message),
+      JSON.stringify(diverging));
+    check("S65: …and `bindings` shows it (otherwise the state is invisible)",
+      / · palette bluewhitered$/m.test((await cmd("bindings")).message),
+      (await cmd("bindings")).message);
+    await seekTo(30);
+    const ramped = await d.evaluate<{ ok: boolean; detail: string }>(`(()=>{
+      const f = ${V}.player.frame, chunk = ${V}.player.getFrame(f);
+      const off = (f - chunk.start) * 6000;
+      const block = chunk.channels.get("energy");
+      const buf = ${V}.rep.state.color;
+      // the diverging ramp, recomputed here from the palette's definition
+      const bwr = (t) => t <= 0.5 ? [2*t, 2*t, 1] : [1, 2*(1-t), 2*(1-t)];
+      for (const p of [0, 97, 199]) {
+        const t = Math.min(1, Math.max(0, block[off + p] / 0.004));
+        const want = bwr(t);
+        for (let k = 0; k < 3; k++) {
+          if (Math.abs(buf[p*3+k] - want[k]) > 1e-6) {
+            return { ok: false, detail: "p=" + p + " k=" + k + " got=" + buf[p*3+k] + " want=" + want[k] + " t=" + t };
+          }
+        }
+      }
+      return { ok: true, detail: "frame " + f };
+    })()`);
+    check("S65: the per-flip re-derive used the NAMED ramp, on the frame's own values",
+      ramped.ok, ramped.detail);
+    const differs = await exactDiff("__palDefault");
+    check("S65: …and that is visibly NOT the default sweep (buffers differ widely)",
+      differs > 300, `${differs} of 18000 floats differ from the sweep`);
+
+    // -- (b, pixels) the picture changed, not just the buffer -----------------
+    // Bind the WHOLE scene so any on-screen point is covered, then read a
+    // patch at a bound point: the sweep's low end is RED, the diverging
+    // ramp's low end is BLUE — a channel-order flip no tolerance can blur.
+    await cmd(`bind all energy color ${RANGE} ?palette=bluewhitered`);
+    await seekTo(0);
+    const probe = await d.evaluate<{ p: number; x: number; y: number } | null>(`(()=>{
+      const chunk = ${V}.player.getFrame(${V}.player.frame);
+      const off = (${V}.player.frame - chunk.start) * 6000;
+      const block = chunk.channels.get("energy");
+      // a point at the ramp's LOW end (t < 0.15 → strongly blue) that is
+      // front-most under the cursor, so the patch reads ITS color
+      for (let p = 0; p < 6000; p++) {
+        if (block[off + p] / 0.004 >= 0.15) continue;
+        const pr = ${V}.debug.projectPoint(p);
+        if (!pr.front) continue;
+        if (${V}.debug.pick(pr.x, pr.y) !== p) continue;
+        return { p, x: pr.x, y: pr.y };
+      }
+      return null;
+    })()`);
+    check("S65: found a front-most low-end point to sample", probe !== null);
+    if (probe !== null) {
+      await rafs();
+      const bluish = await d.samplePatch({
+        centerExpr: `({x:${probe.x},y:${probe.y}})`,
+        half: 1,
+        classify: "b > r + 40",
+      });
+      check("S65: PIXELS — the low end draws BLUE-dominant under the diverging ramp",
+        bluish.count === 4, `${bluish.count}/4 blue-dominant at point ${probe.p}`);
+      await cmd(`bind all energy color ${RANGE}`); // back to the sweep
+      await rafs();
+      const reddish = await d.samplePatch({
+        centerExpr: `({x:${probe.x},y:${probe.y}})`,
+        half: 1,
+        classify: "r > b + 40",
+      });
+      check("S65: …and RED-dominant again under the default sweep (same point, same frame)",
+        reddish.count === 4, `${reddish.count}/4 red-dominant at point ${probe.p}`);
+    }
+
+    // -- (c) THE HOT LOOP: once per BINDING, not once per element -------------
+    // One color binding over 200 points. A seek runs the applier; if the
+    // palette resolved per element the delta would be >= 200.
+    await cmd("unbind all");
+    await cmd(`bind #0-199 energy color ${RANGE} ?palette=gray`);
+    await seekTo(35);
+    const r0 = await resolutions();
+    await seekTo(36);
+    const d1 = (await resolutions()) - r0;
+    check("S65: HOT LOOP — one seek with 200 bound points resolves the palette a handful of times, never 200",
+      d1 >= 1 && d1 < 20, `delta=${d1} for 200 bound points (per-element would be >= 200)`);
+    // a SECOND color binding on another domain doubles it — the count scales
+    // with BINDINGS, which is the guarantee
+    await cmd(`bind all energy tracecolor ${RANGE} ?palette=gray`);
+    await seekTo(37);
+    const r1 = await resolutions();
+    await seekTo(38);
+    const d2 = (await resolutions()) - r1;
+    check("S65: …and the count scales with the number of color BINDINGS (2× for two)",
+      d2 === 2 * d1, `one binding=${d1}, two bindings=${d2}`);
+    // a NON-color binding adds nothing: the resolve lives in the color arms
+    await cmd(`bind #0-199 energy size ${RANGE}`);
+    await seekTo(39);
+    const r2 = await resolutions();
+    await seekTo(40);
+    check("S65: a NON-color binding costs zero palette resolutions",
+      (await resolutions()) - r2 === d2, `delta=${(await resolutions()) - r2} vs ${d2}`);
+
+    // -- (d) the assert-unreachable instrument stayed at zero -----------------
+    check("S65: debug.unknownPaletteHits === 0 — no unvalidated name reached the applier",
+      (await unknownHits()) === 0, `unknownPaletteHits=${await unknownHits()}`);
+
+    // -- undo: the palette rides the ordinary stroke --------------------------
+    const beforeUndo = (await cmd("bindings")).message;
+    check("S65: (setup) the gray tracecolor binding is listed with its palette",
+      / · palette gray$/m.test(beforeUndo), beforeUndo);
+    await d.ctrlZ();
+    await sleep(300);
+    await d.ctrlZ();
+    await sleep(300);
+    const afterUndo = (await cmd("bindings")).message;
+    check("S65: undo removed the palette-carrying bindings one stroke at a time",
+      !/tracecolor/.test(afterUndo) && / · palette gray$/m.test(afterUndo),
+      afterUndo);
+    await d.evaluate(`${V}.model.redo()`);
+    await sleep(300);
+    check("S65: redo brings the palette back with the binding",
+      /tracecolor.*· palette gray/.test((await cmd("bindings")).message),
+      (await cmd("bindings")).message);
+    await d.screenshot(`${REPORT}/S65_palettes.png`);
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -11046,6 +11268,9 @@ const TIER: Record<string, "fast" | "full"> = {
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
   S58: "fast", S59: "fast", S60: "fast", S61: "fast", S62: "fast",
   S63: "fast", S64: "full",
+  // S65 is pixel-bearing (the low end must DRAW blue, not merely store it) and
+  // it measures the per-flip applier — the fast lane's remit exactly.
+  S65: "fast",
 };
 for (const name of Object.keys(all)) {
   if (!(name in TIER)) {
