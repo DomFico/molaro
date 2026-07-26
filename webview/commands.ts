@@ -40,6 +40,7 @@ import {
   BIND_AXES,
   BIND_DASH_MAX,
   BIND_SIZE_MAX,
+  COLOR_AXES,
   gateChannelBind,
   mapScalar,
   normalizeScalars,
@@ -56,7 +57,6 @@ import {
   channelProviders,
   getRecipe,
   listRecipes,
-  rainbow,
   resolveChannelDependency,
   isValidModName,
   resolveModSelector,
@@ -68,6 +68,13 @@ import {
   channelConsumers,
   machineryNote,
 } from "./recipes.ts";
+import {
+  colormapFor,
+  DEFAULT_PALETTE_NAME,
+  listPalettes,
+  paletteIndex,
+  paletteNames,
+} from "./palettes.ts";
 import { buildRepMod, serializeRepCommands, type RepSnapshot } from "./saverep.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
 
@@ -1554,21 +1561,28 @@ export function makeRainbowHandler(ctx: CommandContext): CommandHandler {
 
 /** The [0,1]-scalar→axis application, written ONCE for every scalar source —
  * the bake verb and the typed-result binding (claudebind.ts) both land here:
- * color through the built-in colormap, size through the fixed 0..BIND_SIZE_MAX
- * visual range, opacity as-is. One per-element writer stroke; the caller owns
- * normalization. `bondcolorends` alone takes TWO scalars per element
- * (interleaved [A0,B0,A1,B1,…] — resolveChannelAxis's per-endpoint carry);
- * every other axis takes one. */
+ * color through the resolved PALETTE's colormap, size through the fixed
+ * 0..BIND_SIZE_MAX visual range, opacity as-is. One per-element writer
+ * stroke; the caller owns normalization. `bondcolorends` alone takes TWO
+ * scalars per element (interleaved [A0,B0,A1,B1,…] — resolveChannelAxis's
+ * per-endpoint carry); every other axis takes one.
+ *
+ * `palette` is a REGISTERED palette name, or undefined for the default —
+ * resolved ONCE here, never per element. Omitting it yields
+ * `rainbow.colormap` BY REFERENCE (colormapFor's contract), so every caller
+ * that predates palettes is byte-identical. */
 export function applyScalarsToAxis(
   ctx: CommandContext,
   axis: ScalarAxis,
   ids: readonly number[],
   scalars: readonly number[],
+  palette?: string,
 ): number {
+  const colormap = colormapFor(palette); // ONCE per call — never per element
   const rgbOf = (ts: readonly number[]): number[] => {
     const rgb = new Array<number>(ts.length * 3);
     for (let i = 0; i < ts.length; i++) {
-      const [cr, cg, cb] = rainbow.colormap(ts[i]);
+      const [cr, cg, cb] = colormap(ts[i]);
       rgb[i * 3] = cr;
       rgb[i * 3 + 1] = cg;
       rgb[i * 3 + 2] = cb;
@@ -1576,7 +1590,7 @@ export function applyScalarsToAxis(
     return rgb;
   };
   switch (axis) {
-    case "color": return applyColorScalars(ctx, ids, scalars, rainbow.colormap);
+    case "color": return applyColorScalars(ctx, ids, scalars, colormap);
     case "size": return ctx.sizePointsEach(ids, scalars.map((t) => t * BIND_SIZE_MAX));
     case "opacity": return ctx.opacityPointsEach(ids, scalars);
     case "bondcolor": return ctx.colorEdgesEach(ids, rgbOf(scalars));
@@ -1585,11 +1599,11 @@ export function applyScalarsToAxis(
       const aFlat = new Array<number>(ids.length * 3);
       const bFlat = new Array<number>(ids.length * 3);
       for (let i = 0; i < ids.length; i++) {
-        const [ar, ag, ab] = rainbow.colormap(scalars[i * 2]);
+        const [ar, ag, ab] = colormap(scalars[i * 2]);
         aFlat[i * 3] = ar;
         aFlat[i * 3 + 1] = ag;
         aFlat[i * 3 + 2] = ab;
-        const [br, bg, bb] = rainbow.colormap(scalars[i * 2 + 1]);
+        const [br, bg, bb] = colormap(scalars[i * 2 + 1]);
         bFlat[i * 3] = br;
         bFlat[i * 3 + 1] = bg;
         bFlat[i * 3 + 2] = bb;
@@ -1605,20 +1619,102 @@ export function applyScalarsToAxis(
   }
 }
 
-/** The bake/bind SHARED argument front half: walk trailing words back to
- * front — [<min> <max>] when the last word is numeric, then <axis>, then
- * <channel>; the remainder is the target expression (which may itself
- * contain spaces). ONE parser for both verbs (resolveRepArgs' discipline:
- * shared shape, impossible drift). */
+/** The one OPTION name bake/bind accept, single-sourced for the parser, the
+ * refusal messages, and the completion pool. */
+export const PALETTE_OPTION = "palette";
+
+/**
+ * Split a bake/bind argument list into its POSITIONAL head and its trailing
+ * `?key=value` OPTION block, then resolve the one option there is.
+ *
+ * WHY THE `?` SIGIL. `?` is a RESERVED character in the address grammar
+ * (address.ts RESERVED — `token()` throws on it and `parseTarget` errors),
+ * so an unquoted `?` can never occur inside a target expression: the split
+ * point is collision-proof, which is exactly the property mod parameters
+ * (`<mod> <target> ?k=v`) already rely on. And because the option is NAMED,
+ * it cannot be confused with the optional trailing `<min> <max>` pair or
+ * misread as the `<axis>`/`<channel>` word — a BARE trailing palette name
+ * would be taken by the back-to-front word walk as the axis, reporting a
+ * baffling "no channel named color". Positional ambiguity is impossible
+ * here, not merely unlikely.
+ *
+ * FAIL-CLOSED, in the shape parseModParams uses: an empty segment, a segment
+ * without `=`, an unknown key, a repeated key, or an unregistered palette
+ * name is an error naming what was expected — never a silent default, since
+ * a silently-ignored palette means the user's chosen coloring quietly isn't
+ * what they asked for.
+ *
+ * Returns the head text plus the palette name, NORMALIZED: an explicitly
+ * named default resolves to `undefined` so "on the default" has one
+ * canonical representation (see Binding.palette).
+ */
+function splitPaletteOption(
+  verb: string,
+  args: string,
+): { head: string; palette: string | undefined } | CommandResult {
+  const segs = splitOnUnquoted(args, "?");
+  if (segs.length === 1) return { head: args, palette: undefined };
+  let palette: string | undefined;
+  let seen = false;
+  for (let i = 1; i < segs.length; i++) {
+    const seg = segs[i].trim();
+    if (seg === "") {
+      return { status: "error", message: `${verb}: empty option — the option is ?${PALETTE_OPTION}=<name>` };
+    }
+    const eq = seg.indexOf("=");
+    if (eq < 0) {
+      return { status: "error", message: `${verb}: option "${seg}" must be key=value — ?${PALETTE_OPTION}=<name>` };
+    }
+    const key = seg.slice(0, eq).trim();
+    const value = seg.slice(eq + 1).trim();
+    if (key !== PALETTE_OPTION) {
+      return {
+        status: "error",
+        message: `${verb}: unknown option "${key}" — the only option is ?${PALETTE_OPTION}=<name>`,
+      };
+    }
+    if (seen) {
+      return { status: "error", message: `${verb}: option "${key}" given twice` };
+    }
+    seen = true;
+    if (paletteIndex(value) < 0) {
+      return {
+        status: "error",
+        message: `unknown palette "${value}" — palettes: ${paletteNames().join(", ")}`,
+      };
+    }
+    // canonical: the default is stored as "no palette named"
+    palette = value === DEFAULT_PALETTE_NAME ? undefined : value;
+  }
+  return { head: segs[0], palette };
+}
+
+/** The bake/bind SHARED argument front half: strip the trailing `?option`
+ * block (splitPaletteOption — collision-proof at the reserved `?`), then
+ * walk trailing words back to front — [<min> <max>] when the last word is
+ * numeric, then <axis>, then <channel>; the remainder is the target
+ * expression (which may itself contain spaces). ONE parser for both verbs
+ * (resolveRepArgs' discipline: shared shape, impossible drift). */
 function parseChannelAxisArgs(
   verb: string,
   usage: string,
   args: string,
-): { expr: string; channel: string; axisWord: string; explicitRange: [number, number] | null } | CommandResult {
+):
+  | {
+      expr: string;
+      channel: string;
+      axisWord: string;
+      explicitRange: [number, number] | null;
+      palette: string | undefined;
+    }
+  | CommandResult {
   const needs: CommandResult = {
     status: "error",
     message: `${verb} needs a target, a channel, and an axis — ${usage}`,
   };
+  const opt = splitPaletteOption(verb, args);
+  if ("status" in opt) return opt;
+  args = opt.head;
   const w1 = splitTrailingWord(args);
   if (w1.word === null) return needs;
   let explicitRange: [number, number] | null = null;
@@ -1642,7 +1738,16 @@ function parseChannelAxisArgs(
   }
   const w4 = splitTrailingWord(rest);
   if (w4.word === null || w4.expr === "") return needs;
-  return { expr: w4.expr, channel: w4.word, axisWord, explicitRange };
+  // A palette is meaningless on an axis that does not map through one (size,
+  // opacity, dash, the vector axes): refuse it rather than accept-and-ignore.
+  // COLOR_AXES is the ONE list (channelmap.ts) every consumer reads.
+  if (opt.palette !== undefined && !(COLOR_AXES as readonly string[]).includes(axisWord)) {
+    return {
+      status: "error",
+      message: `a palette is meaningless on the ${axisWord} axis — ?${PALETTE_OPTION}= applies to the color axes only: ${COLOR_AXES.join(" | ")}`,
+    };
+  }
+  return { expr: w4.expr, channel: w4.word, axisWord, explicitRange, palette: opt.palette };
 }
 
 /** The bake/bind SHARED resolve half: declaration lookup (loud with the
@@ -1677,6 +1782,9 @@ function resolveChannelAxis(
       axis: ScalarAxis;
       expr: string;
       frame: number | null;
+      /** The named palette, or undefined for the default (canonical). Only a
+       * COLOR axis can carry one — the parser refuses it elsewhere. */
+      palette: string | undefined;
     }
   | {
       kind: "vector";
@@ -1802,6 +1910,7 @@ function resolveChannelAxis(
     axis,
     expr: p.expr,
     frame: inHand!.frame,
+    palette: p.palette,
   };
 }
 
@@ -1951,6 +2060,26 @@ export function makeStyleTraceHandler(ctx: CommandContext): CommandHandler {
   };
 }
 
+/** `palettes` — read-only listing of the palette registry (bare), the
+ * `styles`/`shapes` shape: registration order, index 0 marked as the default,
+ * one description line each. Reads the registry itself (paletteNames /
+ * listPalettes), so the verb, the completion pool and the resolver's refusal
+ * message cannot name different sets. */
+export function makePalettesHandler(): CommandHandler {
+  return (args: string): CommandResult => {
+    if (args.trim() !== "") {
+      return { status: "error", message: "palettes takes no arguments — it lists the palette registry" };
+    }
+    const rows = listPalettes().map(
+      (p, i) => `  ${p.name}${i === 0 ? " (default)" : ""} — ${p.description}`,
+    );
+    return {
+      status: "ok",
+      message: ["palettes (a bound color axis maps through one — bind … ?palette=<name>):", ...rows].join("\n"),
+    };
+  };
+}
+
 /** `styles` — read-only listing of the style registry (bare). */
 export function makeStylesHandler(ctx: CommandContext): CommandHandler {
   return (args: string): CommandResult => {
@@ -1975,7 +2104,7 @@ export function makeStylesHandler(ctx: CommandContext): CommandHandler {
  */
 export function makeBakeHandler(ctx: CommandContext): CommandHandler {
   const usage =
-    "bake <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondcolorends|bondsize|bondopacity|bonddash · polyline tracecolor|tracesize|traceopacity · orientation; e.g. bake all energy color 0 2.5)";
+    "bake <target> <channel> <axis> [<min> <max>] [?palette=<name>] (axes: point color|size|opacity · edge bondcolor|bondcolorends|bondsize|bondopacity|bonddash · polyline tracecolor|tracesize|traceopacity · orientation; e.g. bake all energy color 0 2.5)";
   return (args: string): CommandResult => {
     const r = resolveChannelAxis(ctx, "bake", usage, args);
     if ("status" in r) return r;
@@ -1997,14 +2126,14 @@ export function makeBakeHandler(ctx: CommandContext): CommandHandler {
         message: `baked "${r.channel}" → orientation on ${n} vertices of "${r.expr}" (${at}, raw vectors) — stored; drawn by the oriented shapes`,
       };
     }
-    const n = applyScalarsToAxis(ctx, r.axis, r.ids, r.scalars);
+    const n = applyScalarsToAxis(ctx, r.axis, r.ids, r.scalars, r.palette);
     const at = r.frame === null ? "static" : `frame ${r.frame}`;
     const rule = r.domain === "edge"
       ? (r.axis === "bondcolorends" ? ", per endpoint" : ", endpoint mean")
       : "";
     return {
       status: "ok",
-      message: `baked "${r.channel}" → ${r.axis} on ${n} ${domainNoun(r.domain)} of "${r.expr}" (${at}, range ${r.range[0]}..${r.range[1]}${rule})`,
+      message: `baked "${r.channel}" → ${r.axis} on ${n} ${domainNoun(r.domain)} of "${r.expr}" (${at}, range ${r.range[0]}..${r.range[1]}${rule}${paletteNote(r.palette)})`,
     };
   };
 }
@@ -2024,7 +2153,7 @@ export function makeBakeHandler(ctx: CommandContext): CommandHandler {
  */
 export function makeBindHandler(ctx: CommandContext): CommandHandler {
   const usage =
-    "bind <target> <channel> <axis> [<min> <max>] (axes: point color|size|opacity · edge bondcolor|bondcolorends|bondsize|bondopacity|bonddash · polyline tracecolor|tracesize|traceopacity · orientation · offset; e.g. bind all energy color 0 2.5)";
+    "bind <target> <channel> <axis> [<min> <max>] [?palette=<name>] (axes: point color|size|opacity · edge bondcolor|bondcolorends|bondsize|bondopacity|bonddash · polyline tracecolor|tracesize|traceopacity · orientation · offset; e.g. bind all energy color 0 2.5 ?palette=bluewhitered)";
   return (args: string): CommandResult => {
     const r = resolveChannelAxis(ctx, "bind", usage, args);
     if ("status" in r) return r;
@@ -2056,7 +2185,17 @@ export function makeBindHandler(ctx: CommandContext): CommandHandler {
       };
     }
     const released = ctx.createBinding(
-      { channel: r.channel, axis: r.axis, points: r.ids, expr: r.expr, range: r.range },
+      {
+        channel: r.channel,
+        axis: r.axis,
+        points: r.ids,
+        expr: r.expr,
+        range: r.range,
+        // canonical: present only for a NON-default palette (the resolver
+        // normalized an explicit default away), so a default binding's
+        // registry entry is byte-identical to before palettes existed
+        ...(r.palette === undefined ? {} : { palette: r.palette }),
+      },
       r.scalars,
     );
     const took =
@@ -2070,9 +2209,17 @@ export function makeBindHandler(ctx: CommandContext): CommandHandler {
       status: "ok",
       message:
         `bound "${r.channel}" → ${r.axis} on ${r.ids.length} ${domainNoun(r.domain)} of "${r.expr}" ` +
-        `(applied at ${at}, range ${r.range[0]}..${r.range[1]}${rule})${took} — live: re-derives as the displayed frame changes`,
+        `(applied at ${at}, range ${r.range[0]}..${r.range[1]}${rule}${paletteNote(r.palette)})${took} — live: re-derives as the displayed frame changes`,
     };
   };
+}
+
+/** The one place a palette is worded for a message or a listing row: silent
+ * on the default (nothing to say — the state is the absence of a choice),
+ * explicit otherwise. Single-sourced so bake, bind and `bindings` cannot
+ * describe the same state two ways. */
+function paletteNote(palette: string | undefined): string {
+  return palette === undefined ? "" : `, palette ${palette}`;
 }
 
 /** `unbind <target> [<axis>]` / `unbind all [<axis>]` — release binding
@@ -2191,7 +2338,13 @@ export function makeBindingsHandler(ctx: CommandContext): CommandHandler {
             ? "vertices · raw vectors"
             : b.axis === OFFSET_AXIS
               ? "points · raw vectors"
-              : `${domainNoun(AXIS_DOMAIN[b.axis])} · range ${b.range![0]}..${b.range![1]}${b.axis === "bondcolorends" ? " · per endpoint" : AXIS_DOMAIN[b.axis] === "edge" ? " · endpoint mean" : ""}`
+              : `${domainNoun(AXIS_DOMAIN[b.axis])} · range ${b.range![0]}..${b.range![1]}${b.axis === "bondcolorends" ? " · per endpoint" : AXIS_DOMAIN[b.axis] === "edge" ? " · endpoint mean" : ""}${
+              // the palette, whenever it is NOT the default — otherwise the
+              // chosen coloring would be invisible state (b.palette is
+              // canonical: undefined ⟺ default, so this shows exactly the
+              // non-default ones)
+              b.palette === undefined ? "" : ` · palette ${b.palette}`
+            }`
         }`,
     );
     return {
@@ -2841,11 +2994,12 @@ export const HELP_TEXT = [
   "  rainbow <expr>              color those points an even hue ramp in",
   "               resolution order (the first recipe: per-point values,",
   "               not one constant; one undo stroke)",
-  "  bake <expr> <channel> <axis> [<min> <max>]   write a scalar data",
-  "               channel (at the displayed frame) onto color|size|opacity,",
-  "               normalized over min..max (declared on the channel, or",
-  "               explicit when the declaration is partial; one undo stroke)",
-  "  bind <expr> <channel> <axis> [<min> <max>]   register a channel→axis",
+  "  bake <expr> <channel> <axis> [<min> <max>] [?palette=<name>]   write a",
+  "               scalar data channel (at the displayed frame) onto",
+  "               color|size|opacity, normalized over min..max (declared on",
+  "               the channel, or explicit when the declaration is partial;",
+  "               one undo stroke)",
+  "  bind <expr> <channel> <axis> [<min> <max>] [?palette=<name>]   register a channel→axis",
   "               binding (same gate as bake): the axis RE-DERIVES from the",
   "               channel on every frame flip; last-bind-wins per element",
   "               WITHIN an axis, axes coexist; one undo stroke;",
@@ -2862,7 +3016,11 @@ export const HELP_TEXT = [
   "               ribbon; unbound orientation = collapsed, nothing draws);",
   "               axis `offset` takes a VECTOR channel, raw, onto POINTS —",
   "               it DISPLACES the drawn positions (shown = raw + offset;",
-  "               bind-only: bake refuses it)",
+  "               bind-only: bake refuses it);",
+  "               a COLOR axis (color|bondcolor|bondcolorends|tracecolor) may",
+  "               name the ramp its values map through — ?palette=<name>,",
+  "               default rainbow; refused on the non-color axes",
+  "  palettes     list the palette registry (read-only)",
   "  unbind <expr>|all [<axis>]  release binding coverage element-wise,",
   "               one axis or all (values stay as last applied — except",
   "               offset, which is zeroed: positions return to raw)",
@@ -3022,12 +3180,12 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registry.register(
     "bake",
     makeBakeHandler(ctx),
-    "write a declared scalar channel's values (at the displayed frame) onto a point axis, normalized over min..max (declared, or explicit when the declaration is partial; one undo stroke): bake <target> <channel> <axis> [<min> <max>]",
+    "write a declared scalar channel's values (at the displayed frame) onto a point axis, normalized over min..max (declared, or explicit when the declaration is partial; one undo stroke); a COLOR axis may name the ramp it maps through (`?palette=<name>`, see `palettes`): bake <target> <channel> <axis> [<min> <max>] [?palette=<name>]",
   );
   registry.register(
     "bind",
     makeBindHandler(ctx),
-    "register a channel→axis binding over the target (same gate/range as bake): the axis re-derives from the channel on every frame flip; last-bind-wins per element within an axis; one undo stroke; axis `offset` (vector, bind-only) displaces the drawn positions: bind <target> <channel> <axis> [<min> <max>]",
+    "register a channel→axis binding over the target (same gate/range as bake): the axis re-derives from the channel on every frame flip; last-bind-wins per element within an axis; one undo stroke; axis `offset` (vector, bind-only) displaces the drawn positions; a COLOR axis may name the ramp it maps through (`?palette=<name>`, see `palettes`; default is rainbow): bind <target> <channel> <axis> [<min> <max>] [?palette=<name>]",
   );
   registry.register(
     "unbind",
@@ -3042,7 +3200,12 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registry.register(
     "bindings",
     makeBindingsHandler(ctx),
-    "read-only list of the channel bindings — channel → axis on target, points, range (bare — takes no target)",
+    "read-only list of the channel bindings — channel → axis on target, points, range, and the palette when it is not the default (bare — takes no target)",
+  );
+  registry.register(
+    "palettes",
+    makePalettesHandler(),
+    "read-only listing of the palette registry — the scalar→color ramps a bound color axis can map through (bare — takes no target; index 0 is the default)",
   );
   registry.register(
     "stylepoints",
@@ -3459,6 +3622,46 @@ function colorSlot(): WordSlot {
   return { pool: () => [...CSS_COLORS.keys()], kind: "value" };
 }
 
+/**
+ * bake/bind's trailing `?option=value` block — completeModInvocation's exact
+ * shape over a FIXED one-option schema, split at the SAME collision-proof
+ * boundary the parser uses (splitOnUnquoted at the reserved `?`), so
+ * completion and invocation can never disagree about where the positional
+ * arguments end. No unquoted `?` before the cursor → the positional
+ * completer runs unchanged.
+ *   no `=` yet → the option NAME (`palette`), unique match appends `=`;
+ *   after `=` → the REGISTERED palette names, live from the registry (an
+ *     empty value completes the whole pool — completeToken's startsWith("")).
+ * Settling is completeToken's — never a second settle path.
+ */
+function completeChannelAxisOptions(
+  argsStart: number,
+  argsHead: string,
+  positional: () => Completion,
+): Completion {
+  const segs = splitOnUnquoted(argsHead, "?");
+  if (segs.length === 1) return positional();
+  const seg = segs[segs.length - 1];
+  const segStart = argsStart + (argsHead.length - seg.length);
+  const none: Completion = { start: argsStart + argsHead.length, candidates: [], applied: "" };
+  const eq = seg.indexOf("=");
+  if (eq < 0) {
+    const lead = seg.length - seg.trimStart().length;
+    const token = seg.slice(lead);
+    if (/[\s"]/.test(token)) return none; // an option name never holds spaces/quotes
+    return completeToken(segStart + lead, token, [PALETTE_OPTION], {
+      uniqueSuffix: "=",
+      kind: "param",
+    });
+  }
+  if (seg.slice(0, eq).trim() !== PALETTE_OPTION) return none;
+  const value = seg.slice(eq + 1);
+  const lead = value.length - value.trimStart().length;
+  return completeToken(segStart + eq + 1 + lead, value.slice(lead), paletteNames(), {
+    kind: "value",
+  });
+}
+
 /** The style slot the style verbs share: the registered style names. */
 function styleSlot(ctx: CommandContext): WordSlot {
   return { pool: () => ctx.styleNames(), kind: "value" };
@@ -3607,15 +3810,21 @@ export function completeCommand(
   // the built-in verbs with enumerable non-target slots
   switch (verb) {
     case "bake":
-      return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [
-        channelSlot(ctx),
-        axisSlot(false), // bake refuses offset — the pool says so
-      ]);
+      // the `?palette=` block first (it can only be trailing); with no
+      // unquoted `?` typed, the positional slots complete exactly as before
+      return completeChannelAxisOptions(argsStart, argsHead, () =>
+        completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [
+          channelSlot(ctx),
+          axisSlot(false), // bake refuses offset — the pool says so
+        ]),
+      );
     case "bind":
-      return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [
-        channelSlot(ctx),
-        axisSlot(true),
-      ]);
+      return completeChannelAxisOptions(argsStart, argsHead, () =>
+        completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [
+          channelSlot(ctx),
+          axisSlot(true),
+        ]),
+      );
     case "unbind":
       return completeSlotsAfterTarget(argsStart, argsHead, targetSlot, [axisSlot(true)]);
     case "add":

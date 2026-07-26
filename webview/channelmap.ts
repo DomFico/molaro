@@ -46,6 +46,16 @@ export const EDGE_AXES = ["bondcolor", "bondcolorends", "bondsize", "bondopacity
 export const TRACE_AXES = ["tracecolor", "tracesize", "traceopacity"] as const;
 export const SCALAR_AXES = [...BIND_AXES, ...EDGE_AXES, ...TRACE_AXES] as const;
 export type ScalarAxis = (typeof SCALAR_AXES)[number];
+/** The COLOR axes: the scalar axes whose [0,1] value maps through a PALETTE
+ * (palettes.ts) instead of a fixed visual range. Every other scalar axis
+ * turns its value into a number (size/dash scale) or uses it as-is
+ * (opacity), so a palette is meaningless there and `?palette=` is refused on
+ * them. Membership here is the ONE list — the palette-carrying axes for the
+ * grammar, the listing, and the per-flip applier alike; `bindings.test.ts`
+ * derives the same set by running a spy palette through every axis, so a
+ * new color axis that forgot to join this list fails that test. */
+export const COLOR_AXES = ["color", "bondcolor", "bondcolorends", "tracecolor"] as const;
+export type ColorAxis = (typeof COLOR_AXES)[number];
 /** The first vector axis: a 3-wide channel consumed RAW (no range, no
  * normalization — the A-1 ruling made min/max on 3-wide a contract
  * violation). Per-vertex "across" vectors; the oriented shapes draw it. */

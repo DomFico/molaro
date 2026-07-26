@@ -44,6 +44,14 @@ export interface Binding {
   /** Normalization range frozen at bind time — null for the orientation
    * axis (vectors are consumed raw; a range is a category error there). */
   range: [number, number] | null;
+  /** Which registered palette (palettes.ts) this binding's scalars map
+   * through — COLOR AXES ONLY (COLOR_AXES; the grammar refuses `?palette=`
+   * elsewhere). CANONICAL FORM: `undefined` ⟺ the default palette. The
+   * resolver normalizes an explicitly-named default away, so "on the
+   * default" has exactly one representation — which is why a default
+   * binding's snapshot/restore, its `bindings` row, and its save_rep replay
+   * are all byte-identical to before palettes existed. */
+  palette?: string;
 }
 
 export interface ReleaseStats {

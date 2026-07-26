@@ -56,7 +56,8 @@ import { AXIS_DOMAIN, BIND_DASH_MAX, BIND_SIZE_MAX, mapScalar, OFFSET_AXIS, ORIE
 import { bindTypedResult } from "./claudebind.ts";
 import { PLOT_RESULT_KINDS } from "./claudemodel.ts";
 import { parseTypedResult } from "./claudemodel.ts";
-import { getRecipe, listRecipes, rainbow, registerRecipe, resolveChannelDependency, resolveEdgeGroup, resolveParameters, unregisterRecipe, validateModValues, type AnalysisMod, type ParamValue } from "./recipes.ts";
+import { colormapFor, unknownPaletteHitCount } from "./palettes.ts";
+import { getRecipe, listRecipes, registerRecipe, resolveChannelDependency, resolveEdgeGroup, resolveParameters, unregisterRecipe, validateModValues, type AnalysisMod, type ParamValue } from "./recipes.ts";
 import {
   installModList,
   isFileAlreadyGone,
@@ -2681,6 +2682,15 @@ async function main(): Promise<void> {
   // — forcing the missing-block behavior to be RULED, not silently inherited
   // as a stale hold. (redesign S-seam asserts debug.missingBoundBlockHits===0.)
   let missingBoundBlockHits = 0;
+  // THE HOT-LOOP INSTRUMENT: how many times the applier resolved a palette.
+  // The re-derive runs over every bound element, so "resolve once per
+  // BINDING, not once per element" is the whole performance requirement of
+  // the palette change — and it is a COUNTABLE claim, not a code-reading
+  // one. Incremented beside each colormapFor call, both of which sit
+  // lexically outside their element loops, so after one frame step this
+  // grows by exactly the number of bound COLOR axes regardless of how many
+  // points they cover. (redesign S65 measures the delta.)
+  let paletteResolutions = 0;
   /** ONE applier, TWO cadence PHASES around the flip copy — the preamble
    * (unbound early-return, static-channel skip, block lookup, the
    * missing-block instrumentation) stays single-sourced across both:
@@ -2760,15 +2770,22 @@ async function main(): Promise<void> {
         const cA = rep.state.edgeColorA;
         const cB = rep.state.edgeColorB;
         const ends = b.axis === "bondcolorends";
+        // The palette resolves ONCE PER BINDING PER FLIP — lexically outside
+        // the element loop, so the per-element cost is the one colormap call
+        // it always was (debug.paletteResolutions counts these; an E2E steps
+        // one frame and asserts the delta is 1 per bound color axis, which is
+        // what a per-element resolve could not produce).
+        const colormap = colormapFor(b.palette);
+        paletteResolutions++;
         for (const e of b.points) {
           const [ea, eb] = header.edges[e];
           const tA = ends ? mapScalar(block[off + ea], lo, hi) : t(e);
           const tB = ends ? mapScalar(block[off + eb], lo, hi) : t(e);
-          const [rA, gA, blA] = rainbow.colormap(tA);
+          const [rA, gA, blA] = colormap(tA);
           cA[e * 3] = rA;
           cA[e * 3 + 1] = gA;
           cA[e * 3 + 2] = blA;
-          const [rB, gB, blB] = rainbow.colormap(tB);
+          const [rB, gB, blB] = colormap(tB);
           cB[e * 3] = rB;
           cB[e * 3 + 1] = gB;
           cB[e * 3 + 2] = blB;
@@ -2780,8 +2797,11 @@ async function main(): Promise<void> {
       switch (b.axis) {
         case "color": case "tracecolor": {
           const buf = b.axis === "color" ? rep.state.color : rep.state.traceColor;
+          // ONCE per binding per flip — see the edge-color arm above.
+          const colormap = colormapFor(b.palette);
+          paletteResolutions++;
           for (const id of b.points) {
-            const [r, g, bl] = rainbow.colormap(t(id));
+            const [r, g, bl] = colormap(t(id));
             buf[id * 3] = r;
             buf[id * 3 + 1] = g;
             buf[id * 3 + 2] = bl;
@@ -3564,7 +3584,10 @@ async function main(): Promise<void> {
       model.beginStroke();
       if (b.axis === ORIENTATION_AXIS) orientationVerticesEach(b.points, values);
       else if (b.axis === OFFSET_AXIS) offsetPointsEach(b.points, values);
-      else applyScalarsToAxis(commandContext, b.axis, b.points, values);
+      // the palette rides the Binding, so the INITIAL write and every later
+      // per-flip re-derive map through the same ramp (a bind whose first
+      // frame differed from the rest would be the worst of both looks)
+      else applyScalarsToAxis(commandContext, b.axis, b.points, values, b.palette);
       const snap = bindingRegistry.snapshot();
       bindingRegistry.add(b);
       const after = bindingRegistry.snapshot();
@@ -4598,6 +4621,16 @@ async function main(): Promise<void> {
          * a non-zero value means a stale-hold path became reachable and its
          * behavior must be ruled. */
         missingBoundBlockHits: (): number => missingBoundBlockHits,
+        /** Palette resolutions in the per-flip applier — one per bound COLOR
+         * axis per flip. The hot-loop guarantee: this must NOT scale with the
+         * number of bound points. */
+        paletteResolutions: (): number => paletteResolutions,
+        /** Times the applier was handed a palette name no registered palette
+         * carries — asserted unreachable (the grammar refuses an unknown name
+         * before a binding exists). A test pins this at 0; non-zero means an
+         * unvalidated name reached the hot path and silently drew the
+         * default. */
+        unknownPaletteHits: (): number => unknownPaletteHitCount(),
         /** project point `idx` (current frame) to client px — for E2E clicks.
          * `depth` = camera-space view depth (positive in front), so pixel
          * tests can reason about impostor sizes and occlusion order. */

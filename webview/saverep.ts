@@ -263,7 +263,12 @@ export function serializeRepCommands(snap: RepSnapshot): SerializeResult {
     const target = formatPointIndices(b.points);
     if (target === "") continue; // an empty binding (should not occur) emits nothing
     const range = b.range ? ` ${b.range[0]} ${b.range[1]}` : "";
-    commands.push(`bind ${target} ${b.channel} ${b.axis}${range}`);
+    // The palette must ride the replay or the saved look silently reverts to
+    // the default ramp. `undefined` ⟺ the default (Binding.palette is
+    // canonical), so a default binding emits the byte-identical line it did
+    // before palettes existed.
+    const palette = b.palette === undefined ? "" : ` ?palette=${b.palette}`;
+    commands.push(`bind ${target} ${b.channel} ${b.axis}${range}${palette}`);
   }
 
   // --- deferred per-element edge/trace attributes ---------------------------
