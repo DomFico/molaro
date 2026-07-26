@@ -52,15 +52,16 @@ point types `anchor` and `t0`–`t3`).
 | `bondopacityof <expr> <a>` | Alpha for edges **touching** the target (either endpoint — the incident reach) | `bondopacityof #124 0.3` |
 | `traceopacity <expr> <a>` | Alpha for polyline vertices whose **subgroup** contains a resolved point | `traceopacity alpha 0.7` |
 | `rainbow <expr>` | Color those points an even hue ramp in resolution order (the first **recipe**: per-point values, not one constant; one undo stroke) | `rainbow alpha.group-0` |
-| `bake <expr> <channel> <axis> [<min> <max>]` | Write a declared data channel (at the displayed frame) onto a representation axis — scalar channel → point `color`/`size`/`opacity`, edge `bondcolor`/`bondsize`/`bondopacity`/`bonddash` (**endpoint mean**, contained edges) and `bondcolorends` (**per-endpoint** color: each half of the edge reads its **own** endpoint — no mean), polyline `tracecolor`/`tracesize`/`traceopacity` (each vertex reads **its** point), normalized over min..max; **vector (3-wide) channel → `orientation`, raw** (one undo stroke) | `bake all energy color 0 2.5` |
-| `bind <expr> <channel> <axis> [<min> <max>]` | Register a **channel→axis binding** (same gate as `bake`): the axis **re-derives from the channel on every frame flip**; last-bind-wins per element within an axis; one undo stroke. Vector channel → `orientation` (raw; **drives the oriented shapes — the ribbon `shape traces ribbon` renders it**) or `offset` (raw, on **points**; **displaces the drawn positions — shown = raw + offset**; bind-only, `bake` refuses it) | `bind all energy color 0 2.5` |
+| `bake <expr> <channel> <axis> [<min> <max>] [?palette=<name>]` | Write a declared data channel (at the displayed frame) onto a representation axis — scalar channel → point `color`/`size`/`opacity`, edge `bondcolor`/`bondsize`/`bondopacity`/`bonddash` (**endpoint mean**, contained edges) and `bondcolorends` (**per-endpoint** color: each half of the edge reads its **own** endpoint — no mean), polyline `tracecolor`/`tracesize`/`traceopacity` (each vertex reads **its** point), normalized over min..max; a **color** axis may name the **palette** its values map through (trailing `?palette=<name>`, default `rainbow`; see `palettes`); **vector (3-wide) channel → `orientation`, raw** (one undo stroke) | `bake all energy color 0 2.5` |
+| `bind <expr> <channel> <axis> [<min> <max>] [?palette=<name>]` | Register a **channel→axis binding** (same gate as `bake`, same trailing `?palette=<name>` on a color axis): the axis **re-derives from the channel on every frame flip**; last-bind-wins per element within an axis; one undo stroke. Vector channel → `orientation` (raw; **drives the oriented shapes — the ribbon `shape traces ribbon` renders it**) or `offset` (raw, on **points**; **displaces the drawn positions — shown = raw + offset**; bind-only, `bake` refuses it) | `bind all energy color 0 2.5 ?palette=bluewhitered` |
 | `unbind <expr> [<axis>]` / `unbind all [<axis>]` | Release binding **coverage element-wise**, one axis or all (values stay as last applied — except `offset`, which is **zeroed**: positions return to raw; one undo op) | `unbind alpha color` |
 | `channels` | Read-only list of the **declared channels** — the bindable vocabulary `bake`/`bind` read, per-frame vs static, which are bound (bare — takes no target). A `produces: channel` mod's channel appears here the instant it declares | `channels` |
-| `bindings` | Read-only list of the channel bindings (bare — takes no target) | `bindings` |
+| `bindings` | Read-only list of the channel bindings — channel → axis on target, element count, range, and the **palette** on any binding that is not on the default (bare — takes no target) | `bindings` |
 | `stylepoints` / `stylebonds` / `styletrace` `<expr> <style>` | Select a registered **shading style** per target (per-element style index; `standard` is the default look, byte-identical; `stylebonds` = contained edges, `styletrace` = subgroup map-up; one undo stroke) | `stylepoints alpha matte` |
 | `styles` | Read-only listing of the style registry (bare; index 0 = default) | `styles` |
 | `shape <points\|bonds\|traces> <name>` | Draw a whole **domain** as a named registered shape (scene-level — per-target assignment is a parked chapter; one undo op) | `shape traces tube` |
 | `shapes` | Read-only listing of the shape registry per domain (bare) | `shapes` |
+| `palettes` | Read-only listing of the **palette registry** — the scalar→color ramps a bound color axis maps through, one description line each (bare; index 0 = default) | `palettes` |
 | `background <color>` | Set the **scene background** (CSS name or `#hex`; **targetless** — scene state, not per-element, so no target and no `all`; session-only; one undo op; repeating the current color records no hollow undo entry) | `background navy` |
 
 **The ribbon** (`shape traces ribbon`) is the first ORIENTED shape: a flat
@@ -551,16 +552,28 @@ bake @selection_1 energy opacity 0 1
 channel's per-element values **at the displayed frame** (`per_point`
 channels are static — their header block is the value source at every
 frame), normalizes them into `[0,1]` over a range, and writes the target's
-points on one axis — `color` through the built-in hue ramp, `size` over the
-fixed `0..6` visual range, `opacity` as-is. It is a **plain recorded
-write**, indistinguishable from a hand-typed rep verb: one undo stroke,
-last-write-wins, nothing persists past it — scrubbing to another frame does
-NOT re-derive (a *live* per-flip binding is separate, future work).
+points on one axis — `color` through a **palette** (the built-in hue sweep
+unless one is named), `size` over the fixed `0..6` visual range, `opacity`
+as-is. It is a **plain recorded write**, indistinguishable from a hand-typed
+rep verb: one undo stroke, last-write-wins, nothing persists past it —
+scrubbing to another frame does NOT re-derive (a *live* per-flip binding is
+separate: `bind`, below).
 
 - The **range**: the channel's declared `min`/`max` when both are present;
   otherwise the explicit trailing pair is required (`bake … <min> <max>`,
   which also *overrides* a full declaration). Values outside the range
   saturate at 0/1 — the range is a lens, not a validity bound.
+- The **palette**: a trailing `?palette=<name>` names which scalar→color
+  ramp a **color** axis maps its `[0,1]` values through — `rainbow` (the
+  built-in hue sweep, red at the low end → magenta at the high end; the
+  default), `bluewhitered` (diverging: blue → white → red, high end red) or
+  `gray` (sequential, perceptually uniform black → white). `palettes` lists
+  the registry. The option comes **last**, after any `<min> <max>`, and a
+  palette name is **one word**. It applies to the four **color** axes only
+  (`color`, `bondcolor`, `bondcolorends`, `tracecolor`) — on any other axis
+  it is **refused**, not accepted and ignored, as is an unregistered name
+  (the message lists the registered ones). Naming the default explicitly
+  (`?palette=rainbow`) is exactly the same as naming none.
 - The **gate** fails loudly and writes nothing: unknown channel or axis,
   a `per_frame` channel (a series, not per-element), a vector channel
   (`components: 3` — scalar axes need 1-wide), a missing or empty range,
@@ -568,8 +581,8 @@ NOT re-derive (a *live* per-flip binding is separate, future work).
 
 ### Bindings: `bind` / `unbind` / `bindings` — the live channel link
 
-`bind <target> <channel> <axis> [<min> <max>]` registers a **binding** —
-the durable statement "this channel drives this axis over these points" —
+`bind <target> <channel> <axis> [<min> <max>] [?palette=<name>]` registers a
+**binding** — the durable statement "this channel drives this axis over these points" —
 through the exact gate and normalization `bake` uses, applies the current
 frame's values in the same single undo stroke (one Ctrl+Z removes the
 binding *and* restores prior values), and from then on **re-derives the
@@ -592,14 +605,24 @@ listed by `bindings` and counted in the status-line badge.
   the write lands, those elements stop being channel-driven, and one
   Ctrl+Z restores both the values and the coverage. The last explicit
   action wins, visibly, element by element.
-- **The orientation axis — a vector channel, stored only (for now)**:
+- **The palette rides the binding**: a color-axis bind stores the palette it
+  was given, so **every per-flip re-derive** maps through that ramp — not
+  just the bind-time write. That is the whole point of the option: before
+  it, a bound color axis was stuck on the one built-in hue sweep, so an
+  *animated* coloring could never match the palette its static twin used.
+  `bindings` reports the palette on any binding that is not on the default,
+  and `save_rep` emits `?palette=` on the `bind` lines it writes, so a
+  replayed rep does not silently revert to the default ramp.
+- **The orientation axis — a vector channel the oriented shapes draw**:
   `bind <target> <vector-channel> orientation` binds a **3-wide** channel to
   the per-vertex **orientation** buffer on the polyline domain, raw (no
   range — a min/max there is a category error and refuses). It re-derives on
-  flip and undoes like any axis, but **nothing draws it yet** — no shape
-  reads orientation, so the effect is invisible; every message and the
-  `bindings` row say so. A scalar channel on `orientation`, or a vector
-  channel on a scalar axis, both refuse loudly by width.
+  flip and undoes like any axis, and the **ribbon** shape reads it
+  (`shape traces ribbon` — see above): with orientation unbound there is no
+  defined plane, so every segment collapses and nothing draws, and the shape
+  verb warns when you enable a shape whose required axis has no binding. A
+  scalar channel on `orientation`, or a vector channel on a scalar axis,
+  both refuse loudly by width.
 - **The offset axis — a vector channel that displaces the picture**:
   `bind <target> <vector-channel> offset` binds a **3-wide** channel to the
   per-**point** offset buffer, raw (no range — same category error as
