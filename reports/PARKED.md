@@ -98,3 +98,32 @@ substrate chapter, which extends this exact code).
   axis, so displacing the OTHER color axis's binding under-reports the element count in
   the advisory message (coverage IS released; message-only). **Lean:** count both color
   axes' coverage in the takeover advisory when the written axis shares the A/B buffer.
+
+## P6 — a PUBLIC accessor for the topology path, or better, B-factor/occupancy as a header channel
+**Surfaced 2026-07-26 by the cartoon `?colorby` work.** mdtraj 1.11.1 **discards the B-factor
+and occupancy columns entirely** — verified: no attribute on `Atom`, nothing on
+`PDBTrajectoryFile`, and the producer carries neither. So three of cartoon's colour schemes
+(`bfactor`, `plddt`, `occupancy`) re-read the ORIGINAL topology file and parse the column
+themselves, reaching it through **`getattr(data, "_topology_path", None)` — a PRIVATE attribute
+of the producer source**. It is guarded and fails closed, but it is a mod depending on an
+underscore.
+
+**Two ways to fix it, and the second is better.**
+1. *Cheap:* give the source a public accessor (`data.topology_path()`), so the dependency is
+   sanctioned rather than tolerated. Does not help any other consumer.
+2. *Right:* carry per-atom **B-factor and occupancy in the header as static per-point channels**
+   when the topology format supplies them. Then `bake`/`bind` reach them for free, every mod and
+   the assistant can use them without parsing anything, and the producer — which already owns
+   the file — does the reading once instead of each mod doing it again. This is the same shape as
+   the per-point `type` channel that already exists.
+
+**Why it is not urgent:** the guarded private access works, and the schemes refuse honestly where
+the data is absent (adk's column is all `0.00` because it is PSF-derived).
+**What makes it worth doing:** the parsing is genuinely fiddly and every mod that wants these
+values must currently repeat it. Measured traps a second implementer would re-discover:
+mdtraj **rewrites atom names on load** (`OH2`→`O` **47,829×** on the membrane, `HN`→`H`, `HB1`→`HB3`;
+even adk has 6) and **reassigns chain letters in mmCIF** (184 of 5DZT's rows, 58 of 1b0c's), so
+name- and chain-keyed mapping both break — **`resSeq` + element are the keys that hold.** And
+`B = 0.00` must be read as *unset*, not as the coldest atom, or a structure whose column is
+mostly blank paints a false gradient (on the membrane only 8 of 1472 drawn residues carry a
+value, and 3140 of the non-zero atoms are waters).
