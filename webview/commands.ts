@@ -1714,8 +1714,9 @@ function parseChannelAxisArgs(
   };
   const opt = splitPaletteOption(verb, args);
   if ("status" in opt) return opt;
-  args = opt.head;
-  const w1 = splitTrailingWord(args);
+  // everything below walks the POSITIONAL head only — with no option block
+  // typed, `head === args` and the walk is the pre-palette walk verbatim
+  const w1 = splitTrailingWord(opt.head);
   if (w1.word === null) return needs;
   let explicitRange: [number, number] | null = null;
   let axisWord: string;

@@ -51,11 +51,13 @@ export type ScalarAxis = (typeof SCALAR_AXES)[number];
  * turns its value into a number (size/dash scale) or uses it as-is
  * (opacity), so a palette is meaningless there and `?palette=` is refused on
  * them. Membership here is the ONE list — the palette-carrying axes for the
- * grammar, the listing, and the per-flip applier alike; `bindings.test.ts`
- * derives the same set by running a spy palette through every axis, so a
- * new color axis that forgot to join this list fails that test. */
+ * grammar, the listing, and the per-flip applier alike. `commands.test.ts`
+ * DERIVES the same set independently (it runs every scalar axis through the
+ * shared apply twice, under two different palettes, and collects the ones
+ * whose written values change), so a new color axis that forgot to join this
+ * list fails that test, and so would a listed axis that ignored its
+ * palette. */
 export const COLOR_AXES = ["color", "bondcolor", "bondcolorends", "tracecolor"] as const;
-export type ColorAxis = (typeof COLOR_AXES)[number];
 /** The first vector axis: a 3-wide channel consumed RAW (no range, no
  * normalization — the A-1 ruling made min/max on 3-wide a contract
  * violation). Per-vertex "across" vectors; the oriented shapes draw it. */
