@@ -4027,153 +4027,68 @@ async function S20(): Promise<void> {
   });
 }
 
-async function S21(): Promise<void> {
-  console.log("S21 — rainbow: the first recipe (per-element values through the recipe registry)");
-  await withDriver(async (d) => {
-    await seedSolvent(d); // the @solvent the pixel proof hides to clear the bulk
-    const cmd = (text: string) =>
-      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
-    const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
-    const snap = (slot: string) =>
-      d.evaluate(`void (window.${slot} = Float32Array.from(${V}.rep.state.color))`);
-    const buffersEqual = (slot: string) =>
-      d.evaluate<boolean>(`(()=>{
-        const c=${V}.rep.state.color, s=window.${slot};
-        if (c.length !== s.length) return false;
-        for (let i=0;i<c.length;i++) if (c[i]!==s[i]) return false;
-        return true;
-      })()`);
-
-    await snap("__pristine");
-    const baseDepth = await undoDepth();
-
-    // -- (a) resolution parity + the recipe distinction: values VARY per element
-    const r1 = await cmd("rainbow alpha");
-    const audit = await d.evaluate<{
-      changed: number; match: boolean; first: number[]; last: number[]; mid: number[];
-    }>(`(()=>{
-      const v=${V}; const c=v.rep.state.color; const s=window.__pristine;
-      const changed=[];
-      for (let p=0;p<c.length/3;p++) {
-        if (c[3*p]!==s[3*p]||c[3*p+1]!==s[3*p+1]||c[3*p+2]!==s[3*p+2]) changed.push(p);
-      }
-      // resolvePoints runs the handler's exact union loop — same ORDER, so the
-      // ramp's ends are its first/last elements
-      const pts=v.debug.resolvePoints("alpha");
-      const sorted=[...new Set(pts)].sort((a,b)=>a-b);
-      const rgb=(p)=>[c[3*p],c[3*p+1],c[3*p+2]];
-      return { changed: changed.length,
-               match: changed.length===sorted.length && changed.every((p,i)=>p===sorted[i]),
-               first: rgb(pts[0]), last: rgb(pts[pts.length-1]),
-               mid: rgb(pts[Math.floor(pts.length/2)]) };
-    })()`);
-    check("S21: rainbow alpha — writes EXACTLY the set view resolves",
-      r1.status === "ok" && audit.match && audit.changed === 400,
-      `${JSON.stringify(r1)} changed=${audit.changed}`);
-    check("S21: ...message reports the action and count, colorpoints' shape",
-      r1.message === `colored ${audit.changed} points rainbow`, r1.message);
-    check("S21: ...as exactly ONE undo stroke", (await undoDepth()) === baseDepth + 1);
-    check("S21: the ramp's t=0 end is hue 0 (red)",
-      audit.first[0] === 1 && audit.first[1] === 0 && audit.first[2] === 0,
-      JSON.stringify(audit.first));
-    check("S21: the ramp's t=1 end is hue 300 (magenta) — the sweep never wraps",
-      audit.last[0] === 1 && audit.last[1] === 0 && audit.last[2] === 1,
-      JSON.stringify(audit.last));
-    check("S21: the written value VARIES per element — the recipe/constant distinction",
-      JSON.stringify(audit.mid) !== JSON.stringify(audit.first) &&
-        JSON.stringify(audit.mid) !== JSON.stringify(audit.last),
-      JSON.stringify(audit.mid));
-
-    // -- (b) LWW + undo: recipe strokes compose with the fixed verbs' ---------
-    await snap("__postRainbow");
-    await cmd("colorpoints alpha.group-0.subgroup-0 white");
-    check("S21: a later constant write overwrites ramp colors (LWW per element)",
-      !(await buffersEqual("__postRainbow")));
-    await d.ctrlZ();
-    await sleep(120);
-    check("S21: undo restores the RAMP values, not the base look",
-      await buffersEqual("__postRainbow"));
-    await d.ctrlZ();
-    await sleep(120);
-    check("S21: a second undo pops the whole rainbow stroke — pristine buffer",
-      (await buffersEqual("__pristine")) && (await undoDepth()) === baseDepth);
-
-    // -- (c) pixel proof: the VARYING colors reach the GPU ---------------------
-    // (buffer-level checks cannot see an attribute-upload miss — the repAttrs
-    // trap — so sample two rendered points and demand they differ.)
-    await cmd("hide @solvent"); // clear the bulk so the samples can't be occluded
-    await cmd("rainbow alpha.group-0.subgroup-0");
-    // fade the subgroup's own edge chain and the polyline: a 1px line crossing
-    // a sprite's center pixel would pollute the sample with the line's color
-    await cmd("bondopacity alpha.group-0.subgroup-0 0");
-    await cmd("traceopacity alpha 0");
-    await cmd("view alpha.group-0.subgroup-0"); // frame the ramp
-    await sleep(1400); // camera tween settles
-    const pts = await d.evaluate<number[]>(
-      `${V}.debug.resolvePoints("alpha.group-0.subgroup-0")`);
-    const pA = pts[0]; // t=0 → red
-    const pB = pts[Math.floor(pts.length * 0.4)]; // t≈0.4 → pure green
-    await cmd(`pointsize #${pA} 12`); // fat sprites so the center sample is robust
-    await cmd(`pointsize #${pB} 12`);
-    const proj = await d.evaluate<{ a: { x: number; y: number; front: boolean }; b: { x: number; y: number; front: boolean } }>(
-      `({ a: ${V}.debug.projectPoint(${pA}), b: ${V}.debug.projectPoint(${pB}) })`);
-    check("S21: both sample points project on-screen, apart from each other",
-      proj.a.front && proj.b.front &&
-        Math.hypot(proj.a.x - proj.b.x, proj.a.y - proj.b.y) > 12,
-      JSON.stringify(proj));
-    await sleep(200); // one more rAF: the size/color attrs upload
-    const shot = await d.captureB64(`${REPORT}/S21_pixels.png`);
-    const px = await d.evaluate<{ a: number[]; b: number[] }>(`(async () => {
-      const img = new Image();
-      await new Promise((res, rej) => { img.onload = res; img.onerror = rej; img.src = "data:image/png;base64,${shot}"; });
-      const c = document.createElement('canvas'); c.width = img.width; c.height = img.height;
-      const g = c.getContext('2d'); g.drawImage(img, 0, 0);
-      const at = (x, y) => [...g.getImageData(Math.round(x), Math.round(y), 1, 1).data.slice(0, 3)];
-      return { a: at(${proj.a.x}, ${proj.a.y}), b: at(${proj.b.x}, ${proj.b.y}) };
-    })()`);
-    check("S21: the ramp's start RENDERS red-dominant",
-      px.a[0] > px.a[1] + 60 && px.a[0] > px.a[2] + 60, JSON.stringify(px));
-    check("S21: the mid-ramp point RENDERS green-dominant — a DIFFERENT color",
-      px.b[1] > px.b[0] + 60 && px.b[1] > px.b[2] + 40, JSON.stringify(px));
-
-    // -- (d) nomatch / usage / parse errors write nothing, push no stroke ------
-    await snap("__noWrite");
-    const depthQuiet = await undoDepth();
-    for (const [text, status] of [
-      ["rainbow alpha.nonexistent", "nomatch"],
-      ["rainbow @nosuch", "nomatch"],
-      ["rainbow", "error"],
-      ["rainbow alpha.[x]", "error"], // [ reserved in expressions
-    ] as const) {
-      const r = await cmd(text);
-      check(`S21: ${text} → ${status}`, r.status === status, JSON.stringify(r));
-    }
-    check("S21: ...none of them wrote a single component",
-      await buffersEqual("__noWrite"));
-    check("S21: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet);
-
-    await d.screenshot(`${REPORT}/S21_rainbow.png`);
-  });
-}
+// S21 — REMOVED with the `rainbow` verb it existed to prove.
+//
+// What it asserted and where that coverage now lives:
+//   the recipe's ramp semantics / resolution parity / ramp ends  → gone with the
+//     feature (the unit-level truth is now commands.test.ts's RETIRED test);
+//   PER-ELEMENT COLOUR VALUES REACH THE GPU (the repAttrs upload trap, proved by
+//     sampling two rendered points and demanding they differ) → S65(b), which
+//     makes the same pixel claim for a bound colour axis through a palette;
+//   LWW + one-undo-stroke composition over a per-element colour write → S37/S38
+//     (bake/bind strokes) and S54 (the bicolor snapshot's stroke accounting).
+// The verb's refusal message is a unit-level fact and is asserted there, not
+// here — nothing in the E2E path is peculiar to it.
 
 async function S22(): Promise<void> {
-  console.log("S22 — mods: the recipe registry read-face (attribution, grouped by origin)");
+  console.log("S22 — mods: the registry read-face (attribution, grouped by origin) + the retired verb");
   await withDriver(async (d) => {
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    // The host's push, verbatim: {type:"modsLoaded", mods:[…]} into the page
+    // (S35's mechanism). The listing's SHAPE is what is under test, so the
+    // scenario supplies its own mod rather than depending on whatever the
+    // machine's mods directory happens to hold — with `rainbow` retired there
+    // is no built-in mod, so a fresh registry may legitimately be empty.
+    const push = async (mods: unknown[]): Promise<void> => {
+      await d.evaluate(`window.dispatchEvent(new MessageEvent("message", { data: ${
+        JSON.stringify({ type: "modsLoaded", mods })} }))`);
+      await sleep(150);
+    };
+    const CREDITED = {
+      kind: "analysis", name: "zz_s22", produces: "per-point-scalar", axis: "color",
+      origin: "workspace", author: "A Person", source: "https://example.invalid/x",
+      description: "harness-only: the listing fixture",
+      code: "def compute(data, target_indices):\n    return [0.0 for _ in target_indices]\n",
+    };
+    const BARE = {
+      kind: "analysis", name: "zz_s22_bare", produces: "per-frame-series",
+      origin: "workspace", description: "harness-only: no credit fields",
+      code: "def compute(data, target_indices):\n    return []\n",
+    };
 
     const baseDepth = await undoDepth();
+    await push([CREDITED, BARE]);
     const r = await cmd("mods");
     check("S22: mods lists the registry", r.status === "ok", JSON.stringify(r));
     const lines = (r.message ?? "").split("\n");
-    check("S22: recipes are grouped under their origin header",
-      lines[0] === "built-in:", JSON.stringify(lines));
-    check("S22: rainbow's line carries name, kind, axis, and the FULL credit",
-      lines[1] === "  rainbow — representation · point-color · by Dominic Fico · https://github.com/DomFico/molaro",
+    check("S22: mods are grouped under their origin header",
+      lines.includes("workspace:"), JSON.stringify(lines));
+    check("S22: a mod's line carries name, kind, produces→axis, and the FULL credit",
+      lines.includes("  zz_s22 — analysis · per-point-scalar → color · by A Person · https://example.invalid/x"),
       JSON.stringify(lines));
-    check("S22: recipes ONLY — no command verbs in the listing",
+    check("S22: …and credit fields stay OPTIONAL — a bare mod gets the bare line",
+      lines.includes("  zz_s22_bare — analysis · per-frame-series"), JSON.stringify(lines));
+    check("S22: rows sit UNDER their origin header",
+      lines.indexOf("workspace:") >= 0 &&
+        lines.indexOf("workspace:") < lines.findIndex((l) => l.startsWith("  zz_s22 ")),
+      JSON.stringify(lines));
+    check("S22: mods ONLY — no command verbs in the listing",
       !r.message.includes("colorpoints") && !r.message.includes("create_sele"),
+      r.message);
+    check("S22: the RETIRED built-in is not listed — no built-in group at all",
+      !lines.includes("built-in:") && !lines.some((l) => /^ {2}rainbow — /.test(l)),
       r.message);
 
     const stray = await cmd("mods rainbow");
@@ -4188,6 +4103,18 @@ async function S22(): Promise<void> {
     check("S22: help mods describes the verb through the registry",
       helped.status === "ok" && /recipe registry/.test(helped.message),
       JSON.stringify(helped));
+
+    // the retired verb, through the REAL command path: gone, and it says so
+    const retired = await cmd("rainbow alpha");
+    check("S22: `rainbow` fails closed with the message naming its successor",
+      retired.status === "error" &&
+        /^rainbow was removed —/.test(retired.message) &&
+        /bake <target> <channel> color/.test(retired.message) &&
+        /\?palette=rainbow/.test(retired.message),
+      JSON.stringify(retired));
+    const unknown = await cmd("bogusverb alpha");
+    check("S22: …while an actually-unknown verb keeps the plain message",
+      unknown.message === "unknown command: bogusverb", JSON.stringify(unknown));
   });
 }
 
@@ -5356,10 +5283,16 @@ async function S29(): Promise<void> {
       check("S29: …and its verb no longer resolves",
         dead.status === "error" && dead.message === "unknown command: zz_fixture");
 
-      // -- built-in refusal and nomatch never prompt -------------------------------
+      // -- the RETIRED built-in and nomatch never prompt ---------------------------
+      // `rm rainbow` used to exercise rm's BUILT-IN refusal bucket. The codebase
+      // ships no built-in mod any more (rainbow was the only one), so the bucket
+      // is covered by unit stubs in commands.test.ts; what E2E can still assert
+      // is that the retired name is simply not a mod, and still never prompts.
       await submit("rm rainbow");
-      check("S29: a built-in is refused by name, nothing deleted",
-        (await lastLine())?.text === '"rainbow" is built-in — code, not a file; it cannot be deleted\nnothing to delete');
+      check("S29: the retired built-in is not a mod — nomatch, nothing deleted",
+        (await lastLine())?.text === 'no mod named "rainbow"\nnothing to delete' &&
+          /term-nomatch/.test((await lastLine())?.cls ?? ""),
+        JSON.stringify(await lastLine()));
       await submit("help rm"); // proves NO pending prompt swallowed this
       check("S29: …and no prompt was armed (the next input ran as a command)",
         /delete WORKSPACE mod files/.test((await lastLine())?.text ?? ""));
@@ -5384,12 +5317,12 @@ async function S29(): Promise<void> {
         JSON.stringify(outcome));
       check("S29: …the file-backed mods are gone from disk", examples.every((f) => !existsSync(f)));
       const listing = (await cmd("mods")).message;
-      check("S29: …registry agrees with disk: broken_ramp stays, the file-backed mods are gone, rainbow survives",
-        listing.includes(" broken_ramp — ") && listing.includes(" rainbow — ") &&
+      check("S29: …registry agrees with disk: broken_ramp stays, the file-backed mods are gone",
+        listing.includes(" broken_ramp — ") &&
           shippedNames.every((n) => !listing.includes(` ${n} — `)),
         listing);
-      check("S29: …the built-in still works",
-        (await cmd("rainbow alpha.group-0.subgroup-0")).status === "ok");
+      check("S29: …and a scene verb still works after the sweep (nothing else was collateral)",
+        (await cmd("colorpoints alpha.group-0.subgroup-0 white")).status === "ok");
     }, 1180, 780, "/terminal");
   } finally {
     // serial-mode hygiene: later scenarios in the same process must see the
@@ -6542,14 +6475,20 @@ async function S35(): Promise<void> {
     // -- §3.3 — the built-in protection the guard exists for SURVIVES ----------
     // A mod file named after a built-in must still be refused, loudly, and the
     // built-in must still work. This is what §2.1 is most likely to break.
-    await push([{ ...modFile('def compute(data, target_indices):\n    return ["colorpoints all red"]\n'), name: "rainbow" }]);
+    // `colorpoints` stands where `rainbow` used to: the guard is about the
+    // command registry's SEALED names, and retiring rainbow freed that name (a
+    // mod may legitimately claim it now), so the fixture must name a verb that
+    // is still built-in for the refusal to be the thing under test.
+    await push([{ ...modFile('def compute(data, target_indices):\n    return ["colorpoints all red"]\n'), name: "colorpoints" }]);
     const lines = await logLines();
     check("S35: a mod named after a BUILT-IN is still refused, naming the reason",
-      lines.some((l) => /^mod "rainbow" skipped — .*built-in/.test(l.text)),
+      lines.some((l) => /^mod "colorpoints" skipped — .*built-in/.test(l.text)),
       JSON.stringify(lines.slice(-2)));
-    const rb = await cmd("rainbow all");
+    // BLUE deliberately: the scene is already all-red at this point (the undo
+    // above restored version A), so a red write would pass even if it no-oped.
+    const rb = await cmd("colorpoints all blue");
     check("S35: …and the built-in still works — it was never overwritten",
-      rb.status === "ok" && rb.message === "colored 6000 points rainbow", JSON.stringify(rb));
+      rb.status === "ok" && (await painted()).blue === 6000, JSON.stringify(rb));
   }, 1180, 780, "/terminal");
 }
 
@@ -9209,10 +9148,15 @@ async function S54(): Promise<void> {
     await snap("__pristineB", "edgeColorB");
     const baseDepth = await undoDepth();
 
-    // -- (a) the snapshot, contained: upstream rainbow → split halves ------------
-    // rainbow gives every point its OWN color, so adjacent endpoints differ and
-    // nearly every matched edge must come out split (A != B).
-    await cmd("rainbow all");
+    // -- (a) the snapshot, contained: a per-point upstream → split halves --------
+    // The upstream must give every point its OWN color, so adjacent endpoints
+    // differ and nearly every matched edge comes out split (A != B). `bake all
+    // mass color` does that: `mass` is a per_point channel of independent
+    // uniform-random values that DECLARES its own min/max (producer/synthetic.py
+    // uses mass.min()/mass.max()), so the ramp spreads over the full sweep with
+    // no saturation and no two points share a value. (This was `rainbow all`
+    // before the recipe was removed; the ramp differs, the property does not.)
+    await cmd("bake all mass color");
     const contained = await paintEnds("bicolorbonds", "alpha");
     check("S54: bicolorbonds alpha — every contained edge's halves = its endpoints' CURRENT colors",
       contained.r.status === "ok" && contained.audit.matched > 0 &&
@@ -9220,14 +9164,14 @@ async function S54(): Promise<void> {
       JSON.stringify(contained));
     check("S54: ...unmatched edges are byte-untouched", contained.audit.touchedOutside === 0,
       `touched=${contained.audit.touchedOutside}`);
-    check("S54: ...the rainbow upstream makes them SPLIT (A != B on most matched edges)",
+    check("S54: ...the per-point upstream makes them SPLIT (A != B on most matched edges)",
       contained.audit.split > contained.audit.matched * 0.5,
       `split=${contained.audit.split}/${contained.audit.matched}`);
     check("S54: ...message reports the action and count",
       contained.r.message === `bicolored ${contained.audit.matched} edges from their endpoints' colors`,
       contained.r.message);
     check("S54: ...as exactly ONE undo stroke", (await undoDepth()) === baseDepth + 2,
-      `depth=${await undoDepth()}`); // rainbow + bicolorbonds
+      `depth=${await undoDepth()}`); // bake + bicolorbonds
 
     // -- (b) SNAPSHOT means snapshot: upstream recolor does NOT retro-update -----
     await snap("__snapA", "edgeColorA");
@@ -11252,7 +11196,7 @@ async function S65(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S21, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -11288,7 +11232,8 @@ const TIER: Record<string, "fast" | "full"> = {
   S0: "full", S1: "full", S2: "full", S3: "full", S4: "full", S5: "fast",
   S6: "full", S7: "full", S8: "full", S9: "full", S10: "full", S11: "full",
   S12: "full", S13: "full", S14: "full", S15: "full", S16: "full",
-  S17: "fast", S18: "fast", S19: "fast", S20: "full", S21: "full",
+  S17: "fast", S18: "fast", S19: "fast", S20: "full",
+  // S21 removed with the `rainbow` verb
   S22: "full", S23: "full", S24: "full", S25: "full", S26: "full",
   S27: "full", S28: "full", S29: "full", S30: "full", S31: "full",
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",

@@ -618,41 +618,32 @@ try {
       lastLine?.text === "set 400 points to opacity 1 (clamped to 1)",
     JSON.stringify(lastLine));
 
-  // the first recipe through the real relay: per-point values, one write
+  // the RETIRED verb through the real relay: gone, and the line says so
+  // (this block used to drive `rainbow <target>`; the recipe was removed and its
+  // hue sweep is now the default PALETTE, exercised by the bind/bake lines below)
   lastLine = await runLine("rainbow beta.group-1.subgroup-4");
-  check("rainbow <target> lands through the relay (the first recipe verb)",
-    /term-ok/.test(lastLine?.cls ?? "") && lastLine?.text === "colored 100 points rainbow",
-    JSON.stringify(lastLine));
-  check("…and the buffer carries a VARYING ramp: red start, magenta end, distinct middle",
-    await d.evaluate<boolean>(`(()=>{
-      const v=window.__viewer; const c=v.rep.state.color;
-      const pts=v.debug.resolvePoints("beta.group-1.subgroup-4");
-      const rgb=p=>[c[3*p],c[3*p+1],c[3*p+2]];
-      const a=rgb(pts[0]), b=rgb(pts[pts.length-1]), m=rgb(pts[Math.floor(pts.length/2)]);
-      return a[0]===1&&a[1]===0&&a[2]===0 &&
-             b[0]===1&&b[1]===0&&b[2]===1 &&
-             (m[0]!==a[0]||m[1]!==a[1]||m[2]!==a[2]) &&
-             (m[0]!==b[0]||m[1]!==b[1]||m[2]!==b[2]);
-    })()`));
-  lastLine = await runLine("rainbow beta.nonexistent");
-  check("a rainbow nomatch is the standard no-write line",
-    /term-nomatch/.test(lastLine?.cls ?? "") &&
-      lastLine?.text === `nothing matches "beta.nonexistent"`,
-    JSON.stringify(lastLine));
-  lastLine = await runLine("rainbow");
-  check("bare rainbow is the usage error",
+  check("a retired verb is an ERROR line naming its successor, not `unknown command`",
     /term-err/.test(lastLine?.cls ?? "") &&
-      lastLine?.text === "rainbow needs a target — rainbow <target> (e.g. rainbow alpha.group-0)",
+      /^rainbow was removed — /.test(lastLine?.text ?? "") &&
+      /bake <target> <channel> color/.test(lastLine?.text ?? "") &&
+      /\?palette=rainbow/.test(lastLine?.text ?? ""),
+    JSON.stringify(lastLine));
+  lastLine = await runLine("bogusverb beta");
+  check("…while an actually-unknown verb keeps the plain unknown-command line",
+    /term-err/.test(lastLine?.cls ?? "") && lastLine?.text === "unknown command: bogusverb",
     JSON.stringify(lastLine));
 
-  // the recipe registry read-face through the real relay
+  // the mod registry read-face through the real relay. NOTE: what the workspace
+  // group holds is whatever the mods directory holds, so the assertion is on the
+  // listing's SHAPE, not on any one mod — and there is no `built-in:` group to
+  // assert any more (`rainbow`, the only built-in mod, was retired).
   lastLine = await runLine("mods");
-  check("mods lists built-ins AND workspace mods, grouped, with kind and credit",
+  check("mods lists the registry grouped by origin, with no built-in group left",
     /term-ok/.test(lastLine?.cls ?? "") &&
-      (lastLine?.text ?? "").startsWith(
-        "built-in:\n  rainbow — representation · point-color · by Dominic Fico · https://github.com/DomFico/molaro") &&
-      (lastLine?.text ?? "").includes("workspace:") &&
-      (lastLine?.text ?? "").includes("  index_ramp — analysis · per-point-scalar → color · by Example Author"),
+      ((lastLine?.text ?? "") === "no recipes" ||
+        (/(^|\n)workspace:$/m.test(lastLine?.text ?? "") &&
+          /\n {2}\S+ — analysis · /.test(lastLine?.text ?? ""))) &&
+      !/(^|\n)built-in:$/m.test(lastLine?.text ?? ""),
     JSON.stringify(lastLine));
   lastLine = await runLine("mods rainbow");
   check("mods with stray arguments is the usage error",
