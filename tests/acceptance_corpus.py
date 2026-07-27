@@ -116,19 +116,32 @@ def check_system(sid: str) -> tuple[bool, list[str], dict]:
     )
     checks.append(("grouping", grouping_ok, f"{len(header.groups)} groups, {len(set(header.points.subgroup_id))} subgroups vs {n_res} residues"))
 
-    # Connectivity: edges are topology bonds minus suppressed cross-box bonds.
+    # Connectivity: the DECLARED edges are topology bonds minus suppressed
+    # cross-box bonds, PLUS whatever covalent-radius inference added
+    # (producer/bond_inference.py).
+    #
+    # The old invariant here was `edges <= topology bonds`, which held only while
+    # the edge list was a SUBSET of the file's own connectivity. It no longer is:
+    # the membrane gains 123 476 inferred bonds and the duplex 24. So the bound is
+    # stated on the DECLARED part alone, with the inferred part taken from the
+    # source's own report rather than inferred from the total — otherwise the check
+    # would pass for any number of edges at all.
     top_bonds = top.n_bonds
     edges = len(header.edges)
-    # Every edge index in range, and edge count <= topology bond count.
+    inferred = src.inferred_edges_kept
+    # Every edge index in range, and the declared part still bounded by the file.
     edges_in_range = all(0 <= i < header.n_points and 0 <= j < header.n_points for i, j in header.edges)
-    conn_ok = edges_in_range and edges <= max(top_bonds, 0)
-    checks.append(("connectivity", conn_ok, f"{edges} edges (topology bonds {top_bonds})"))
+    conn_ok = edges_in_range and (edges - inferred) <= max(top_bonds, 0)
+    checks.append(("connectivity", conn_ok,
+                   f"{edges} edges = {edges - inferred} declared + {inferred} inferred "
+                   f"(topology bonds {top_bonds})"))
 
     detail = {
         "N": header.n_points,
         "T": src.n_frames,
         "groups": len(header.groups),
         "edges": edges,
+        "inferred": inferred,
         "polylines": len(header.polylines),
         "composition": got,
     }
@@ -151,7 +164,8 @@ def main() -> int:
         print(
             f"[{status}] {sid:26s} "
             + (f"N={d['N']:>7} T={d['T']:>4} groups={d['groups']:>2} "
-               f"edges={d['edges']:>6} polylines={d['polylines']:>2} {d['composition']}"
+               f"edges={d['edges']:>6} (+{d['inferred']:<6} inferred) "
+               f"polylines={d['polylines']:>2} {d['composition']}"
                if d else "")
         )
         for f in fails:
