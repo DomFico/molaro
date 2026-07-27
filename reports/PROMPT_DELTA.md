@@ -540,3 +540,62 @@ figure or none.
 - **Point at:** `webview/palettes.ts` (the registry + the three descriptions),
   `splitPaletteOption` / `parseChannelAxisArgs` (`webview/commands.ts`, the grammar and every
   refusal), `makePalettesHandler` (the listing), `webview/saverep.ts:266-271` (the replay line).
+
+---
+
+## Since the palette pass — the display frame cap made a prompt sentence FALSE (2026-07-26)
+
+### CORRECTION (not a new surface): `data.trajectory` is the STRIDED set, not the full one (incr 63, ships `15415ec`..`b42597f`)
+> **STATUS: APPLIED 2026-07-26 (THIS commit, branch `feat/strided-load`)** — `claudeprompt.ts`'s
+> `data.trajectory` bullet and correctness Rule 4. Guarded by a claudebackend prompt-teaching
+> test, proven live in BOTH directions: reverting the whole prompt hunk fails it on
+> `doesNotMatch` (the stale claims), reverting the Rule 4 hunk ALONE fails it on `match`
+> (680 pass / 1 fail either way; 681 / 0 restored). Do not re-teach.
+- **What changed under the prompt:** the producer now loads a long frame series with a stride
+  when it exceeds a display cap (`DEFAULT_MAX_FRAMES = 500`, `producer/source.py:50`; the one
+  place the number lives, `--max-frames` / `OpenArgs.maxFrames` / `molaro.viewer.maxFrames`
+  override it). `header.n_frames`, the frame stream and `data.trajectory` ALL mean the served
+  strided set — one frame axis, asserted equal in `MdtrajSource.trajectory`, so a mod's
+  arithmetic stays self-consistent. What is NOT self-consistent is any sentence claiming the
+  mod sees the whole file.
+- **The two false claims, verbatim, now deleted:** "`data.trajectory` is a live **mdtraj
+  Trajectory** — the real, **full** trajectory" and "for a long trajectory, loading **every
+  frame** is a real one-time cost, so reach for it only when you need the coordinates". The
+  first is simply untrue at stride > 1; the second is untrue in the same breath AND its cost
+  premise is now wrong in the OTHER direction — the frame axis is bounded before the mod runs,
+  and the cap rationale's own measurement is that read time was never the wall (a full
+  15 000-frame / 2 331 MB read is 1.16 s, `producer/source.py:27-31`). Removed rather than
+  rewritten: a cost warning that overstates the cost spends tokens to make a model timid.
+- **Teach (done):** it holds the frames the viewer SHOWS, which for a long trajectory is a
+  STRIDED sample (default cap 500 frames), so its `n_frames` is that served count — never
+  assume it is the file's frame count. `data.frame_stride` (1 = every frame) and
+  `data.n_frames_in_file` say which, and `Coordinate provenance` in get_context says the same.
+- **The behavioural half is Rule 4**, not the contract bullet: the frame sampling is now part
+  of the convention a result must be stated with (`frame_stride > 1` means "every Nth frame",
+  not "over the trajectory"). Reporting a strided sample as "the trajectory" is the actual
+  user-visible defect; knowing the attribute names only enables the fix.
+- **Both attributes are reachable from inside `compute` on EVERY source** — verified by
+  running a mod through the real `producer.serve.run_mod` path, not by reading the class: on
+  `03_adk_psf_dcd` at `--max-frames 20` a mod returned `frame_stride=5`,
+  `n_frames_in_file=98`, `trajectory.n_frames=20` (header 20); at the default cap, `1 / 98 /
+  98`; and the synthetic source answered `1 / 600` with `trajectory is None` rather than
+  raising, because the neutral defaults live on the `DataSource` base
+  (`producer/source.py:155,171`) and `run_mod` passes the SOURCE itself as `data`
+  (`producer/serve.py:173`).
+- **Nothing else in the prompt needed the change** (grepped, not assumed): every other frame
+  reference is anchored to the served axis and stays true — `per-frame-series` length is
+  "exactly `data.trajectory.n_frames`" (the right anchor, and the assertion above is what makes
+  it right), the channel formula `n_frames * n_points * components`, `[n_frames][n_pairs]`
+  visibility, and the "5s run_mod timeout" (still `DEFAULT_MOD_TIMEOUT_S = 5.0`,
+  `producer/serve.py:75`). The prompt gives NO byte-size or per-frame cost figure anywhere
+  else, so the 30x-smaller channel falsified nothing in the other direction.
+- **If a future pass wants a cost note back, make it the honest one:** the cap bounds the FRAME
+  axis, not the product. `500 * 222 227 * 3 * 4` is still 1.33 GB, so the residual cost scales
+  with ATOM count, not with how long the run was. Do not restate that as a measurement — it is
+  arithmetic, and nobody has measured a 222k-atom multi-frame load.
+- **Point at:** `producer/source.py:22-73` (the cap, its rationale, `stride_for_frame_cap`),
+  `producer/mdtraj_source.py:943-1004` (the strided lazy `trajectory` + the frame-count
+  assertion + both properties), `:1212-1241` (`_provenance`, the `frame sampling: stride N — …`
+  line the user and the model read), `src/claudetools.ts:299-309` (get_context's
+  `Coordinate provenance` block), `docs/COMMANDS.md:879-902` (the mod-facing doc, already
+  correct — the prompt now agrees with it).

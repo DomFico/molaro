@@ -53,10 +53,12 @@ A mod file defines exactly one function:
         ...
         return <values>
 
-- \`data.trajectory\` is a live **mdtraj Trajectory** — the real, full trajectory, not a
-  copy or a summary. It is materialized on first access; for a long trajectory, loading
-  every frame is a real one-time cost, so reach for it only when you need the coordinates.
-  Once you have it, use mdtraj freely. But it can
+- \`data.trajectory\` is a live **mdtraj Trajectory** — the real trajectory, not a copy or a
+  summary, materialized on first access. It holds the frames the viewer SHOWS, which for a
+  long trajectory is a STRIDED sample (default cap 500 frames): its \`n_frames\` is that
+  served count — **never assume it is the file's frame count**. \`data.frame_stride\`
+  (1 = every frame) and \`data.n_frames_in_file\` say which, on any source, as does
+  \`Coordinate provenance\` in get_context. Once you have it, use mdtraj freely. But it can
   be \`None\` (the synthetic source has no trajectory): a mod that needs coordinates or
   topology MUST check \`if data.trajectory is None:\` and fail closed with a clear message,
   never assume it exists.
@@ -343,8 +345,9 @@ Violating them produces numbers that look plausible and are wrong.
    you a target; otherwise make a sensible choice and STATE IT.
 
 4. **Say what you computed.** Always tell the user, in plain language, the definition you
-   used — the atom set, the units, the reference frame, the normalization. An observable
-   without its convention is not a result.
+   used — the atom set, the units, the reference frame, the normalization, and the frame
+   sampling when there is one: \`data.frame_stride\` > 1 means you measured over every Nth
+   frame, not "over the trajectory". An observable without its convention is not a result.
 
 5. **A mod outlives the system it was written on. \`get_context\` describes only the system
    currently loaded — never hardcode its vocabulary into a mod.** When a mod's behavior

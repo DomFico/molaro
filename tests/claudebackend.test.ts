@@ -742,6 +742,35 @@ test("get_context reports coordinate provenance, including a strided load", asyn
   assert.match(text(res), /periodic-image centering: on/);
 });
 
+// The prompt's OWN claim about the frame axis had to move with it. Before the
+// display frame cap, `data.trajectory` was described as "the real, FULL
+// trajectory" and reaching for it as "loading EVERY frame" — both false once a
+// long trajectory loads strided. That is the same defect class as the stale
+// figures this project has caught repeatedly, except in the one artifact that
+// steers the model: a mod author told `n_frames` is the file's count will report
+// 500 strided frames as "the trajectory".
+test("system prompt teaches the strided frame axis, not a full trajectory (PROMPT_DELTA 2026-07-26)", () => {
+  const p = buildSystemPrompt(sampleContext());
+  // the falsified claims are GONE — neither the "full trajectory" nor the
+  // "every frame" cost framing may come back (the negative half of the guard)
+  assert.doesNotMatch(p, /real, full trajectory/);
+  assert.doesNotMatch(p, /loading\s+every frame is a real one-time cost/);
+  // what a mod must now know: the served set is a STRIDED sample under a cap,
+  // so trajectory.n_frames is NOT the file's frame count
+  assert.match(p, /STRIDED sample \(default cap 500 frames\)/);
+  assert.match(p, /never assume it is the file's frame count/);
+  // the two attributes that say which — spelled exactly as `compute` reads them
+  // off `data` (producer/source.py's neutral DataSource properties, present on
+  // EVERY source, so a mod may read them unconditionally)
+  assert.match(p, /`data\.frame_stride`\s*\n?\s*\(1 = every frame\)/);
+  assert.match(p, /`data\.n_frames_in_file`/);
+  // …and the same fact is readable in get_context, under the label it prints
+  assert.match(p, /`Coordinate provenance` in get_context/);
+  // the BEHAVIOURAL half: rule 4 makes the frame sampling part of the
+  // convention a result must be stated with
+  assert.match(p, /measured over every Nth\s+frame, not "over the trajectory"/);
+});
+
 test("get_context omits the provenance block when there is none", async () => {
   const deps = mockDeps({ getContext: async () => ({ ...sampleContext(), provenance: [] }) });
   const res = await buildToolDefs(deps).get_context.handler({}, {});
