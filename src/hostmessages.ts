@@ -79,32 +79,47 @@ export interface ProducerOpenSpec {
    * of 0 (= no cap).
    */
   maxFrames?: number;
+  /**
+   * Override for the producer's COVALENT-BOND INFERENCE mode — see
+   * `molaro.viewer.inferBonds`. `"full"` infers every bond a topology does not
+   * declare, `"nonsolvent"` skips solvent residues, `"off"` draws only declared
+   * bonds. `undefined` (and the empty string a cleared setting produces) sends
+   * nothing, leaving the producer's own default as the ONE place that choice
+   * lives (`DEFAULT_MODE` in producer/bond_inference.py) — the same "say nothing"
+   * discipline `maxFrames` uses with 0.
+   */
+  inferBonds?: string;
 }
 
 /**
  * The producer argv (and panel title) for an open request. ONE function for every
  * entry point — `viewer.open` with a corpus id / an explicit topology / nothing,
  * and `viewer.openFile` from the Explorer — so an argument that must reach the
- * producer (the frame cap is the current one) cannot be threaded onto some
- * commands and forgotten on others. Pure (no vscode), so it is unit-tested; the
- * caller reads settings and passes the resolved numbers in.
+ * producer (the frame cap and the bond-inference mode are the current ones)
+ * cannot be threaded onto some commands and forgotten on others. Pure (no
+ * vscode), so it is unit-tested; the caller reads settings and passes the
+ * resolved values in.
  */
 export function producerOpenArgs(spec: ProducerOpenSpec): { producerArgs: string[]; title: string } {
-  // The frame cap applies to real datasets only. --n-frames is an explicit
-  // request for a synthetic size, not a file whose length is an accident of how
-  // long a simulation ran, so the cap has nothing to say about it.
+  // Flags that apply to REAL datasets only, in one place so all three real-dataset
+  // branches below carry exactly the same set. --n-frames is an explicit request
+  // for a synthetic size, not a file whose length is an accident of how long a
+  // simulation ran, so the frame cap has nothing to say about it; and the
+  // synthetic source has no topology, so bond inference has nothing to infer.
   const cap = spec.maxFrames !== undefined && spec.maxFrames !== 0
     ? ["--max-frames", String(spec.maxFrames)]
     : [];
+  const bonds = spec.inferBonds ? ["--infer-bonds", spec.inferBonds] : [];
+  const real = [...cap, ...bonds];
   if (spec.openPath) {
     return {
-      producerArgs: ["--open", spec.openPath, ...cap],
+      producerArgs: ["--open", spec.openPath, ...real],
       title: `Point Viewer (${basename(spec.openPath)})`,
     };
   }
   if (spec.system) {
     return {
-      producerArgs: ["--system", spec.system, ...cap],
+      producerArgs: ["--system", spec.system, ...real],
       title: `Point Viewer (${spec.system})`,
     };
   }
@@ -113,7 +128,7 @@ export function producerOpenArgs(spec: ProducerOpenSpec): { producerArgs: string
     if (spec.trajectory) args.push("--trajectory", spec.trajectory);
     for (const lig of spec.ligandResidues ?? []) args.push("--ligand-residue", lig);
     return {
-      producerArgs: [...args, ...cap],
+      producerArgs: [...args, ...real],
       title: `Point Viewer (${basename(spec.topology)})`,
     };
   }

@@ -121,3 +121,36 @@ test("producerOpenArgs: 0 and undefined send NOTHING, so the producer's default 
   // and it never reaches the synthetic source, whose --n-frames is explicit
   assert.ok(!producerOpenArgs({ nPoints: 100, maxFrames: 500 }).producerArgs.includes("--max-frames"));
 });
+
+test("producerOpenArgs: the bond-inference mode reaches EVERY real-dataset entry point", () => {
+  // Same regression as the frame cap, one increment later: a second producer
+  // argument, and the reason the builder is shared at all. --open is the Explorer
+  // path, so it is the one a user actually opens a bondless PDB with.
+  for (const spec of [
+    { openPath: "/data/membrane.pdb" },
+    { system: "06_membrane_complex" },
+    { topology: "/d/a.pdb", trajectory: "/d/a.dcd" },
+  ]) {
+    for (const mode of ["full", "nonsolvent", "off"]) {
+      const args = producerOpenArgs({ ...spec, inferBonds: mode }).producerArgs;
+      assert.ok(args.includes("--infer-bonds"), `--infer-bonds missing for ${JSON.stringify(spec)}`);
+      assert.equal(args[args.indexOf("--infer-bonds") + 1], mode);
+    }
+  }
+  // both real-dataset flags ride together, cap first, in one stable order
+  assert.deepEqual(
+    producerOpenArgs({ openPath: "/x.dcd", maxFrames: 500, inferBonds: "off" }).producerArgs,
+    ["--open", "/x.dcd", "--max-frames", "500", "--infer-bonds", "off"],
+  );
+});
+
+test("producerOpenArgs: an empty inferBonds sends nothing, and it never reaches synthetic", () => {
+  // A hand-cleared setting must leave the producer's own DEFAULT_MODE in charge
+  // rather than forwarding an empty flag value the CLI would reject.
+  for (const inferBonds of ["", undefined]) {
+    assert.deepEqual(producerOpenArgs({ openPath: "/x.dcd", inferBonds }).producerArgs,
+      ["--open", "/x.dcd"], `inferBonds=${JSON.stringify(inferBonds)} must not be forwarded`);
+  }
+  // the synthetic source has no topology, so there is nothing to infer
+  assert.ok(!producerOpenArgs({ nPoints: 100, inferBonds: "full" }).producerArgs.includes("--infer-bonds"));
+});

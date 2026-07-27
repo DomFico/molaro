@@ -97,6 +97,9 @@ interface OpenArgs {
   /** Frame-cap override for a real dataset — see `molaro.viewer.maxFrames`. Takes
    * precedence over the setting; omit to use it. */
   maxFrames?: number;
+  /** Bond-inference override for a real dataset — see `molaro.viewer.inferBonds`.
+   * Takes precedence over the setting; omit to use it. */
+  inferBonds?: string;
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -110,6 +113,7 @@ export function activate(context: vscode.ExtensionContext): void {
       const { producerArgs, title } = producerOpenArgs({
         ...args,
         maxFrames: args?.maxFrames ?? configuredMaxFrames(),
+        inferBonds: args?.inferBonds ?? configuredInferBonds(),
       });
       openPanel(context, producerLog, {
         producerArgs,
@@ -169,6 +173,7 @@ export function activate(context: vscode.ExtensionContext): void {
         const { producerArgs, title } = producerOpenArgs({
           openPath: target.fsPath,
           maxFrames: configuredMaxFrames(),
+          inferBonds: configuredInferBonds(),
         });
         openPanel(context, producerLog, {
           producerArgs,
@@ -186,6 +191,25 @@ export function activate(context: vscode.ExtensionContext): void {
  * positive value caps; a negative one loads every frame. */
 function configuredMaxFrames(): number {
   return vscode.workspace.getConfiguration("molaro").get<number>("viewer.maxFrames", 0) || 0;
+}
+
+/** The `molaro.viewer.inferBonds` mode for the producer's covalent-bond inference.
+ *
+ * Forwarded verbatim, including the setting's own default — unlike `maxFrames`,
+ * whose 0 sentinel means "say nothing", because a NUMBER has no spare value and a
+ * settings UI needs a real enum here to be usable. That does put the default in
+ * TWO places (this package.json enum and `DEFAULT_MODE` in
+ * producer/bond_inference.py), which is this project's most-paid-for defect class,
+ * so it is ASSERTED rather than remembered: tests/bond_inference.py block G reads
+ * package.json and fails if the enum or the default drifts from the producer's.
+ *
+ * An empty value (a hand-cleared setting) forwards nothing, leaving the producer's
+ * default. The value is NOT validated here — the producer rejects an unknown mode
+ * loudly at open, which is one gate rather than two that can disagree. */
+function configuredInferBonds(): string {
+  return (
+    vscode.workspace.getConfiguration("molaro").get<string>("viewer.inferBonds", "") || ""
+  ).trim();
 }
 
 /** The mods directory (persistence lives here; nothing else does): the
