@@ -876,6 +876,31 @@ visible, not a silent success.
 - All of `mdtraj`: `md.rmsd`, `md.rmsf`, `md.compute_rg`, `md.compute_phi`,
   `md.compute_distances`, … (`import mdtraj as md`; `numpy` is available too).
 
+**Frame alignment, and the display frame cap.** The frame axis has ONE meaning: a
+long trajectory is loaded with a **stride** (default cap 500 frames — a
+15 000-frame file loads every 30th, giving 500), and `header.n_frames`,
+`data.give_frames(...)`, `data.trajectory` and `traj.n_frames` **all** mean that
+same strided set. So `traj.xyz[f]` is frame `f` of what the viewer shows, and a
+`per-frame-series` return of length `traj.n_frames` is always the right length —
+there is no file-frame numbering anywhere a mod can reach.
+
+Why the cap exists: a `per_point_per_frame` vector channel is
+`n_frames × n_points × 3 × 4` bytes by contract, which is 2.33 GB on a
+15 000-frame 12 944-atom system and 78 MB at 500 frames. A mod does not have to
+cope with the long case; it is bounded before the mod runs.
+
+If a mod does its **own** frame subsampling (a cost budget), it is subsampling
+that strided set — the two compose, and it can say so:
+
+```python
+data.frame_stride        # 1 when every frame in the file is loaded, else the stride
+data.n_frames_in_file    # the trajectory's TRUE frame count on disk, before the stride
+```
+
+Both are present on every source (a source with no file reports `1` and its own
+`n_frames`). The same fact is stated for the user in `Header.provenance`, which
+carries a `frame sampling: stride N — …` line whenever the stride is not 1.
+
 **Index alignment — the load-bearing guarantee.** Point index `i` in header
 order **is** atom index `i` in `traj.topology` **and** column `i` in
 `traj.xyz`. So `target_indices` (header order) can index the trajectory

@@ -49,6 +49,92 @@ export function producerStatusFromLog(line: string): string | null {
   return text.length > 0 ? text : null;
 }
 
+/** Synthetic-source defaults when `viewer.open` is given no size. */
+export const DEFAULT_N_POINTS = 20_000;
+export const DEFAULT_N_FRAMES = 600;
+
+/**
+ * What a caller can ask `viewer.open` / `viewer.openFile` for. Exactly one of
+ * `openPath` (open this file directly), `system` (a benchmark corpus id) or
+ * `topology` (+ optional `trajectory`) selects a real dataset; with none of them
+ * the synthetic source is used.
+ */
+export interface ProducerOpenSpec {
+  openPath?: string;
+  system?: string;
+  topology?: string;
+  trajectory?: string;
+  ligandResidues?: readonly string[];
+  nPoints?: number;
+  nFrames?: number;
+  seed?: number;
+  /**
+   * Override for the producer's display FRAME CAP — how many trajectory frames a
+   * real dataset loads. Positive caps at that many (a longer trajectory loads
+   * with a stride and says so in `Header.provenance`); NEGATIVE loads every frame
+   * (no cap); `undefined` or 0 sends nothing, leaving the producer's own default
+   * (`DEFAULT_MAX_FRAMES` in producer/source.py — the ONE place that number
+   * lives, which is why 0 is a "say nothing" sentinel here rather than a second
+   * copy of it). 0 is never forwarded, so it can't collide with the CLI's meaning
+   * of 0 (= no cap).
+   */
+  maxFrames?: number;
+}
+
+/**
+ * The producer argv (and panel title) for an open request. ONE function for every
+ * entry point — `viewer.open` with a corpus id / an explicit topology / nothing,
+ * and `viewer.openFile` from the Explorer — so an argument that must reach the
+ * producer (the frame cap is the current one) cannot be threaded onto some
+ * commands and forgotten on others. Pure (no vscode), so it is unit-tested; the
+ * caller reads settings and passes the resolved numbers in.
+ */
+export function producerOpenArgs(spec: ProducerOpenSpec): { producerArgs: string[]; title: string } {
+  // The frame cap applies to real datasets only. --n-frames is an explicit
+  // request for a synthetic size, not a file whose length is an accident of how
+  // long a simulation ran, so the cap has nothing to say about it.
+  const cap = spec.maxFrames !== undefined && spec.maxFrames !== 0
+    ? ["--max-frames", String(spec.maxFrames)]
+    : [];
+  if (spec.openPath) {
+    return {
+      producerArgs: ["--open", spec.openPath, ...cap],
+      title: `Point Viewer (${basename(spec.openPath)})`,
+    };
+  }
+  if (spec.system) {
+    return {
+      producerArgs: ["--system", spec.system, ...cap],
+      title: `Point Viewer (${spec.system})`,
+    };
+  }
+  if (spec.topology) {
+    const args = ["--dataset", spec.topology];
+    if (spec.trajectory) args.push("--trajectory", spec.trajectory);
+    for (const lig of spec.ligandResidues ?? []) args.push("--ligand-residue", lig);
+    return {
+      producerArgs: [...args, ...cap],
+      title: `Point Viewer (${basename(spec.topology)})`,
+    };
+  }
+  const nPoints = spec.nPoints ?? DEFAULT_N_POINTS;
+  const nFrames = spec.nFrames ?? DEFAULT_N_FRAMES;
+  const seed = spec.seed ?? 7;
+  return {
+    producerArgs: [
+      "--n-points", String(nPoints), "--n-frames", String(nFrames), "--seed", String(seed),
+    ],
+    title: `Point Viewer (N=${nPoints})`,
+  };
+}
+
+/** Last path segment, for a panel title. Tolerates either separator and a
+ * trailing one, and falls back to the whole string. */
+function basename(p: string): string {
+  const parts = p.split(/[/\\]/).filter((s) => s.length > 0);
+  return parts.length > 0 ? parts[parts.length - 1] : p;
+}
+
 /**
  * Resolve which file a deletion of mod `name` would remove, using ONLY the
  * scanned mod path-map — NEVER a path derived from `name`. This is rm's

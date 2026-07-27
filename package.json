@@ -45,6 +45,11 @@
           "type": "string",
           "default": "view {target}",
           "markdownDescription": "Command run when the hold key is held over a point in the viewer. `{target}` is replaced by the resolved committed selection (`@name`). Empty disables the gesture. The command runs through the ordinary command path \u2014 pre-validated, one undo stroke."
+        },
+        "molaro.viewer.maxFrames": {
+          "type": "number",
+          "default": 0,
+          "markdownDescription": "How many trajectory frames to LOAD from a real dataset. A longer trajectory is loaded with a stride \u2014 every `ceil(frames/cap)`-th frame \u2014 which keeps the frame count, and every per-frame channel a mod produces from it, bounded however long the run was; the header's provenance then names the stride and the true frame count. `0` (the default) uses the producer's built-in cap of 500 frames. A positive number caps at that many. A negative number loads **every** frame \u2014 correct for short trajectories, but a 15 000-frame system then makes a per-point per-frame vector channel of `frames x atoms x 3 x 4` bytes (2.33 GB on a 12 944-atom system), which will not fit. Takes effect when a viewer panel is (re)opened."
         }
       }
     },

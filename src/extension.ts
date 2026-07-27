@@ -32,15 +32,17 @@ import { createClaudeStub } from "../webview/claudestub.ts";
 import { DEFAULT_COLOR, DEFAULT_OPACITY, DEFAULT_SIZE } from "../webview/representation.ts";
 import { createClaudeBackend, type ClaudeBackend } from "./claudebackend.ts";
 import { buildTargetExamples, gatherLiveState, type SceneContext } from "./claudetools.ts";
-import { producerStatusFromLog, relaysTerminalMessageToViewer, resolveModDeletion } from "./hostmessages.ts";
+import {
+  producerOpenArgs,
+  producerStatusFromLog,
+  relaysTerminalMessageToViewer,
+  resolveModDeletion,
+} from "./hostmessages.ts";
 import { clearApiKey, NO_KEY_HINT, promptAndStoreApiKey, resolveApiKey } from "./claudeauth.ts";
 import { createPlotHost } from "../webview/plothost.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
 import { PLOT_BODY, PLOT_CSS } from "../webview/plothud.ts";
 import { TERMINAL_BODY, TERMINAL_CSS } from "../webview/terminalhud.ts";
-
-const DEFAULT_N_POINTS = 20_000;
-const DEFAULT_N_FRAMES = 600;
 
 /** A backend at the conversation panel's boundary — the real SDK backend or the
  * scripted stub; both speak the frozen contract. */
@@ -92,6 +94,9 @@ interface OpenArgs {
   trajectory?: string;
   ligandResidues?: string[];
   pythonPath?: string;
+  /** Frame-cap override for a real dataset — see `molaro.viewer.maxFrames`. Takes
+   * precedence over the setting; omit to use it. */
+  maxFrames?: number;
 }
 
 export function activate(context: vscode.ExtensionContext): void {
@@ -102,24 +107,10 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     vscode.commands.registerCommand("viewer.open", (args?: OpenArgs) => {
       const isReal = Boolean(args?.system || args?.topology);
-      const nPoints = args?.nPoints ?? DEFAULT_N_POINTS;
-      const nFrames = args?.nFrames ?? DEFAULT_N_FRAMES;
-      const seed = args?.seed ?? 7;
-
-      let producerArgs: string[];
-      let title: string;
-      if (args?.system) {
-        producerArgs = ["--system", args.system];
-        title = `Point Viewer (${args.system})`;
-      } else if (args?.topology) {
-        producerArgs = ["--dataset", args.topology];
-        if (args.trajectory) producerArgs.push("--trajectory", args.trajectory);
-        for (const lig of args.ligandResidues ?? []) producerArgs.push("--ligand-residue", lig);
-        title = `Point Viewer (${args.topology.split("/").pop()})`;
-      } else {
-        producerArgs = ["--n-points", String(nPoints), "--n-frames", String(nFrames), "--seed", String(seed)];
-        title = `Point Viewer (N=${nPoints})`;
-      }
+      const { producerArgs, title } = producerOpenArgs({
+        ...args,
+        maxFrames: args?.maxFrames ?? configuredMaxFrames(),
+      });
       openPanel(context, producerLog, {
         producerArgs,
         title,
@@ -172,14 +163,29 @@ export function activate(context: vscode.ExtensionContext): void {
       async (uri?: vscode.Uri, uris?: vscode.Uri[]) => {
         const target = uri ?? uris?.[0] ?? (await pickFile());
         if (!target) return;
+        // Through the SAME arg builder as viewer.open — this is the path the
+        // Explorer context menu takes, so it is where a long trajectory actually
+        // gets opened, and the frame cap must reach it.
+        const { producerArgs, title } = producerOpenArgs({
+          openPath: target.fsPath,
+          maxFrames: configuredMaxFrames(),
+        });
         openPanel(context, producerLog, {
-          producerArgs: ["--open", target.fsPath],
-          title: `Point Viewer (${target.path.split("/").pop()})`,
+          producerArgs,
+          title,
           pythonPath: realPythonPath(),
         });
       },
     ),
   );
+}
+
+/** The `molaro.viewer.maxFrames` override for the producer's display frame cap.
+ * 0 (the setting default) means "say nothing" — the producer applies its own
+ * default, which stays the ONE source of that number (producer/source.py). A
+ * positive value caps; a negative one loads every frame. */
+function configuredMaxFrames(): number {
+  return vscode.workspace.getConfiguration("molaro").get<number>("viewer.maxFrames", 0) || 0;
 }
 
 /** The mods directory (persistence lives here; nothing else does): the
