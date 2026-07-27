@@ -284,17 +284,27 @@ try {
     JSON.stringify(lastLine));
   await d.evaluate(`(()=>{document.getElementById('term-input').value=''; return true;})()`);
   await clickInput();
-  await d.key("Tab", "Tab", 9); // empty prompt → the verb pool. The registry
-  // (built-ins + workspace mods) now exceeds COMPLETION_LIST_CAP, so the
-  // uniform display-volume rule prints the count-and-hint, not the full list
-  // (pre-existing red on main once the mod count crossed the cap).
+  // Empty prompt → the verb pool. Whether that pool exceeds
+  // COMPLETION_LIST_CAP is ENVIRONMENT-DEPENDENT (built-ins + whatever the
+  // machine's mods directory holds), and retiring `rainbow` moved the built-in
+  // count from 45 to 44 — landing a 6-mod directory exactly ON the cap. So ask
+  // the page which branch of the display-volume rule applies and demand the log
+  // line match THAT branch: the RULE is the invariant, the count is not.
+  const pool = await d.evaluate<{ capped: boolean; n: number }>(`(()=>{
+    const c = window.__viewer.complete("", 0);
+    const m = /^(\\d+) matches$/.exec(c.candidates[0] ?? "");
+    return m ? { capped: true, n: Number(m[1]) } : { capped: false, n: c.candidates.length };
+  })()`);
+  await d.key("Tab", "Tab", 9);
   await sleep(400);
   lines2 = await logLines();
   lastLine = lines2[lines2.length - 1];
-  check("Tab at an empty prompt applies the display-volume cap (count-and-hint)",
+  check("Tab at an empty prompt obeys the display-volume rule for its pool size",
     /term-echo/.test(lastLine?.cls ?? "") &&
-      /^\d+ matches\s+— type to narrow$/.test(lastLine?.text ?? ""),
-    JSON.stringify(lastLine));
+      (pool.capped
+        ? /^\d+ matches\s+— type to narrow$/.test(lastLine?.text ?? "")
+        : /\bhelp\b/.test(lastLine?.text ?? "") && /\bview\b/.test(lastLine?.text ?? "")),
+    `pool=${JSON.stringify(pool)} line=${JSON.stringify(lastLine)}`);
   await d.insertText("h"); // a typed prefix narrows to a listable verb set
   await d.key("Tab", "Tab", 9);
   await sleep(400);
