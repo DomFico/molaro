@@ -40,6 +40,20 @@ gone on the streaming path, so a source no mod analyses never holds the whole
 trajectory resident. (The resident path — single-frame / non-seekable inputs —
 still keeps ``_xyz`` and an eager ``trajectory``, unchanged.)
 
+Phase 3 makes the SERVED FRAME COUNT a display decision rather than whatever the
+file holds: a trajectory longer than ``max_frames`` (default
+``DEFAULT_MAX_FRAMES``) is loaded with a STRIDE, so header frame ``i`` IS file
+frame ``i * stride``. That is a MAPPING change in the existing per-chunk seek —
+``_read_header_frames`` is the single place the mapping lives, and both
+``give_frames`` and the startup sweep go through it — not a new mechanism, and it
+keeps the out-of-core property (the strided frames are seeked and read; the whole
+trajectory is never materialised to subsample it). Stride 1 takes the
+pre-existing unstrided call verbatim, so an uncapped load is byte-identical to
+before. ``n_frames``, the frame stream, the header's frame-derived fields
+(bbox/PBC sample) and the mod-facing ``trajectory`` ALL mean the strided set —
+one frame axis, no silent mismatch — and ``Header.provenance`` names the stride
+and the true file frame count whenever it is not 1.
+
 Requires mdtraj + numpy (the benchmark `mdbench` conda env). The synthetic
 source has no such dependency; this one is only imported when a real dataset is
 requested.
@@ -67,7 +81,7 @@ from producer.domain_rules import (
     classify_atom,
     trace_anchor_indices,
 )
-from producer.source import DataSource
+from producer.source import DEFAULT_MAX_FRAMES, DataSource, stride_for_frame_cap
 
 # Bonds longer than this (nm) are treated as periodic-boundary wrap artifacts
 # (a bonded pair split across opposite box faces) and suppressed, so they don't
@@ -174,11 +188,14 @@ class MdtrajSource(DataSource):
         name: Optional[str] = None,
         ligand_residues: Sequence[str] = (),
         center: bool = True,
+        max_frames: Optional[int] = DEFAULT_MAX_FRAMES,
     ) -> None:
         if not os.path.exists(topology_path):
             raise FileNotFoundError(f"topology not found: {topology_path}")
         self.name = name or os.path.splitext(os.path.basename(topology_path))[0]
         self.ligand_residues = list(ligand_residues)
+        # Display frame cap (Phase 3). None / <= 0 disables it — every frame loads.
+        self._max_frames = max_frames
 
         # mdtraj normalizes every container format's length unit to nm on read,
         # so positions and the emitted units are always nm — no hand conversion,
@@ -207,23 +224,40 @@ class MdtrajSource(DataSource):
         if handle is not None:
             self._streaming = True
             self._handle = handle
-            self.n_frames = int(len(handle))
+            # Frame axis (Phase 3): the file's count, the stride derived from the
+            # cap, and the SERVED count — set before anything reads frames, since
+            # the startup sweep already sweeps only the served frames.
+            self._n_file_frames = int(len(handle))
+            self._stride = stride_for_frame_cap(self._n_file_frames, max_frames)
+            self.n_frames = len(range(0, self._n_file_frames, self._stride))
             self.n_points = int(self._topology.n_atoms)
             self._build_streaming(topology_path)
         else:
             self._streaming = False
-            self._build_resident(topology_path, trajectory_path, center)
+            self._build_resident(topology_path, trajectory_path, center, max_frames)
 
     # -- Build paths -----------------------------------------------------------
 
     def _build_resident(
-        self, topology_path: str, trajectory_path: Optional[str], center: bool
+        self, topology_path: str, trajectory_path: Optional[str], center: bool,
+        max_frames: Optional[int] = None,
     ) -> None:
         """The original in-RAM path: load every frame, center, slice from _xyz.
 
-        Unchanged behaviour — this is what a non-seekable or single-frame input
-        (PDB/GRO/restart/CG snapshot, e.g. the corpus membrane and CG systems)
-        takes, so those datasets are byte-for-byte identical to before.
+        Unchanged behaviour at stride 1 — this is what a non-seekable or
+        single-frame input (PDB/GRO/restart/CG snapshot, e.g. the corpus membrane
+        and CG systems) takes, so those datasets are byte-for-byte identical to
+        before.
+
+        The frame cap needs its OWN handling here (Phase 3) rather than riding the
+        streaming seek: this path exists precisely because the container cannot be
+        seeked (a multi-model PDB/GRO, an .xyz) or holds one frame, so there is no
+        seek to remap and mdtraj must parse every model to reach model k anyway.
+        The subsample is therefore a slice of the loaded block, and the transient
+        full parse is unavoidable for these formats — what the cap buys here is
+        the SERVED footprint (``_xyz``, ``trajectory``, and every channel a mod
+        derives from them), which is the wall. Single-frame inputs get stride 1 by
+        construction (1 <= any cap), so the common resident case never slices.
         """
         if trajectory_path:
             traj = md.load(trajectory_path, top=topology_path)
@@ -239,6 +273,16 @@ class MdtrajSource(DataSource):
                 f"atom-count mismatch: topology has {top.n_atoms}, "
                 f"trajectory has {traj.n_atoms}"
             )
+
+        # Frame axis (Phase 3). Subsample BEFORE centering and before _xyz is
+        # copied out, so the centering verdict, the header's frame-derived fields
+        # and the served coordinates all describe the SAME strided set — exactly
+        # what the streaming path's sweep does. At stride 1 `traj` is not sliced at
+        # all (mdtraj's slice copies), so this path is untouched.
+        self._n_file_frames = int(traj.n_frames)
+        self._stride = stride_for_frame_cap(self._n_file_frames, max_frames)
+        if self._stride > 1:
+            traj = traj[:: self._stride]
 
         # Periodic-image centering, BEFORE _xyz is copied out of the trajectory
         # — that ordering is what makes the streamed bytes and the mod-facing
@@ -287,6 +331,42 @@ class MdtrajSource(DataSource):
         # header (topology fields + the scan's raw bbox/edges).
         self._build_header_fields()
 
+    def _read_header_frames(self, start: int, count: int):
+        """Read HEADER frames ``[start, start+count)`` from disk through the
+        persistent handle, RAW (uncentered), as an mdtraj Trajectory.
+
+        THE ONE PLACE the frame mapping lives (Phase 3): header frame ``i`` is file
+        frame ``i * stride``. Both consumers — ``give_frames`` and the startup sweep
+        — go through here, so the header's frame-derived fields and the streamed
+        coordinates can never disagree about which file frames they mean.
+
+        At stride 1 this is verbatim the pre-Phase-3 call (``seek(start)`` then
+        ``read_as_traj(n_frames=count)``, no ``stride`` keyword), so an uncapped
+        load is byte-identical. At stride > 1 it hands mdtraj its own ``stride``,
+        which reads the ``count`` wanted frames and SKIPS the rest — the out-of-core
+        property is preserved (never a whole-trajectory materialisation to
+        subsample), and it is one read call rather than ``count`` seeks.
+
+        No clipping is possible: the last header frame is ``(n_frames-1)*stride``
+        and ``n_frames == len(range(0, n_file_frames, stride))``, so every
+        requested file frame exists. Asserted anyway — a short read would otherwise
+        silently serve fewer frames than the envelope claims.
+        """
+        handle = self._handle
+        stride = self._stride
+        handle.seek(start * stride)
+        if stride == 1:
+            chunk = handle.read_as_traj(self._topology, n_frames=count)
+        else:
+            chunk = handle.read_as_traj(self._topology, n_frames=count, stride=stride)
+        if chunk.n_frames != count and chunk.n_frames != 0:
+            raise RuntimeError(
+                f"short read: asked for {count} frames at header {start} "
+                f"(stride {stride}, file frames {start * stride}.."
+                f"{(start + count - 1) * stride}) but got {chunk.n_frames}"
+            )
+        return chunk
+
     def _startup_scan(self) -> None:
         """ONE streaming sweep over the RAW coordinates via the persistent handle
         (decision D1), ≤1 chunk resident. In a single pass it accumulates THREE
@@ -315,10 +395,9 @@ class MdtrajSource(DataSource):
              reducer) after the verdict is known. The grouping is topology-only,
              so wrapping whole groups cannot stretch a bond; asserted, not trusted.
         """
-        handle = self._handle
         top = self._topology
         n = self.n_points
-        T = self.n_frames
+        T = self.n_frames        # SERVED frames (already strided — Phase 3)
 
         # Same PBC edge-sample frames the resident path uses (linspace over T).
         n_sample = min(T, PBC_SAMPLE_FRAMES)
@@ -372,11 +451,12 @@ class MdtrajSource(DataSource):
         tear_after = 0.0
         tear_centroid0: Optional[np.ndarray] = None
 
-        handle.seek(0)
         start = 0
         while start < T:
             count = min(SCAN_CHUNK_FRAMES, T - start)
-            chunk = handle.read_as_traj(self._topology, n_frames=count)
+            # Through the ONE mapping (Phase 3) — the sweep therefore reads exactly
+            # the frames give_frames will serve, whatever the stride.
+            chunk = self._read_header_frames(start, count)
             xyz = np.ascontiguousarray(chunk.xyz, dtype="<f4")   # (c, N, 3) raw, LE
             c = xyz.shape[0]
             if c == 0:
@@ -870,18 +950,52 @@ class MdtrajSource(DataSource):
         streaming display path uses only the per-chunk ``give_frames`` hook. The
         resident path sets ``self._trajectory`` at load, so this returns it
         directly there.
+
+        It loads the SAME STRIDED frames the header declares (Phase 3), by handing
+        mdtraj the source's own stride. This is not an optimisation, it is the
+        no-silent-mismatch requirement: a mod reads ``n_frames`` off the header and
+        indexes ``trajectory.xyz`` with it, so if the two frame axes disagreed the
+        mod would compute over frames the viewer never shows — and a channel it
+        produced would be the wrong length. Both counts are ASSERTED equal below
+        rather than assumed.
         """
         traj = self._trajectory
         if traj is None and self._streaming:
-            traj = md.load(self._traj_path, top=self._topology_path)
+            traj = md.load(
+                self._traj_path, top=self._topology_path,
+                # stride=None at stride 1 — the pre-Phase-3 call verbatim.
+                stride=self._stride if self._stride > 1 else None,
+            )
             if traj.n_atoms != self.n_points:
                 raise ValueError(
                     f"atom-count mismatch: topology has {self.n_points}, "
                     f"trajectory has {traj.n_atoms}"
                 )
+            if traj.n_frames != self.n_frames:
+                raise ValueError(
+                    f"frame-count mismatch: the header declares {self.n_frames} "
+                    f"frames (stride {self._stride} over {self._n_file_frames} in "
+                    f"the file) but data.trajectory holds {traj.n_frames} — a mod "
+                    "would analyse frames the viewer never shows"
+                )
             self._center_on_solute(traj)     # center to match the streamed bytes
             self._trajectory = traj
         return self._trajectory
+
+    # -- Frame axis (Phase 3) --------------------------------------------------
+
+    @property
+    def frame_stride(self) -> int:
+        """The loaded stride: 1 when every frame in the file is served, ``s`` when
+        only every ``s``-th was (see the display frame cap in producer/source.py).
+        Overrides the neutral DataSource default so a mod can state what its
+        numbers were measured over."""
+        return self._stride
+
+    @property
+    def n_frames_in_file(self) -> int:
+        """The trajectory's TRUE frame count on disk, before the stride."""
+        return self._n_file_frames
 
     # -- Header construction ---------------------------------------------------
 
@@ -1086,8 +1200,39 @@ class MdtrajSource(DataSource):
             # Say what was done to the coordinates, every time — including when
             # nothing was. A mod analysing this trajectory sees exactly these
             # coordinates, so the assistant must be able to read what they are.
-            provenance=[f"periodic-image centering: {self.centering}"],
+            provenance=self._provenance(),
         )
+
+    def _provenance(self) -> List[str]:
+        """What was done to the coordinates, and to the frame axis.
+
+        The centering line is emitted every time, including when nothing was done
+        (its outcome is a decision with a non-obvious answer, so silence would be
+        ambiguous). The FRAME-SAMPLING line is emitted only when the stride is not
+        1 — deliberately, on both truthfulness and byte-identity grounds:
+
+          * at stride 1 nothing is withheld. ``n_frames`` IS the file's frame
+            count, so the header already tells the whole truth and an extra line
+            would restate it;
+          * at stride > 1 ``n_frames`` is SMALLER than the file's count and the
+            header alone cannot reveal that — which is exactly when disclosure is
+            mandatory. A user (and a mod, and the assistant, which reads
+            provenance through get_context) must be able to learn that they are
+            being shown every N-th frame, and out of how many;
+          * and an unstrided load stays byte-identical to before, header bytes
+            included — this project's standard for an additive change.
+        """
+        lines = [f"periodic-image centering: {self.centering}"]
+        if self._stride > 1:
+            lines.append(
+                f"frame sampling: stride {self._stride} — 1 frame in "
+                f"{self._stride} loaded, {self.n_frames} of "
+                f"{self._n_file_frames} in the file (display frame cap "
+                f"{self._max_frames}). n_frames, the frame stream and "
+                f"data.trajectory all mean these {self.n_frames} frames; a mod "
+                f"that subsamples further is subsampling this set."
+            )
+        return lines
 
     def give_frames(self, start: int, count: int) -> FrameChunk:
         if count < 1 or start < 0 or start + count > self.n_frames:
@@ -1105,11 +1250,11 @@ class MdtrajSource(DataSource):
             )
 
         # Streaming path (decision D7 — seek every time, no chunk cache): read
-        # exactly [start, start+count) from disk through the persistent handle.
-        # The serve loop is single-threaded FIFO, so the shared handle needs no
-        # lock.
-        self._handle.seek(start)
-        chunk = self._handle.read_as_traj(self._topology, n_frames=count)
+        # exactly header frames [start, start+count) from disk through the
+        # persistent handle, via the ONE frame mapping (header frame i == file
+        # frame i*stride, Phase 3). The serve loop is single-threaded FIFO, so the
+        # shared handle needs no lock.
+        chunk = self._read_header_frames(start, count)
         # --- Phase 2b: per-chunk periodic-image centering (ONE TRUTH restored) --
         # Center the chunk in place, byte-identically to whole-trajectory
         # centering (so the solute never jumps at a chunk boundary), THEN copy out

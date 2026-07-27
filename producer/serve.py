@@ -47,6 +47,7 @@ from contract.contract import (  # noqa: E402
     header_to_json,
     validate_header,
 )
+from producer.source import DEFAULT_MAX_FRAMES  # noqa: E402 — no molecular stack
 from producer.synthetic import SyntheticSource  # noqa: E402
 
 log = logging.getLogger("producer")
@@ -688,6 +689,7 @@ def build_source(args: argparse.Namespace):
             trajectory_path=spec["trajectory"],
             name=spec["name"],
             ligand_residues=spec["ligand_residues"],
+            max_frames=args.max_frames,
         )
     if args.dataset:
         from producer.mdtraj_source import MdtrajSource  # lazy
@@ -698,6 +700,7 @@ def build_source(args: argparse.Namespace):
             trajectory_path=args.trajectory,
             name=args.dataset_name,
             ligand_residues=args.ligand_residue or (),
+            max_frames=args.max_frames,
         )
     if args.open:
         # Open a file directly (Increment 4.6): resolve a companion topology for
@@ -716,7 +719,11 @@ def build_source(args: argparse.Namespace):
             trajectory_path=resolved["trajectory"],
             name=None,
             ligand_residues=args.ligand_residue or (),
+            max_frames=args.max_frames,
         )
+    # The synthetic source is NOT frame-capped: --n-frames is an explicit request
+    # for a size, not a file whose length is an accident of how long a simulation
+    # was run. The cap answers the second case only.
     return SyntheticSource(n_points=args.n_points, n_frames=args.n_frames, seed=args.seed)
 
 
@@ -735,6 +742,17 @@ def main() -> None:
         "--edge-mods", action="append",
         help="path to a produces:edges mod file whose [i, j] pairs are appended to "
              "the header at load (repeatable; default: none, header byte-identical)",
+    )
+    ap.add_argument(
+        "--max-frames", type=int, default=DEFAULT_MAX_FRAMES,
+        help=(
+            "cap on the number of trajectory frames LOADED from a real dataset "
+            f"(default {DEFAULT_MAX_FRAMES}). A longer trajectory loads with a "
+            "stride of ceil(frames/cap) — one frame in that many — and the header's "
+            "provenance names the stride and the true frame count. 0 or negative "
+            "loads every frame (no cap). Does not affect --n-frames, which sets the "
+            "synthetic source's frame count explicitly."
+        ),
     )
     ap.add_argument("--log-level", default="INFO")
     args = ap.parse_args()
