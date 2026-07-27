@@ -8,6 +8,17 @@
 reports/**
 media/**
 
+# Lane working artifacts — one-off probes, gate logs, capture scaffolds. NOT a
+# runtime path and never imported by dist/. This rule closes a real ship defect,
+# not a hypothetical one: vsce packages the FILESYSTEM (it consults
+# .vscodeignore, not git), so untracked scratch files shipped too. Measured
+# before this rule: viewer-0.1.0-win32-x64.vsix carried 148 `extension/
+# scratchpad/*` entries, and the INSTALLED extension at
+# ~/.vscode/extensions/undefined_publisher.viewer-0.1.0/scratchpad/ held 60
+# top-level entries / 148 files — i.e. every VSIX packaged and installed on
+# 2026-07-26 shipped the lanes' probe scripts into the running extension.
+scratchpad/**
+
 # Tests and their fixtures (not run inside the installed extension).
 tests/**
 contract/fixtures/**
