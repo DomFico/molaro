@@ -193,23 +193,40 @@ function configuredMaxFrames(): number {
   return vscode.workspace.getConfiguration("molaro").get<number>("viewer.maxFrames", 0) || 0;
 }
 
+/** The bond-inference modes, host-side. THE THIRD COPY of this list (package.json's
+ * enum and `producer/bond_inference.MODES` are the others), so it is ASSERTED
+ * rather than remembered: tests/bond_inference.py block H reads this file AND
+ * package.json and fails if either drifts from the producer's. */
+const INFER_BONDS_MODES = ["full", "nonsolvent", "off"];
+
 /** The `molaro.viewer.inferBonds` mode for the producer's covalent-bond inference.
  *
- * Forwarded verbatim, including the setting's own default — unlike `maxFrames`,
- * whose 0 sentinel means "say nothing", because a NUMBER has no spare value and a
- * settings UI needs a real enum here to be usable. That does put the default in
- * TWO places (this package.json enum and `DEFAULT_MODE` in
- * producer/bond_inference.py), which is this project's most-paid-for defect class,
- * so it is ASSERTED rather than remembered: tests/bond_inference.py block G reads
- * package.json and fails if the enum or the default drifts from the producer's.
+ * Forwarded, including the setting's own default — unlike `maxFrames`, whose 0
+ * sentinel means "say nothing", because a NUMBER has no spare value and a settings
+ * UI needs a real enum here to be usable.
  *
  * An empty value (a hand-cleared setting) forwards nothing, leaving the producer's
- * default. The value is NOT validated here — the producer rejects an unknown mode
- * loudly at open, which is one gate rather than two that can disagree. */
+ * default. An UNKNOWN value forwards nothing either, with a warning naming the
+ * valid ones. That is a deliberate reversal: this used to forward verbatim on the
+ * argument that "the producer rejects an unknown mode loudly at open, which is one
+ * gate rather than two that can disagree" — but the producer's rejection is
+ * `argparse` refusing to start, so a single mistyped character in settings.json
+ * (`"Full"`; VS Code's `enum` is a settings-UI dropdown and a JSON squiggle, not a
+ * write barrier) meant NO dataset would open at all. A bad value for one feature
+ * must not brick file opening; `maxFrames` coerces the same way with `|| 0`. The
+ * producer keeps its loud gate for every path that is not a user's text editor —
+ * the CLI, tests/bridge.ts, `viewer.open` args — where a typo is a bug, not a
+ * setting. */
 function configuredInferBonds(): string {
-  return (
+  const raw = (
     vscode.workspace.getConfiguration("molaro").get<string>("viewer.inferBonds", "") || ""
   ).trim();
+  if (raw === "" || INFER_BONDS_MODES.includes(raw)) return raw;
+  vscode.window.showWarningMessage(
+    `molaro.viewer.inferBonds: unknown value ${JSON.stringify(raw)} — ` +
+      `using the default. Valid values: ${INFER_BONDS_MODES.join(", ")}.`,
+  );
+  return "";
 }
 
 /** The mods directory (persistence lives here; nothing else does): the

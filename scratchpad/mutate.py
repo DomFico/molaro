@@ -6,24 +6,54 @@ owns the rule. Anything a mutation does NOT catch is a hole in the net, and is
 reported as such.
 
     <mdbench-python> scratchpad/mutate.py
+
+RUNS ON A SNAPSHOT, NEVER ON THE LIVE CHECKOUT. This used to rewrite
+producer/bond_inference.py and package.json IN PLACE for a 30-45 minute run,
+restoring each file in a `finally` that only covered the subprocess. The cost was
+not theoretical: two reviewers measuring this branch at the same time recorded a
+shredded water graph and 4,681 impossible-element bonds, and watched the same call
+return 137,666 then 123,452 then 123,476 within forty minutes, before working out
+that a harness was editing the tree underneath them. A tool that corrupts anyone
+who reads the repo while it runs is not a tool. Every mutation now lands in a
+private copy under the system temp directory, and the working tree is never
+opened for writing at all — which also means this can be run against uncommitted
+work, since the copy is of the WORKING TREE, not of HEAD.
 """
 from __future__ import annotations
 
 import pathlib
 import re
+import shutil
 import subprocess
-import sys
+import tempfile
 import time
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 PY = "/home/dom/miniforge3/envs/mdbench/bin/python"
 
+# Everything `python -m tests.bond_inference` reads. Copied per mutation; the
+# heavy directories (node_modules, .git, dist) are not among them.
+SNAPSHOT_DIRS = ("producer", "tests", "contract")
+SNAPSHOT_FILES = ("package.json",)
+
+
+def snapshot(dest: pathlib.Path) -> None:
+    """Copy the WORKING TREE's Python surface into `dest`."""
+    for d in SNAPSHOT_DIRS:
+        shutil.copytree(ROOT / d, dest / d,
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    for f in SNAPSHOT_FILES:
+        shutil.copy2(ROOT / f, dest / f)
+    # src/extension.ts is READ by block H (the third copy of the mode list).
+    (dest / "src").mkdir(exist_ok=True)
+    shutil.copy2(ROOT / "src" / "extension.ts", dest / "src" / "extension.ts")
+
 # (label, file, old, new, blocks expected to fail)
 MUTATIONS = [
     ("M1  scope 1 becomes GLOBAL (no residue scoping)",
      "producer/bond_inference.py",
-     "atoms_by_residue[res.index].append(i)",
-     "atoms_by_residue[0].append(i)",
+     "    res = table.residue_of[atoms]",
+     "    res = np.zeros_like(table.residue_of[atoms])",
      "A B C E G"),
     ("M2  monatomic (ion) exclusion removed",
      "producer/bond_inference.py",
@@ -42,20 +72,23 @@ MUTATIONS = [
      "I"),
     ("M5  H-H guard removed",
      "producer/bond_inference.py",
-     "        keep = (d <= (radius[gi] + radius[gj]) * COVALENT_BOND_SCALE) & ~(\n"
-     "            is_h[gi] & is_h[gj]\n        )",
-     "        keep = d <= (radius[gi] + radius[gj]) * COVALENT_BOND_SCALE",
+     "        & ~(is_h[gi] & is_h[gj])\n",
+     "",
      "I"),
     ("M6  linkage scope stops distance-checking",
      "producer/bond_inference.py",
-     "                        if dist <= (radius[i] + radius[j]) * COVALENT_BOND_SCALE:\n"
+     "                        if (\n"
+     "                            MIN_COVALENT_BOND_NM\n"
+     "                            <= dist\n"
+     "                            <= (radius[i] + radius[j]) * COVALENT_BOND_SCALE\n"
+     "                        ):\n"
      "                            yield (i, j, dist, SCOPE_LINKAGE)",
      "                        yield (i, j, dist, SCOPE_LINKAGE)",
      "E"),
     ("M7  crosslink scope drops the chalcogen requirement",
      "producer/bond_inference.py",
-     "        i for i in range(len(symbols)) if symbols[i] in CROSSLINK_ELEMENTS and eligible[i]",
-     "        i for i in range(len(symbols)) if eligible[i]",
+     "        [i for i in range(len(symbols)) if symbols[i] in CROSSLINK_ELEMENTS and eligible[i]],",
+     "        [i for i in range(len(symbols)) if eligible[i]],",
      "B C G"),
     ("M8  'off' infers anyway",
      "producer/bond_inference.py",
@@ -87,6 +120,41 @@ MUTATIONS = [
      "            reach = 2.0 * float(radius[idx].max()) * COVALENT_BOND_SCALE",
      "            reach = 1.0 * float(radius[idx].max()) * COVALENT_BOND_SCALE",
      "I"),
+    ("M17 the hydrogen rule stops consulting DECLARED bonds (the 24-bond defect)",
+     "producer/bond_inference.py",
+     "        if h in taken_hydrogens:\n            continue  # already monovalent by the file's own account\n",
+     "",
+     "B C I"),
+    ("M18 the minimum bond length is removed (a duplicated record self-bonds)",
+     "producer/domain_rules.py",
+     "MIN_COVALENT_BOND_NM = 0.05",
+     "MIN_COVALENT_BOND_NM = 0.0",
+     "I"),
+    ("M19 scope 3 re-adds the residue-INDEX adjacency gate",
+     "producer/bond_inference.py",
+     "            same = residue_of[gi] == residue_of[gj]",
+     "            same = np.abs(residue_of[gi] - residue_of[gj]) <= 1",
+     "J"),
+    ("M20 scope 1 goes back to a PER-RECORD Python loop (cost scales with records)",
+     "producer/bond_inference.py",
+     "        step = max(1, INTRA_PAIR_CHUNK // per_row)",
+     "        step = 1",
+     "K"),
+    ("M21 DENSE_RESIDUE_MAX_ATOMS raised past every real record",
+     "producer/bond_inference.py",
+     "DENSE_RESIDUE_MAX_ATOMS = 64",
+     "DENSE_RESIDUE_MAX_ATOMS = 100000",
+     "K"),
+    ("M22 boron returns to the radii table",
+     "producer/domain_rules.py",
+     '    "H": 0.031,\n    "C": 0.076,',
+     '    "H": 0.031,\n    "B": 0.084,\n    "C": 0.076,',
+     "J"),
+    ("M23 the host stops validating the setting (a typo bricks file opening)",
+     "src/extension.ts",
+     'const INFER_BONDS_MODES = ["full", "nonsolvent", "off"];',
+     'const INFER_BONDS_MODES = ["full", "nonsolvent"];',
+     "H"),
     ("M13 additive dedupe removed (existing bonds re-proposed)",
      "producer/bond_inference.py",
      "        if key in existing:\n            continue",
@@ -101,10 +169,10 @@ MUTATIONS = [
     # is a fast path, not a rule. A 1-atom residue's upper triangle is empty, so
     # removing the guard cannot change any output — an undetectable mutation here is
     # correct information, not a hole.
-    ("M16 residue-size skip removed (len<2 residues still scanned)",
+    ("M16 residue-size skip removed (len<2 residues still bucketed)",
      "producer/bond_inference.py",
-     "        if len(members) < 2:\n            continue",
-     "        if len(members) < 1:\n            continue",
+     "        if k < 2:\n            continue",
+     "        if k < 1:\n            continue",
      "(expected: NOTHING — an optimisation, not a rule)"),
     ("M15 the PBC cutoff no longer sees inferred pairs",
      "producer/mdtraj_source.py",
@@ -147,20 +215,19 @@ def main() -> int:
     for label, rel, old, new, expect in MUTATIONS:
         if ONLY and label.split()[0] not in ONLY:
             continue
-        path = ROOT / rel
-        original = path.read_text()
+        original = (ROOT / rel).read_text()
         if original.count(old) != 1:
             print(f"[SKIP] {label}\n       anchor matched {original.count(old)} times — fix the harness")
             holes.append(label + " (anchor)")
             continue
-        path.write_text(original.replace(old, new, 1))
         t0 = time.perf_counter()
-        try:
-            proc = subprocess.run([PY, "-m", "tests.bond_inference"], cwd=ROOT,
-                                  capture_output=True, text=True, timeout=1800)
+        with tempfile.TemporaryDirectory(prefix="molaro-mutate-") as tmp:
+            work = pathlib.Path(tmp)
+            snapshot(work)
+            (work / rel).write_text(original.replace(old, new, 1))
+            proc = subprocess.run([PY, "-m", "tests.bond_inference"], cwd=work,
+                                  capture_output=True, text=True, timeout=3600)
             out = proc.stdout
-        finally:
-            path.write_text(original)
         red = "FAILURES PRESENT" in out
         got = blocks_that_failed(out)
         verdict = "CAUGHT" if red else "NOT CAUGHT"

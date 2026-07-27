@@ -120,21 +120,46 @@ def check_system(sid: str) -> tuple[bool, list[str], dict]:
     # cross-box bonds, PLUS whatever covalent-radius inference added
     # (producer/bond_inference.py).
     #
-    # The old invariant here was `edges <= topology bonds`, which held only while
-    # the edge list was a SUBSET of the file's own connectivity. It no longer is:
-    # the membrane gains 123 476 inferred bonds and the duplex 24. So the bound is
-    # stated on the DECLARED part alone, with the inferred part taken from the
-    # source's own report rather than inferred from the total — otherwise the check
-    # would pass for any number of edges at all.
+    # The invariant here was `edges <= topology bonds`, which held only while the
+    # edge list was a SUBSET of the file's own connectivity. It no longer is: the
+    # membrane gains 123 452 inferred bonds and the duplex 24.
+    #
+    # The first replacement relaxed the bound by `src.inferred_edges_kept` — a
+    # COUNT the source reports about ITSELF — with a comment claiming that avoided
+    # a check that "would pass for any number of edges at all". It did not: a
+    # source can license any number of edges by claiming it inferred them. That was
+    # reproduced, not theorised — 500 fabricated garbage edges per system,
+    # attributed to inference, and this harness printed "+1298 inferred" and
+    # reported 9/9 PASS.
+    #
+    # So the bound is restated as a SET relation, which no self-report can inflate:
+    # every edge is either a bond the TOPOLOGY declares, or a pair the inference
+    # report actually names. `report.pairs` is the pair list itself, and it is
+    # disjoint from the declared bonds by construction, so this pins WHICH edges
+    # are drawn and not merely how many.
     top_bonds = top.n_bonds
     edges = len(header.edges)
     inferred = src.inferred_edges_kept
-    # Every edge index in range, and the declared part still bounded by the file.
+    report = getattr(src, "bond_inference", None)
+    declared_pairs = {(min(a.index, b.index), max(a.index, b.index)) for a, b in top.bonds}
+    inferred_pairs = set(report.pairs) if report is not None else set()
+    drawn = [(min(i, j), max(i, j)) for i, j in header.edges]
+    unexplained = [e for e in drawn if e not in declared_pairs and e not in inferred_pairs]
+    # Every edge index in range, every edge accounted for by name, the declared
+    # part still bounded by the file, and the report's own pairs still disjoint
+    # from what the file declared (additive-only).
     edges_in_range = all(0 <= i < header.n_points and 0 <= j < header.n_points for i, j in header.edges)
-    conn_ok = edges_in_range and (edges - inferred) <= max(top_bonds, 0)
+    conn_ok = (
+        edges_in_range
+        and not unexplained
+        and (edges - inferred) <= max(top_bonds, 0)
+        and not (inferred_pairs & declared_pairs)
+    )
     checks.append(("connectivity", conn_ok,
                    f"{edges} edges = {edges - inferred} declared + {inferred} inferred "
-                   f"(topology bonds {top_bonds})"))
+                   f"(topology bonds {top_bonds}); "
+                   f"{len(unexplained)} edges named by NEITHER the topology nor the report"
+                   + (f" e.g. {unexplained[:3]}" if unexplained else "")))
 
     detail = {
         "N": header.n_points,

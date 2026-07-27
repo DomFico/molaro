@@ -74,7 +74,10 @@ from __future__ import annotations
 import collections
 import json
 import os
+import re
+import subprocess
 import sys
+import time
 import warnings
 
 warnings.filterwarnings("ignore")
@@ -93,7 +96,11 @@ from producer.bond_inference import (  # noqa: E402
     infer_bonds_unscoped,
 )
 from producer.corpus import corpus_root, resolve_system  # noqa: E402
-from producer.domain_rules import COVALENT_BOND_SCALE, covalent_radius_nm  # noqa: E402
+from producer.domain_rules import (  # noqa: E402
+    COVALENT_BOND_SCALE,
+    MIN_COVALENT_BOND_NM,
+    covalent_radius_nm,
+)
 from producer.mdtraj_source import PBC_BOND_CUTOFF_NM, MdtrajSource  # noqa: E402
 
 CORPUS = [
@@ -108,17 +115,18 @@ CORPUS = [
 CORPUS_DELTA = {
     "01_alanine_dipeptide": 0, "02_trpcage_atomistic": 0, "03_adk_psf_dcd": 0,
     "04_ligand_custom_solvent": 0, "05_macrocycle_disulfide": 0,
-    "06_membrane_complex": 123476, "07_coarse_grain_martini": 0,
+    "06_membrane_complex": 123452, "07_coarse_grain_martini": 0,
     "09_nucleic_duplex": 24, "10_tip4p_virtualsites": 0,
 }
 # The same, in "nonsolvent" mode: identical everywhere except the membrane, where
-# 67,058 of the 123,476 inferred bonds are water O-H.
-CORPUS_DELTA_NONSOLVENT = dict(CORPUS_DELTA, **{"06_membrane_complex": 56418})
+# 67,058 of the 123,452 inferred bonds are water O-H (attributed by residue name:
+# HOH 67,058 + DMPC 56,394 = 123,452).
+CORPUS_DELTA_NONSOLVENT = dict(CORPUS_DELTA, **{"06_membrane_complex": 56394})
 # The per-scope split, for the two systems that add anything. Named separately
 # because the scopes answer different questions and a regression that moved bonds
 # from one scope to another would leave the total unchanged.
 CORPUS_SCOPES = {
-    "06_membrane_complex": {"intra": 123476, "linkage": 0, "crosslink": 0},
+    "06_membrane_complex": {"intra": 123452, "linkage": 0, "crosslink": 0},
     "09_nucleic_duplex": {"intra": 2, "linkage": 22, "crosslink": 0},
 }
 # Edge counts on `main`, BEFORE this branch — measured with
@@ -204,6 +212,65 @@ def _residue_atom(top, name, res_seq, atom_name):
                 if atom.name == atom_name:
                     return atom.index
     return None
+
+
+def _component_sizes(atom_indices, edges):
+    """Sizes of the connected components induced on ``atom_indices``."""
+    order = {a: k for k, a in enumerate(atom_indices)}
+    parent = list(range(len(order)))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for i, j in edges:
+        if i in order and j in order:
+            a, b = find(order[i]), find(order[j])
+            if a != b:
+                parent[a] = b
+    sizes = collections.Counter(find(k) for k in range(len(order)))
+    return sorted(sizes.values())
+
+
+def _oversized_solvent_records(top) -> int:
+    """Solvent residue RECORDS holding more than one physical molecule (>3 atoms).
+    Not a defect of ours — PDB resSeq overflows at 9,999 and mdtraj merges what
+    follows — but it is the reason "one record is one molecule" cannot be relied
+    on, so it is counted rather than assumed away."""
+    return sum(1 for r in top.residues
+               if r.name.upper() in ("HOH", "WAT", "SOL", "TIP3") and r.n_atoms > 3)
+
+
+# Maximum bonds an element can carry. Deliberately GENEROUS — hypervalent sulfur
+# and phosphorus are real, and a formally charged nitrogen is four-coordinate — so
+# a violation here is not a judgement call. Hydrogen is the load-bearing one: it
+# is monovalent with no exceptions, and 24 divalent hydrogens shipped in the
+# default mode while this file graded bond COUNTS instead of atom DEGREE.
+MAX_DEGREE = {"H": 1, "C": 4, "N": 4, "O": 2, "F": 1, "CL": 1, "BR": 1, "I": 1}
+
+
+def _degree_violations(top, edges):
+    """Atoms whose degree exceeds MAX_DEGREE, as {"H>1": n, ...}.
+
+    Counted over the WHOLE edge list — declared plus inferred — because that is
+    what the renderer draws and what a chemist would look at. Files carry their
+    own violations (membrane.pdb declares 7 four-coordinate nitrogens of its own),
+    so the assertion that matters is the DIFFERENCE between modes: inference must
+    introduce none.
+    """
+    degree = collections.Counter()
+    for i, j in edges:
+        degree[i] += 1
+        degree[j] += 1
+    out = collections.Counter()
+    for atom in top.atoms:
+        sym = (atom.element.symbol if atom.element is not None else "").upper()
+        cap = MAX_DEGREE.get(sym)
+        if cap is not None and degree[atom.index] > cap:
+            out[f"{sym}>{cap}"] += 1
+    return dict(out)
 
 
 # -- A. PSF equality -----------------------------------------------------------
@@ -307,7 +374,30 @@ def check_membrane_graph():
         ("DMPC: 56394 bonds", inside == 56394, f"{inside}"),
         ("DMPC: 0 rings (every lipid is a tree)", rings == 0, f"{rings}"),
         ("0 cross-residue inferred bonds anywhere in the membrane", cross == 0, f"{cross}"),
-        ("total inferred == 123476", report.added == 123476, f"{report.added}"),
+        ("total inferred == 123452", report.added == 123452, f"{report.added}"),
+    ]
+
+    # The merged-water record check. scope 1's justification is "a residue record
+    # is one molecule", and on THIS file that is false: PDB resSeq overflow put ten
+    # waters in one HOH record 3,725 times, so the intra scope really does run an
+    # all-pairs search across ten distinct molecules for 54% of what it infers. The
+    # record boundary cannot protect that; only the distance margin can. So the
+    # protection is asserted where it can actually fail — on the SOLVENT
+    # connected components, which must be exactly one 3-atom tree per water
+    # whatever the records say. A widened window (a bigger SCALE, a bigger radius)
+    # shows up here as a component larger than 3, and block B's DMPC assertions
+    # cannot see it because a merged-record fusion is intra-record by construction.
+    solvent = sorted(a.index for a in top.atoms
+                     if a.residue.name.upper() in ("HOH", "WAT", "SOL", "TIP3"))
+    scomps, sbonds, srings = _graph(solvent, edges)
+    sizes = _component_sizes(solvent, edges)
+    checks += [
+        ("record boundaries are NOT the protection: 3,726 HOH records hold >3 atoms",
+         _oversized_solvent_records(top) == 3726, f"{_oversized_solvent_records(top)}"),
+        ("...yet every water is its own 3-atom tree: 47829 components, 95658 bonds, 0 rings",
+         (scomps, sbonds, srings) == (47829, 95658, 0), f"{(scomps, sbonds, srings)}"),
+        ("no solvent component is larger than one water molecule",
+         set(sizes) == {3}, f"component-size histogram {dict(collections.Counter(sizes))}"),
     ]
     return all(ok for _, ok, _ in checks), checks
 
@@ -327,25 +417,30 @@ def check_corpus_delta(sid: str):
     try:
         off, full, nons = built["off"], built["full"], built["nonsolvent"]
         report = full.bond_inference
-        delta = len(full.edges) - len(off.edges)
-        delta_ns = len(nons.edges) - len(off.edges)
+        # Read through the MOD-FACING accessor (DataSource.edges -> EdgeView), so
+        # this block also proves that surface reports the DRAWN set.
+        off_edges = [tuple(e) for e in off.edges]
+        full_edges = [tuple(e) for e in full.edges]
+        nons_edges = [tuple(e) for e in nons.edges]
+        delta = len(full_edges) - len(off_edges)
+        delta_ns = len(nons_edges) - len(off_edges)
         checks = [
             (f"full: +{CORPUS_DELTA[sid]} edges", delta == CORPUS_DELTA[sid],
-             f"{len(off.edges)} -> {len(full.edges)} (+{delta})"),
+             f"{len(off_edges)} -> {len(full_edges)} (+{delta})"),
             (f"nonsolvent: +{CORPUS_DELTA_NONSOLVENT[sid]} edges",
              delta_ns == CORPUS_DELTA_NONSOLVENT[sid],
-             f"{len(off.edges)} -> {len(nons.edges)} (+{delta_ns})"),
+             f"{len(off_edges)} -> {len(nons_edges)} (+{delta_ns})"),
             ("every inferred pair survives the PBC cutoff here",
              full.inferred_edges_kept == report.added,
              f"{full.inferred_edges_kept} of {report.added} kept"),
             ("the report's count IS the edge delta", report.added == delta,
              f"report {report.added} vs edges +{delta}"),
             ("inferred pairs are APPENDED — pre-inference slots do not move",
-             full.edges[: len(off.edges)] == off.edges,
-             f"first {len(off.edges)} edges identical"),
+             full_edges[: len(off_edges)] == off_edges,
+             f"first {len(off_edges)} edges identical"),
             ("the inferred tail is sorted and holds i < j",
-             all(i < j for i, j in full.edges[len(off.edges):])
-             and full.edges[len(off.edges):] == sorted(full.edges[len(off.edges):]),
+             all(i < j for i, j in full_edges[len(off_edges):])
+             and full_edges[len(off_edges):] == sorted(full_edges[len(off_edges):]),
              f"{delta} appended"),
         ]
         if sid in CORPUS_SCOPES:
@@ -353,6 +448,27 @@ def check_corpus_delta(sid: str):
             got = {"intra": report.intra, "linkage": report.linkage,
                    "crosslink": report.crosslink}
             checks.append((f"scope split {want}", got == want, f"{got}"))
+
+        # VALENCE, on every system, in the mode that ships. This is the assertion
+        # this file lacked: it graded bond SETS and COUNTS, so 24 chemically
+        # impossible bonds (divalent hydrogens, pentavalent carbons, three-membered
+        # C-C-H rings) passed every check while being PINNED by the membrane's
+        # count. Stated as a DIFFERENCE against "off" because a file can declare
+        # its own violations and inference must not be blamed for them —
+        # membrane.pdb declares 7 four-coordinate nitrogens in both modes.
+        viol_off = _degree_violations(off._topology, off_edges)
+        viol_full = _degree_violations(full._topology, full_edges)
+        viol_ns = _degree_violations(nons._topology, nons_edges)
+        checks += [
+            ("inference introduces NO impossible valence (full vs off)",
+             viol_full == viol_off, f"off {viol_off} -> full {viol_full}"),
+            ("...nor in nonsolvent mode",
+             viol_ns == viol_off, f"off {viol_off} -> nonsolvent {viol_ns}"),
+            ("no inferred bond is zero-length (a duplicated atom record)",
+             _min_pair_length(full) >= 0.05 if report.added else True,
+             f"shortest inferred pair {_min_pair_length(full):.4f} nm"
+             if report.added else "nothing inferred"),
+        ]
         # provenance discipline: a line only when something was added
         prov = [line for line in full.give_header().provenance
                 if line.startswith("bond inference")]
@@ -367,6 +483,17 @@ def check_corpus_delta(sid: str):
     finally:
         for src in built.values():
             src.close()
+
+
+def _min_pair_length(src) -> float:
+    """Shortest INFERRED pair on a built source, in nm, at the frame inference
+    used. inf when nothing was inferred."""
+    report = src.bond_inference
+    if report is None or not report.pairs:
+        return float("inf")
+    xyz = src._representative_xyz()
+    pairs = np.asarray(report.pairs, dtype=np.int64)
+    return float(np.linalg.norm(xyz[pairs[:, 0]] - xyz[pairs[:, 1]], axis=1).min())
 
 
 def check_graceful_empty_cases():
@@ -583,8 +710,8 @@ def check_pbc_filter_reaches_inferred_pairs():
                  f"{separation} nm; window {window:.4f} nm; cutoff {PBC_BOND_CUTOFF_NM} nm"),
                 ("inference PROPOSES the bond", report.added == 1, f"{report.added}"),
                 ("the PBC cutoff DROPS it — inferred pairs are filtered like declared ones",
-                 src.inferred_edges_kept == 0 and src.edges == [],
-                 f"kept {src.inferred_edges_kept} of {report.added}, edges {src.edges}"),
+                 src.inferred_edges_kept == 0 and len(src.edges) == 0,
+                 f"kept {src.inferred_edges_kept} of {report.added}, edges {list(src.edges)}"),
                 ("provenance says a bond was suppressed",
                  any("suppressed as cross-box" in line for line in src.give_header().provenance),
                  "; ".join(src.give_header().provenance)[:140]),
@@ -739,7 +866,7 @@ def check_off_is_pre_change(sid: str):
             reference = []
         checks = [
             ("off == the pre-change rule, same pairs in the same order",
-             src.edges == reference,
+             [tuple(e) for e in src.edges] == reference,
              f"{len(src.edges)} vs {len(reference)}"),
             (f"off edge count == the count measured on main ({PRE_CHANGE_EDGES[sid]})",
              len(src.edges) == PRE_CHANGE_EDGES[sid], f"{len(src.edges)}"),
@@ -764,23 +891,28 @@ def check_negative_control():
 
     MEASURED (2026-07-27), DMPC subgraph, 482 lipids / 56,876 atoms:
         scoped                  482 components, 56,394 bonds,     0 rings
-        unscoped global search  742 components, 59,709 bonds, 3,575 rings
+        unscoped global search  670 components, 59,703 bonds, 3,497 rings
 
     Two different failures at once, and neither is fixable by moving a threshold:
-      * FUSION — 3,575 rings, from bonds between atoms of different molecules that
+      * FUSION — 3,497 rings, from bonds between atoms of different molecules that
         happen to touch. membrane.pdb genuinely holds 1,788 atom pairs closer than
         0.05 nm, so no distance cut separates "one molecule" from "two molecules
         in contact".
-      * SHREDDING — 742 > 482 components, because a lipid hydrogen's nearest
+      * SHREDDING — 670 > 482 components, because a lipid hydrogen's nearest
         neighbour turns out to be in a passing water, so the one-partner rule hands
         the H to the water and it detaches from its own carbon.
 
-    (The original diagnosis recorded ~70 components here rather than 742. 742 is
-    what this repository's unscoped path measures; the ring count, 3,575, agrees
-    exactly. The difference is almost certainly whether the hydrogen rule was
-    applied globally — a variant with the rule off collapses DMPC to 3 components
-    with 9,391 rings, which is worse still. All three are catastrophic; the
-    assertion below is on the property, with the measured numbers pinned.)
+    (The original diagnosis recorded ~70 components here rather than 670. 670 is
+    what this repository's unscoped path measures. The difference is almost
+    certainly whether the hydrogen rule was applied globally — a variant with the
+    rule off collapses DMPC to 3 components with 8,979 rings, which is worse still.
+    All are catastrophic; the assertion below is on the property, with the measured
+    numbers pinned. The control shares _window_survivors with the real scopes, so
+    the ONLY difference between the two rows is the scoping — which is what a
+    control has to isolate. When the hydrogen rule learned to consult declared
+    bonds and the minimum bond length arrived, this row moved 742/59,709/3,575 ->
+    670/59,703/3,497 for exactly that reason, and it is re-measured here rather
+    than left stale.)
     """
     traj, top = _load_static(
         _bench("systems", "06_membrane_complex", "files", "membrane.pdb")
@@ -810,8 +942,8 @@ def check_negative_control():
          unscoped_cross > 10000 and not any(residue_of[i] != residue_of[j]
                                             for i, j in scoped.pairs),
          f"unscoped {unscoped_cross} cross-residue, scoped 0"),
-        ("pinned measurement: unscoped == 742 comps / 59709 bonds / 3575 rings",
-         unscoped_graph == (742, 59709, 3575), f"{unscoped_graph}"),
+        ("pinned measurement: unscoped == 670 comps / 59703 bonds / 3497 rings",
+         unscoped_graph == (670, 59703, 3497), f"{unscoped_graph}"),
         ("WHY no threshold works: membrane.pdb holds 1788 atom pairs under 0.05 nm",
          close == 1788, f"{close} pairs closer than 0.05 nm"),
     ]
@@ -842,6 +974,15 @@ def check_one_default():
         ("one enumDescription per mode", len(prop.get("enumDescriptions", [])) == len(MODES),
          f"{len(prop.get('enumDescriptions', []))}"),
     ]
+    # THIRD copy: the host validates the setting before forwarding it, because a
+    # typo'd value used to reach argparse and stop the producer starting at all —
+    # so a one-character mistake in settings.json bricked opening ANY dataset. The
+    # host cannot import Python, so it holds its own list; that list is read here.
+    ext = open(os.path.join(os.path.dirname(__file__), "..", "src", "extension.ts")).read()
+    m = re.search(r"const INFER_BONDS_MODES = \[(.*?)\];", ext, re.S)
+    host_modes = tuple(re.findall(r'"([^"]+)"', m.group(1))) if m else ()
+    checks.append(("src/extension.ts INFER_BONDS_MODES == producer MODES",
+                   host_modes == tuple(MODES), f"{list(host_modes)} vs {list(MODES)}"))
     return all(ok for _, ok, _ in checks), checks
 
 
@@ -894,6 +1035,69 @@ def check_hydrogen_rule():
     checks.append(("H-H is never bonded even at 0.05 nm", got2.added == 0,
                    f"{got2.added} bonds; window would be "
                    f"{2 * covalent_radius_nm('H') * COVALENT_BOND_SCALE:.4f} nm"))
+
+    # AN ALREADY-BONDED HYDROGEN. The rule above ranks NEW candidates against each
+    # other; it used to never consult the topology's DECLARED bonds, so a hydrogen
+    # the file had already bonded gained a SECOND one. That is not hypothetical —
+    # it shipped 24 times on the corpus membrane (block C's valence check is the
+    # real-data half of this) — and it could not be reached by the fixture above,
+    # which calls md.Topology() and never add_bond(). Geometry lifted from the
+    # measured case: PRO.HG2 declared bonded to CG at 0.1115 nm and 0.1125 nm from
+    # CD, inside the 0.1284 nm C-H window.
+    top3 = md.Topology()
+    res3 = top3.add_residue("PRO", top3.add_chain())
+    cg = top3.add_atom("CG", md.element.carbon, res3)
+    cd = top3.add_atom("CD", md.element.carbon, res3)
+    hg2 = top3.add_atom("HG2", md.element.hydrogen, res3)
+    xyz3 = np.array([[0.0, 0, 0], [0.1481, 0, 0], [0.073294, 0.084023, 0]],
+                    dtype=np.float64)
+    d_cg = float(np.linalg.norm(xyz3[cg.index] - xyz3[hg2.index]))
+    d_cd = float(np.linalg.norm(xyz3[cd.index] - xyz3[hg2.index]))
+    window_ch = (covalent_radius_nm("C") + covalent_radius_nm("H")) * COVALENT_BOND_SCALE
+    free = infer_bonds(top3, xyz3)                 # nothing declared yet
+    top3.add_bond(cg, hg2)                         # ...now the file declares CG-HG2
+    bound = infer_bonds(top3, xyz3)
+    checks += [
+        ("COUNTERFACTUAL: with NOTHING declared the H really is in range of both",
+         (cg.index, hg2.index) in set(free.pairs) and len(free.pairs) >= 1
+         and d_cg <= window_ch and d_cd <= window_ch,
+         f"CG-H {d_cg:.4f} nm, CD-H {d_cd:.4f} nm, window {window_ch:.4f} nm; "
+         f"free inference proposed {sorted(free.pairs)}"),
+        ("a hydrogen the topology ALREADY bonded gains NOTHING",
+         not any(hg2.index in pair for pair in bound.pairs),
+         f"{sorted(bound.pairs)}"),
+        ("...and the refusal is COUNTED, not silent",
+         bound.hydrogen_candidates_dropped >= 1,
+         f"hydrogen_candidates_dropped={bound.hydrogen_candidates_dropped}"),
+        ("the declared bond itself is never re-proposed (additive only)",
+         (cg.index, hg2.index) not in set(bound.pairs), f"{sorted(bound.pairs)}"),
+    ]
+
+    # A DUPLICATED ATOM RECORD. The covalent window has an upper bound and no lower
+    # one, so two records for the same physical atom (a hand-edited or concatenated
+    # PDB; mdtraj only de-duplicates alternate positions when label_alt_id is set)
+    # sit at distance 0.000, satisfy it trivially, and used to produce a
+    # ZERO-LENGTH edge. Same layout as the measured case: N, CA, CA(dup), C, O.
+    top4 = md.Topology()
+    res4 = top4.add_residue("GLY", top4.add_chain())
+    top4.add_atom("N", md.element.nitrogen, res4)
+    top4.add_atom("CA", md.element.carbon, res4)
+    top4.add_atom("CA", md.element.carbon, res4)      # the duplicate, no altloc
+    top4.add_atom("C", md.element.carbon, res4)
+    top4.add_atom("O", md.element.oxygen, res4)
+    xyz4 = np.array([[0.0, 0, 0], [0.145, 0, 0], [0.145, 0, 0],
+                     [0.290, 0, 0], [0.290, 0.123, 0]], dtype=np.float64)
+    dup = infer_bonds(top4, xyz4)
+    zero = [(i, j) for i, j in dup.pairs
+            if float(np.linalg.norm(xyz4[i] - xyz4[j])) < 1e-9]
+    checks += [
+        ("a duplicated atom record is NOT bonded to itself", zero == [], f"{zero}"),
+        ("COUNTERFACTUAL: the duplicate is real and the rest of the residue still bonds",
+         top4.n_atoms == 5 and len(dup.pairs) >= 3, f"{sorted(dup.pairs)}"),
+        ("the floor rejects only coincident records, not short real bonds",
+         all(float(np.linalg.norm(xyz4[i] - xyz4[j])) >= MIN_COVALENT_BOND_NM
+             for i, j in dup.pairs), f"{sorted(dup.pairs)}"),
+    ]
     return all(ok for _, ok, _ in checks), checks
 
 
@@ -959,6 +1163,528 @@ def check_big_residue_and_modes():
 # -- runner --------------------------------------------------------------------
 
 
+
+# -- J. what the scopes REACH, and what they provably do not -------------------
+
+
+def _synthetic(chain_specs):
+    """Build a topology + coordinates from
+    ``[[(resname, [(atom_name, element_symbol, (x, y, z)), ...]), ...], ...]``
+    — one inner list per CHAIN. Used for the bond classes no corpus file has."""
+    top = md.Topology()
+    coords = []
+    handles = {}
+    for residues in chain_specs:
+        chain = top.add_chain()
+        for res_name, atoms in residues:
+            res = top.add_residue(res_name, chain)
+            for atom_name, symbol, pos in atoms:
+                atom = top.add_atom(atom_name, md.element.get_by_symbol(symbol), res)
+                handles[(res.index, atom_name)] = atom.index
+                coords.append(pos)
+    return top, np.array(coords, dtype=np.float64), handles
+
+
+def _cys(origin):
+    """N-CA-CB-SG, SG at origin + (0, 0.331, 0)."""
+    x, y, z = origin
+    return [("N", "N", (x, y, z)), ("CA", "C", (x + 0.145, y, z)),
+            ("CB", "C", (x + 0.145, y + 0.150, z)),
+            ("SG", "S", (x + 0.145, y + 0.331, z))]
+
+
+def _cys_facing(origin, gap):
+    """A second CYS whose SG sits ``gap`` nm beyond the first one's SG."""
+    x, y, z = origin
+    sg_y = y + 0.331 + gap
+    return [("N", "N", (x, sg_y + 0.331, z)), ("CA", "C", (x + 0.145, sg_y + 0.331, z)),
+            ("CB", "C", (x + 0.145, sg_y + 0.181, z)),
+            ("SG", "S", (x + 0.145, sg_y, z))]
+
+
+# A real disulfide, MEASURED on 1b0c chain 4 CYS14.SG-CYS38.SG: 0.20417 nm.
+SS_BOND_NM = 0.20417
+
+
+def check_crosslink_reach():
+    """Scope 3 used to refuse any pair whose residue INDEX differed by 1, on the
+    stated ground that "an i/i+1 pair is scope 2's business". Both halves of that
+    were false, and a fixture shows it in one line each:
+
+      * mdtraj numbers residues GLOBALLY while scope 2 iterates
+        ``for chain in topology.chains``. So a disulfide joining the LAST residue
+        of one chain to the FIRST of the next differs by 1 in index and was
+        reachable by no scope at all. The control is the identical geometry with
+        one spacer residue in between, which was found — so the index gate, and
+        nothing else, was the cause.
+      * scope 2 name-gates to (C, N)/(O3', P), so it could never have caught an
+        S-S anyway. A VICINAL disulfide (residues i and i+1 of one chain — the
+        acetylcholine-receptor alpha Cys192-Cys193 motif) was therefore lost too.
+
+    The replacement gate is "not the SAME residue", which is genuinely scope 1's
+    business. What keeps the scope honest is the chalcogen requirement plus the
+    covalent window, not index arithmetic — and the corpus agrees: this change
+    adds ZERO bonds to every system in block C.
+    """
+    a, b = _cys((0.0, 0.0, 0.0)), _cys_facing((0.0, 0.0, 0.0), SS_BOND_NM)
+    spacer = [("GLY", [("N", "N", (2.0, 0, 0)), ("CA", "C", (2.145, 0, 0)),
+                       ("C", "C", (2.297, 0, 0)), ("O", "O", (2.297, 0.123, 0))])]
+    checks = []
+
+    def probe(label, spec, want_pair, expect):
+        top, xyz, h = _synthetic(spec)
+        got = infer_bonds(top, xyz, DEFAULT_MODE)
+        pairs = set(got.pairs)
+        found = tuple(sorted(want_pair)) in pairs
+        checks.append((label, found is expect,
+                       f"{'found' if found else 'MISSED'} "
+                       f"(intra {got.intra} linkage {got.linkage} crosslink {got.crosslink})"))
+        return got
+
+    # the fixture's own geometry, asserted so a mis-built fixture cannot pass
+    top0, xyz0, _ = _synthetic([[("CYS", a)], [("CYS", b)]])
+    d = float(np.linalg.norm(xyz0[3] - xyz0[7]))
+    checks.append(("FIXTURE: the two SG atoms are a real disulfide apart",
+                   abs(d - SS_BOND_NM) < 1e-4, f"{d * 10:.4f} A vs 2.0417 A"))
+
+    probe("inter-chain S-S: chain-A-last <-> chain-B-first is FOUND",
+          [[("CYS", a)], [("CYS", b)]], (3, 7), True)
+    probe("CONTROL: the same S-S with a spacer residue was always found",
+          [[("CYS", a)], spacer, [("CYS", b)]], (3, 11), True)
+    probe("vicinal S-S: residues i and i+1 of ONE chain is FOUND",
+          [[("CYS", a), ("CYS", b)]], (3, 7), True)
+
+    # ...and the scope that claims it is the one that made it.
+    top1, xyz1, _ = _synthetic([[("CYS", a)], [("CYS", b)]])
+    rep1 = infer_bonds(top1, xyz1, DEFAULT_MODE)
+    checks.append(("...attributed to the CROSSLINK scope, not smuggled in elsewhere",
+                   rep1.crosslink == 1 and rep1.linkage == 0,
+                   f"intra {rep1.intra} linkage {rep1.linkage} crosslink {rep1.crosslink}"))
+
+    # a same-residue S-C stays scope 1's, so the widened gate did not duplicate it
+    same = [("CYS", a)]
+    top2, xyz2, _ = _synthetic([same])
+    rep2 = infer_bonds(top2, xyz2, DEFAULT_MODE)
+    checks.append(("a SAME-residue S-C is still scope 1's, never scope 3's",
+                   rep2.crosslink == 0 and rep2.intra == len(rep2.pairs),
+                   f"intra {rep2.intra} crosslink {rep2.crosslink}"))
+    return all(ok for _, ok, _ in checks), checks
+
+
+def check_named_coverage_gaps():
+    """The bond classes NO scope reaches, asserted as MISSED rather than left to be
+    discovered by a user opening a glycoprotein.
+
+    Inference is additive, so each of these renders as disconnected pieces and
+    never as a wrong bond — a coverage gap, not a false graph. That makes them
+    acceptable; it does not make them invisible, which is why domain_rules names
+    them and MdtrajSource puts them in Header.provenance. This block is what stops
+    that list from being prose: if a future scope starts reaching one of these,
+    the corresponding line here goes red and the docs must move with it.
+    """
+    checks = []
+
+    def probe(label, spec, want_pair):
+        top, xyz, _ = _synthetic(spec)
+        got = infer_bonds(top, xyz, DEFAULT_MODE)
+        key = tuple(sorted(want_pair))
+        d = float(np.linalg.norm(xyz[key[0]] - xyz[key[1]]))
+        checks.append((label, key not in set(got.pairs),
+                       f"target at {d * 10:.3f} A -> "
+                       f"{'FOUND (the docs are now wrong)' if key in set(got.pairs) else 'missed, as documented'}"))
+
+    gly = lambda x: [("N", "N", (x, 0, 0)), ("CA", "C", (x + 0.145, 0, 0)),
+                     ("C", "C", (x + 0.297, 0, 0)), ("O", "O", (x + 0.297, 0.123, 0))]
+    # head-to-tail cyclic peptide: last residue's C to first residue's N (0.133 nm)
+    probe("head-to-tail cyclic peptide (last C -> first N) is NOT inferred",
+          [[("GLY", [("N", "N", (0.0, 0, 0)), ("CA", "C", (0.145, 0, 0))]),
+            ("GLY", gly(0.4)),
+            ("GLY", [("N", "N", (0.9, 0, 0)), ("CA", "C", (1.045, 0, 0)),
+                     ("C", "C", (0.133, 0, 0))])]], (0, 8))
+    # N-glycan: ASN.ND2 - NAG.C1 (0.1441 nm), two non-adjacent residues, no chalcogen
+    probe("N-glycan link ASN.ND2 - NAG.C1 is NOT inferred",
+          [[("ASN", [("CB", "C", (0.0, 0, 0)), ("CG", "C", (0.152, 0, 0)),
+                     ("ND2", "N", (0.152, 0.133, 0))]),
+            ("GLY", gly(2.0)),
+            ("NAG", [("C1", "C", (0.152, 0.2771, 0)), ("O5", "O", (0.152, 0.4211, 0))])]],
+          (2, 7))
+    # isopeptide: LYS.NZ - GLY.C (0.133 nm)
+    probe("isopeptide LYS.NZ - GLY.C (ubiquitin/SUMO) is NOT inferred",
+          [[("LYS", [("CE", "C", (0.0, 0, 0)), ("NZ", "N", (0.148, 0, 0))]),
+            ("ALA", gly(2.0)),
+            ("GLY", [("C", "C", (0.281, 0, 0)), ("O", "O", (0.281, 0.123, 0))])]],
+          (1, 6))
+    # covalent ligand through a non-chalcogen: SER.OG - LIG.C1 (0.1432 nm)
+    probe("a covalent ligand bonded through O (no chalcogen) is NOT inferred",
+          [[("SER", [("CB", "C", (0.0, 0, 0)), ("OG", "O", (0.143, 0, 0))]),
+            ("ALA", gly(2.0)),
+            ("LIG", [("C1", "C", (0.2862, 0, 0)), ("C2", "C", (0.4382, 0, 0))])]],
+          (1, 6))
+    # metal-organic: a heme iron inside its own porphyrin (Fe-N 0.204 nm)
+    hem = [("FE", "Fe", (0.0, 0, 0))]
+    for k, (dx, dy) in enumerate(((0.204, 0.0), (-0.204, 0.0), (0.0, 0.204), (0.0, -0.204))):
+        hem.append((f"N{k}", "N", (dx, dy, 0.0)))
+    top_h, xyz_h, _ = _synthetic([[("HEM", hem)]])
+    rep_h = infer_bonds(top_h, xyz_h, DEFAULT_MODE)
+    fe_bonds = [p for p in rep_h.pairs if 0 in p]
+    window_fe = (covalent_radius_nm("FE") + covalent_radius_nm("N")) * COVALENT_BOND_SCALE
+    checks.append(("a heme Fe stays UNBONDED inside its own porphyrin",
+                   fe_bonds == [],
+                   f"Fe-N 0.2040 nm vs window {window_fe:.4f} nm (metals are not in "
+                   f"COVALENT_RADII_NM) -> {len(fe_bonds)} Fe bonds"))
+
+    # ...and the flip side of the metals decision: an ION never sprouts a shell.
+    checks.append(("...which is the SAME decision that keeps ion coordination shells bare",
+                   covalent_radius_nm("ZN") == covalent_radius_nm("__nosuchelement__"),
+                   "every metal falls back to COVALENT_RADIUS_DEFAULT_NM"))
+    return all(ok for _, ok, _ in checks), checks
+
+
+def check_boron_silicon_absent():
+    """B and SI were in COVALENT_RADII_NM and earned ZERO edges on every system in
+    the evidence base, while boron measurably widened the window on the one system
+    whose atoms have no real elements at all: mdtraj name-guesses martini backbone
+    beads called "BB" as boron. 07's "+0" then survived by 0.13 pm.
+
+    Removing them is only safe if real boron/silicon chemistry still lands inside
+    the DEFAULT radius's window, so that is measured here rather than asserted.
+    Si-C is the one genuine loss and is named as such."""
+    d = covalent_radius_nm("__default__")
+    checks = [("B is not in the radii table", covalent_radius_nm("B") == d, "default"),
+              ("SI is not in the radii table", covalent_radius_nm("SI") == d, "default")]
+    for label, real_nm, other, reachable in (
+        ("B-O (boronic acid)", 0.136, "O", True),
+        ("B-C", 0.158, "C", True),
+        ("B-N", 0.144, "N", True),
+        ("SI-O (siloxane)", 0.163, "O", True),
+        ("SI-C", 0.187, "C", False),
+    ):
+        window = (d + covalent_radius_nm(other)) * COVALENT_BOND_SCALE
+        got = real_nm <= window
+        checks.append((f"{label} {'still reachable' if reachable else 'is the ACCEPTED loss'} "
+                       f"with the default radius",
+                       got is reachable,
+                       f"real {real_nm:.3f} nm vs window {window:.4f} nm -> "
+                       f"{'reachable' if got else 'missed'}"))
+
+    # the martini system, where boron was doing harm: the tightest intra-residue
+    # pair must stay OUTSIDE the window, and the margin is reported because it is thin.
+    spec = resolve_system("07_coarse_grain_martini")
+    traj, top = _load_static(spec["topology"])
+    xyz = traj.xyz[0]
+    worst = None
+    for res in top.residues:
+        idx = [a.index for a in res.atoms]
+        for m in range(len(idx)):
+            for n in range(m + 1, len(idx)):
+                i, j = idx[m], idx[n]
+                dist = float(np.linalg.norm(xyz[i] - xyz[j]))
+                si = top.atom(i).element.symbol if top.atom(i).element else ""
+                sj = top.atom(j).element.symbol if top.atom(j).element else ""
+                w = (covalent_radius_nm(si) + covalent_radius_nm(sj)) * COVALENT_BOND_SCALE
+                if worst is None or dist - w < worst[0]:
+                    worst = (dist - w, dist, w,
+                             f"{res.name}.{top.atom(i).name}({si})-{top.atom(j).name}({sj})")
+    margin, dist, window, who = worst
+    checks.append(("martini: the tightest intra-residue pair is still OUTSIDE its window",
+                   margin > 0,
+                   f"margin {margin * 1000:+.4f} pm ({who}: d={dist * 1000:.3f} pm vs "
+                   f"window {window * 1000:.3f} pm)"))
+    checks.append(("...and with boron in the table that window would have been 8.4 pm wider",
+                   abs((0.084 - covalent_radius_nm("__default__")) * COVALENT_BOND_SCALE
+                       * 1000 - 8.4) < 0.2,
+                   "0.084 nm (Cordero B) vs 0.077 nm default"))
+    return all(ok for _, ok, _ in checks), checks
+
+
+# -- K. cost, which nothing in this file used to constrain ---------------------
+
+
+def _split_merged_waters(top):
+    """Rebuild a topology with ONE residue record per water molecule.
+
+    ``membrane.pdb`` is the only large system available to measure inference cost
+    on, and its resSeq overflowed: mdtraj merged 47,829 waters into 14,300 HOH
+    records. That is the FLATTERING case for a per-record implementation, so
+    measuring only it is how a per-record cost stays invisible. This produces the
+    same atoms, the same coordinates, the same elements and the same declared
+    bonds with 50,031 records instead of 16,502 — what any PDB under 99,999
+    residues, any .gro, or any prmtop would have given.
+    """
+    new = md.Topology()
+    for chain in top.chains:
+        nc = new.add_chain()
+        for res in chain.residues:
+            atoms = list(res.atoms)
+            if res.name.upper() in ("HOH", "WAT", "SOL", "TIP3") and len(atoms) > 3:
+                for s in range(0, len(atoms), 3):
+                    nr = new.add_residue(res.name, nc, resSeq=res.resSeq)
+                    for a in atoms[s:s + 3]:
+                        new.add_atom(a.name, a.element, nr)
+            else:
+                nr = new.add_residue(res.name, nc, resSeq=res.resSeq)
+                for a in atoms:
+                    new.add_atom(a.name, a.element, nr)
+    seq = list(new.atoms)
+    for a, b in top.bonds:
+        new.add_bond(seq[a.index], seq[b.index])
+    return new
+
+
+# Cost ceilings. Deliberately loose — a wall clock on a shared machine is not a
+# benchmark — but not vacuous either: MEASURED at 0.44 s for the 222,227-atom
+# membrane, so 4 s catches the ~10x class of regression (the exact mutation that
+# used to leave this file ALL PASS: a 10x repeat of the intra distance
+# computation took inference 1.08 s -> 2.87 s and nothing went red). The RATIO is
+# the assertion that actually pins the defect, and it needs no absolute number.
+MEMBRANE_INFER_CEILING_S = 4.0
+# Cost must scale with ATOMS, not with residue records. Before the bucketed
+# rewrite this ratio was 1.73 (0.671 s -> 1.159 s for identical bonds); it is now
+# 0.9. 1.25 leaves room for machine noise and still fails the per-record class.
+RECORD_SCALING_MAX_RATIO = 1.25
+
+
+def check_cost():
+    """Nothing in the 175 checks this file used to hold constrained COST, so a
+    pure 2.7x slowdown of inference passed ALL green. Two things are asserted:
+
+      * a loose absolute ceiling, which catches gross regressions;
+      * the RATIO between the as-filed membrane and the same 222,227 atoms with
+        one residue record per water. That ratio is the actual defect: inference
+        used to loop over residues in Python and cost ~16 us per RECORD, so the
+        only file big enough to measure it understated a normally-numbered box of
+        the same size by 74%. A ratio assertion needs no absolute number and no
+        assumption about the machine.
+
+    Best-of-3 on both, back to back in ONE process, so machine load cannot
+    explain a difference between them.
+    """
+    traj, top = _load_static(
+        _bench("systems", "06_membrane_complex", "files", "membrane.pdb")
+    )
+    xyz = traj.xyz[0]
+    split = _split_merged_waters(top)
+
+    def best(t):
+        runs = []
+        for _ in range(3):
+            started = time.perf_counter()
+            report = infer_bonds(t, xyz, DEFAULT_MODE)
+            runs.append(time.perf_counter() - started)
+        return min(runs), report
+
+    filed_s, filed = best(top)
+    split_s, split_report = best(split)
+    ratio = split_s / max(filed_s, 1e-9)
+    checks = [
+        ("FIXTURE: the rebuild is the same atoms, elements and bonds",
+         split.n_atoms == top.n_atoms and split.n_bonds == top.n_bonds
+         and [a.element for a in split.atoms] == [a.element for a in top.atoms],
+         f"{top.n_atoms} atoms, {top.n_bonds} bonds"),
+        ("FIXTURE: ...with 3x the residue records",
+         split.n_residues > 3 * 10 ** 4 and split.n_residues > 2 * top.n_residues,
+         f"{top.n_residues} records as filed -> {split.n_residues} rebuilt"),
+        ("record count does not change WHICH bonds are found",
+         sorted(split_report.pairs) == sorted(filed.pairs),
+         f"{filed.added} vs {split_report.added}"),
+        (f"membrane inference under {MEMBRANE_INFER_CEILING_S}s",
+         filed_s < MEMBRANE_INFER_CEILING_S, f"{filed_s:.3f}s for {top.n_atoms} atoms"),
+        (f"cost scales with ATOMS not RECORDS (ratio < {RECORD_SCALING_MAX_RATIO})",
+         ratio < RECORD_SCALING_MAX_RATIO,
+         f"as-filed {filed_s:.3f}s ({top.n_residues} records) -> "
+         f"rebuilt {split_s:.3f}s ({split.n_residues} records) = {ratio:.2f}x"),
+    ]
+    return all(ok for _, ok, _ in checks), checks
+
+
+def check_no_scipy_for_ordinary_files():
+    """scipy is imported LAZILY, and that laziness has to buy something. It used
+    to buy nothing for real data: the crosslink scope built a KD-tree whenever a
+    file held ANY sulfur — i.e. essentially every protein — so a 72-atom
+    macrocycle paid ~0.14 s and ~25 MiB to import scipy for a scope that added
+    zero bonds. Both paths that need scipy are now bounded away from ordinary
+    files: the crosslink scope brute-forces below CROSSLINK_BRUTE_MAX_PAIRS, and
+    the intra scope only reaches _kdtree for a residue record over
+    DENSE_RESIDUE_MAX_ATOMS atoms.
+
+    Run in a SUBPROCESS because sys.modules is process-global and every other
+    block in this file has already imported scipy.
+    """
+    probe = (
+        "import sys, warnings, os; warnings.filterwarnings('ignore');"
+        "sys.path.insert(0, %r);"
+        "import numpy as np, mdtraj as md;"
+        "from producer.bond_inference import infer_bonds;"
+        "t = md.load(%r);"
+        "r = infer_bonds(t.topology, t.xyz[0].astype(np.float64), 'full');"
+        "print(r.added, 'scipy' if 'scipy.spatial' in sys.modules else 'noscipy')"
+    )
+    root = os.path.join(os.path.dirname(__file__), "..")
+    checks = []
+    for label, sid, want_scipy in (
+        ("05_macrocycle_disulfide (2 S atoms, 0 bonds added)", "05_macrocycle_disulfide", False),
+        ("03_adk_psf_dcd (7 S atoms, 0 bonds added)", "03_adk_psf_dcd", False),
+        ("09_nucleic_duplex (34-atom records, 24 bonds added)", "09_nucleic_duplex", False),
+        ("02_trpcage_atomistic", "02_trpcage_atomistic", False),
+        ("04_ligand_custom_solvent", "04_ligand_custom_solvent", False),
+    ):
+        spec = resolve_system(sid)
+        out = subprocess.run([sys.executable, "-c", probe % (root, spec["topology"])],
+                             capture_output=True, text=True)
+        tail = out.stdout.strip().splitlines()[-1] if out.stdout.strip() else out.stderr[-200:]
+        got_scipy = tail.split()[-1] == "scipy" if tail.split() else True
+        checks.append((f"{label}: scipy is NOT imported", got_scipy is want_scipy, tail))
+    # ...and the branch that DOES need it still works (the 300-atom records in
+    # membrane_frame0.pdb are real, not a fixture).
+    big = _bench("systems", "06_membrane_complex", "files", "membrane_frame0.pdb")
+    if os.path.exists(big):
+        top = md.load_topology(big)
+        largest = max(r.n_atoms for r in top.residues)
+        checks.append(("a real file DOES contain records over DENSE_RESIDUE_MAX_ATOMS",
+                       largest > DENSE_RESIDUE_MAX_ATOMS,
+                       f"membrane_frame0.pdb largest record = {largest} atoms "
+                       f"(threshold {DENSE_RESIDUE_MAX_ATOMS})"))
+    return all(ok for _, ok, _ in checks), checks
+
+
+# -- L. the four complaint files, THROUGH THE REAL PRODUCER --------------------
+
+
+def _source_for(path, trajectory=None, mode=DEFAULT_MODE):
+    return MdtrajSource(path, trajectory, os.path.basename(path), [], infer_bonds=mode)
+
+
+def check_complaint_files_through_producer():
+    """Blocks A, B and E grade the four files the brief complains about by calling
+    infer_bonds() on a bare md.load() topology. That skips everything the producer
+    does around it: file_resolve, centering, _representative_xyz(), the PBC filter
+    and header serialization. So the complaints were graded OUTSIDE the thing that
+    ships. This block runs the same four files through MdtrajSource and asserts the
+    complaint is fixed IN THE HEADER.
+
+    Complaint 1 also has a second half the rest of this file never names: the
+    brief says "Also DC.HO5' terminal H is bare". It is fixed, but block C's
+    "09_nucleic_duplex: intra=2" would pass just as happily if those two bonds
+    landed on two entirely different atoms — so the two hydrogens are named.
+    """
+    checks = []
+
+    # -- complaint 1: nucleic backbone + the terminal HO5'
+    spec = resolve_system("09_nucleic_duplex")
+    off = MdtrajSource(spec["topology"], spec["trajectory"], spec["name"],
+                       spec["ligand_residues"], infer_bonds="off")
+    full = MdtrajSource(spec["topology"], spec["trajectory"], spec["name"],
+                        spec["ligand_residues"], infer_bonds="full")
+    try:
+        h_off, h_full = off.give_header(), full.give_header()
+        deg_off, deg_full = collections.Counter(), collections.Counter()
+        for i, j in h_off.edges:
+            deg_off[i] += 1
+            deg_off[j] += 1
+        for i, j in h_full.edges:
+            deg_full[i] += 1
+            deg_full[j] += 1
+        top = full._topology
+        links = _consecutive_o3p_links(top, h_full.edges)
+        links_off = _consecutive_o3p_links(top, h_off.edges)
+        ho5 = [a.index for a in top.atoms if a.name in ("HO5'", "HO5*")]
+        checks += [
+            ("09 duplex: O3'-P backbone links 0 -> 22 in the HEADER",
+             (links_off, links) == (0, 22), f"off {links_off} -> full {links}"),
+            ("09 duplex: the 2 terminal HO5' hydrogens go bare -> bonded",
+             len(ho5) == 2 and all(deg_off[i] == 0 for i in ho5)
+             and all(deg_full[i] == 1 for i in ho5),
+             f"HO5' atoms {ho5}: degree "
+             f"{[deg_off[i] for i in ho5]} -> {[deg_full[i] for i in ho5]}"),
+            ("09 duplex: no bare hydrogen is left anywhere",
+             sum(1 for a in top.atoms
+                 if a.element is not None and a.element.symbol == "H"
+                 and deg_full[a.index] == 0) == 0,
+             f"{sum(1 for a in top.atoms if a.element is not None and a.element.symbol == 'H' and deg_off[a.index] == 0)}"
+             f" bare hydrogens with inference off"),
+        ]
+    finally:
+        off.close()
+        full.close()
+
+    # -- complaint 2: the AlphaFold cif — ADP and TPO bare, ZN/MG correctly bare
+    af = _bench("fold_halm2_hala2_adp_mg_zn_thr42_seed_1_model_1.cif")
+    src = _source_for(af)
+    src_off = _source_for(af, mode="off")
+    try:
+        header, header_off = src.give_header(), src_off.give_header()
+        top = src._topology
+        edges = {(min(i, j), max(i, j)) for i, j in header.edges}
+        for name, want in (("ADP", (1, 29, 3)), ("TPO", (1, 10, 0))):
+            idx = [a.index for r in top.residues if r.name.upper() == name for a in r.atoms]
+            checks.append((f"AF cif through the producer: {name} -> {want}",
+                           _graph(idx, edges) == want, f"{len(idx)} atoms -> {_graph(idx, edges)}"))
+        ions = [a.index for r in top.residues if r.name.upper() in ("ZN", "MG")
+                for a in r.atoms]
+        checks += [
+            (f"AF cif: header edges {len(header_off.edges)} -> {len(header.edges)}",
+             len(header.edges) - len(header_off.edges) == 40,
+             f"+{len(header.edges) - len(header_off.edges)}"),
+            ("AF cif: ZN and MG stay bare in the HEADER",
+             not any(i in ions or j in ions for i, j in header.edges), f"{len(ions)} ion atoms"),
+        ]
+    finally:
+        src.close()
+        src_off.close()
+
+    # -- complaint 3: the membrane, and complaint 4: BACD (an authoritative PSF)
+    spec = resolve_system("06_membrane_complex")
+    memb = MdtrajSource(spec["topology"], spec["trajectory"], spec["name"],
+                        spec["ligand_residues"], infer_bonds="full")
+    try:
+        header = memb.give_header()
+        top = memb._topology
+        deg = collections.Counter()
+        for i, j in header.edges:
+            deg[i] += 1
+            deg[j] += 1
+        dmpc = [a.index for r in top.residues if r.name.upper() == "DMPC" for a in r.atoms]
+        bare = sum(1 for i in dmpc if deg[i] == 0)
+        checks += [
+            ("membrane: 0 of the 56,876 DMPC atoms are left unbonded in the HEADER",
+             bare == 0 and len(dmpc) == 56876, f"{bare} bare of {len(dmpc)}"),
+            ("membrane: the header carries the bond-inference provenance line",
+             any(line.startswith("bond inference") for line in header.provenance),
+             next((line[:80] for line in header.provenance
+                   if line.startswith("bond inference")), "MISSING")),
+        ]
+    finally:
+        memb.close()
+
+    bacd_pdb, bacd_psf = _bench("BACD_ion.pdb"), _bench("BACD_ion.psf")
+    if os.path.exists(bacd_pdb) and os.path.exists(bacd_psf):
+        src = _source_for(bacd_pdb)
+        try:
+            header = src.give_header()
+            psf = md.load_topology(bacd_psf)
+            want = {(min(a.index, b.index), max(a.index, b.index)) for a, b in psf.bonds}
+            got = {(min(i, j), max(i, j)) for i, j in header.edges}
+            checks.append(("BACD through the producer: header.edges EQUALS the authoritative PSF",
+                           got == want, f"{len(got)} edges vs {len(want)} PSF bonds; "
+                                        f"missing {len(want - got)}, extra {len(got - want)}"))
+        finally:
+            src.close()
+    return all(ok for _, ok, _ in checks), checks
+
+
+def _consecutive_o3p_links(top, edges):
+    """Bonds joining residue i's O3' to residue i+1's P, within one chain."""
+    pairs = {(min(i, j), max(i, j)) for i, j in edges}
+    found = 0
+    for chain in top.chains:
+        residues = list(chain.residues)
+        for a, b in zip(residues, residues[1:]):
+            o3 = next((x.index for x in a.atoms if x.name in ("O3'", "O3*")), None)
+            p = next((x.index for x in b.atoms if x.name == "P"), None)
+            if o3 is not None and p is not None and (min(o3, p), max(o3, p)) in pairs:
+                found += 1
+    return found
+
 def _run(label, fn, *args):
     try:
         ok, checks = fn(*args)
@@ -1014,6 +1740,19 @@ def main() -> int:
     print("\n--- I. the rules no real system here exercises ---")
     total &= _run("one partner per hydrogen; never H-H", check_hydrogen_rule)
     total &= _run("the KD-tree branch; mode validation", check_big_residue_and_modes)
+
+    print("\n--- J. what the scopes reach, and what they provably do not ---")
+    total &= _run("chain-boundary and vicinal crosslinks", check_crosslink_reach)
+    total &= _run("the NAMED coverage gaps stay gaps", check_named_coverage_gaps)
+    total &= _run("boron/silicon absent from the radii table", check_boron_silicon_absent)
+
+    print("\n--- K. cost, which nothing here used to constrain ---")
+    total &= _run("cost scales with atoms, not residue records", check_cost)
+    total &= _run("an ordinary file never imports scipy", check_no_scipy_for_ordinary_files)
+
+    print("\n--- L. the four complaint files, through the REAL producer ---")
+    total &= _run("nucleic backbone, HO5', ADP/TPO, DMPC, BACD vs its PSF",
+                  check_complaint_files_through_producer)
 
     print(f"\n{'ALL PASS' if total else 'FAILURES PRESENT'}")
     return 0 if total else 1

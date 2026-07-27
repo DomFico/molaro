@@ -212,3 +212,53 @@ test("neighborSubgroups finds nearby subgroups, excludes self", () => {
   );
   assert.deepEqual(out.sort(), [1]);
 });
+
+// -- pick state does not leak between calls -----------------------------------
+// pickElement is called on EVERY pointermove during a Ctrl-drag paint, and its
+// cost is O(N + 2E) — covalent-bond inference grew E on the corpus membrane from
+// 50 488 to 173 940, so a per-call projection MEMO is the obvious optimisation
+// and was built. It was then MEASURED to be a net loss (see the note above
+// `const out` in webview/picking.ts: it makes the common N >> E case 56% worse to
+// make the dense case 15% better) and removed.
+//
+// These stay, because they are what any future attempt has to survive: they pin
+// that two picks in a row cannot share state through the coordinates, the camera,
+// or a grown buffer. They pass today by construction — nothing is cached — which
+// is the point: they are the trap, armed in advance.
+
+test("two picks in a row do not share state across a frame flip", () => {
+  const g = geom({
+    pointSize: new Float32Array([30, 30]),
+    segments: { count: 1, pointA: [0], pointB: [1], halfA: [1], halfB: [1] },
+  });
+  const frame0 = new Float32Array([-0.5, 0, 0, 0.9, 0, 0]);
+  const frame1 = new Float32Array([0.9, 0, 0, -0.5, 0, 0]); // the two points swap
+  const a = pickElement(frame0, 2, new Float32Array([1, 1]), ORTHO, -0.5, 0, 200, 200, 12, g);
+  const b = pickElement(frame1, 2, new Float32Array([1, 1]), ORTHO, -0.5, 0, 200, 200, 12, g);
+  assert.equal(a.index, 0, "frame 0: point 0 sits under the click");
+  assert.equal(b.index, 1, "frame 1: point 1 does — shared state would still say 0");
+});
+
+test("two picks in a row do not share state across a camera move", () => {
+  const positions = new Float32Array([-0.5, 0, 0, 0.5, 0, 0]);
+  const g = geom({ pointSize: new Float32Array([1, 1]) });
+  // A second view-projection that mirrors x, so the same click lands on the
+  // other point without any coordinate changing.
+  const MIRROR = new Float32Array([-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  const a = pickElement(positions, 2, new Float32Array([1, 1]), ORTHO, -0.5, 0, 200, 200, 12, g);
+  const b = pickElement(positions, 2, new Float32Array([1, 1]), MIRROR, -0.5, 0, 200, 200, 12, g);
+  assert.equal(a.index, 0);
+  assert.equal(b.index, 1, "shared state would answer with the previous camera");
+});
+
+test("a pick on a bigger scene is not answered from a smaller earlier one", () => {
+  const small = new Float32Array([0, 0, 0]);
+  const gSmall = geom({ pointSize: new Float32Array([1]) });
+  assert.equal(pickElement(small, 1, new Float32Array([1]), ORTHO, 0, 0, 200, 200, 12, gSmall).index, 0);
+  const N = 500;
+  const big = new Float32Array(N * 3);
+  for (let p = 0; p < N; p++) big[p * 3] = -0.9 + (1.8 * p) / (N - 1);
+  const gBig = geom({ pointSize: new Float32Array(N).fill(1) });
+  const r = pickElement(big, N, new Float32Array(N).fill(1), ORTHO, 0.9, 0, 200, 200, 12, gBig);
+  assert.equal(r.index, N - 1, "the rightmost point, not whatever index 0 held");
+});

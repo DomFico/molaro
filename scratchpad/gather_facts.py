@@ -29,7 +29,7 @@ for sid in SYSTEMS:
     ns = MdtrajSource(spec["topology"], spec["trajectory"], spec["name"],
                       spec["ligand_residues"], infer_bonds="nonsolvent")
     r = full.bond_inference
-    prefix = full.edges[:len(off.edges)] == off.edges
+    prefix = [tuple(e) for e in full.edges][:len(off.edges)] == [tuple(e) for e in off.edges]
     print(f"  {sid:26s} off={len(off.edges):>6} full={len(full.edges):>6} "
           f"delta=+{len(full.edges)-len(off.edges):<6} nonsolvent=+{len(ns.edges)-len(off.edges):<6} "
           f"intra={r.intra} link={r.linkage} xlink={r.crosslink} "

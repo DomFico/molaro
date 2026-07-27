@@ -35,7 +35,7 @@ import {
   type FrameChunk,
   type Header,
 } from "../contract/contract.ts";
-import { frameSamplingNote, StreamingPlayer } from "./playback.ts";
+import { bondInferenceNote, frameSamplingNote, StreamingPlayer } from "./playback.ts";
 import { Transport, rejectIfErrorPayload } from "./transport.ts";
 import {
   DEFAULT_EDGE_COLOR,
@@ -433,7 +433,16 @@ class ShapeRegistry {
     for (const b of this.built) if (b.enabled) b.pass.onFrameFlip?.();
   }
 
+  /** Bumped by every rep-buffer write. THE cheap "did any representation value
+   * change?" question, for a consumer that has to rebuild something derived from
+   * those buffers and must not do it speculatively — see pickAt's half-width
+   * refresh. Deliberately coarse (any channel bumps it): over-invalidating costs
+   * one extra rebuild after an unrelated colour change, while under-invalidating
+   * would pick against stale widths. */
+  repWriteEpoch = 0;
+
   repWrite(channel: RepChannel, ids: readonly number[]): void {
+    this.repWriteEpoch++;
     for (const b of this.built) if (b.enabled) b.pass.onRepWrite?.[channel]?.(ids);
   }
 
@@ -1802,9 +1811,15 @@ async function main(): Promise<void> {
   // `header.provenance` is `undefined` for every dataset. Re-reading the text
   // keeps the fix inside the display half; parseHeader already succeeded on
   // this exact string, so JSON.parse here cannot throw and cannot disagree.
-  const frameSampling = frameSamplingNote(
-    (JSON.parse(headerText) as { provenance?: unknown }).provenance,
-  );
+  const headerProvenance = (JSON.parse(headerText) as { provenance?: unknown }).provenance;
+  const frameSampling = frameSamplingNote(headerProvenance);
+  // `header.edges.length` has the same problem `n_frames` has: since covalent-bond
+  // inference landed it is no longer "the bonds in your file". On the corpus
+  // membrane 123 452 of 173 940 edges — 71% — were computed from covalent radii
+  // and appear in no file the user opened. The producer already writes the
+  // sentence; without this read it reached the ASSISTANT (via get_context) and
+  // not the human.
+  const bondInference = bondInferenceNote(headerProvenance);
   // one-shot: the host (plot orchestration, stub) learns the frame count —
   // T is authoritative here in the header, nowhere host-side
   host.postMessage({ type: "viewerInfo", nFrames });
@@ -4072,13 +4087,23 @@ async function main(): Promise<void> {
     : null;
 
   const vp = new THREE.Matrix4();
+  // The half-width refresh below rewrites every segment's stored width from the
+  // live size buffers. It used to run on EVERY pick — 175 428 iterations on the
+  // corpus membrane, and pickAt runs on every pointermove during a Ctrl-drag
+  // paint — even in a scene where no size was ever changed. It is now gated on
+  // the registry's write epoch, so it runs once after a size command and never
+  // again until the next one. -1 forces the first pick to build it.
+  let pickHalfEpoch = -1;
+  let pickHalfRefreshes = 0;   // test seam: how often that loop actually ran
   const pickAt = (clientX: number, clientY: number): number => {
     const rect = renderer.domElement.getBoundingClientRect();
     const ndcX = ((clientX - rect.left) / rect.width) * 2 - 1;
     const ndcY = -((clientY - rect.top) / rect.height) * 2 + 1;
     camera.updateMatrixWorld();
     vp.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
-    if (pickSegments) {
+    if (pickSegments && pickHalfEpoch !== registry.repWriteEpoch) {
+      pickHalfEpoch = registry.repWriteEpoch;
+      pickHalfRefreshes++;
       // refresh each segment's half-width VALUE from the live size buffers
       const es = rep.state.edgeSize;
       const ts = rep.state.traceSize;
@@ -4477,11 +4502,17 @@ async function main(): Promise<void> {
   // series renders this template byte-for-byte as it did before it existed.
   const baseStatus =
     `${header.name} — N=${header.n_points}, T=${nFrames}${frameSampling?.suffix ?? ""} · ` +
-    `${header.edges.length} edges, ${header.polylines.length} polylines · ` +
+    `${header.edges.length} edges${bondInference?.suffix ?? ""}, ` +
+    `${header.polylines.length} polylines · ` +
     `${header.categories.length} categories · live producer stream` +
     (scale.fallback ? ` · ${NO_BBOX_WARNING}` : "");
-  // …and the producer's full sentence goes to the hover, where length is free.
-  if (frameSampling) setStatusDetail(frameSampling.detail);
+  // …and the producer's full sentences go to the hover, where length is free.
+  // Both disclosures share it: each is a separate paragraph, and a dataset with
+  // neither leaves the hover exactly as it was.
+  const provenanceDetail = [frameSampling?.detail, bondInference?.detail]
+    .filter((d): d is string => typeof d === "string" && d.length > 0)
+    .join("\n\n");
+  if (provenanceDetail) setStatusDetail(provenanceDetail);
   // The binding badge composes onto the steady-state line (principle 2: a
   // binding must be visible without asking).
   refreshBindingBadge = () => {
@@ -4652,6 +4683,13 @@ async function main(): Promise<void> {
         },
         /** what a click at client (x,y) would pick (-1 = empty space). */
         pick: (x: number, y: number): number => pickAt(x, y),
+        /** how many times pickAt has rebuilt its per-segment half-width table.
+         * That loop is one iteration per SEGMENT — 175 428 on the corpus
+         * membrane — and it used to run on every pick, including the ones during
+         * a Ctrl-drag paint, in scenes where no size had ever been written. It is
+         * now gated on the registry's write epoch, and this counter is how that
+         * is asserted rather than assumed. */
+        pickHalfRefreshes: (): number => pickHalfRefreshes,
         /** current scene background as an sRGB hex string (the S50 seam). */
         background: (): string => backgroundColor.getHexString(THREE.SRGBColorSpace),
         /** centroid+radius of the currently visible points (current frame). */

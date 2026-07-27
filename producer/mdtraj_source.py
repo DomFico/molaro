@@ -1082,7 +1082,10 @@ class MdtrajSource(DataSource):
         )
         self.groups = group_labels
         self.subgroups = subgroup_labels
-        self.edges = self._edges()
+        # The DRAWN edge list. Named privately because ``DataSource.edges`` is the
+        # mod-facing, READ-ONLY view of this same truth (an EdgeView) — one list,
+        # two shapes, and the view is derived so they cannot disagree.
+        self._edge_list = self._edges()
         self.polylines = self._polylines(group_id)
         self.bbox = self._bbox()
 
@@ -1265,7 +1268,7 @@ class MdtrajSource(DataSource):
             categories=list(CATEGORIES),
             groups=self.groups,
             subgroups=self.subgroups,
-            edges=self.edges,
+            edges=self._edge_list,
             polylines=self.polylines,
             channels=[],  # deferred this increment
             # Say what was done to the coordinates, every time — including when
@@ -1349,7 +1352,11 @@ class MdtrajSource(DataSource):
             detail += f"; {suppressed} then suppressed as cross-box"
         detail += (
             ". Additive only — no bond the topology declares was removed, and no "
-            "coordinate was touched."
+            "coordinate was touched. NOT reached: metal-organic bonds (a heme Fe "
+            "stays unbonded), glycosidic/N-glycan links, isopeptide bonds, "
+            "head-to-tail cyclic peptides, and covalent ligand links through "
+            "anything but S/Se — those render as disconnected pieces rather than "
+            "as a wrong bond."
         )
         if report.mode == "nonsolvent":
             return f"bond inference: NONSOLVENT (solvent residues excluded) — {detail}"

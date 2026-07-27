@@ -62,14 +62,35 @@ NUCLEIC_TRACE_FALLBACKS = ("C4'", "C4*")
 # record falls back to ``COVALENT_RADIUS_DEFAULT_NM`` — small enough that its
 # coordination shell is not drawn as connectivity. Add a metal here only with a
 # measurement that shows what it starts bonding to.
+#
+# WHAT THIS COSTS, stated rather than left to be discovered: a genuine
+# metal-ORGANIC bond is therefore MISSED, not merely deprioritised. MEASURED on a
+# heme: Fe-N is 0.204 nm and the default-radius window is 0.1776 nm, so the iron
+# of a CONECT-less heme/cytochrome stays unbonded at the centre of a correctly
+# bonded porphyrin ring. Cordero's Fe radius (0.132 nm) would give 0.2436 nm and
+# would bond it — along with every ZN/MG coordination shell in the same file.
+# The trade is deliberate: inference is additive, so a missed bond draws nothing
+# while an invented one draws a lie.
+#
+# BORON AND SILICON ARE DELIBERATELY ABSENT TOO, and for a different reason. Both
+# were in this table and MEASURED to earn ZERO edges on every system in the
+# evidence base (9 corpus systems + BACD_ion + 10GJ + an AlphaFold cif). Boron's
+# only appearance anywhere is mdtraj's NAME GUESS on coarse-grain martini
+# backbone beads called "BB" — a fictitious element on a system with no atomistic
+# chemistry at all — where a 0.084 nm radius widened the intra-residue window from
+# 0.1848 nm to 0.1932 nm on a system whose tightest real pair clears its window by
+# 0.13 pm. So the entry earned nothing and put the one "+0 is a correctness claim"
+# system at risk. Real boron chemistry is still reachable through the default
+# radius (MEASURED windows: B-O 0.1716 nm vs a real 0.136 nm, B-C 0.1836 vs 0.158,
+# B-N 0.1776 vs 0.144); silicon's Si-O 0.163 nm is reachable and Si-C at 0.187 nm
+# is NOT (window 0.1836 nm) — an accepted, stated loss, since silicon is not a
+# biomolecular covalent element and this table says so.
 COVALENT_RADII_NM: Dict[str, float] = {
     "H": 0.031,
-    "B": 0.084,
     "C": 0.076,
     "N": 0.071,
     "O": 0.066,
     "F": 0.057,
-    "SI": 0.111,
     "P": 0.107,
     "S": 0.105,
     "CL": 0.102,
@@ -83,6 +104,17 @@ COVALENT_RADIUS_DEFAULT_NM = 0.077
 # covalent-bond detection from coordinates; it accepts a stretched bond in an
 # unminimised structure without reaching the next shell (a 1-4 pair, an H-bond).
 COVALENT_BOND_SCALE = 1.2
+# FLOOR on a proposed bond's length. The window above has an upper bound and no
+# lower one, so a pair at distance 0.000 satisfies it trivially — and a file CAN
+# contain two records for the same physical atom (a hand-edited or concatenated
+# PDB whose duplicate ATOM line carries no altloc; mdtraj de-duplicates alternate
+# positions only when label_alt_id is set, so both records load). Inference then
+# proposes an atom bonded to itself and the header carries a ZERO-LENGTH edge.
+# 0.05 nm is below every real covalent bond by a wide margin — the shortest bond
+# inference can propose at all is O-H at ~0.096 nm, since H-H is never bonded, and
+# the shortest bond in nature (H-H, 0.074 nm) is out of reach for the same reason
+# — so this rejects coincident/duplicate records and nothing else.
+MIN_COVALENT_BOND_NM = 0.05
 
 # BACKBONE LINKAGE: the only atom-name pairs allowed to bond ACROSS two
 # sequence-adjacent residues of one chain, written (tail atom in residue i, head
@@ -98,10 +130,27 @@ BACKBONE_LINKAGE_PAIRS: Tuple[Tuple[str, str], ...] = (
 # scope needs to look up on a residue.
 LINKAGE_ATOM_NAMES = frozenset(name for pair in BACKBONE_LINKAGE_PAIRS for name in pair)
 
-# CROSSLINK: bonds between residues that are NOT sequence-adjacent exist in real
-# structures, but only for a short list of chemistries — disulfide (S-S),
-# thioether and lanthionine (S-C). Requiring one endpoint to be a chalcogen is
-# what keeps this scope from becoming a general distance search.
+# CROSSLINK: bonds between two residues that a backbone linkage does not explain
+# exist in real structures, but only for a short list of chemistries — disulfide
+# (S-S), thioether and lanthionine (S-C). Requiring one endpoint to be a chalcogen
+# is what keeps this scope from becoming a general distance search: an unrestricted
+# inter-residue distance search is exactly the unscoped implementation that fused
+# the membrane (see bond_inference's negative control).
+#
+# WHAT THIS LEAVES UNREACHABLE, named rather than discovered later. Every
+# cross-residue covalent bond whose endpoints are BOTH non-chalcogen and whose
+# residues are not a named backbone pair is missed by all three scopes:
+#   * head-to-tail cyclic peptides (last C -> first N: a real amide, but the two
+#     residues are not sequence-adjacent, so scope 2 cannot see it);
+#   * glycosidic and N-glycan linkages (ASN.ND2 - NAG.C1, and sugar-sugar);
+#   * isopeptide bonds (LYS.NZ - GLY.C, i.e. ubiquitin/SUMO conjugates);
+#   * a covalent ligand attached through anything but S/Se (e.g. SER.OG - C).
+# All four MEASURED as missed on purpose-built fixtures (tests/bond_inference.py
+# block J). Inference is additive, so each of these renders as DISCONNECTED
+# pieces rather than as a wrong bond — a coverage gap, never a false graph — and
+# ``MdtrajSource`` says so in ``Header.provenance`` so the omission is readable
+# rather than silent. Widening this set needs the same evidence the current one
+# has: an authoritative external bond list to grade against.
 CROSSLINK_ELEMENTS = frozenset({"S", "SE"})
 
 # Virtual / dummy sites carry no chemistry and must never be bonded: a TIP4P

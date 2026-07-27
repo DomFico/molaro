@@ -118,6 +118,48 @@ class LabelView:
         return (category, group, subgroup)
 
 
+class EdgeView:
+    """Read-only view of the connectivity the viewer actually DRAWS, indexed in
+    header edge order — ``edges[e]`` -> ``(i, j)`` point indices.
+
+    Why a mod needs this, and why ``data.trajectory.topology.bonds`` is not the
+    same thing any more. Two passes build the header's edge list: the topology's
+    own declared bonds, and covalent-radius inference for what the file leaves
+    out (``producer/bond_inference.py``). Inference does NOT mutate the topology —
+    that is deliberate, because mutating it would move the coordinates a mod and
+    the wrapping grouping both read — so the two now DISAGREE, and by a lot: on
+    the corpus membrane the topology declares 50,495 bonds while the viewer draws
+    173,940. A mod that walks ``topology.bonds`` to reason about connectivity (a
+    cartoon mod counting bonded hydrogens, say) would silently miss 71% of it and
+    could not even detect that a divergence existed.
+
+    This is the same shape of answer ``frame_stride``/``n_frames_in_file`` gave
+    for the frame axis: expose BOTH truths and name which is which, rather than
+    picking one. ``topology.bonds`` remains "what the file said"; ``data.edges``
+    is "what is on screen", after inference and after the periodic-image cutoff
+    that drops cross-box bonds.
+
+    Lazy: it holds the header's own list and indexes into it, so asking for it
+    costs nothing until a mod reads an element.
+    """
+
+    __slots__ = ("_edges",)
+
+    def __init__(self, header: Header) -> None:
+        self._edges = header.edges
+
+    def __len__(self) -> int:
+        return len(self._edges)
+
+    def __getitem__(self, e: int) -> Tuple[int, int]:
+        i, j = self._edges[e]
+        return (int(i), int(j))
+
+    def __iter__(self):
+        for i, j in self._edges:
+            yield (int(i), int(j))
+
+
 class DataSource(ABC):
     """Answers the two logical protocol requests (SPEC.md)."""
 
@@ -192,4 +234,19 @@ class DataSource(ABC):
             view = LabelView(self.give_header())
             # cache on the instance (base ABC has no __init__ to preallocate it)
             self._label_view = view
+        return view
+
+    @property
+    def edges(self) -> EdgeView:
+        """The connectivity the viewer DRAWS, in header edge order — see
+        ``EdgeView`` for why this is not ``data.trajectory.topology.bonds``.
+
+        Neutral information (every source has an edge list, the synthetic one
+        included), so it lives on the base next to ``labels`` rather than on the
+        one domain-aware subclass. Read-only, and cached on first access because
+        headers are constant for a resident dataset."""
+        view = getattr(self, "_edge_view", None)
+        if view is None:
+            view = EdgeView(self.give_header())
+            self._edge_view = view
         return view

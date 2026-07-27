@@ -901,6 +901,32 @@ Both are present on every source (a source with no file reports `1` and its own
 `n_frames`). The same fact is stated for the user in `Header.provenance`, which
 carries a `frame sampling: stride N — …` line whenever the stride is not 1.
 
+#### The connectivity the viewer DRAWS: `data.edges`
+
+```python
+data.edges[e]            # -> (i, j) point indices, in header edge order
+len(data.edges)          # the drawn edge count
+for i, j in data.edges:  # iterable
+    ...
+```
+
+`data.trajectory.topology.bonds` is **what the file said**. `data.edges` is
+**what is on screen**, and since covalent-bond inference landed the two are not
+the same list. Inference (`producer/bond_inference.py`) adds the bonds a file
+leaves out — a CONECT-less ligand or lipid, a nucleic `O3'-P` backbone — but it
+deliberately does **not** mutate the topology, because that object is also what a
+mod reads coordinates from and what the periodic-wrapping grouping is built on.
+On the corpus membrane the gap is 50 495 declared bonds against 173 940 drawn.
+
+So a mod that walks `topology.bonds` to reason about connectivity is reasoning
+about the file, not about the picture. Use `data.edges` when you mean the
+picture. The same fact is stated for the user in `Header.provenance`, which
+carries a `bond inference: …` line whenever inference ran.
+
+`data.edges` is present on every source (the synthetic one included) and is
+read-only — a mod consumes connectivity, it does not author it. (A mod that
+*authors* edges declares `produces: edges`; that is a different surface.)
+
 **Index alignment — the load-bearing guarantee.** Point index `i` in header
 order **is** atom index `i` in `traj.topology` **and** column `i` in
 `traj.xyz`. So `target_indices` (header order) can index the trajectory

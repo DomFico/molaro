@@ -10873,6 +10873,29 @@ async function S63(): Promise<void> {
       check("S63: clicking empty space near small elements over-grabs NOTHING (pick = -1)",
         (await pick(empty.x, empty.y)) === -1);
     }
+
+    // -- E) COST: the per-segment half-width table is rebuilt on WRITES, not picks
+    // That loop is one iteration per segment (175 428 on the corpus membrane) and
+    // ran on EVERY pick, including every pointermove of a Ctrl-drag paint, in
+    // scenes where no size had ever been written. It is now gated on the
+    // registry's write epoch. Asserted by COUNT, so no timing is involved.
+    const refreshes = () => d.evaluate<number>(`${V}.debug.pickHalfRefreshes()`);
+    const before = await refreshes();
+    for (let i = 0; i < 12; i++) await pick(pp.x + i, pp.y + i);
+    const afterPicks = await refreshes();
+    check("S63: 12 more picks with no size write rebuild the half-width table ZERO times",
+      afterPicks === before, `${before} -> ${afterPicks} (12 picks)`);
+    check("S63: …and it HAD been built (the gate is not just never firing)",
+      before >= 1, `${before} rebuilds so far`);
+    const wrote = await cmd("bondsize all 3");
+    check("S63: (setup) a size write landed", wrote.status === "ok", wrote.message);
+    await pick(pp.x, pp.y);
+    const afterWrite = await refreshes();
+    check("S63: a size WRITE makes the next pick rebuild it exactly once",
+      afterWrite === afterPicks + 1, `${afterPicks} -> ${afterWrite}`);
+    await pick(pp.x, pp.y);
+    check("S63: …and the pick after that does not rebuild it again",
+      (await refreshes()) === afterWrite, `${afterWrite} -> ${await refreshes()}`);
   });
 }
 
@@ -11206,7 +11229,149 @@ async function S65(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65 };
+// -- S66: covalent-bond INFERENCE, on a real dataset, proved in PIXELS --------
+//
+// Covalent-bond inference is a PRODUCER change, and the whole standing E2E suite
+// stayed green whether it existed or not: exactly one scenario (S30) uses a real
+// mdtraj source, and it uses 03_adk_psf_dcd, where inference adds +0 bonds. The
+// `--infer-bonds` passthrough in tests/bridge.ts had no caller. So the feature
+// could have been deleted and this file would not have noticed.
+//
+// This is the scenario that notices. 09_nucleic_duplex is the smallest real
+// system the fix changes: mdtraj's residue templates bond protein C-N but never
+// nucleic O3'-P, so the duplex's backbone arrives 100% unlinked — 22 of 22
+// consecutive links absent — plus the 2 terminal HO5' hydrogens bare. Inference
+// adds exactly those 24, and because the inferred block is APPENDED they occupy
+// edge slots 13178..13201, which the `#e` axis addresses directly.
+//
+// Graded three ways, because a stored buffer is not a picture:
+//   1. the header edge count and the addressability of the appended block;
+//   2. the STATUS LINE, which is the only place a user can learn that 24 of the
+//      drawn bonds are in no file they opened;
+//   3. PIXELS at the projected midpoint of one inferred O3'-P bond — red with
+//      inference on, and (the counterfactual) nothing there at all with it off.
+async function S66(): Promise<void> {
+  console.log("S66 — bond inference on the REAL nucleic duplex: +24 backbone links, in pixels");
+
+  /** Drive the real producer at one inference mode; `fn` gets the driver. */
+  const withInferDriver = async (
+    mode: "off" | "full",
+    fn: (d: E2EDriver) => Promise<void>,
+  ): Promise<void> => {
+    portBase += 2;
+    const d = new E2EDriver({
+      bridgePort: portBase, cdpPort: portBase + 300, width: 1180, height: 780,
+      producerArgs: ["--system", "09_nucleic_duplex", "--infer-bonds", mode],
+      python: MDBENCH_PY,
+    });
+    try {
+      await d.start();
+      await d.navigate("/terminal");
+      await sleep(9000); // real mdtraj load (19 393 atoms x 120 frames)
+      await fn(d);
+    } finally {
+      await d.dispose();
+    }
+  };
+
+  // ---- mode OFF: the pre-inference producer, and the counterfactual ---------
+  let offEdges = -1;
+  let offStatus = "";
+  let offRed = -1;
+  let offNomatch = "";
+  await withInferDriver("off", async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    offEdges = await d.evaluate<number>(`${V}.edges.length`);
+    offStatus = await d.evaluate<string>(`document.getElementById("status").textContent`);
+    // the appended block does not exist, so addressing it must NOMATCH
+    offNomatch = (await cmd("colorbonds #e13178-13201 red")).status;
+    // …and there is nothing to draw where an inferred bond would be.
+    await cmd("hide all");
+    await cmd("show polymer");
+    await sleep(500);
+    const patch = await d.samplePatch({
+      centerExpr: `(()=>{const a=${V}.debug.projectPoint(1), b=${V}.debug.projectPoint(0);
+                   return {x:(a.x+b.x)/2, y:(a.y+b.y)/2};})()`,
+      half: 14,
+      classify: "r > 140 && g < 90 && b < 90",
+    });
+    offRed = patch.count;
+  });
+  check("S66: `off` reproduces the pre-inference edge list (13178 edges)",
+    offEdges === 13178, `edges=${offEdges}`);
+  check("S66: `off` — the appended inferred block is not addressable (#e13178-13201 nomatches)",
+    offNomatch === "nomatch", offNomatch);
+  check("S66: `off` — the status line SAYS inference is off (a user can see WHY it looks unbonded)",
+    /\(inference off\)/.test(offStatus), offStatus.slice(0, 190));
+  check("S66: `off` — 0 red pixels at the terminal-H bond site (the counterfactual)",
+    offRed === 0, `${offRed} red px`);
+
+  // ---- mode FULL: the fix, in pixels ---------------------------------------
+  await withInferDriver("full", async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const edges = await d.evaluate<number>(`${V}.edges.length`);
+    check("S66: `full` appends exactly 24 inferred edges (13178 -> 13202)",
+      edges === 13202, `edges=${edges}`);
+
+    const status = await d.evaluate<string>(`document.getElementById("status").textContent`);
+    check("S66: the status line DISCLOSES the inferred count next to the edge count",
+      /13202 edges \(24 inferred\)/.test(status), status.slice(0, 190));
+
+    // the appended block IS the nucleic backbone: every one of the 24 joins two
+    // DIFFERENT residues, which no declared edge in this file does.
+    const audit = await d.evaluate<{ appended: number; crossResidue: number; ho5: number }>(`(()=>{
+      const v = ${V};
+      const sub = (i) => v.hierarchy.subgroupOfPoint(i);
+      let appended = 0, crossResidue = 0;
+      for (let e = 13178; e < v.edges.length; e++) {
+        appended++;
+        if (sub(v.edges[e][0]) !== sub(v.edges[e][1])) crossResidue++;
+      }
+      // the two terminal HO5' hydrogens: bare with inference off, bonded now
+      const deg = new Map();
+      for (const [a, b] of v.edges) { deg.set(a,(deg.get(a)||0)+1); deg.set(b,(deg.get(b)||0)+1); }
+      const ho5 = [1, 380].filter((i) => (deg.get(i) || 0) === 1).length;
+      return { appended, crossResidue, ho5 };
+    })()`);
+    check("S66: all 24 appended edges join two DIFFERENT residues (a backbone linkage)",
+      audit.appended === 24 && audit.crossResidue === 22,
+      JSON.stringify(audit));
+    check("S66: the 2 terminal HO5' hydrogens are bonded (the second half of complaint 1)",
+      audit.ho5 === 2, JSON.stringify(audit));
+
+    // PIXELS. Isolate one inferred bond: hide everything, show only its two
+    // endpoints' subgroups, fatten and color it, frame the camera on it.
+    await cmd("hide all");
+    const target = await d.evaluate<{ a: number; b: number }>(`(()=>{
+      const v = ${V};
+      const e = v.edges[13178];
+      return { a: e[0], b: e[1] };
+    })()`);
+    await cmd(`show #${target.a}`);
+    await cmd(`show #${target.b}`);
+    await cmd("colorbonds #e13178 red");
+    await cmd("bondsize #e13178 8");
+    await cmd(`view #${target.a}`);
+    await sleep(1600);
+    const patch = await d.samplePatch({
+      centerExpr: `(()=>{const a=${V}.debug.projectPoint(${target.a}), b=${V}.debug.projectPoint(${target.b});
+                   return {x:(a.x+b.x)/2, y:(a.y+b.y)/2};})()`,
+      half: 14,
+      classify: "r > 140 && g < 90 && b < 90",
+    });
+    check("S66: PIXELS — an INFERRED O3'-P bond actually DRAWS (red at its midpoint)",
+      patch.count > 40, `${patch.count} red px in a 28x28 patch at edge 13178's midpoint`);
+
+    // and the attribute budget still holds at the larger edge count
+    const over = await d.evaluate<string[]>(`${V}.attrBudgetOver`);
+    check("S66: the per-attribute budget is not exceeded at the inferred edge count",
+      Array.isArray(over) && over.length === 0, JSON.stringify(over));
+  });
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -11253,6 +11418,11 @@ const TIER: Record<string, "fast" | "full"> = {
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
   S58: "fast", S59: "fast", S60: "fast", S61: "fast", S62: "fast",
   S63: "fast", S64: "full",
+  // S66 opens a REAL dataset twice (once per inference mode) and pixel-asserts an
+  // INFERRED bond. Two real mdtraj loads make it slow, so it rides the full lane
+  // — but it is the only scenario in this file that would notice covalent-bond
+  // inference being deleted.
+  S66: "full",
   // S65 is pixel-bearing (the low end must DRAW blue, not merely store it) and
   // it measures the per-flip applier — the fast lane's remit exactly.
   S65: "fast",

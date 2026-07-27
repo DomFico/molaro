@@ -199,6 +199,28 @@ export function pickElement(
 
   // Project a point to CSS px; returns depth (clip.w, positive in front) or a
   // non-positive value when behind the camera. Writes sx/sy into `out`.
+  //
+  // NOT MEMOISED, and that is a MEASURED decision rather than an omission. The
+  // segment loop below re-projects both of its endpoints, so a scene with N
+  // points and E segments costs N + 2E projections — and covalent-bond inference
+  // grew E on the corpus membrane from 50 488 to 173 940, i.e. precisely the term
+  // multiplied by two. Segment endpoints ARE points, so a per-call memo (three
+  // Float64Arrays plus a call stamp, read by both loops) looks like an obvious
+  // win. It was built and benched against the real membrane header at both
+  // inference modes, median of 12 picks, bare Node against this module:
+  //
+  //                          E = 50 488        E = 173 940
+  //     re-project (this)      2.66 ms           7.70 ms
+  //     memoised               4.15 ms           6.58 ms
+  //     memoised behind a
+  //       2E > N gate          5.7  ms           9.2  ms
+  //
+  // Filling the memo writes 3 doubles per point — 5.3 MB at N = 222 227 — which
+  // costs more than the projections it saves whenever E is small, so it makes the
+  // COMMON case (N >> E) 56% worse to make the dense case 15% better. Gating it
+  // on 2E > N is worse still: selecting between two closures makes this call site
+  // polymorphic and V8 stops inlining it, which costs more than either arm saves.
+  // A real fix here is a spatial index over the segments, not a memo.
   const out = { sx: 0, sy: 0 };
   const project = (p: number): number => {
     const x = positions[p * 3];

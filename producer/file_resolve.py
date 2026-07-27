@@ -36,6 +36,21 @@ TRAJECTORY_EXTS = {
     ".mdcrd", ".crd", ".trj", ".dtr", ".lammpstrj", ".xyz", ".tng",
 }
 # Candidate companion topology extensions, in resolution priority order.
+#
+# NOT ALL OF THESE ARE LOADABLE, and that matters because the ordering keeps
+# getting proposed as a fix. MEASURED against mdtraj's own loader registry:
+# `.prmtop`, `.parm7`, `.psf` and `.top` are NOT in `md.load`'s table, so
+# `MdtrajSource(<any of them>)` raises `OSError: Sorry, no loader for
+# filename=...` — verified directly on BACD_ion.psf and 03_adk_psf_dcd's adk.psf.
+# `.pdb`, `.gro`, `.mol2`, `.cif` and `.h5` load.
+#
+# So the recurring suggestion "rank .psf above .pdb, because a PSF carries the
+# complete authoritative bond list and the PDB next to it does not" would not
+# recover those bonds — it would make the open FAIL OUTRIGHT for every system
+# that has both. (What DOES recover them: covalent-radius inference. On BACD the
+# header's edge set now EQUALS BACD_ion.psf's 8 741 bonds exactly, from the PDB
+# alone — tests/bond_inference.py block L.) Anything that moves this list needs
+# to teach the source to READ the format first.
 TOPOLOGY_EXTS: List[str] = [
     ".pdb", ".gro", ".prmtop", ".parm7", ".psf", ".top", ".mol2", ".cif", ".h5",
 ]
