@@ -103,6 +103,8 @@ interface OpenArgs {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
+  // The packaged mods that come standard (see loadAllMods). Set before any scan.
+  shippedModsDirPath = join(context.extensionPath, "mods");
   const producerLog = vscode.window.createOutputChannel("Point Viewer Producer");
   context.subscriptions.push(producerLog);
 
@@ -244,40 +246,75 @@ function modsDir(): string {
   return join(homedir(), ".molaro", "mods");
 }
 
-/** Startup scan of `<modsDir()>/*.py` — parse each with the shared pure
- * parser; a malformed file is SKIPPED with a reported warning (one bad mod
- * must never break startup or the registry). Loaded files get origin
- * "workspace" (assigned here, never read from the file). */
-function loadWorkspaceMods(
+/** The SHIPPED mods directory — `<extension>/mods`, packaged inside the VSIX.
+ * Read-only by nature: it lives under the installed extension, not in user
+ * space, which is exactly why a shipped mod cannot be deleted (see
+ * `loadShippedMods`). Set once at activation; "" before that (and in a unit
+ * test that never activates), which makes the scan a no-op rather than a
+ * crash. */
+let shippedModsDirPath = "";
+
+/** Startup scan of `<dir>/*.py` — parse each with the shared pure parser; a
+ * malformed file is SKIPPED with a reported warning (one bad mod must never
+ * break startup or the registry). `origin` is ASSIGNED here, never read from
+ * the file. Only a scan that records into `modPaths` can ever be deleted. */
+function scanModDir(
+  dir: string,
+  origin: "built-in" | "workspace",
   log: vscode.OutputChannel,
   modPaths?: Map<string, string>,
 ): AnalysisMod[] {
-  const dir = modsDir();
   let files: string[];
   try {
-    mkdirSync(dir, { recursive: true }); // the global dir always exists
+    if (origin === "workspace") mkdirSync(dir, { recursive: true }); // the global dir always exists
     files = readdirSync(dir).filter((f) => f.endsWith(".py")).sort();
   } catch {
-    return []; // unreadable/uncreatable mods dir — nothing to load
+    return []; // unreadable/uncreatable/absent dir — nothing to load
   }
-  modPaths?.clear();
   const mods: AnalysisMod[] = [];
   for (const file of files) {
     try {
-      const parsed = parseModFile(readFileSync(join(dir, file), "utf-8"), "workspace");
+      const parsed = parseModFile(readFileSync(join(dir, file), "utf-8"), origin);
       if (parsed.ok) {
         mods.push(parsed.mod);
         // rm's name → file map: deletion uses ONLY paths recorded by this
         // scan (the mod's name comes from the header, not the filename),
-        // which is what confines rm to .molaro/mods forever
+        // which is what confines rm to the mods dir forever. A SHIPPED mod is
+        // deliberately never recorded, so `rm`/`delete_mod` cannot resolve it
+        // and refuse through the existing built-in path — no new guard.
         modPaths?.set(parsed.mod.name, join(dir, file));
       } else log.appendLine(`[mods] skipped ${file}: ${parsed.error}`);
     } catch (err) {
       log.appendLine(`[mods] skipped ${file}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  if (mods.length > 0) log.appendLine(`[mods] loaded ${mods.length} workspace mod(s) from ${dir}`);
   return mods;
+}
+
+/** Every mod the registry should hold: the SHIPPED set that comes with the
+ * package, then the user's own, with a WORKSPACE MOD OF THE SAME NAME WINNING.
+ *
+ * Shadowing is the point, not an accident: a user who wants to change a shipped
+ * mod's EDIT-ME globals copies it into their mods dir and edits there, and the
+ * shipped original stays intact underneath for the next install to restore. The
+ * `Mod` object carries its own Python source, so a shipped mod needs no file
+ * path at run time and works identically to a workspace one. */
+function loadAllMods(
+  log: vscode.OutputChannel,
+  modPaths?: Map<string, string>,
+): AnalysisMod[] {
+  modPaths?.clear();
+  // Shipped first: it must NOT populate modPaths, so scan it with no map.
+  const shipped = shippedModsDirPath ? scanModDir(shippedModsDirPath, "built-in", log) : [];
+  const dir = modsDir();
+  const workspace = scanModDir(dir, "workspace", log, modPaths);
+  const overridden = new Set(workspace.map((m) => m.name));
+  const kept = shipped.filter((m) => !overridden.has(m.name));
+  const shadowed = shipped.length - kept.length;
+  if (kept.length > 0) log.appendLine(`[mods] loaded ${kept.length} shipped mod(s) from ${shippedModsDirPath}`);
+  if (shadowed > 0) log.appendLine(`[mods] ${shadowed} shipped mod(s) shadowed by a workspace mod of the same name`);
+  if (workspace.length > 0) log.appendLine(`[mods] loaded ${workspace.length} workspace mod(s) from ${dir}`);
+  return [...kept, ...workspace];
 }
 
 /** Format assistant-passed parameters as the invocation string's `?key=value`
@@ -456,7 +493,7 @@ function openPanel(
     // cached header, so a mid-session declared channel / new binding / drawn
     // shape appears in this get_context, not the next reload.
     const liveState = await gatherLiveState(runViewerCommand);
-    const mods = loadWorkspaceMods(producerLog, modPaths).map((m) => ({
+    const mods = loadAllMods(producerLog, modPaths).map((m) => ({
       name: m.name, produces: m.produces, axis: m.axis, description: m.description,
       ...(m.channel ? { channel: m.channel } : {}),
       ...(m.edgeGroup ? { edgeGroup: m.edgeGroup } : {}),
@@ -527,7 +564,7 @@ function openPanel(
   };
 
   const analysisModNames = (): string[] =>
-    loadWorkspaceMods(producerLog, modPaths).map((m) => m.name);
+    loadAllMods(producerLog, modPaths).map((m) => m.name);
 
   /** Push the workspace mods to the viewer and AWAIT its registration outcome
    * for `confirm` — the SAME id-correlated round-trip runViewerCommand uses (the
@@ -543,7 +580,7 @@ function openPanel(
       }, 60_000);
       pendingAsstAck.set(id, (r) => { clearTimeout(timer); resolve(r); });
       void panel.webview.postMessage({
-        type: "modsLoaded", mods: loadWorkspaceMods(producerLog, modPaths), id, confirm,
+        type: "modsLoaded", mods: loadAllMods(producerLog, modPaths), id, confirm,
       });
     });
 
@@ -595,7 +632,7 @@ function openPanel(
   // the approval gate; the tool surfaces {ok:false} as a refusal to the model.
   const deleteAssistantMod = (name: string): { ok: boolean; message: string } => {
     // Refresh the scan so modPaths reflects disk, then resolve ONLY via the map.
-    loadWorkspaceMods(producerLog, modPaths);
+    loadAllMods(producerLog, modPaths);
     const resolved = resolveModDeletion(modPaths, name);
     if ("refused" in resolved) return { ok: false, message: resolved.refused };
     let alreadyGone = false;
@@ -639,7 +676,7 @@ function openPanel(
         // from the RESOLVED typed values (defaults filled). An unknown mod has no
         // schema — relay raw and let the viewer report it.
         runMod: (name, target, parameters) => {
-          const mod = loadWorkspaceMods(producerLog, modPaths).find((m) => m.name === name);
+          const mod = loadAllMods(producerLog, modPaths).find((m) => m.name === name);
           let paramStr = "";
           if (mod) {
             const resolved = resolveParameters(mod.params ?? [], new Map(Object.entries(parameters ?? {})));
@@ -653,7 +690,7 @@ function openPanel(
         runCommand: (text) => runViewerCommand(text),
         analysisModNames,
         runModParams: (name) =>
-          loadWorkspaceMods(producerLog, modPaths).find((m) => m.name === name)?.params,
+          loadAllMods(producerLog, modPaths).find((m) => m.name === name)?.params,
       },
     );
     claudeBackend = backend;
@@ -768,7 +805,7 @@ function openPanel(
       if (msg?.type === "viewerInfo") {
         void panel.webview.postMessage({
           type: "modsLoaded",
-          mods: loadWorkspaceMods(producerLog, modPaths),
+          mods: loadAllMods(producerLog, modPaths),
         });
       }
       return;
@@ -818,7 +855,7 @@ function openPanel(
         const { file, backup } = saveModFile(modsDir(), name, source);
         void panel.webview.postMessage({
           type: "modsLoaded",
-          mods: loadWorkspaceMods(producerLog, modPaths),
+          mods: loadAllMods(producerLog, modPaths),
         });
         void panel.webview.postMessage({ type: "save-mod-result", name, file, backup });
       } catch (err) {
@@ -905,7 +942,7 @@ function openPanel(
       modsReloadTimer = null;
       void panel.webview.postMessage({
         type: "modsLoaded",
-        mods: loadWorkspaceMods(producerLog, modPaths),
+        mods: loadAllMods(producerLog, modPaths),
       });
     }, 200);
   };

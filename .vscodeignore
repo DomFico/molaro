@@ -41,6 +41,14 @@ tsconfig.json
 producer/CONTRACT_FIT_AUDIT.md
 HANDOFF*.md
 
-# Workspace mod examples — .molaro/ is USER-WORKSPACE data (the extension
-# loads mods from the opened workspace, not from itself).
+# Old in-repo workspace mod examples. `.molaro/` is USER data, and since the
+# mods dir went GLOBAL (`~/.molaro/mods`) this copy is not even read — it is
+# kept only for the tests that point at it explicitly. Never ship it.
 .molaro/**
+
+# NOT ignored, deliberately: `mods/` — the mods that COME STANDARD. These are a
+# product surface, loaded from `<extension>/mods` with origin "built-in" beside
+# the user's own (src/extension.ts `loadAllMods`), and a user's mod of the same
+# name shadows one. If a rule above ever starts matching `mods/`, every install
+# silently loses cartoon/live_sasa/live_ss and their providers — which is what
+# tests/shipped_mods.test.ts pins the roster for.
