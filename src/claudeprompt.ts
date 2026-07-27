@@ -70,6 +70,19 @@ A mod file defines exactly one function:
   luck and silently nomatches the moment a chain isn't named \`A\`/\`B\`/\`C\` (the grammar
   matches nothing and you colour nothing while reporting success). \`data.labels\` is present
   for every system, the synthetic one included, and is read-only.
+- \`data.edges[e]\` is the connectivity the viewer actually **DRAWS** — \`(i, j)\` point
+  indices in header edge order, read-only. **This is NOT
+  \`data.trajectory.topology.bonds\`, and the difference is large.** The header's edge list
+  is the topology's declared bonds PLUS covalent-radius inference for what the file leaves
+  out, minus cross-box pairs. Inference does not mutate the topology (deliberately — that
+  would move coordinates), so the two disagree: on a membrane system the topology declares
+  50,495 bonds while the viewer draws 173,940, and a custom residue or ligand a file
+  declares no bonds for (DMPC, ADP, a phosphorylated residue, a non-standard amino acid)
+  has **nothing** in \`topology.bonds\`. **Any mod reasoning about connectivity — bonded
+  hydrogen counts, side-chain adjacency, ring detection, contacts — must read
+  \`data.edges\`**, or it silently scores those residues as bondless. \`topology.bonds\`
+  remains "what the file said"; \`data.edges\` is "what is on screen". Same both-truths
+  shape as \`frame_stride\`/\`n_frames_in_file\`.
 - \`target_indices\` is a list of atom indices (ints) that the user's target resolved to,
   in trajectory atom order. An empty list means the whole system.
 - **Atom index i in \`target_indices\` is atom i in \`data.trajectory.topology\` and in

@@ -127,3 +127,66 @@ name- and chain-keyed mapping both break — **`resSeq` + element are the keys t
 `B = 0.00` must be read as *unset*, not as the coldest atom, or a structure whose column is
 mostly blank paints a false gradient (on the membrane only 8 of 1472 drawn residues carry a
 value, and 3140 of the non-zero atoms are waters).
+
+## P7 — a trace anchor for MODIFIED/NON-STANDARD backbone residues
+
+**Found while closing increment 63 (bond inference), measured, not fixed.**
+
+`domain_rules.trace_anchor_indices` gates on mdtraj's `is_protein` / `is_nucleic`
+classification. A residue mdtraj does not recognise gets **no anchor**, owns no trace
+vertex, and is skipped by the backbone polyline — even when it carries a complete
+backbone. Because the polyline then steps across the missing residue, the distance
+usually exceeds `TRACE_GAP_BREAK_NM` and the trace visibly **BREAKS** there.
+
+**Measured, on the owner's own systems:**
+
+| system | residue | evidence |
+|---|---|---|
+| `BACD_ion.pdb` | ABU42, DHBR43, DHBR48, DALA52, ABU58, DHBR59 (+1) | 27-residue peptide, trace threads only **20**; 7 residues with full `N/CA/C` get no anchor |
+| `10GJ.cif` | 8OG13 (8-oxoguanine, 23 atoms, has `P`) | chain 9 splits into **two** polylines, resSeq 1→12 and 14→147 |
+| AF cif | — | 0 orphans (mdtraj recognises TPO as protein) |
+
+This is the TRACE half of exactly the complaint that motivated increment 63 — "custom
+residues are not drawn properly". Increment 63 fixed the BOND half; the anchor rule was
+never in its scope.
+
+**Lean:** derive the anchor from the ATOMS PRESENT rather than from mdtraj's
+classification — `CA` when a residue has `N`/`CA`/`C`, `P` (then `C4'`) when it has a
+nucleic sugar signature — falling back to the current classification test. That is the
+banked Rule #5 (*derive vocabulary at run time, do not trust one system's classification*)
+applied to the same function that already encodes the CA / P / C4' vocabulary.
+
+**Blast radius, why it is a separate increment:** it changes `header.polylines`, which
+feeds the trace, the ribbon/cartoon, `colortrace`/`tracesize`, and the trace-gap rule from
+increment 54. Any system with a modified residue gains vertices, so E2E pixel baselines
+and `acceptance_corpus` polyline counts move deliberately. It needs the same treatment
+increment 63 got: a negative control proving the derivation is load-bearing, and a check
+that a genuinely discontinuous chain still breaks.
+
+**Do not conflate with the gap-break rule.** Increment 54 established that the trace splits
+on DISTANCE (`>1.0 nm`), never on `resSeq`. That rule is correct and is doing its job here —
+it is breaking because the anchor is genuinely absent, not because the threshold is wrong.
+
+## P8 — covalent bond categories no inference scope reaches
+
+Increment 63's three scopes (intra-residue / named backbone linkage / S-Se crosslink)
+deliberately cannot reach these, and nothing in the header or provenance says so:
+
+- **head-to-tail cyclic peptides** (last residue `C` -> first residue `N`) — scope 2 walks
+  `zip(rs, rs[1:])` per chain and never wraps. A cyclosporin-class macrocycle renders as an
+  open chain. Measured MISSED on a fixture at 1.330 A.
+- **glycosidic / N-glycan links** (`ASN.ND2` - `NAG.C1`, measured MISSED at 1.441 A) — a
+  sugar tree renders as disconnected monosaccharides.
+- **isopeptide bonds** (`LYS.NZ` - `GLY.C`, ubiquitin/SUMO conjugates).
+- **non-chalcogen covalent ligand links** (a covalent serine-protease inhibitor).
+- **metal-organic bonds** — a heme Fe floats unbonded inside a correctly-bonded porphyrin.
+  This one is arguably CORRECT (coordination is not covalent, and PyMOL/VMD also leave it),
+  but the other four are real misses.
+
+**Lean:** a scope 4 keyed on a small NAMED linkage table (`ND2`/`C1`, `NZ`/`C`, and a
+chain-wrap pass for scope 2) rather than a distance-only rule. The membrane's 1,788
+sub-0.05 nm pairs are why a general non-adjacent heavy-atom rule is not safe — that is the
+same refutation that forced scoping in the first place, and any scope 4 must survive it.
+
+**Blocked on:** wanting a real file for each case. Every number above is from a synthetic
+fixture; none of the 15 real structures in the evidence base contains one.
