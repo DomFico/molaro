@@ -37,20 +37,24 @@ TRAJECTORY_EXTS = {
 }
 # Candidate companion topology extensions, in resolution priority order.
 #
-# NOT ALL OF THESE ARE LOADABLE, and that matters because the ordering keeps
-# getting proposed as a fix. MEASURED against mdtraj's own loader registry:
-# `.prmtop`, `.parm7`, `.psf` and `.top` are NOT in `md.load`'s table, so
-# `MdtrajSource(<any of them>)` raises `OSError: Sorry, no loader for
-# filename=...` — verified directly on BACD_ion.psf and 03_adk_psf_dcd's adk.psf.
-# `.pdb`, `.gro`, `.mol2`, `.cif` and `.h5` load.
+# The ordering keeps getting proposed as a fix — "rank .psf above .pdb, because a
+# PSF carries the complete authoritative bond list and the PDB next to it does
+# not". Two MEASURED facts bound that suggestion, and they point opposite ways:
 #
-# So the recurring suggestion "rank .psf above .pdb, because a PSF carries the
-# complete authoritative bond list and the PDB next to it does not" would not
-# recover those bonds — it would make the open FAIL OUTRIGHT for every system
-# that has both. (What DOES recover them: covalent-radius inference. On BACD the
-# header's edge set now EQUALS BACD_ion.psf's 8 741 bonds exactly, from the PDB
-# alone — tests/bond_inference.py block L.) Anything that moves this list needs
-# to teach the source to READ the format first.
+# 1. `.prmtop`, `.parm7`, `.psf` and `.top` are NOT in `md.load`'s registry, so
+#    opening one of them STANDALONE raises `OSError: Sorry, no loader for
+#    filename=...` (verified on BACD_ion.psf and 03_adk_psf_dcd/adk.psf).
+# 2. But this list governs ONLY companion resolution for a TRAJECTORY, and on
+#    that path `MdtrajSource` reads the topology with `md.load_topology`, which
+#    DOES read all four. Measured through the real class:
+#    `MdtrajSource(topology_path=adk.psf, trajectory_path=adk.dcd)` works —
+#    3 341 points, 3 365 edges. Standalone `.psf` never consults this list at all.
+#
+# So reordering would NOT break the companion open. The reason to leave it alone
+# is that it now buys nothing: covalent-radius inference already recovers those
+# bonds from the .pdb alone — on BACD the header's edge set EQUALS BACD_ion.psf's
+# 8 741 bonds exactly (tests/bond_inference.py block L) — while swapping which
+# file wins would also swap its chain/segment naming, which the header exposes.
 TOPOLOGY_EXTS: List[str] = [
     ".pdb", ".gro", ".prmtop", ".parm7", ".psf", ".top", ".mol2", ".cif", ".h5",
 ]
