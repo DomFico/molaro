@@ -88,6 +88,10 @@ const { values: args } = parseArgs({
     // --edge-mods so its [i, j] pairs are appended to the synthetic header at
     // load. Synthetic-source only. Repeatable.
     "edge-mods": { type: "string", multiple: true },
+    // Covalent-bond inference mode for a real dataset — forwarded to serve.py's
+    // --infer-bonds. Real-source only (--open / --system); omitted leaves the
+    // producer's own default, so an unflagged run is unchanged.
+    "infer-bonds": { type: "string" },
   },
 });
 
@@ -96,10 +100,11 @@ const pendingResponses: http.ServerResponse[] = [];
 // which reply is the header when --strip-bbox rewrites it.
 const pendingKinds: string[] = [];
 
+const inferBonds = args["infer-bonds"] ? ["--infer-bonds", args["infer-bonds"]] : [];
 const producerArgs = args.open
-  ? ["--open", args.open]
+  ? ["--open", args.open, ...inferBonds]
   : args.system
-    ? ["--system", args.system]
+    ? ["--system", args.system, ...inferBonds]
     : [
         "--n-points", args["n-points"]!, "--n-frames", args["n-frames"]!,
         // forward any --edge-mods paths to serve.py (synthetic source only)

@@ -75,6 +75,16 @@ export interface DriverOptions {
   python?: string;
   corpusRoot?: string;
   route?: string; // default "/"
+  /**
+   * Render on the REAL GPU (ANGLE over the system driver) instead of the default
+   * SwiftShader software rasterizer. Off by default and left off for every
+   * scenario: SwiftShader is what makes the suite deterministic and
+   * hardware-independent, and a pixel assertion tuned on it must not silently
+   * start reading a different rasterizer. Set only by a COST measurement, where
+   * SwiftShader would measure the CPU rasterizer rather than the GPU and the
+   * number would be meaningless (see tests/impostor_bench.ts, ADDENDUM_01 §A1).
+   */
+  gpu?: boolean;
 }
 
 export class E2EDriver {
@@ -153,8 +163,9 @@ export class E2EDriver {
           "--no-sandbox",
           `--remote-debugging-port=${o.cdpPort}`,
           `--user-data-dir=${dataDir}`,
-          "--enable-unsafe-swiftshader",
-          "--use-angle=swiftshader",
+          ...(o.gpu
+            ? ["--use-gl=angle", "--ignore-gpu-blocklist"]
+            : ["--enable-unsafe-swiftshader", "--use-angle=swiftshader"]),
           "--hide-scrollbars",
           `--window-size=${o.width},${o.height}`,
           "about:blank",
