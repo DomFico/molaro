@@ -1,9 +1,10 @@
 /**
  * Unit tests for the palette registry (webview/palettes.ts) — the registry
  * surface (registration order, name → index, the default), THE BYTE-IDENTITY
- * ANCHOR (the default palette IS the recipe's own colormap function, by
- * reference), the two added ramps' defining properties MEASURED rather than
- * asserted, and the assert-unreachable unknown-name instrument. Pure, no DOM.
+ * ANCHOR (one shared colormap function object behind every way of naming the
+ * default, plus a CAPTURED table of the sweep's pre-move values), the two
+ * added ramps' defining properties MEASURED rather than asserted, and the
+ * assert-unreachable unknown-name instrument. Pure, no DOM.
  * Run from viewer/:
  *   node --test tests/palettes.test.ts
  */
@@ -26,8 +27,9 @@ import {
   registerPalette,
   srgbToLuminance,
   unknownPaletteHitCount,
+  hsvToRgb,
+  RAINBOW_HUE_MAX,
 } from "../webview/palettes.ts";
-import { hsvToRgb, rainbow } from "../webview/recipes.ts";
 
 // -- the registry surface (styles.ts's shape) --------------------------------
 
@@ -93,28 +95,96 @@ test("registerPalette: a name that could not survive save_rep's replay line is R
 
 // -- THE BYTE-IDENTITY ANCHOR ------------------------------------------------
 
-test("BYTE-IDENTITY: the default palette is the recipe's colormap FUNCTION, not a copy", () => {
+test("BYTE-IDENTITY: every way of naming the default resolves to ONE function object", () => {
   // The strongest form of "the default path is unchanged": identity, not
-  // equality of sampled values. A re-implementation of the sweep could drift;
-  // the same function object cannot.
-  assert.equal(RAINBOW_PALETTE.colormap, rainbow.colormap);
-  assert.equal(colormapFor(undefined), rainbow.colormap,
-    "an unnamed palette resolves to the very function the hardcoded call used");
-  assert.equal(colormapFor("rainbow"), rainbow.colormap,
+  // equality of sampled values. A second copy of the sweep could drift; one
+  // shared function object cannot. (This used to be asserted against the
+  // `rainbow` RECIPE's colormap — the recipe is gone and the sweep moved into
+  // palettes.ts, so the identity is now internal to the registry, and the
+  // pre-move VALUES are pinned by the captured table below.)
+  assert.equal(colormapFor(undefined), RAINBOW_PALETTE.colormap,
+    "an unnamed palette resolves to the registered default's own function");
+  assert.equal(colormapFor("rainbow"), RAINBOW_PALETTE.colormap,
     "naming the default explicitly resolves to the same function");
   assert.equal(colormapFor(DEFAULT_PALETTE_NAME), colormapFor(undefined));
 });
 
-test("BYTE-IDENTITY: the default's samples equal the sweep's, exactly, across the ramp", () => {
-  // Redundant with the identity above BY DESIGN — it is the check that would
-  // still fail if someone replaced the shared reference with a copy.
+// CAPTURED, NOT DERIVED. Every row below was produced by RUNNING the sweep as
+// it stood on the `rainbow` recipe at 92fa291 (scratchpad/sweep_capture.ts
+// --before, 4117 samples dumped as exact float64 bits) and converting those
+// bits to round-tripping decimal literals. Nothing here re-derives the hue
+// formula, which is the one comparison that would agree with a wrong move.
+// The full 4117-sample capture matched after the move with 0 differing
+// samples across all three of colormapFor(undefined) / colormapFor("rainbow")
+// / RAINBOW_PALETTE.colormap; this is the durable subset.
+const CAPTURED_SWEEP: Array<[number, number, number, number]> = [
+  [0, 1, 0, 0],
+  [-0, 1, 0, 0],
+  [1, 1, 0, 1],
+  [0.16666666666666666, 1, 0.8333333333333334, 0],
+  [0.3333333333333333, 0.33333333333333326, 1, 0],
+  [0.6666666666666666, 0, 0.6666666666666665, 1],
+  [0.8333333333333334, 0.16666666666666696, 0, 1],
+  [0.1, 1, 0.5, 0],
+  [0.7, 0, 0.5, 1],
+  [1 / 4096, 1, 0.001220703125, 0],
+  [7 / 4096, 1, 0.008544921875, 0],
+  [341 / 4096, 1, 0.416259765625, 0],
+  [683 / 4096, 1, 0.833740234375, 0],
+  [1024 / 4096, 0.75, 1, 0],
+  [1365 / 4096, 0.333740234375, 1, 0],
+  [2048 / 4096, 0, 1, 0.5],
+  [2731 / 4096, 0, 0.666259765625, 1],
+  [3072 / 4096, 0, 0.25, 1],
+  [3413 / 4096, 0.166259765625, 0, 1],
+  [4095 / 4096, 0.998779296875, 0, 1],
+  // the boundary/off-domain values a real binding can produce
+  [0.9999999999999999, 1, 0, 1],
+  [1.0000000000000002, 1, 0, 1],
+  [1e-300, 1, 0, 0],
+  [-1e-16, 1, 0, 8.881784197001252e-16],
+  [-0.25, 0.75, 0, 1],
+  [1.25, 1, 0.25, 0],
+  [2, 0, 0, 1],
+  [-1, 1, 1, 0],
+  [NaN, 1, 0, NaN],
+  [Infinity, 1, 0, NaN],
+  [-Infinity, 1, 0, NaN],
+];
+
+test("BYTE-IDENTITY: the default ramp reproduces the PRE-MOVE recipe sweep, exactly", () => {
+  // assert.deepEqual here is deepStrictEqual: numbers compare with Object.is
+  // semantics, so +0 ≠ -0 and NaN === NaN — exact bits, no tolerance.
   const cmap = colormapFor(undefined);
-  for (let i = 0; i <= 300; i++) {
-    const t = i / 300;
-    assert.deepEqual(cmap(t), rainbow.colormap(t), `t=${t}`);
+  for (const [t, r, g, b] of CAPTURED_SWEEP) {
+    assert.deepEqual(cmap(t), [r, g, b], `captured t=${t}`);
+    assert.deepEqual(colormapFor("rainbow")(t), [r, g, b], `?palette=rainbow t=${t}`);
   }
   assert.deepEqual(cmap(0), [1, 0, 0], "t=0 → red, the sweep's low end");
   assert.deepEqual(cmap(1), [1, 0, 1], "t=1 → magenta, the sweep's high end");
+});
+
+// -- the sweep's own maths, now that this module owns it ----------------------
+
+test("hsvToRgb: the primary/secondary anchors, s=0 gray, hue wrap", () => {
+  // Moved verbatim from tests/recipes.test.ts with the function itself: these
+  // anchors are the sweep's foundation, and the sweep is a palette.
+  assert.deepEqual(hsvToRgb(0, 1, 1), [1, 0, 0], "red");
+  assert.deepEqual(hsvToRgb(60, 1, 1), [1, 1, 0], "yellow");
+  assert.deepEqual(hsvToRgb(120, 1, 1), [0, 1, 0], "green");
+  assert.deepEqual(hsvToRgb(240, 1, 1), [0, 0, 1], "blue");
+  assert.deepEqual(hsvToRgb(300, 1, 1), [1, 0, 1], "magenta");
+  assert.deepEqual(hsvToRgb(0, 0, 0.5), [0.5, 0.5, 0.5], "s=0 is a gray of value v");
+  assert.deepEqual(hsvToRgb(360, 1, 1), hsvToRgb(0, 1, 1), "360 wraps to 0");
+  assert.deepEqual(hsvToRgb(-60, 1, 1), hsvToRgb(300, 1, 1), "negative hues normalize");
+});
+
+test("the hue sweep stops short of 360 so the ramp's two ends stay distinct", () => {
+  assert.equal(RAINBOW_HUE_MAX, 300);
+  const cmap = RAINBOW_PALETTE.colormap;
+  assert.deepEqual(cmap(1), hsvToRgb(RAINBOW_HUE_MAX, 1, 1), "t=1 → the sweep's far end");
+  assert.notDeepEqual(cmap(0), cmap(1));
+  assert.deepEqual(cmap(0.5), [0, 1, 0.5], "t=0.5 → hue 150");
 });
 
 // -- the diverging ramp: measured, not asserted ------------------------------
@@ -256,11 +326,10 @@ test("off-domain: bluewhitered and gray SATURATE to their endpoint colors", () =
 });
 
 test("off-domain: rainbow WRAPS its hue (the recorded exception), staying in gamut", () => {
-  // rainbow's colormap is THE recipe's shared function — the byte-identity
-  // anchor — so it cannot grow a clamp without editing the recipe. Its
-  // historical behavior off-domain is a modulo hue wrap: in-gamut for any
-  // finite t, but NOT saturating. Pinned so the difference is a recorded
-  // fact, never a discovery.
+  // rainbow cannot grow a clamp without breaking CAPTURED_SWEEP above (which
+  // holds the pre-move values at t = -0.25 and 1.25). Its historical behavior
+  // off-domain is a modulo hue wrap: in-gamut for any finite t, but NOT
+  // saturating. Pinned so the difference is a recorded fact, never a discovery.
   assert.deepEqual(RAINBOW_PALETTE.colormap(1.25), hsvToRgb(375, 1, 1), "wraps: 375° ≡ 15°");
   assert.deepEqual(RAINBOW_PALETTE.colormap(-0.25), hsvToRgb(-75, 1, 1), "wraps below zero too");
   for (const t of [-2, -0.25, 1.25, 3, 1e6]) {
@@ -298,7 +367,7 @@ test("colormapFor: an unknown name COUNTS on the assert-unreachable instrument",
   // viewer (debug.unknownPaletteHits) means an unvalidated name got through.
   const before = unknownPaletteHitCount();
   const cmap = colormapFor("no-such-palette");
-  assert.equal(cmap, rainbow.colormap, "cannot throw in the hot path");
+  assert.equal(cmap, RAINBOW_PALETTE.colormap, "cannot throw in the hot path");
   assert.equal(unknownPaletteHitCount(), before + 1, "the branch is instrumented, not silent");
   colormapFor(undefined);
   colormapFor("rainbow");

@@ -32,6 +32,7 @@
  * assigned by the file loader (never trusted from the file itself). */
 import { validateFigure, type FigureAxes } from "./plotmodel.ts";
 import { parseChannelDelta, type Channel } from "../contract/contract.ts";
+import { RAINBOW_PALETTE } from "./palettes.ts";
 
 export type RecipeOrigin = "built-in" | "workspace";
 
@@ -151,34 +152,20 @@ export interface AnalysisMod extends ModCommon {
 
 export type Mod = Recipe | AnalysisMod;
 
-/** Pure HSV → RGB (h in degrees, s/v in [0,1]; returns RGB in [0,1]). */
-export function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
-  const c = v * s;
-  const hp = (((h % 360) + 360) % 360) / 60;
-  const x = c * (1 - Math.abs((hp % 2) - 1));
-  const [r, g, b] =
-    hp < 1 ? [c, x, 0] :
-    hp < 2 ? [x, c, 0] :
-    hp < 3 ? [0, c, x] :
-    hp < 4 ? [0, x, c] :
-    hp < 5 ? [x, 0, c] : [c, 0, x];
-  const m = v - c;
-  return [r + m, g + m, b + m];
-}
-
-/** The rainbow hue sweep: 0 → red … RAINBOW_HUE_MAX → magenta. Stops short
- * of 360 so the ramp's two ends never wrap back to the same color. */
-export const RAINBOW_HUE_MAX = 300;
-
 /** `rainbow` — the first recipe: an even ramp from 0 to 1 across the
  * resolved set in its existing order, rendered through one built-in hue
- * sweep. A single-point set yields [0] (no divide-by-zero). */
+ * sweep. A single-point set yields [0] (no divide-by-zero).
+ *
+ * The hue sweep itself now lives in palettes.ts (a sweep is a palette, and
+ * after this recipe goes it is the palette registry's only caller). The
+ * colormap here is that ONE function object, shared by reference — the
+ * identity that keeps a bound colour axis byte-identical. */
 export const rainbow: Recipe = {
   name: "rainbow",
   kind: "representation",
   axis: "point-color",
   compute: (points) => points.map((_, i) => i / Math.max(points.length - 1, 1)),
-  colormap: (t) => hsvToRgb(t * RAINBOW_HUE_MAX, 1, 1),
+  colormap: RAINBOW_PALETTE.colormap,
   origin: "built-in",
   author: "Dominic Fico",
   source: "https://github.com/DomFico/molaro",

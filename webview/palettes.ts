@@ -14,20 +14,28 @@
  * through; naming none keeps the sweep.
  *
  * THE ANCHOR: `rainbow` is the FIRST registered palette (index 0 = the
- * default, styles.ts's `standard` discipline) and its `colormap` is THE SAME
- * FUNCTION OBJECT the recipe carries — not a copy of the formula. So "the
- * default path is unchanged" is a function-identity fact a unit test asserts
- * (`RAINBOW_PALETTE.colormap === rainbow.colormap`), not a numeric
- * comparison that could drift.
+ * default, styles.ts's `standard` discipline), so an unnamed colour binding
+ * resolves to it and nothing else. Its sweep USED TO live on the `rainbow`
+ * REPRESENTATION RECIPE, and the identity `RAINBOW_PALETTE.colormap ===
+ * rainbow.colormap` was the byte-identity proof for every existing scene.
+ * The recipe is gone; the sweep MOVED HERE VERBATIM (a palette is what it
+ * always was — a name and a pure `colormap`), so this module now owns it and
+ * imports nothing. What replaces the old anchor:
+ *   - function identity, still asserted: `colormapFor(undefined) ===
+ *     colormapFor("rainbow") === RAINBOW_PALETTE.colormap`, so naming the
+ *     default costs nothing and cannot fork into a second implementation;
+ *   - a CAPTURED-VALUE table (tests/palettes.test.ts) taken by RUNNING the
+ *     pre-move recipe sweep, compared with exact `Object.is` equality — not
+ *     a re-derivation of the formula, which is the one comparison that could
+ *     agree with a wrong move.
  *
  * NO CAPACITY CAP, deliberately — unlike styles.ts, which fails closed at
  * MAX_STYLES because styles pack into a fixed `uniform vec4[]`. A palette is
  * a CPU-side function evaluated at write/flip cadence and never uploaded, so
  * there is no array to overflow and a cap would be invented ceremony.
  *
- * Pure module: no DOM, no Three — unit-tested in Node.
+ * Pure module: no DOM, no Three, NO IMPORTS — unit-tested in Node.
  */
-import { rainbow } from "./recipes.ts";
 
 export interface Palette {
   name: string;
@@ -37,10 +45,10 @@ export interface Palette {
    *
    * OFF-DOMAIN RULE (the belt, enforced by test): a finite t outside [0,1]
    * must still come out finite and in-gamut. `bluewhitered` and `gray`
-   * SATURATE to their endpoint colors; `rainbow` is THE recipe's shared
-   * function (the byte-identity anchor — it cannot grow a clamp without
-   * editing the recipe) and keeps its historical hue-WRAP, which is in-gamut
-   * for any finite t (hsvToRgb reduces the hue mod 360) and is pinned by
+   * SATURATE to their endpoint colors; `rainbow` keeps its historical
+   * hue-WRAP — it cannot grow a clamp without breaking the captured-value
+   * table that pins it to the pre-move sweep — which is in-gamut for any
+   * finite t (hsvToRgb reduces the hue mod 360) and is pinned by
    * test so the difference is recorded, never discovered. NaN propagates
    * through every ramp (they are arithmetic on t); the gate's finiteness
    * spot-check owns that boundary, as it does for every channel consumer. */
@@ -50,12 +58,33 @@ export interface Palette {
   description: string;
 }
 
-/** The built-in hue sweep, as a palette: THE recipe's own colormap function,
- * shared by reference (see the header — this identity is the byte-identity
- * proof for every existing scene). */
+/** Pure HSV → RGB (h in degrees, s/v in [0,1]; returns RGB in [0,1]). Moved
+ * here verbatim from the retired `rainbow` recipe — the hue sweep below is its
+ * only caller, and the sweep is a palette. */
+export function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+  const c = v * s;
+  const hp = (((h % 360) + 360) % 360) / 60;
+  const x = c * (1 - Math.abs((hp % 2) - 1));
+  const [r, g, b] =
+    hp < 1 ? [c, x, 0] :
+    hp < 2 ? [x, c, 0] :
+    hp < 3 ? [0, c, x] :
+    hp < 4 ? [0, x, c] :
+    hp < 5 ? [x, 0, c] : [c, 0, x];
+  const m = v - c;
+  return [r + m, g + m, b + m];
+}
+
+/** The hue sweep's far end: 0 → red … RAINBOW_HUE_MAX → magenta. Stops short
+ * of 360 so the ramp's two ends never wrap back to the same color. */
+export const RAINBOW_HUE_MAX = 300;
+
+/** The built-in hue sweep, as a palette. The `colormap` expression is the
+ * retired recipe's own, moved verbatim (see the header: the byte-identity
+ * proof for every existing scene is now identity + a captured-value table). */
 export const RAINBOW_PALETTE: Palette = {
   name: "rainbow",
-  colormap: rainbow.colormap,
+  colormap: (t) => hsvToRgb(t * RAINBOW_HUE_MAX, 1, 1),
   // NOT described as "sequential": its perceived lightness is non-monotone
   // (measured: total L* descent 68.18 across 2048 steps, falling on 820 of
   // them, range 32.3..97.1 — derived by linearizing the emitted sRGB,
@@ -206,9 +235,9 @@ export const DEFAULT_PALETTE_NAME = RAINBOW_PALETTE.name;
 /**
  * THE hot-path resolver: a binding's stored palette name → the colormap
  * function. `undefined` (the canonical "on the default" state — see
- * Binding.palette) returns the default's colormap, which IS
- * `rainbow.colormap` by reference, so an unnamed palette costs nothing and
- * changes nothing.
+ * Binding.palette) returns the default's colormap, which IS the ONE
+ * `RAINBOW_PALETTE.colormap` object `?palette=rainbow` also resolves to, so
+ * an unnamed palette costs nothing and changes nothing.
  *
  * Callers resolve ONCE per binding (never per element): the per-flip applier
  * hoists this above its element loops, and applyScalarsToAxis calls it once
