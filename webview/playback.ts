@@ -253,3 +253,75 @@ export class StreamingPlayer<P> {
     }
   }
 }
+
+// -- the frame axis, disclosed ------------------------------------------------
+// The player above plays whatever frame axis it is handed. That axis can be a
+// STRIDED SAMPLE of a longer one: a producer that caps the display frame count
+// loads every Nth frame and says so as a `frame sampling:` line in
+// `Header.provenance`. `n_frames` — and therefore every `T=` the viewer prints
+// — is then the SERVED count, not the source's.
+//
+// This lives here for the same reason NO_BBOX_WARNING lives in geometry.ts:
+// a disclosure belongs with the thing it discloses about, and the frame axis
+// is this module's. Pure and string-only — no DOM, so it unit-tests in Node
+// alongside the player.
+
+/** What a status line needs in order to not misreport a strided frame axis. */
+export interface FrameSamplingNote {
+  /**
+   * Appended DIRECTLY after the printed served count, so `T=500` reads
+   * `T=500 of 15000 (stride 30)`. Always begins with a space; never empty.
+   *
+   * The served count is deliberately NOT taken from the provenance line: the
+   * caller already has it as `header.n_frames`, which is authoritative for
+   * what is actually on screen. Reading it twice from two places is how the
+   * count and the label get to disagree.
+   */
+  suffix: string;
+  /** The producer's own sentence(s), verbatim — for a hover / detail surface. */
+  detail: string;
+}
+
+/** The prefix the producer writes; see docs/COMMANDS.md ("a `frame sampling:
+ *  stride N — …` line whenever the stride is not 1"). Matched as a prefix
+ *  ONLY — never by position in the list, and never by the rest of the wording. */
+const FRAME_SAMPLING_PREFIX = "frame sampling:";
+
+/**
+ * Read the frame-sampling disclosure out of `Header.provenance`, or null when
+ * there is nothing to disclose (then the status line must stay byte-identical
+ * to a viewer that never knew about striding — that is the whole contract of
+ * returning null).
+ *
+ * Takes `unknown` on purpose: provenance is an optional, open, producer-written
+ * list of prose lines, so every shape it can arrive in (absent, null, not an
+ * array, holding non-strings) has to land on the quiet answer rather than throw.
+ *
+ * Robust to a provenance list that grows: the sampling line may be absent,
+ * first, last, repeated, or surrounded by unrelated lines. The stride and the
+ * source count are read INDEPENDENTLY of each other, so a reworded line still
+ * yields whichever facts it still states — and because the marker's PRESENCE is
+ * itself the fact "frames were dropped", a line whose numbers cannot be read at
+ * all still produces a note. Silence is the one outcome that would misreport
+ * the data, so it is reachable only when the marker is genuinely absent.
+ */
+export function frameSamplingNote(provenance: unknown): FrameSamplingNote | null {
+  if (!Array.isArray(provenance)) return null;
+  const lines = provenance
+    .filter((l): l is string => typeof l === "string")
+    .map((l) => l.trim())
+    .filter((l) => l.toLowerCase().startsWith(FRAME_SAMPLING_PREFIX));
+  if (lines.length === 0) return null;
+  const detail = lines.join("\n");
+  // Both patterns tolerate one intervening word ("stride of 30", "500 frames
+  // of 15000") so a reworded sentence still yields its numbers. Neither can
+  // capture the stride's own "1 frame in 30": that phrase has no "of", and
+  // "30 loaded, 500" fails the \s+ after the optional word (the comma).
+  const stride = /\bstride\s+(?:\w+\s+)?(\d+)/i.exec(detail);
+  const ofSource = /\b\d+\s+(?:\w+\s+)?of\s+(\d+)\b/i.exec(detail);
+  let suffix = "";
+  if (ofSource) suffix += ` of ${ofSource[1]}`;
+  if (stride) suffix += ` (stride ${stride[1]})`;
+  if (suffix === "") suffix = " (strided)"; // marker present, numbers unreadable
+  return { suffix, detail };
+}

@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { execSync } from "node:child_process";
 
 import { ProducerBroker } from "../src/broker.ts";
+import { frameSamplingNote } from "../webview/playback.ts";
 import {
   decodeFrameChunk,
   parseHeader,
@@ -119,6 +120,61 @@ test("live producer: header, pipelined FIFO chunks, error reply, clean shutdown"
     }
     assert.equal(alive, false, "producer process terminated on dispose");
   }
+});
+
+/**
+ * The quiet half of the frame-sampling disclosure, against a REAL header.
+ *
+ * The status line prints `T=<n_frames>` and now appends the stride when the
+ * producer reports one. The additive-purity requirement is that a frame axis
+ * served whole renders that token byte-for-byte as it did before the disclosure
+ * existed — so this reads the header the real producer actually emits and shows
+ * the composed token is unchanged, rather than trusting the unit fixtures.
+ *
+ * The synthetic source never strides (`--max-frames` caps loading from a real
+ * dataset; serve.py's own help states it "does not affect --n-frames"), so it is
+ * exactly the shape every un-strided dataset presents: a header whose
+ * provenance carries no `frame sampling:` line.
+ */
+test("a frame axis served whole leaves the printed frame count byte-identical", async () => {
+  // Read provenance from the RAW header text, as the viewer does: `provenance`
+  // is declared on Header but parseHeader does not copy it out of the JSON.
+  const headerOf = async (args: string[]) => {
+    const s = startSession(args);
+    try {
+      s.broker.send({ type: "header" });
+      const text = new TextDecoder().decode(await s.next());
+      return { text, header: parseHeader(text) };
+    } finally {
+      s.broker.dispose();
+    }
+  };
+  const check = async (args: string[], what: string) => {
+    const { text, header } = await headerOf(args);
+    const provenance = (JSON.parse(text) as { provenance?: unknown }).provenance;
+    const lines = Array.isArray(provenance) ? provenance : [];
+    assert.ok(
+      !lines.some((l) => typeof l === "string" && l.trim().startsWith("frame sampling:")),
+      `${what}: real header disclosed no stride — got ${JSON.stringify(provenance)}`,
+    );
+    assert.equal(frameSamplingNote(provenance), null, `${what}: no note`);
+    // the token webview/main.ts composes, from this real header
+    assert.equal(
+      `T=${header.n_frames}${frameSamplingNote(provenance)?.suffix ?? ""}`,
+      `T=${header.n_frames}`,
+      `${what}: printed frame count unchanged`,
+    );
+    return header.n_frames;
+  };
+
+  assert.equal(await check(["--n-points", "20", "--n-frames", "40"], "inside the cap"), 40);
+  // Past the cap number, and still silent — because the DISPLAY never infers a
+  // stride from the count. Only the producer knows whether frames were dropped,
+  // so only the producer's disclosure may put anything on the status line.
+  assert.equal(
+    await check(["--n-points", "20", "--n-frames", "600", "--max-frames", "500"], "past the cap"),
+    600,
+  );
 });
 
 test("producer crash surfaces as onExit, not a hang", async () => {

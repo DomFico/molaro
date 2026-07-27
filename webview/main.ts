@@ -35,7 +35,7 @@ import {
   type FrameChunk,
   type Header,
 } from "../contract/contract.ts";
-import { StreamingPlayer } from "./playback.ts";
+import { frameSamplingNote, StreamingPlayer } from "./playback.ts";
 import { Transport, rejectIfErrorPayload } from "./transport.ts";
 import {
   DEFAULT_EDGE_COLOR,
@@ -147,6 +147,24 @@ interface ViewerConfig {
 function setStatus(text: string): void {
   const el = document.getElementById("status");
   if (el) el.textContent = text;
+}
+
+/**
+ * The status line's LONG form. The topbar is one clipped line
+ * (`white-space: nowrap; text-overflow: ellipsis`), so a producer's full
+ * sentence cannot live in it — but `title` is already this HUD's detail
+ * mechanism (`#panel-grip`, `#divider` both carry one), so the sentence goes
+ * onto the element that already shows the short form rather than into a new
+ * element of its own.
+ *
+ * Only ever called when there IS something to disclose: with nothing to say the
+ * attribute is never written at all, so such a scene keeps today's DOM exactly.
+ * The detail describes the DATA, not the message, so it deliberately survives
+ * the transient strings setStatus writes over the steady-state line.
+ */
+function setStatusDetail(text: string): void {
+  const el = document.getElementById("status");
+  if (el) el.title = text;
 }
 
 // -- boot loading overlay: the "loading, not frozen" signal ------------------
@@ -1771,8 +1789,22 @@ async function main(): Promise<void> {
     window.clearTimeout(stallTimer);
   });
   rejectIfErrorPayload(headerBytes);
-  const header = parseHeader(new TextDecoder().decode(headerBytes));
+  const headerText = new TextDecoder().decode(headerBytes);
+  const header = parseHeader(headerText);
   const nFrames = header.n_frames;
+  // `nFrames` can be a STRIDED SAMPLE of a longer frame axis, and then every
+  // `T=` printed from it is the served count, not the source's — so the
+  // disclosure has to travel with it (see frameSamplingNote).
+  //
+  // It is read from the raw header text rather than from `header.provenance`
+  // because `parseHeader` does not carry that field through: `provenance` is
+  // declared on `Header` (contract.ts) but never copied out of the JSON, so
+  // `header.provenance` is `undefined` for every dataset. Re-reading the text
+  // keeps the fix inside the display half; parseHeader already succeeded on
+  // this exact string, so JSON.parse here cannot throw and cannot disagree.
+  const frameSampling = frameSamplingNote(
+    (JSON.parse(headerText) as { provenance?: unknown }).provenance,
+  );
   // one-shot: the host (plot orchestration, stub) learns the frame count —
   // T is authoritative here in the header, nowhere host-side
   host.postMessage({ type: "viewerInfo", nFrames });
@@ -4437,11 +4469,19 @@ async function main(): Promise<void> {
     renderer.render(scene, camera);
   });
 
+  // The stride rides the frame count itself, not the end of the line: this line
+  // is clipped with an ellipsis, so a disclosure appended after the category
+  // count could be truncated away — and a frame count qualified anywhere but at
+  // the frame count is a caption for the wrong number. With no stride there is
+  // no note at all, so the interpolation contributes nothing and an unstrided
+  // series renders this template byte-for-byte as it did before it existed.
   const baseStatus =
-    `${header.name} — N=${header.n_points}, T=${nFrames} · ` +
+    `${header.name} — N=${header.n_points}, T=${nFrames}${frameSampling?.suffix ?? ""} · ` +
     `${header.edges.length} edges, ${header.polylines.length} polylines · ` +
     `${header.categories.length} categories · live producer stream` +
     (scale.fallback ? ` · ${NO_BBOX_WARNING}` : "");
+  // …and the producer's full sentence goes to the hover, where length is free.
+  if (frameSampling) setStatusDetail(frameSampling.detail);
   // The binding badge composes onto the steady-state line (principle 2: a
   // binding must be visible without asking).
   refreshBindingBadge = () => {

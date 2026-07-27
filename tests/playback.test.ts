@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { StreamingPlayer, type PlaybackConfig } from "../webview/playback.ts";
+import { frameSamplingNote, StreamingPlayer, type PlaybackConfig } from "../webview/playback.ts";
 
 const CFG: PlaybackConfig = {
   nFrames: 100,
@@ -144,4 +144,106 @@ test("duplicate chunk arrivals do not double-count cache bytes", () => {
   deliver(0);
   deliver(0);
   assert.equal(player.stats().cacheBytes, 1000);
+});
+
+// -- the frame axis, disclosed -------------------------------------------------
+// The player plays the SERVED frames. When the producer loaded only every Nth
+// frame, a status line that prints that count and stops is a false statement
+// about the data — so frameSamplingNote turns the header's `frame sampling:`
+// provenance line into what a status line can carry.
+
+/**
+ * Composes the served count with the note EXACTLY as webview/main.ts does
+ * (`T=${nFrames}${frameSampling?.suffix ?? ""}`), so every assertion below is
+ * about the token a person actually reads in the topbar — and so the
+ * byte-identity claim is mechanical rather than asserted.
+ */
+const frameToken = (served: number, provenance: unknown): string =>
+  `T=${served}${frameSamplingNote(provenance)?.suffix ?? ""}`;
+
+/**
+ * The line the producer writes when it strides, verbatim. The identical literal
+ * is pinned in tests/claudebackend.test.ts (the assistant-side half of the same
+ * disclosure) and its shape is stated in docs/COMMANDS.md.
+ */
+const STRIDED = "frame sampling: stride 30 — 1 frame in 30 loaded, 500 of 15000 in the file";
+
+/**
+ * Stand-ins for the other lines provenance carries. Deliberately generic: the
+ * only property the display may depend on is "not the sampling line", so
+ * depending on what any real neighbour SAYS would be depending on the wrong
+ * thing.
+ */
+const OTHER = ["coordinate preparation: none", "some later line nobody has written yet"];
+
+test("no sampling line — the served count renders byte-identically", () => {
+  // Every shape an optional, producer-written, open list can arrive in. Each
+  // must reach the quiet answer: null, contributing not one character.
+  const quiet: unknown[] = [
+    undefined,
+    null,
+    [],
+    OTHER,
+    "frame sampling: stride 30", // a bare string is not a list — must not be read
+    { provenance: STRIDED }, // nor an object
+    42,
+    [null, 7, { frame: "sampling:" }], // a list holding no strings at all
+    ["framesampling: stride 30", "the frame sampling line is not here"], // near-misses
+  ];
+  for (const p of quiet) {
+    assert.equal(frameSamplingNote(p), null, `expected no note for ${JSON.stringify(p)}`);
+    assert.equal(frameToken(500, p), "T=500", `expected today's token for ${JSON.stringify(p)}`);
+  }
+});
+
+test("a strided axis names the source count and the stride, at the count", () => {
+  const note = frameSamplingNote([STRIDED]);
+  assert.ok(note);
+  assert.equal(note.suffix, " of 15000 (stride 30)");
+  assert.equal(frameToken(500, [STRIDED]), "T=500 of 15000 (stride 30)");
+  // the long form is the producer's own sentence, unedited
+  assert.equal(note.detail, STRIDED);
+});
+
+test("the sampling line is found by prefix, at any position, however many times", () => {
+  const expected = " of 15000 (stride 30)";
+  assert.equal(frameSamplingNote([STRIDED, ...OTHER])?.suffix, expected);
+  assert.equal(frameSamplingNote([...OTHER, STRIDED])?.suffix, expected);
+  assert.equal(frameSamplingNote([OTHER[0], STRIDED, OTHER[1]])?.suffix, expected);
+  assert.equal(frameSamplingNote([null, STRIDED, 3])?.suffix, expected);
+  // repeated: the suffix stays one reading, the detail keeps both lines
+  const twice = frameSamplingNote([STRIDED, STRIDED]);
+  assert.equal(twice?.suffix, expected);
+  assert.equal(twice?.detail, `${STRIDED}\n${STRIDED}`);
+  // surrounding whitespace and case are not part of the marker
+  assert.equal(frameSamplingNote([`  \n${STRIDED}  `])?.suffix, expected);
+  assert.equal(frameSamplingNote(["Frame Sampling: stride 4 — 100 of 400"])?.suffix,
+    " of 400 (stride 4)");
+});
+
+test("the served count is never taken from the provenance line", () => {
+  // The header's n_frames is what the viewer actually holds; if the line's own
+  // served count ever disagreed, the display must still describe the frames on
+  // screen. So the note contributes the source count and the stride only.
+  assert.equal(frameToken(400, [STRIDED]), "T=400 of 15000 (stride 30)");
+});
+
+test("a reworded sampling line still yields whichever facts it states", () => {
+  // stride and the source count are read independently, so losing one keeps
+  // the other; and the numbers survive one intervening word.
+  assert.equal(frameSamplingNote(["frame sampling: stride 30"])?.suffix, " (stride 30)");
+  assert.equal(frameSamplingNote(["frame sampling: 500 of 15000 loaded"])?.suffix, " of 15000");
+  assert.equal(frameSamplingNote(["frame sampling: stride of 30, 500 frames of 15000"])?.suffix,
+    " of 15000 (stride 30)");
+  // "1 frame in 30" must not be mistaken for the source count — it has no "of"
+  assert.equal(frameSamplingNote(["frame sampling: 1 frame in 30 loaded, stride 30"])?.suffix,
+    " (stride 30)");
+});
+
+test("a sampling line with unreadable numbers still discloses that frames were dropped", () => {
+  // The marker's PRESENCE is itself the fact. Falling silent here is the one
+  // outcome that would label a sampled axis as the whole thing.
+  const note = frameSamplingNote(["frame sampling: only some frames were loaded"]);
+  assert.equal(note?.suffix, " (strided)");
+  assert.equal(frameToken(500, ["frame sampling:"]), "T=500 (strided)");
 });
