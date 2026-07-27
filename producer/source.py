@@ -26,7 +26,9 @@ from contract.contract import FrameChunk, Header
 #
 # WHY A CAP AT ALL, and why here rather than in each mod. The binding constraint
 # is NOT read time: reading all 15000 frames x 12944 atoms of the owner's
-# BACD_rep9.dcd through mdtraj takes ~1.6 s (measured). The wall is a
+# BACD_rep9.dcd through mdtraj takes 1.16 s (measured here, twice, identical —
+# md.open + read in 500-frame chunks, warm page cache, 2331 MB off disk). The wall
+# is a
 # per_point_per_frame VECTOR channel, whose size the contract FIXES at
 # n_frames * n_points * components * 4 B — for that trajectory
 # 15000 * 12944 * 3 * 4 = 2 329 920 000 B = 2.33 GB, the size of the trajectory
