@@ -295,6 +295,17 @@ export function buildToolDefs(deps: ToolDeps) {
         : "";
       const base = `Base look (defaults for any element not written by a command; undo restores these): ` +
         `point size ${c.baseLook.pointSize}, opacity ${c.baseLook.opacity}, color ${c.baseLook.color}\n`;
+      // What was done to the coordinates and to the FRAME AXIS before anything
+      // downstream saw them (periodic-image centering; a strided load of a long
+      // trajectory). This field existed on SceneContext and was rendered nowhere,
+      // so the model could not read it — which now matters concretely: when a load
+      // is strided, `Frames (T)` above is SMALLER than the file's frame count and
+      // this is the only place that says so. A mod's per-frame results describe
+      // these T frames, not the file's.
+      const prov = c.provenance.length
+        ? `Coordinate provenance (what was done before you see the data):\n` +
+          c.provenance.map((p) => `  - ${p}`).join("\n") + "\n"
+        : "";
       // LIVE representation state — read from the running viewer THIS call, so
       // a channel/binding/shape created mid-session is visible immediately.
       const live = c.liveState;
@@ -302,7 +313,7 @@ export function buildToolDefs(deps: ToolDeps) {
         `System: ${c.system}\nAtoms (N): ${c.nAtoms}\nFrames (T): ${c.nFrames}\n` +
         `Categories: ${c.categories.join(", ") || "(none)"}\n` +
         `Groups (${c.groups.length}): ${c.groups.slice(0, 24).join(", ")}${c.groups.length > 24 ? ", …" : ""}\n` +
-        `Subgroups: ${c.subgroupCount}\n` + kinds + types + base +
+        `Subgroups: ${c.subgroupCount}\n` + kinds + types + prov + base +
         `Example targets: ${c.targetExamples.join(", ") || "all"}\n` +
         `Committed selections:\n${c.committedSelections}\n` +
         `Channels:\n${live.channels}\n` +

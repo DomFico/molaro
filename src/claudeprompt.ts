@@ -559,6 +559,13 @@ export function renderContext(c: SceneContext): string {
       ? [`- Point types (atom elements) — target a class across the system as *.*.*.<type>: ` +
          `${c.pointTypes.join(", ")}${c.pointTypesCapped ? ", … (capped)" : ""}`]
       : []),
+    // How the coordinates AND the frame axis were prepared. This was carried in
+    // SceneContext and rendered NOWHERE — a field documented as the model's window
+    // onto what it is analysing, that the model never actually saw. It matters
+    // literally: a strided load reports "frame sampling: stride 30 — 1 frame in 30
+    // loaded, 500 of 15000 in the file", and a model that cannot read that will
+    // describe 500 frames as the whole trajectory.
+    ...(c.provenance.length ? [`- Coordinate provenance: ${c.provenance.join(" | ")}`] : []),
     `- Base look (defaults, restored by undo): point size ${c.baseLook.pointSize}, ` +
       `opacity ${c.baseLook.opacity}, color ${c.baseLook.color}`,
     `- Example targets you can use: ${c.targetExamples.join(", ") || "all"}`,

@@ -707,3 +707,43 @@ test("get_context advertises a produces: edges mod's %group (the edge-group gap)
 test("system prompt without context still instructs get_context first", () => {
   assert.match(buildSystemPrompt(null), /Call get_context/);
 });
+
+// -- coordinate provenance reaches the model (frame-stride disclosure) ---------
+//
+// SceneContext.provenance carried "what was done to the coordinates" and was
+// rendered NOWHERE — neither in the boot system prompt nor in the get_context
+// tool's text. It matters literally once a long trajectory loads with a STRIDE:
+// `Frames (T)` is then smaller than the file's frame count, and the provenance
+// line is the ONLY place that says so. A model that cannot read it will describe
+// every 30th frame as the whole trajectory.
+
+test("the boot system prompt renders coordinate provenance", () => {
+  const p = buildSystemPrompt(sampleContext());
+  assert.match(p, /Coordinate provenance: periodic-image centering: off/);
+});
+
+test("get_context reports coordinate provenance, including a strided load", async () => {
+  const strided = {
+    ...sampleContext(),
+    nFrames: 500,
+    provenance: [
+      "periodic-image centering: on (283 solute atoms held still)",
+      "frame sampling: stride 30 — 1 frame in 30 loaded, 500 of 15000 in the file",
+    ],
+  };
+  const deps = mockDeps({ getContext: async () => strided });
+  const res = await buildToolDefs(deps).get_context.handler({}, {});
+  assert.match(text(res), /Frames \(T\): 500/);
+  // the disclosure itself: the stride AND the true frame count
+  assert.match(text(res), /Coordinate provenance/);
+  assert.match(text(res), /frame sampling: stride 30/);
+  assert.match(text(res), /500 of 15000 in the file/);
+  // and the centering line is still there — provenance is a list, not one slot
+  assert.match(text(res), /periodic-image centering: on/);
+});
+
+test("get_context omits the provenance block when there is none", async () => {
+  const deps = mockDeps({ getContext: async () => ({ ...sampleContext(), provenance: [] }) });
+  const res = await buildToolDefs(deps).get_context.handler({}, {});
+  assert.ok(!text(res).includes("Coordinate provenance"), "no empty section");
+});
