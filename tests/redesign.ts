@@ -9156,7 +9156,17 @@ async function S54(): Promise<void> {
     // uses mass.min()/mass.max()), so the ramp spreads over the full sweep with
     // no saturation and no two points share a value. (This was `rainbow all`
     // before the recipe was removed; the ramp differs, the property does not.)
-    await cmd("bake all mass color");
+    // Self-diagnosing on purpose: no other scenario bakes `mass`, so if that
+    // path were wrong the failure must name IT, not bicolorbonds' snapshot.
+    const up = await cmd("bake all mass color");
+    check("S54: the per-point upstream lands (a static declared channel → color)",
+      up.status === "ok", JSON.stringify(up));
+    check("S54: …and it leaves points with DISTINCT colors — the split's precondition",
+      await d.evaluate<boolean>(`(()=>{
+        const c=${V}.rep.state.color; const seen=new Set();
+        for (let p=0;p<c.length/3;p++) seen.add(c[3*p]+","+c[3*p+1]+","+c[3*p+2]);
+        return seen.size > 100;
+      })()`), "the upstream collapsed to too few distinct colors");
     const contained = await paintEnds("bicolorbonds", "alpha");
     check("S54: bicolorbonds alpha — every contained edge's halves = its endpoints' CURRENT colors",
       contained.r.status === "ok" && contained.audit.matched > 0 &&
