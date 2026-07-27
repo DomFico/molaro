@@ -434,9 +434,11 @@ def infer_bonds_unscoped(topology, xyz) -> List[Tuple[int, int]]:
     eligible atom, no residue scoping at all.
 
     This is here so ``tests/bond_inference.py`` can MEASURE what the scoping
-    prevents instead of asserting it in prose. Run on the membrane it fuses the
-    DMPC leaflet into a few dozen ringed blobs. It is never called by the
-    producer; ``_edges()`` reaches only ``infer_bonds``.
+    prevents instead of asserting it in prose. Run on the membrane it takes the
+    DMPC leaflet from 482 acyclic components / 0 rings to 742 components with
+    3,575 rings — fusing molecules that touch AND detaching hydrogens onto
+    passing waters (see the table at the top of this module). It is never called
+    by the producer; ``_edges()`` reaches only ``infer_bonds``.
     """
     xyz = np.asarray(xyz)
     table = _atom_table(topology, DEFAULT_MODE)
