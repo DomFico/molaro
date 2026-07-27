@@ -47,6 +47,14 @@ from contract.contract import (  # noqa: E402
     header_to_json,
     validate_header,
 )
+# The bond-inference mode list, from the module that owns it — ONE list, so the
+# CLI's `choices` and the producer's validation cannot drift. Importing it is
+# cheap: bond_inference defers scipy to first use precisely so a synthetic-only
+# run pays nothing for reading these two names.
+from producer.bond_inference import (  # noqa: E402
+    DEFAULT_MODE as DEFAULT_INFER_BONDS,
+    MODES as INFER_BONDS_MODES,
+)
 from producer.source import DEFAULT_MAX_FRAMES  # noqa: E402 — no molecular stack
 from producer.synthetic import SyntheticSource  # noqa: E402
 
@@ -690,6 +698,7 @@ def build_source(args: argparse.Namespace):
             name=spec["name"],
             ligand_residues=spec["ligand_residues"],
             max_frames=args.max_frames,
+            infer_bonds=args.infer_bonds,
         )
     if args.dataset:
         from producer.mdtraj_source import MdtrajSource  # lazy
@@ -701,6 +710,7 @@ def build_source(args: argparse.Namespace):
             name=args.dataset_name,
             ligand_residues=args.ligand_residue or (),
             max_frames=args.max_frames,
+            infer_bonds=args.infer_bonds,
         )
     if args.open:
         # Open a file directly (Increment 4.6): resolve a companion topology for
@@ -720,6 +730,7 @@ def build_source(args: argparse.Namespace):
             name=None,
             ligand_residues=args.ligand_residue or (),
             max_frames=args.max_frames,
+            infer_bonds=args.infer_bonds,
         )
     # The synthetic source is NOT frame-capped: --n-frames is an explicit request
     # for a size, not a file whose length is an accident of how long a simulation
@@ -752,6 +763,19 @@ def main() -> None:
             "provenance names the stride and the true frame count. 0 or negative "
             "loads every frame (no cap). Does not affect --n-frames, which sets the "
             "synthetic source's frame count explicitly."
+        ),
+    )
+    ap.add_argument(
+        "--infer-bonds", choices=list(INFER_BONDS_MODES), default=DEFAULT_INFER_BONDS,
+        help=(
+            "covalent-bond inference for a real dataset (default "
+            f"{DEFAULT_INFER_BONDS!r}). 'full' infers the bonds a topology does not "
+            "declare — intra-residue, sequence-adjacent backbone linkage (protein "
+            "C-N, nucleic O3'-P), and S/Se crosslinks — from Cordero covalent radii, "
+            "ADDITIVELY (no declared bond is ever removed, no coordinate is touched). "
+            "'nonsolvent' does the same but skips solvent residues, which is most of "
+            "the cost on a solvated box. 'off' draws only the bonds the topology "
+            "declares, reproducing the pre-inference edge list exactly."
         ),
     )
     ap.add_argument("--log-level", default="INFO")

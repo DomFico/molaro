@@ -54,6 +54,16 @@ before. ``n_frames``, the frame stream, the header's frame-derived fields
 one frame axis, no silent mismatch — and ``Header.provenance`` names the stride
 and the true file frame count whenever it is not 1.
 
+CONNECTIVITY. ``_edges()`` runs TWO passes: mdtraj's residue TEMPLATES (only when
+the topology declares no bonds at all — unchanged), then COVALENT-RADIUS INFERENCE
+(``producer/bond_inference.py``), which is additive and reaches what the templates
+cannot: a nucleic O3'-P backbone linkage, a ligand or lipid with no CONECT records,
+a modified residue. Inference reads frame-0 coordinates and mutates NOTHING —
+neither the topology nor a single coordinate — so every byte-exactness gate in
+this file is untouched by it. ``molaro.viewer.inferBonds`` /
+``--infer-bonds full|nonsolvent|off`` selects the mode; ``off`` reproduces the
+pre-inference edge list exactly.
+
 Requires mdtraj + numpy (the benchmark `mdbench` conda env). The synthetic
 source has no such dependency; this one is only imported when a real dataset is
 requested.
@@ -74,6 +84,7 @@ from contract.contract import (
     Header,
     Points,
 )
+from producer import bond_inference
 from producer.domain_rules import (
     CAT_LIGAND,
     CAT_POLYMER,
@@ -189,6 +200,7 @@ class MdtrajSource(DataSource):
         ligand_residues: Sequence[str] = (),
         center: bool = True,
         max_frames: Optional[int] = DEFAULT_MAX_FRAMES,
+        infer_bonds: str = bond_inference.DEFAULT_MODE,
     ) -> None:
         if not os.path.exists(topology_path):
             raise FileNotFoundError(f"topology not found: {topology_path}")
@@ -196,6 +208,20 @@ class MdtrajSource(DataSource):
         self.ligand_residues = list(ligand_residues)
         # Display frame cap (Phase 3). None / <= 0 disables it — every frame loads.
         self._max_frames = max_frames
+        # Covalent-bond inference mode: "full" | "nonsolvent" | "off". Validated
+        # HERE, before any file is read, so a typo'd setting fails loudly at open
+        # instead of silently disabling the fix (see bond_inference.MODES).
+        if infer_bonds not in bond_inference.MODES:
+            raise ValueError(
+                f"unknown bond-inference mode {infer_bonds!r} "
+                f"(expected one of {bond_inference.MODES})"
+            )
+        self._infer_bonds = infer_bonds
+        # What inference actually did, filled by _edges(). Declared here so a
+        # caller (provenance, the corpus test's connectivity check) always finds
+        # the attribute, even on a source whose edge pass returned early.
+        self.bond_inference: Optional[bond_inference.InferredBonds] = None
+        self.inferred_edges_kept = 0
 
         # mdtraj normalizes every container format's length unit to nm on read,
         # so positions and the emitted units are always nm — no hand conversion,
@@ -1087,6 +1113,38 @@ class MdtrajSource(DataSource):
         return group_id, labels
 
     def _edges(self) -> List[Tuple[int, int]]:
+        """The header's edge list: the topology's own bonds, plus the bonds
+        COVALENT-RADIUS INFERENCE proposes, minus anything the PBC cutoff rejects.
+
+        TWO passes, in this order, and the first is untouched:
+
+          1. the pre-existing template gate — a topology declaring ZERO bonds gets
+             ``create_standard_bonds()``. Kept exactly as it was, including its
+             graceful empty result for CG bead systems.
+          2. covalent-radius inference (``producer/bond_inference.py``), ADDITIVE.
+             It is a SECOND pass rather than a replacement because pass 1 is
+             template knowledge — it names residues and their bond tables — which
+             geometry cannot reproduce, while pass 2 reaches everything the
+             templates do not: a nucleic O3'-P linkage (which mdtraj never bonds,
+             so a nucleic backbone arrives 100% unlinked), a ligand with no CONECT
+             records, a lipid, a modified residue. Pass 1's all-or-nothing gate was
+             the defect: a topology with ANY bonds used to get NO inference at all.
+
+        Both passes' pairs then go through the SAME cross-box PBC filter — a bond
+        is a bond however it was found, and an inferred pair spanning a periodic
+        image must be suppressed exactly like a declared one.
+
+        Inference reads ``_representative_xyz()`` (the same frame-0 coordinates
+        ``_polylines`` measures its gaps on) and does NOT mutate the topology: the
+        inferred pairs live only in this edge list. That matters twice — the
+        wrapping grouping (``_wrappable_groups``) and the mod-facing
+        ``data.trajectory.topology`` both stay exactly what the file said, so this
+        increment cannot move a coordinate.
+
+        Ordering is append-only: the declared bonds keep their existing slots and
+        the inferred block follows, sorted. Edge slot order IS header order for the
+        renderer's per-edge attributes, so nothing already on screen shifts.
+        """
         top = self._topology
         if top.n_bonds == 0:
             # No explicit bonds: infer standard biopolymer connectivity. Yields
@@ -1096,8 +1154,14 @@ class MdtrajSource(DataSource):
                 top.create_standard_bonds()
             except Exception:
                 pass
-        pairs = [(a.index, b.index) for a, b in top.bonds]
+        declared = [(a.index, b.index) for a, b in top.bonds]
+
+        self.bond_inference = bond_inference.infer_bonds(
+            top, self._representative_xyz(), self._infer_bonds
+        )
+        pairs = declared + self.bond_inference.pairs
         if not pairs:
+            self.inferred_edges_kept = 0
             return []
         pairs_arr = np.asarray(pairs, dtype=np.int64)
 
@@ -1108,6 +1172,7 @@ class MdtrajSource(DataSource):
         deltas = sample[:, pairs_arr[:, 0], :] - sample[:, pairs_arr[:, 1], :]
         max_len = np.sqrt((deltas ** 2).sum(axis=2)).max(axis=0)  # per bond
         keep = max_len <= PBC_BOND_CUTOFF_NM
+        self.inferred_edges_kept = int(keep[len(declared):].sum())
         return [(int(i), int(j)) for (i, j), k in zip(pairs, keep) if k]
 
     def _representative_xyz(self) -> np.ndarray:
@@ -1227,8 +1292,21 @@ class MdtrajSource(DataSource):
             being shown every N-th frame, and out of how many;
           * and an unstrided load stays byte-identical to before, header bytes
             included — this project's standard for an additive change.
+
+        The BOND-INFERENCE line follows the same discipline, for the same reasons.
+        It is emitted when inference ADDED bonds (the edge list is then no longer
+        just the file's connectivity, and nothing else in the header says so), and
+        whenever the mode is not the default (a user who turned inference DOWN and
+        then finds a nucleic backbone unlinked must be able to read why). It stays
+        SILENT in the one case where silence is complete: the default mode found
+        nothing to add, so the edges ARE the topology's bonds — which also keeps a
+        system inference does not touch byte-identical to the pre-inference
+        producer, header included.
         """
         lines = [f"periodic-image centering: {self.centering}"]
+        bonds = self._bond_inference_provenance()
+        if bonds is not None:
+            lines.append(bonds)
         if self._stride > 1:
             lines.append(
                 f"frame sampling: stride {self._stride} — 1 frame in "
@@ -1239,6 +1317,45 @@ class MdtrajSource(DataSource):
                 f"that subsamples further is subsampling this set."
             )
         return lines
+
+    def _bond_inference_provenance(self) -> Optional[str]:
+        """The bond-inference provenance line, or None to stay silent.
+
+        Names the three scopes separately because they answer different questions:
+        an intra-residue count says "a ligand/lipid/modified residue got its bonds",
+        a linkage count says "a backbone was joined up", a crosslink count says "a
+        disulfide or thioether was found". A count of bonds suppressed afterwards by
+        the periodic cutoff is reported when it is not zero — it is the difference
+        between what was inferred and what is drawn.
+        """
+        report = self.bond_inference
+        if report is None:
+            return None
+        if report.mode == "off":
+            return (
+                "bond inference: OFF — the edges are exactly the bonds the topology "
+                "declares. A file whose ligand/lipid records carry no explicit "
+                "connectivity, and any nucleic backbone (mdtraj's templates never "
+                "bond O3'-P), will show those atoms unbonded."
+            )
+        suppressed = report.added - self.inferred_edges_kept
+        detail = (
+            f"{report.added} bonds inferred from covalent radii "
+            f"(Cordero radii x {bond_inference.COVALENT_BOND_SCALE}): "
+            f"intra-residue {report.intra}, backbone linkage {report.linkage}, "
+            f"crosslink {report.crosslink}"
+        )
+        if suppressed:
+            detail += f"; {suppressed} then suppressed as cross-box"
+        detail += (
+            ". Additive only — no bond the topology declares was removed, and no "
+            "coordinate was touched."
+        )
+        if report.mode == "nonsolvent":
+            return f"bond inference: NONSOLVENT (solvent residues excluded) — {detail}"
+        if report.added == 0:
+            return None                      # nothing was done; silence is complete
+        return f"bond inference: {detail}"
 
     def give_frames(self, start: int, count: int) -> FrameChunk:
         if count < 1 or start < 0 or start + count > self.n_frames:
