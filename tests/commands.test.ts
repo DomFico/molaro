@@ -1485,34 +1485,37 @@ test("colorpoints: nomatch / bad color / usage / parse errors write NOTHING", ()
   assert.equal(colorOps.length, 0, "no path wrote anything");
 });
 
-test("rainbow: the value VARIES per element — one write, resolution order, ramp ends", () => {
+// `rainbow` — the one recipe verb — was REMOVED. Its per-element write
+// discipline is `bake`'s below (the same applyColorScalars rail, same one
+// stroke, same LWW); its hue sweep is the default PALETTE. What is tested here
+// is the only thing the verb still owes a user: saying so.
+test("RETIRED: `rainbow` is gone, fails closed, and names its successor", () => {
   const { registry, colorEachOps, colorOps } = makeRegistry();
-  // c0 = {0,1}: a 2-point ramp — t = 0 then 1 → hue 0 (red) then 300 (magenta)
-  const res = registry.runCommand("rainbow c0");
-  assert.equal(res.status, "ok");
-  assert.equal(res.message, "colored 2 points rainbow");
-  assert.equal(colorEachOps.length, 1, "one invocation = one per-element write (one stroke)");
-  assert.deepEqual(colorEachOps[0].points, [0, 1], "view's exact resolution and order");
-  assert.equal(colorEachOps[0].rgb.length, 6, "flat 3×N — each point carries its OWN RGB");
-  assert.deepEqual(colorEachOps[0].rgb.slice(0, 3), [1, 0, 0], "t=0 → hue 0 (red)");
-  assert.deepEqual(colorEachOps[0].rgb.slice(3, 6), [1, 0, 1], "t=1 → hue 300 (magenta)");
-  assert.notDeepEqual(colorEachOps[0].rgb.slice(0, 3), colorEachOps[0].rgb.slice(3, 6),
-    "the per-element values DIFFER — the recipe/constant-verb distinction");
-  assert.equal(colorOps.length, 0, "never the broadcast writer — recipes are per-element");
-});
-
-test("rainbow: full grammar rides the shared resolve core (@name, all, leaf)", () => {
-  const { registry, colorEachOps } = makeRegistry();
-  // @stored = subgroup s0 (0,1) + point 2 → a 3-point ramp: t = 0, 0.5, 1
-  assert.equal(registry.runCommand("rainbow @stored").message, "colored 3 points rainbow");
-  assert.deepEqual(colorEachOps[0].points, [0, 1, 2]);
-  assert.deepEqual(colorEachOps[0].rgb.slice(0, 3), [1, 0, 0], "t=0 → red");
-  assert.deepEqual(colorEachOps[0].rgb.slice(3, 6), [0, 1, 0.5], "t=0.5 → hue 150");
-  assert.deepEqual(colorEachOps[0].rgb.slice(6, 9), [1, 0, 1], "t=1 → magenta");
-  // a single-point target is the [0] ramp — no divide-by-zero, plain red
-  assert.equal(registry.runCommand("rainbow c0.g0.s0.a").message, "colored 1 points rainbow");
-  assert.deepEqual(colorEachOps[1], { points: [0], rgb: [1, 0, 0] });
-  assert.equal(registry.runCommand("rainbow all").message, "colored 3 points rainbow");
+  for (const text of ["rainbow", "rainbow c0", "rainbow @stored + all"]) {
+    const r = registry.runCommand(text);
+    assert.equal(r.status, "error", text);
+    assert.match(r.message, /^rainbow was removed —/, text);
+    // the successor must be TYPEABLE, not a shrug
+    assert.match(r.message, /bake <target> <channel> color/, text);
+    assert.match(r.message, /bind <target> <channel> color/, text);
+    assert.match(r.message, /\?palette=rainbow/, text);
+    assert.match(r.message, /colorpoints <target> <color>/, text);
+  }
+  assert.equal(colorEachOps.length + colorOps.length, 0, "and it writes nothing");
+  // NOT a verb: absent from the pool, so it never completes and `help` has no
+  // entry — the refusal is a dispatch-miss fallback, not a registration
+  assert.ok(!registry.verbs().includes("rainbow"));
+  assert.ok(!registry.isBuiltin("rainbow"));
+  assert.equal(registry.describe("rainbow"), undefined);
+  // `help rainbow` answers the same way — asking about a name that used to
+  // work must not read as a typo
+  const helped = registry.runCommand("help rainbow");
+  assert.equal(helped.status, "nomatch");
+  assert.match(helped.message, /^rainbow was removed —/);
+  // a still-unknown verb keeps the plain message — retirement is not a catch-all
+  assert.equal(registry.runCommand("bogusverb x").message, "unknown command: bogusverb");
+  // the retired name is FREE: nothing reserves it against a workspace mod
+  assert.ok(!HELP_TEXT.includes("rainbow <expr>"), "and it is out of the help text");
 });
 
 // -- bake: the Tier-1 channel consumer (channel → axis via the shared gate) -------
@@ -1531,7 +1534,7 @@ test("bake: a streamed channel with an explicit range writes each axis, one stro
   assert.deepEqual(eachOps[1], { kind: "opacity", points: [0, 1, 2], values: [0, 0.5, 1] }, "opacity is t as-is");
   const color = registry.runCommand("bake all energy color 0 2.5");
   assert.equal(color.status, "ok");
-  // the built-in colormap: t=0 → red, t=1 → magenta (rainbow's exact ramp)
+  // the DEFAULT palette's colormap: t=0 → red, t=1 → magenta (the hue sweep)
   assert.deepEqual(colorEachOps[0].rgb.slice(0, 3), [1, 0, 0]);
   assert.deepEqual(colorEachOps[0].rgb.slice(6, 9), [1, 0, 1]);
 });
@@ -2333,24 +2336,48 @@ test("bind family: help surfaces all three verbs", () => {
   }
 });
 
-test("mods: lists the registry — rainbow grouped under built-in with its credit", () => {
+test("mods: an EMPTY registry says so — there is no built-in mod any more", () => {
+  // `rainbow` used to occupy this listing's built-in group. With it retired the
+  // registry ships empty, and the read face must say that rather than print a
+  // bare origin header.
   const { registry } = makeRegistry();
   const r = registry.runCommand("mods");
   assert.equal(r.status, "ok");
-  const lines = r.message.split("\n");
-  assert.ok(lines.includes("built-in:"), "grouped by origin");
-  assert.ok(
-    lines.includes("  rainbow — representation · point-color · by Dominic Fico · https://github.com/DomFico/molaro"),
-    r.message);
-  assert.ok(lines.indexOf("built-in:") < lines.findIndex((l) => l.startsWith("  rainbow")),
-    "recipe rows sit under their origin header");
-  assert.ok(!r.message.includes("colorpoints") && !r.message.includes("view"),
-    "recipes only — verb discoverability stays with help/?");
+  assert.equal(r.message, "no recipes");
+});
+
+test("mods: lists the registry — grouped under its origin header, with credit", () => {
+  registerRecipe({
+    name: "zz_listed",
+    kind: "representation",
+    axis: "point-color",
+    compute: (points) => points.map(() => 0.5),
+    colormap: () => [0, 0, 0],
+    origin: "built-in",
+    author: "A Person",
+    source: "https://example.invalid/x",
+  });
+  try {
+    const { registry } = makeRegistry();
+    const r = registry.runCommand("mods");
+    assert.equal(r.status, "ok");
+    const lines = r.message.split("\n");
+    assert.ok(lines.includes("built-in:"), "grouped by origin");
+    assert.ok(
+      lines.includes("  zz_listed — representation · point-color · by A Person · https://example.invalid/x"),
+      r.message);
+    assert.ok(lines.indexOf("built-in:") < lines.findIndex((l) => l.startsWith("  zz_listed")),
+      "recipe rows sit under their origin header");
+    assert.ok(!r.message.includes("colorpoints") && !r.message.includes("view"),
+      "recipes only — verb discoverability stays with help/?");
+  } finally {
+    unregisterRecipe("zz_listed");
+  }
 });
 
 test("mods: attribution renders for ANY recipe's credit; author/source stay optional", () => {
   // a stub with distinct provenance strings proves the credit display isn't
-  // rainbow-specific; a bare stub pins that credit fields are optional
+  // specific to any one mod; a bare stub pins that credit fields are optional
   registerRecipe({
     name: "stub-credit",
     kind: "representation",
@@ -2378,26 +2405,13 @@ test("mods: attribution renders for ANY recipe's credit; author/source stay opti
 
 test("mods: stray arguments are a usage error, nothing listed", () => {
   const { registry } = makeRegistry();
-  const r = registry.runCommand("mods rainbow");
+  const r = registry.runCommand("mods zz_anything");
   assert.equal(r.status, "error");
   assert.equal(r.message, "mods takes no arguments — it lists the recipe registry");
   assert.ok(!r.message.includes("built-in:"), "no listing rides the error");
   assert.ok(registry.verbs().includes("mods"), "registered like every verb");
 });
 
-test("rainbow: nomatch / usage / parse errors write NOTHING", () => {
-  const { registry, colorEachOps } = makeRegistry();
-  const nomatch = registry.runCommand("rainbow nothere");
-  assert.equal(nomatch.status, "nomatch");
-  assert.match(nomatch.message, /nothing matches "nothere"/);
-  const bare = registry.runCommand("rainbow");
-  assert.equal(bare.status, "error");
-  assert.match(bare.message, /rainbow <target>/);
-  const parseErr = registry.runCommand("rainbow c0.[x]"); // [ reserved in expressions
-  assert.equal(parseErr.status, "error");
-  assert.equal(colorEachOps.length, 0, "no path wrote anything");
-  assert.ok(registry.verbs().includes("rainbow"), "registered like every verb");
-});
 
 // -- the typed-result binding (claudebind.ts) — dispatch on the stub ctx ----------
 
@@ -2598,10 +2612,17 @@ test("rm: usage, nomatch, and the built-in refusal — none of them arm a prompt
   assert.equal(nomatch.status, "nomatch");
   assert.match(nomatch.message, /no mod named "nothere"[\s\S]*nothing to delete/);
   assert.equal(nomatch.confirm, undefined);
-  const builtin = registry.runCommand("rm rainbow");
+  // a registered BUILT-IN stub stands in for what `rainbow` used to be: the
+  // codebase ships none, but rm's refusal path for one must stay covered
+  registerRecipe({
+    name: "zz_rm_builtin", kind: "analysis", produces: "per-frame-series",
+    code: "def compute(d,t):\n pass", origin: "built-in",
+  });
+  const builtin = registry.runCommand("rm zz_rm_builtin");
+  unregisterRecipe("zz_rm_builtin");
   assert.equal(builtin.status, "error");
   assert.match(builtin.message,
-    /"rainbow" is built-in — code, not a file; it cannot be deleted[\s\S]*nothing to delete/);
+    /"zz_rm_builtin" is built-in — code, not a file; it cannot be deleted[\s\S]*nothing to delete/);
   assert.equal(builtin.confirm, undefined, "refusal-only never prompts");
   // `rm all` against whatever the SHARED module registry currently holds
   // (earlier tests register workspace stubs): empty → nomatch, else a
@@ -2628,12 +2649,16 @@ test("rm: a deletable selector prompts (confirm:true) and arms EXACTLY the works
     name: "zz_rm_b", kind: "analysis", produces: "per-frame-series",
     code: "def compute(d,t):\n pass", origin: "workspace",
   });
+  registerRecipe({
+    name: "zz_rm_builtin2", kind: "analysis", produces: "per-frame-series",
+    code: "def compute(d,t):\n pass", origin: "built-in",
+  });
   try {
     const { registry, rmArms } = makeRegistry();
-    const r = registry.runCommand("rm rainbow + zz_rm_a + nothere + zz_rm_b");
+    const r = registry.runCommand("rm zz_rm_builtin2 + zz_rm_a + nothere + zz_rm_b");
     assert.equal(r.status, "ok");
     assert.equal(r.confirm, true, "the terminal arms its pending slot on this");
-    assert.match(r.message, /"rainbow" is built-in/, "mixed selector still refuses the built-in");
+    assert.match(r.message, /"zz_rm_builtin2" is built-in/, "mixed selector still refuses the built-in");
     assert.match(r.message, /no mod named "nothere"/);
     assert.match(r.message, /will delete 2 workspace mods: zz_rm_a, zz_rm_b/,
       "the confirmation states EXACTLY what will be deleted");
@@ -2642,6 +2667,7 @@ test("rm: a deletable selector prompts (confirm:true) and arms EXACTLY the works
   } finally {
     unregisterRecipe("zz_rm_a");
     unregisterRecipe("zz_rm_b");
+    unregisterRecipe("zz_rm_builtin2");
   }
 });
 
@@ -2717,7 +2743,7 @@ function macroTracker() {
     validate: (c: string) => CommandResult = () => ok,
     run: (c: string) => CommandResult = (c) => ({ status: "ok", message: `ran ${c}` }),
   ) => ({
-    modNames: new Set(["rainbow", "color_ab"]),
+    modNames: new Set(["index_ramp", "color_ab"]),
     validate: (c: string) => { calls.validate.push(c); return validate(c); },
     run: (c: string) => { calls.run.push(c); return run(c); },
     beginStroke: () => { calls.beginStroke++; },
@@ -2727,10 +2753,10 @@ function macroTracker() {
 }
 
 test("commandMacroRefusal: rm and mod-invocation refused; scene verbs allowed", () => {
-  const mods = new Set(["rainbow", "color_ab"]);
+  const mods = new Set(["index_ramp", "color_ab"]);
   assert.match(commandMacroRefusal("rm all", mods)!, /rm.*not allowed/);
   assert.match(commandMacroRefusal("color_ab all", mods)!, /invoking a mod.*recursion/);
-  assert.match(commandMacroRefusal("rainbow alpha", mods)!, /recursion/);
+  assert.match(commandMacroRefusal("index_ramp alpha", mods)!, /recursion/);
   assert.equal(commandMacroRefusal("colorbonds alpha.group-0.* red", mods), null);
   assert.equal(commandMacroRefusal("hide beta", mods), null);
 });
@@ -2869,25 +2895,28 @@ test("§3.1 a re-pushed mod RUNS ITS NEW CODE — not the version it was first r
 });
 
 test("§3.3 a mod named after a BUILT-IN is still refused — and the built-in still works", () => {
-  const { registry, install, colorEachOps } = makeInstaller();
-  const hostile = modV("rainbow", "def compute(d,t): return ['pwned']");
+  const { registry, install, colorOps } = makeInstaller();
+  // `colorpoints` stands where `rainbow` used to: a real BUILT-IN VERB (the
+  // guard is about the command registry's sealed names, and retiring rainbow
+  // freed that name — a mod may legitimately claim it now).
+  const hostile = modV("colorpoints", "def compute(d,t): return ['pwned']");
   const outcome = install([hostile]);
   assert.deepEqual(outcome.installed, [], "nothing installed");
   assert.equal(outcome.skipped.length, 1);
-  assert.equal(outcome.skipped[0].name, "rainbow");
+  assert.equal(outcome.skipped[0].name, "colorpoints");
   assert.match(outcome.skipped[0].reason, /built-in/, "and it says WHY");
 
   // the reason the guard exists: the built-in must be untouched
-  const r = registry.runCommand("rainbow c0");
+  const r = registry.runCommand("colorpoints c0 red");
   assert.equal(r.status, "ok", r.message);
-  assert.equal(colorEachOps.length, 1, "the real rainbow ran — its handler was never replaced");
-  assert.equal(getRecipe("rainbow")?.origin, "built-in", "and its recipe entry is still the built-in");
+  assert.equal(colorOps.length, 1, "the real colorpoints ran — its handler was never replaced");
+  assert.equal(getRecipe("colorpoints"), undefined, "and no mod entry was created for it");
 });
 
 test("a mod's own verb is NOT a built-in — sealing draws the line where the factory ends", () => {
   const { registry, install } = makeInstaller();
   try {
-    assert.ok(registry.isBuiltin("colorpoints") && registry.isBuiltin("rainbow") && registry.isBuiltin("help"));
+    assert.ok(registry.isBuiltin("colorpoints") && registry.isBuiltin("bake") && registry.isBuiltin("help"));
     install([modV("zz_over", "def compute(d,t): return []")]);
     assert.ok(registry.verbs().includes("zz_over"), "it IS a verb");
     assert.ok(!registry.isBuiltin("zz_over"), "…but never a built-in — which is what makes the re-push legal");
@@ -2897,8 +2926,8 @@ test("a mod's own verb is NOT a built-in — sealing draws the line where the fa
 });
 
 test("§3.2 modInstallReport is TRUTHFUL — it never reports a registration that did not happen", () => {
-  const skipped = { installed: [], skipped: [{ name: "rainbow", reason: '"rainbow" is a built-in command' }] , channelCollisions: [], dependencyIssues: [] };
-  const refused = modInstallReport(skipped, "rainbow");
+  const skipped = { installed: [], skipped: [{ name: "colorpoints", reason: '"colorpoints" is a built-in command' }] , channelCollisions: [], dependencyIssues: [] };
+  const refused = modInstallReport(skipped, "colorpoints");
   assert.equal(refused.status, "error", "a skip is an ERROR the tool can surface, not a silent line");
   assert.match(refused.message, /did NOT register/);
   assert.match(refused.message, /built-in command/, "the reason travels with it");
@@ -3151,10 +3180,20 @@ function makeCompletionFixture() {
     code: "def compute(data, target_indices, params):\n    return []",
   };
   registerRecipe(mod);
+  // a BUILT-IN mod stub: rm's completion pool must exclude built-ins, and with
+  // `rainbow` retired the codebase ships none — without a stub that assertion
+  // would pass vacuously.
+  registerRecipe({
+    name: "zz_comp_builtin", kind: "analysis", produces: "per-frame-series",
+    code: "def compute(d,t):\n pass", origin: "built-in",
+  });
   fx.registry.register("compmod", makeAnalysisModHandler(fx.ctx, mod), "test mod");
   const comp = (text: string, cursor = text.length) =>
     completeCommand(fx.ctx, fx.registry, text, cursor);
-  return { ...fx, comp, done: () => unregisterRecipe("compmod") };
+  return {
+    ...fx, comp,
+    done: () => { unregisterRecipe("compmod"); unregisterRecipe("zz_comp_builtin"); },
+  };
 }
 
 test("completeCommand: verb position is unchanged — and a mod's own verb completes there", () => {
@@ -3555,7 +3594,8 @@ test("completeCommand: rm completes workspace mod names + 'all' (built-ins never
     assert.equal(bare.kind, "value");
     assert.ok(bare.candidates.includes("compmod"));
     assert.ok(bare.candidates.includes("all"));
-    assert.ok(!bare.candidates.includes("rainbow"), "built-ins are refused by rm — never offered");
+    assert.ok(!bare.candidates.includes("zz_comp_builtin"),
+      "built-ins are refused by rm — never offered");
     assert.deepEqual(comp("rm comp"),
       { start: 3, candidates: ["compmod"], applied: "mod", kind: "value" });
     // selector terms split on '+', spaces optional

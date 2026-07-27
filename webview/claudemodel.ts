@@ -52,7 +52,8 @@ export interface ApprovalRequiredEvent {
  * per-point-scalar: scalars arrive ALREADY normalized to [0,1] — the
  * binding maps [0,1] → visual and never normalizes or interprets
  * magnitudes. scalars[i] corresponds to the i-th point of `target`
- * resolved in HEADER ORDER (rainbow's exact ordering contract); a length
+ * resolved in HEADER ORDER (the point resolver's exact ordering contract,
+ * shared with `view` and `bake`); a length
  * mismatch writes nothing.
  *
  * per-frame-series: one raw value per frame — drawn in the plot tab.

@@ -51,7 +51,6 @@ point types `anchor` and `t0`–`t3`).
 | `bondopacity <expr> <a>` | Alpha for edges with **both** endpoints in the target | `bondopacity beta.group-0.subgroup-0 0` |
 | `bondopacityof <expr> <a>` | Alpha for edges **touching** the target (either endpoint — the incident reach) | `bondopacityof #124 0.3` |
 | `traceopacity <expr> <a>` | Alpha for polyline vertices whose **subgroup** contains a resolved point | `traceopacity alpha 0.7` |
-| `rainbow <expr>` | Color those points an even hue ramp in resolution order (the first **recipe**: per-point values, not one constant; one undo stroke) | `rainbow alpha.group-0` |
 | `bake <expr> <channel> <axis> [<min> <max>] [?palette=<name>]` | Write a declared data channel (at the displayed frame) onto a representation axis — scalar channel → point `color`/`size`/`opacity`, edge `bondcolor`/`bondsize`/`bondopacity`/`bonddash` (**endpoint mean**, contained edges) and `bondcolorends` (**per-endpoint** color: each half of the edge reads its **own** endpoint — no mean), polyline `tracecolor`/`tracesize`/`traceopacity` (each vertex reads **its** point), normalized over min..max; a **color** axis may name the **palette** its values map through (trailing `?palette=<name>`, default `rainbow`; see `palettes`); **vector (3-wide) channel → `orientation`, raw** (one undo stroke) | `bake all energy color 0 2.5` |
 | `bind <expr> <channel> <axis> [<min> <max>] [?palette=<name>]` | Register a **channel→axis binding** (same gate as `bake`, same trailing `?palette=<name>` on a color axis): the axis **re-derives from the channel on every frame flip**; last-bind-wins per element within an axis; one undo stroke. Vector channel → `orientation` (raw; **drives the oriented shapes — the ribbon `shape traces ribbon` renders it**) or `offset` (raw, on **points**; **displaces the drawn positions — shown = raw + offset**; bind-only, `bake` refuses it) | `bind all energy color 0 2.5 ?palette=bluewhitered` |
 | `unbind <expr> [<axis>]` / `unbind all [<axis>]` | Release binding **coverage element-wise**, one axis or all (values stay as last applied — except `offset`, which is **zeroed**: positions return to raw; one undo op) | `unbind alpha color` |
@@ -501,44 +500,40 @@ Shared rules (identical across the twelve verbs):
   usage error — it needs both a target and a value.
 - Constant values only, deliberately, within this family: each of the
   twelve verbs writes ONE value across its elements. Values that *vary* per
-  element are the **recipes'** job (see `rainbow` below) or the **channel
-  consumer's** (see `bake`); live per-flip channel bindings and
+  element are the **channel consumer's** job (see `bake`/`bind`, which map a
+  data channel through a **palette**); live per-flip channel bindings and
   shape/primitive-type verbs remain future work. (The trace
   shapes' boundary interpolation is a rendering consequence of per-vertex
   state, not a mapping feature; size-0 and opacity-0 are distinct literal
   values on distinct channels, and neither is a hide.)
 
-## Recipes: `rainbow`
+## Removed: `rainbow`
 
 ```
-rainbow alpha.group-0
-rainbow alpha.group-0.subgroup-0
-rainbow @selection_1
-rainbow alpha.group-0 + beta.group-2
+> rainbow alpha.group-0
+rainbow was removed — its hue sweep is now the default palette. Map a channel
+through it with `bake <target> <channel> color` or `bind <target> <channel>
+color` (add ?palette=rainbow to name it explicitly; `palettes` lists them).
+For one flat color, `colorpoints <target> <color>`.
 ```
 
-A **recipe** is a stored, named function over a resolved target that writes
-a representation buffer — the generalization of the twelve fixed verbs
-(one *constant* value) into verbs whose written value **varies per element**
-as a function of the resolved set. `rainbow` is the first: it spreads an
-even 0→1 ramp across the resolved points **in resolution order** and colors
-them through one built-in hue sweep (red at the start of the set, magenta
-at the end; a single-point target is plain red). Under the hood the recipe
-computes a per-point scalar and a colormap turns scalars into colors — the
-two stages stay separate so future scalar sources reuse the same
-color-mapping step.
+`rainbow` used to spread an even 0→1 ramp across a resolved target and colour
+it through one built-in hue sweep. It is **gone**, and typing it says so — it
+is not a verb, so it does not complete and `help` has no entry for it, but the
+name is recognised at dispatch so a stale doc or habit gets a route forward
+rather than `unknown command`.
 
-- `rainbow <target>` takes **no value token and no `[name]`** — the whole
-  argument is the target expression, resolved exactly like `view` (full
-  grammar, hidden points included, never commits).
-- It writes the same per-point color buffer `colorpoints` writes, with all
-  the family's shared rules: **one undo stroke** per invocation,
-  **last-write-wins per element** (a later `colorpoints` overwrites ramp
-  colors and vice versa), hidden points written too, message reports the
-  action and count (`colored N points rainbow`), and a nomatch or error
-  writes nothing and pushes no stroke.
-- Recipes live in an in-memory registry (name → recipe) the verb resolves
-  through; parameters and other axes are future work.
+The **sweep itself survives**, and is what the removal leaves behind: it is the
+`rainbow` **palette** — registry index 0, the DEFAULT ramp every bound colour
+axis maps through (see `palettes` below). So the honest successor is a channel
+mapped onto the colour axis: same colours, driven by *data* instead of by
+position in the resolved set. `?palette=rainbow` and naming no palette at all
+are the same thing, bit for bit.
+
+The **recipe machinery** (a `kind: "representation"` mod — a JS `compute` over
+the resolved set plus a `colormap`) is still in the code and still described
+below, but it now has **no instances**: `rainbow` was the only one there had
+ever been.
 
 ## Channels: `bake`
 
@@ -600,7 +595,7 @@ listed by `bindings` and counted in the status-line badge.
   named, across all axes otherwise (`unbind all` releases everything;
   released values stay as last applied).
 - **The LWW rule is live**: a direct representation write (`colorpoints`,
-  `pointsize`, `pointopacity`, `bake`, a recipe) over bound elements
+  `pointsize`, `pointopacity`, `bake`) over bound elements
   **clears the overlapping same-axis coverage in the same undo stroke** —
   the write lands, those elements stop being channel-driven, and one
   Ctrl+Z restores both the values and the coverage. The last explicit
@@ -654,15 +649,16 @@ listed by `bindings` and counted in the status-line badge.
   byte-identical to a viewer without this feature.
 
 
-A mod is one of two kinds. **Representation** mods (like `rainbow`) compute
-in the webview over geometry only. **Analysis** mods carry Python source
+A mod is one of two kinds. **Representation** mods compute in the webview
+over geometry only (there are currently **none** — `rainbow`, the only one
+there has ever been, was removed). **Analysis** mods carry Python source
 that executes **in the producer process against the loaded dataset**, and
 declare what they produce — the declaration is the routing key into the
 existing machinery (nothing new renders):
 
 - `produces: per-point-scalar` (+ an `axis`: color / size / opacity) — one
   value in `[0,1]` per resolved point, bound through the same per-element
-  write rails as `rainbow` (one undo stroke, last-write-wins; the mod owns
+  write rails as `bake` (one undo stroke, last-write-wins; the mod owns
   its own normalization).
 - `produces: per-frame-series` — one **raw** value per frame, drawn in the
   plot tab exactly like a series tool result.
@@ -924,8 +920,6 @@ corpus to `1e-4` nm.
 
 ```
 > mods
-built-in:
-  rainbow — representation · point-color · by Dominic Fico · https://github.com/DomFico/molaro
 workspace:
   index_ramp — analysis · per-point-scalar → color · by Example Author · https://github.com/DomFico/molaro
   frame_metric — analysis · per-frame-series · by Example Author · https://github.com/DomFico/molaro
@@ -963,7 +957,8 @@ deleted 2 mods: index_ramp, xy_metric
 stop resolving). The selector names **mods, not points** — bare names,
 `+` unions, and `all`, which always means all *workspace* mods.
 
-- **Built-ins are refused by name** (`rainbow` is code, not a file); a
+- **Built-ins are refused by name** (a built-in mod is code, not a file — the
+  codebase currently ships none); a
   mixed selector refuses the built-ins and confirms the deletable rest —
   the prompt states exactly which mods will be deleted.
 - **It asks first.** `rm` prints what will be deleted and waits: the next
@@ -1168,7 +1163,7 @@ rails and the outcome renders as an italic `⤷` line in the tool's block
   `[0,1]`) over a target address, applied to a point axis: **color**
   through the built-in hue colormap, **size** as `0…6` (2× the base
   size), **opacity** as-is. `scalars[i]` matches the *i*-th point of the
-  target in header order — the same resolution `view`/`rainbow` use; a
+  target in header order — the same resolution `view`/`bake` use; a
   count mismatch writes **nothing**. The write is one undo stroke,
   last-write-wins, exactly like a hand-typed representation verb.
 - **command** — a command string run through the exact path a typed

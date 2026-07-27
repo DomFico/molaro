@@ -459,10 +459,39 @@ export class CommandRegistry {
     const verb = space < 0 ? trimmed : trimmed.slice(0, space);
     const args = space < 0 ? "" : trimmed.slice(space + 1).trim();
     const entry = this.entries.get(verb);
-    if (!entry) return { status: "error", message: `unknown command: ${verb}` };
+    if (!entry) {
+      // A REGISTERED verb always wins — this is consulted only after the
+      // lookup misses, so retiring a name also FREES it: a workspace mod may
+      // take it, and the mod's own verb dispatches normally.
+      const retired = RETIRED_VERBS[verb];
+      if (retired) return { status: "error", message: `${verb} was removed — ${retired}` };
+      return { status: "error", message: `unknown command: ${verb}` };
+    }
     return entry.handler(args);
   }
 }
+
+/**
+ * Verbs that USED to exist, and what to type instead. A removed verb must fail
+ * CLOSED with a route forward, not read as a typo: `unknown command: rainbow`
+ * would leave a user (or an assistant, or a doc written last month) unable to
+ * tell "gone" from "misspelled", and the honest successor is not guessable.
+ *
+ * Deliberately NOT registered as verbs: a retired name is absent from
+ * `registry.verbs()`, so it never completes, never appears in `help`, and never
+ * blocks a workspace mod from claiming the name. This map is a dispatch-miss
+ * fallback and nothing else.
+ */
+const RETIRED_VERBS: Record<string, string> = {
+  // The hue sweep it wrote survives as the DEFAULT PALETTE, so the successor
+  // is a real one: the same ramp, driven by a data channel instead of by
+  // position in the resolved set.
+  rainbow:
+    "its hue sweep is now the default palette. Map a channel through it with " +
+    "`bake <target> <channel> color` or `bind <target> <channel> color` " +
+    "(add ?palette=rainbow to name it explicitly; `palettes` lists them). " +
+    "For one flat color, `colorpoints <target> <color>`.",
+};
 
 /**
  * `view` — camera focus, the text twin of the row-click / right-drag focus
@@ -1249,7 +1278,8 @@ export function makeColorBondsHandler(
  * SNAPSHOT pair: each matched edge's two halves take their endpoint points'
  * CURRENT `color` values (read at execution time — a later colorpoints does
  * NOT retro-update the edge; run the verb again to re-snapshot). No color
- * token by design (rainbow's shape: the values are computed, not passed) —
+ * token by design (a computed-value verb's shape: the values are read, not
+ * passed) —
  * and no two-argument color form exists. Targeting is the colorbonds pair's
  * exactly: same resolver, same edgesMatching predicates (contained vs
  * incident), same nomatch wording. Writes the edgeColorA/edgeColorB PAIR in
@@ -1526,39 +1556,6 @@ export function applyColorScalars(
   return ctx.colorPointsEach(points, rgb);
 }
 
-/**
- * `rainbow <target>` — the FIRST RECIPE verb: where the twelve fixed verbs
- * write one constant, a recipe COMPUTES a per-element value from the
- * resolved set (rainbow: an even 0→1 ramp across the points in resolution
- * order, through the built-in hue sweep). No trailing value token — the
- * whole argument is the target expression, resolved through the SAME
- * resolve-and-dedupe core the fixed verbs use (view's exact point set).
- * The handler resolves the recipe BY NAME from the recipe registry and runs
- * it — never a hardcoded compute — so the recipe object is the invocable
- * unit later recipes clone. Same family invariants: one undo stroke, LWW,
- * nomatch/error writes nothing, message reports the action and count.
- */
-export function makeRainbowHandler(ctx: CommandContext): CommandHandler {
-  return (args: string): CommandResult => {
-    const expr = args.trim();
-    if (expr === "") {
-      return {
-        status: "error",
-        message: "rainbow needs a target — rainbow <target> (e.g. rainbow alpha.group-0)",
-      };
-    }
-    const recipe = getRecipe("rainbow");
-    if (!recipe || recipe.kind !== "representation") {
-      return { status: "error", message: 'no representation mod named "rainbow"' };
-    }
-    const r = resolveTargetPoints(ctx, expr);
-    if ("status" in r) return r;
-    const scalars = recipe.compute(r.points);
-    const n = applyColorScalars(ctx, r.points, scalars, recipe.colormap);
-    return { status: "ok", message: `colored ${n} points rainbow` };
-  };
-}
-
 /** The [0,1]-scalar→axis application, written ONCE for every scalar source —
  * the bake verb and the typed-result binding (claudebind.ts) both land here:
  * color through the resolved PALETTE's colormap, size through the fixed
@@ -1569,8 +1566,8 @@ export function makeRainbowHandler(ctx: CommandContext): CommandHandler {
  *
  * `palette` is a REGISTERED palette name, or undefined for the default —
  * resolved ONCE here, never per element. Omitting it yields
- * `rainbow.colormap` BY REFERENCE (colormapFor's contract), so every caller
- * that predates palettes is byte-identical. */
+ * `RAINBOW_PALETTE.colormap` BY REFERENCE (colormapFor's contract), so every
+ * caller that predates palettes is byte-identical. */
 export function applyScalarsToAxis(
   ctx: CommandContext,
   axis: ScalarAxis,
@@ -3030,9 +3027,6 @@ export const HELP_TEXT = [
   "               PRESENT, never a hide; out-of-range clamps to 0/1)",
   "  bondopacity / bondopacityof / traceopacity <expr> <a>   the same shapes",
   "               on the OPACITY axis (overlap compositing is draw-order naive)",
-  "  rainbow <expr>              color those points an even hue ramp in",
-  "               resolution order (the first recipe: per-point values,",
-  "               not one constant; one undo stroke)",
   "  bake <expr> <channel> <axis> [<min> <max>] [?palette=<name>]   write a",
   "               scalar data channel (at the displayed frame) onto",
   "               color|size|opacity, normalized over min..max (declared on",
@@ -3096,6 +3090,12 @@ export function makeHelpHandler(registry: CommandRegistry): CommandHandler {
     const verb = args.split(/\s+/)[0];
     const description = registry.describe(verb);
     if (description === undefined) {
+      // A retired verb answers here too — asking `help` about a name that used
+      // to work must not read as "you misspelled something".
+      const retired = RETIRED_VERBS[verb];
+      if (retired) {
+        return { status: "nomatch", message: `${verb} was removed — ${retired}` };
+      }
       return { status: "nomatch", message: `no such command: ${verb}` };
     }
     return { status: "ok", message: `${verb} — ${description}` };
@@ -3210,11 +3210,6 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "traceopacity",
     makeTraceOpacityHandler(ctx),
     "fade polyline vertices whose subgroup contains a resolved point (contained at subgroup grain): traceopacity <target> <opacity>",
-  );
-  registry.register(
-    "rainbow",
-    makeRainbowHandler(ctx),
-    "color the target's points an even hue ramp in resolution order (the first recipe — per-point values, one undo stroke): rainbow <target>",
   );
   registry.register(
     "bake",

@@ -2533,7 +2533,7 @@ async function main(): Promise<void> {
     const prev = new Float32Array(list.length * stride);
     // AFTER as well as BEFORE. This is the funnel every representation writer
     // reaches — colour/size/opacity across points, edges and trace vertices, the
-    // three style verbs, orientation, `rainbow`, `bake`, and a bind's initial
+    // three style verbs, orientation, `bake`, and a bind's initial
     // apply — so capturing the written values here gives all of them a forward
     // face at once, and undo/redo become a two-way swap over the same id list.
     //

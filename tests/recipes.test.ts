@@ -1,6 +1,7 @@
 /**
- * Unit tests for the recipe layer — the ramp, the hue colormap, and the
- * in-memory registry. Pure, no DOM. Run from viewer/:
+ * Unit tests for the mod layer — the in-memory registry, the mod FILE format,
+ * the fail-closed return gate, parameters, channel providers, and the rm
+ * selector. Pure, no DOM. Run from viewer/:
  * node --test tests/recipes.test.ts
  */
 import { test } from "node:test";
@@ -9,61 +10,57 @@ import assert from "node:assert/strict";
 import {
   getRecipe,
   listRecipes,
-  rainbow,
   registerRecipe,
   type Recipe,
 } from "../webview/recipes.ts";
-import { hsvToRgb, RAINBOW_HUE_MAX } from "../webview/palettes.ts";
 
-test("rainbow.compute: an even 0→1 ramp across the set in its given order", () => {
-  assert.deepEqual(rainbow.compute([10, 20, 30, 40, 50]), [0, 0.25, 0.5, 0.75, 1]);
-  assert.deepEqual(rainbow.compute([7, 3]), [0, 1], "two points span the whole ramp");
-  // the scalar depends on POSITION in the set, never on the ids themselves
-  assert.deepEqual(rainbow.compute([50, 40, 30, 20, 10]), [0, 0.25, 0.5, 0.75, 1]);
-});
+// The `rainbow` recipe — the ramp, its colormap, its attribution — was
+// REMOVED, and with it the only `kind: "representation"` instance that ever
+// existed. What it used to prove and where that lives now:
+//   the hue sweep's values         → tests/palettes.test.ts (CAPTURED_SWEEP,
+//                                    the bit-for-bit pre-removal capture)
+//   hsvToRgb's anchors             → tests/palettes.test.ts
+//   the verb's write discipline    → `bake`'s tests in commands.test.ts (the
+//                                    same applyColorScalars rail)
+//   "typing it says so"            → commands.test.ts, the retired-verb test
+// The registry/type machinery below is still exercised, now through stubs —
+// which is exactly the evidence for the question "is the Recipe arm vestigial".
 
-test("rainbow.compute: a single-point set yields [0] — no divide-by-zero", () => {
-  assert.deepEqual(rainbow.compute([124]), [0]);
-});
-
-// hsvToRgb's own anchors moved to tests/palettes.test.ts with the function.
-
-test("rainbow.colormap: one built-in hue sweep, ends never coincide", () => {
-  assert.deepEqual(rainbow.colormap(0), [1, 0, 0], "t=0 → hue 0 (red)");
-  assert.deepEqual(rainbow.colormap(1), hsvToRgb(RAINBOW_HUE_MAX, 1, 1), "t=1 → the sweep's far end");
-  assert.notDeepEqual(rainbow.colormap(0), rainbow.colormap(1),
-    "the sweep stops short of 360 so the ramp's ends stay distinct");
-  assert.deepEqual(rainbow.colormap(0.5), [0, 1, 0.5], "t=0.5 → hue 150");
-});
-
-test("the registry holds rainbow under its name, axis point-color (storage only)", () => {
-  const r = getRecipe("rainbow");
-  assert.ok(r, "rainbow registered at module load");
-  assert.equal(r, rainbow, "the registry resolves to THE recipe object the verb runs");
-  assert.equal(r.name, "rainbow");
-  assert.equal(r.axis, "point-color");
-  assert.equal(getRecipe("nothere"), undefined);
-});
-
-test("rainbow carries honest attribution: built-in, project author and repo", () => {
-  assert.equal(rainbow.origin, "built-in");
-  assert.equal(rainbow.author, "Dominic Fico");
-  assert.equal(rainbow.source, "https://github.com/DomFico/molaro");
-});
-
-test("registerRecipe: a name → recipe map future recipes register into", () => {
-  const flat: Recipe = {
-    name: "flat-test",
+/** A representation-mod stub: the Recipe arm's only remaining inhabitant, so
+ * the registry/serializer/selector tests keep covering the union's other arm.
+ * Registration order matters to one test below, so each caller names its own. */
+function repStub(name: string): Recipe {
+  return {
+    name,
     kind: "representation",
     axis: "point-color",
     compute: (points) => points.map(() => 0.5),
     colormap: () => [0, 0, 0],
     origin: "built-in",
   };
+}
+
+test("the registry starts EMPTY — nothing is registered at module load", () => {
+  // `rainbow` used to be here. A built-in mod is now a thing the codebase has
+  // none of; the registry fills only from workspace mod files.
+  assert.deepEqual(listRecipes(), []);
+  assert.equal(getRecipe("rainbow"), undefined, "the retired name resolves to nothing");
+  assert.equal(getRecipe("nothere"), undefined);
+});
+
+test("registerRecipe: a name → recipe map mods register into", () => {
+  const flat = repStub("flat-test");
   registerRecipe(flat);
-  assert.equal(getRecipe("flat-test"), flat);
-  assert.deepEqual(listRecipes().map((r) => r.name), ["rainbow", "flat-test"],
+  assert.equal(getRecipe("flat-test"), flat, "the registry resolves to THE object handed in");
+  assert.equal(flat.axis, "point-color");
+  registerRecipe({
+    name: "flat-test-2", kind: "analysis", produces: "per-frame-series",
+    code: "def compute(d,t):\n pass", origin: "workspace",
+  });
+  assert.deepEqual(listRecipes().map((r) => r.name), ["flat-test", "flat-test-2"],
     "listRecipes enumerates in registration order");
+  unregisterRecipe("flat-test");
+  unregisterRecipe("flat-test-2");
 });
 
 // -- the mod FILE format + the fail-closed validation gate (brief #3) -------------
@@ -137,7 +134,7 @@ test("mod files: save → load round-trips the mod exactly", () => {
 });
 
 test("mod files: representation mods have no file form (they are code)", () => {
-  assert.throws(() => serializeMod(rainbow), /only analysis mods serialize/);
+  assert.throws(() => serializeMod(repStub("rep-no-file")), /only analysis mods serialize/);
 });
 
 test("mod files: every malformed shape is a reported skip, never a throw", () => {
@@ -474,7 +471,10 @@ test("resolveModSelector: names, + unions, all (workspace only), the three bucke
     { name: "aa_mod", kind: "analysis", produces: "per-frame-series", code: "def compute(d,t):\n pass", origin: "workspace" },
     { name: "bb_mod", kind: "analysis", produces: "per-frame-series", code: "def compute(d,t):\n pass", origin: "workspace" },
   ];
-  const pool = [rainbow, ...mods];
+  // a BUILT-IN stub stands in for what `rainbow` used to be here: the codebase
+  // ships no built-in mod any more, but `rm`'s builtins bucket is still the
+  // refusal path for one, so it must stay covered.
+  const pool = [repStub("zz_builtin"), ...mods];
   assert.deepEqual(resolveModSelector("aa_mod", pool),
     { workspace: ["aa_mod"], builtins: [], nomatch: [] }, "bare name");
   assert.deepEqual(resolveModSelector("aa_mod + bb_mod", pool),
@@ -484,8 +484,8 @@ test("resolveModSelector: names, + unions, all (workspace only), the three bucke
     "all = every WORKSPACE mod — never built-ins");
   assert.deepEqual(resolveModSelector("nothere", pool),
     { workspace: [], builtins: [], nomatch: ["nothere"] }, "nomatch");
-  assert.deepEqual(resolveModSelector("rainbow + aa_mod + nothere", pool),
-    { workspace: ["aa_mod"], builtins: ["rainbow"], nomatch: ["nothere"] },
+  assert.deepEqual(resolveModSelector("zz_builtin + aa_mod + nothere", pool),
+    { workspace: ["aa_mod"], builtins: ["zz_builtin"], nomatch: ["nothere"] },
     "a mixed selector fills all three buckets");
   const deduped = resolveModSelector("aa_mod + aa_mod + all", pool);
   assert.ok(!("error" in deduped));
@@ -501,11 +501,16 @@ test("unregisterRecipe removes a mod from the registry (and only that mod)", () 
     name: "zz_doomed", kind: "analysis", produces: "per-frame-series",
     code: "def compute(d,t):\n pass", origin: "workspace",
   });
+  registerRecipe({
+    name: "zz_neighbor", kind: "analysis", produces: "per-frame-series",
+    code: "def compute(d,t):\n pass", origin: "workspace",
+  });
   assert.ok(getRecipe("zz_doomed"));
   assert.equal(unregisterRecipe("zz_doomed"), true);
   assert.equal(getRecipe("zz_doomed"), undefined);
-  assert.ok(getRecipe("rainbow"), "neighbors untouched");
+  assert.ok(getRecipe("zz_neighbor"), "neighbors untouched");
   assert.equal(unregisterRecipe("zz_doomed"), false, "second delete is a no-op");
+  unregisterRecipe("zz_neighbor");
 });
 
 // -- Brief #10a: MOD_PRODUCES / MOD_AXES as the single source ------------------
@@ -747,7 +752,7 @@ test("channelProviders: maps channel name → declaring mods; a name with >1 pro
   });
   const providers = channelProviders([
     ch("heat_a", "heat"), ch("heat_b", "heat"), ch("flow", "flow_dir"),
-    rainbow, // a representation mod contributes nothing
+    repStub("zz_rep"), // a representation mod contributes nothing
   ]);
   assert.deepEqual(providers.get("heat"), ["heat_a", "heat_b"], "the collision — two providers");
   assert.deepEqual(providers.get("flow_dir"), ["flow"], "a unique provider");

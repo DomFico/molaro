@@ -8,7 +8,7 @@
  *
  *   per-point-scalar → resolveTargetPoints (view's exact header-ordered
  *                      resolution) + the per-element writer discipline
- *                      rainbow runs on (capture-prior + recordOp, ONE undo
+ *                      `bake` runs on (capture-prior + recordOp, ONE undo
  *                      stroke, LWW, own buffer, GPU sync via onWrite):
  *                      color through applyColorScalars + the built-in
  *                      colormap; size/opacity through the same factory's

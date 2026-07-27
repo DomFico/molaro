@@ -3,10 +3,15 @@
  * tagged explicitly:
  *
  *   kind: "representation" (Type R) — JS compute in the webview over the
- *     resolved point set, geometry-only (rainbow: per-element scalar in
- *     [0,1] rendered through a colormap into the point-color buffer). The
+ *     resolved point set, geometry-only (a per-element scalar in [0,1]
+ *     rendered through a colormap into the point-color buffer). The
  *     scalar-then-colormap split is deliberate — the mapping-and-write step
  *     (applyColorScalars in commands.ts) never knows the scalar source.
+ *     CURRENTLY UNINHABITED: `rainbow`, the only instance there has ever
+ *     been, was retired (its hue sweep survives as the default PALETTE, which
+ *     is where a scalar→colour ramp belongs — palettes.ts). The arm and the
+ *     read faces that branch on it are kept, exercised by unit-test stubs;
+ *     whether to retire the type is a separate decision.
  *
  *   kind: "analysis" (Type A) — PYTHON compute executed in the PRODUCER
  *     process against the loaded dataset (`code` defines
@@ -32,7 +37,6 @@
  * assigned by the file loader (never trusted from the file itself). */
 import { validateFigure, type FigureAxes } from "./plotmodel.ts";
 import { parseChannelDelta, type Channel } from "../contract/contract.ts";
-import { RAINBOW_PALETTE } from "./palettes.ts";
 
 export type RecipeOrigin = "built-in" | "workspace";
 
@@ -152,25 +156,6 @@ export interface AnalysisMod extends ModCommon {
 
 export type Mod = Recipe | AnalysisMod;
 
-/** `rainbow` — the first recipe: an even ramp from 0 to 1 across the
- * resolved set in its existing order, rendered through one built-in hue
- * sweep. A single-point set yields [0] (no divide-by-zero).
- *
- * The hue sweep itself now lives in palettes.ts (a sweep is a palette, and
- * after this recipe goes it is the palette registry's only caller). The
- * colormap here is that ONE function object, shared by reference — the
- * identity that keeps a bound colour axis byte-identical. */
-export const rainbow: Recipe = {
-  name: "rainbow",
-  kind: "representation",
-  axis: "point-color",
-  compute: (points) => points.map((_, i) => i / Math.max(points.length - 1, 1)),
-  colormap: RAINBOW_PALETTE.colormap,
-  origin: "built-in",
-  author: "Dominic Fico",
-  source: "https://github.com/DomFico/molaro",
-};
-
 // -- the in-memory mod registry ---------------------------------------------------
 
 const recipes = new Map<string, Mod>();
@@ -189,7 +174,14 @@ export function listRecipes(): Mod[] {
   return [...recipes.values()];
 }
 
-registerRecipe(rainbow);
+// NOTHING IS REGISTERED AT MODULE LOAD. `rainbow` — the one built-in mod, and
+// the only `kind: "representation"` instance that ever existed — was retired
+// here; its hue sweep lives on as the DEFAULT PALETTE (palettes.ts), which is
+// what a colour `bake`/`bind` maps through. So the registry now starts EMPTY
+// and fills only from workspace mod files. The Recipe arm of the `Mod` union
+// and the read faces that branch on it are kept deliberately (see the header)
+// — retiring the type is a separate decision, not a side effect of retiring
+// one mod.
 
 // -- the mod FILE format (analysis mods only — R mods are code) --------------------
 //
