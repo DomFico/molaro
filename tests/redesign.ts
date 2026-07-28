@@ -8300,6 +8300,86 @@ async function S49(): Promise<void> {
     check("S49: with several selections over the point, the NEWEST is resolved and displayed",
       /@newer/.test(ambiguous), ambiguous);
     await holdUp();
+
+    // == the honesty patch =====================================================
+    // Three measured lies the gesture used to tell. Each leg is written so it
+    // FAILS on the pre-fix build, not merely passes on the fixed one.
+
+    // -- 1. releasing early SAYS SO -------------------------------------------
+    // Before: cancelHold() cleared the timer silently and the "hold to run: …"
+    // prompt stayed on screen indefinitely, reading as still-pending.
+    await hover(centre.x, centre.y);
+    await holdDown();
+    await sleep(80);
+    check("S49: (setup) a dwell is in progress", /hold to run:/.test(await status()));
+    await holdUp();
+    await sleep(40);
+    const afterRelease = await status();
+    check("S49: releasing before the dwell SAYS it cancelled, instead of leaving a stale prompt",
+      /cancelled/.test(afterRelease) && !/^hold to run:/.test(afterRelease), afterRelease);
+
+    // -- 2. auto-repeat fires ONCE --------------------------------------------
+    // Before: holdTimer is nulled at the top of the firing callback, so each OS
+    // auto-repeat keydown saw an idle machine and started another dwell — a 2 s
+    // hold measured FIVE firings and cost five Ctrl+Z presses to undo.
+    // `view` is camera-only, so count dwells (status prompts), not undo depth.
+    const repeatDown = () =>
+      d.evaluate(`window.dispatchEvent(new KeyboardEvent("keydown",{key:"f",repeat:true,bubbles:true}))`);
+    await hover(centre.x, centre.y);
+    await holdDown();
+    await sleep(HOLD_WAIT);          // let the first dwell FIRE and clear holdTimer
+    const firedOnce = await status();
+    check("S49: (setup) the first dwell fired", /→/.test(firedOnce), firedOnce);
+    await repeatDown();
+    await repeatDown();
+    await sleep(60);
+    check("S49: an auto-repeat keydown does NOT start a second dwell while the key is held",
+      !/hold to run:/.test(await status()), await status());
+    await holdUp();
+
+    // -- 3. the frame scrubber does not swallow the keyboard -------------------
+    // Before: the guard was `tagName === "INPUT"`, and the scrubber IS an
+    // <input type=range>. Clicking it left it focused, which silently killed the
+    // gesture AND Ctrl+Z / Ctrl+Shift+Z / Escape — this one handler owns them all.
+    // The event must be dispatched ON the scrubber and allowed to BUBBLE, which is
+    // what a real browser does when it has focus. Dispatching on `window` (as the
+    // other legs do) leaves e.target === window, so the guard is never consulted
+    // and the leg passes whether or not the fix exists — verified: that version was
+    // green on the pre-fix build too.
+    const focusedRange = await d.evaluate<string>(`(() => {
+      const r = document.querySelector('input[type=range]');
+      if (!r) return "(no range input)";
+      r.focus();
+      return document.activeElement === r ? "focused" : "(focus refused)";
+    })()`);
+    check("S49: (setup) the frame scrubber is an <input type=range> and takes focus",
+      focusedRange === "focused", focusedRange);
+    await hover(centre.x, centre.y);
+    // Wipe the status line first. A previous leg leaves "hold to run: …" on it, and
+    // asserting for that string against stale text passes whether or not the gesture
+    // armed — verified: without this sentinel the leg was green on the pre-fix build.
+    await d.evaluate(`document.getElementById("status").textContent = "(sentinel)"`);
+    await d.evaluate(`document.querySelector('input[type=range]')
+      .dispatchEvent(new KeyboardEvent("keydown",{key:"f",bubbles:true}))`);
+    await sleep(80);
+    const withScrubberFocused = await status();
+    check("S49: with the scrubber focused the gesture STILL arms — a range input is not text entry",
+      /hold to run:/.test(withScrubberFocused), withScrubberFocused);
+    await holdUp();
+
+    // …and the text-entry guard it replaced still holds, so a letter typed into a
+    // real text field is content and never a command. Fail-closed by construction.
+    const typedInText = await d.evaluate<string>(`(() => {
+      const i = document.createElement("input");   // type defaults to "text"
+      document.body.appendChild(i); i.focus();
+      const before = document.getElementById("status")?.textContent ?? "";
+      i.dispatchEvent(new KeyboardEvent("keydown",{key:"f",bubbles:true}));
+      const after = document.getElementById("status")?.textContent ?? "";
+      i.remove();
+      return before === after ? "unchanged" : ("CHANGED -> " + after);
+    })()`);
+    check("S49: a letter typed into a TEXT input is content, never the gesture",
+      typedInText === "unchanged", typedInText);
   });
 }
 

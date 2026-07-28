@@ -4279,6 +4279,28 @@ async function main(): Promise<void> {
     return null;
   };
   const quoted = (name: string): string => (/^[A-Za-z0-9_-]+$/.test(name) ? name : `"${name}"`);
+  /** Is this element TEXT ENTRY — somewhere a bare letter is content, not a command?
+   *
+   * The guard used to be `tagName === "INPUT" || "TEXTAREA"`, which swallowed every
+   * key for ANY input — including `<input type=range>`, which is the frame scrubber.
+   * Clicking the scrubber leaves it focused, so scrub-then-press silently killed the
+   * hold gesture AND Ctrl+Z / Ctrl+Shift+Z / Escape (this one handler owns them all)
+   * until the user happened to click the canvas again. Measured before this fix:
+   * hold-F left the status untouched and Ctrl+Z went `undo 9 -> 9`.
+   *
+   * FAIL-CLOSED: an input type we do not recognise counts as text entry, so adding a
+   * new text field can never silently unguard typing. Only the types that cannot
+   * receive text are listed. */
+  const NON_TEXT_INPUT_TYPES = new Set([
+    "range", "checkbox", "radio", "button", "submit", "reset", "color", "file", "image",
+  ]);
+  const isTextEntry = (el: HTMLElement | null): boolean => {
+    if (!el) return false;
+    if (el.isContentEditable) return true;
+    if (el.tagName === "TEXTAREA") return true;
+    if (el.tagName !== "INPUT") return false;
+    return !NON_TEXT_INPUT_TYPES.has((el as HTMLInputElement).type.toLowerCase());
+  };
   window.addEventListener("pointermove", (e) => {
     lastPointer = { x: e.clientX, y: e.clientY };
     if (holdFrom && Math.hypot(e.clientX - holdFrom.x, e.clientY - holdFrom.y) > CLICK_MOVE_THRESHOLD) {
@@ -4286,13 +4308,27 @@ async function main(): Promise<void> {
       setStatus("hold cancelled — pointer moved");
     }
   });
-  window.addEventListener("keyup", (e) => { if (e.key.toLowerCase() === HOLD_KEY) cancelHold(); });
+  window.addEventListener("keyup", (e) => {
+    if (e.key.toLowerCase() !== HOLD_KEY) return;
+    // Say so. Releasing early used to cancel SILENTLY and leave the "hold to
+    // run: …" prompt on screen indefinitely, which reads as still-pending. The
+    // message belongs HERE and not inside cancelHold, because the fire path
+    // calls cancelHold too and a fired hold must keep its own result line.
+    const wasDwelling = holdTimer !== null;
+    cancelHold();
+    if (wasDwelling) setStatus("hold cancelled — key released early");
+  });
 
   // -- keys: Escape cancels; Ctrl+Z undo, Ctrl+Shift+Z redo (state, never camera) --
   window.addEventListener("keydown", (e) => {
-    const t = e.target as HTMLElement | null;
-    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA")) return;
-    if (e.key.toLowerCase() === HOLD_KEY && !e.ctrlKey && !e.metaKey && !e.altKey) {
+    if (isTextEntry(e.target as HTMLElement | null)) return;
+    if (e.key.toLowerCase() === HOLD_KEY && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
+      // Auto-repeat is a SECOND keydown with the key still physically down. Without
+      // this, a 2 s hold fired ~5 times (measured: undo depth 1 -> 6) and cost five
+      // Ctrl+Z presses to undo — because holdTimer is cleared at the top of the
+      // firing callback, so the next repeat sees an idle machine. Scoped to this
+      // branch on purpose: holding Ctrl+Z to walk back a stack must keep repeating.
+      if (e.repeat) return;
       if (holdTimer !== null || !holdTemplate || !lastPointer) return; // already dwelling / unbound / no pointer yet
       const idx = pickAt(lastPointer.x, lastPointer.y);
       const name = idx >= 0 ? selectionAt(idx) : null;
