@@ -338,7 +338,7 @@ Two hard rules, both enforced (a violation fails LOUDLY before anything runs):
 
 A 3-wide channel bound to the \`offset\` axis DISPLACES the drawn positions (\`shown = raw +
 offset\`): it MOVES points, it does not restyle them (distinct from the color/scalar ramp).
-Two shipped \`commands\` mods drive it: \`smooth <region> ?window=N\` (replaces each point's
+Two shipped \`commands\` mods drive it: \`smooth <region> ?smoothing=N\` (N = frames AVERAGED, VMD-style; replaces each point's
 shown position with a windowed average of its own positions over ±N frames, so jitter reads
 as smooth motion) and \`delay <region> ?frames=k\` (shows each point where it was k frames
 earlier). Each runs its provider then binds, in ONE invocation.

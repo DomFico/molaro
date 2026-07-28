@@ -8924,9 +8924,9 @@ async function S51(): Promise<void> {
 //   A  invocation DECLARES the vector channel and BINDS it to offset (the P-3
 //      sequence: provider first, then the macro's `bind all smoothing offset`),
 //      as exactly ONE undo stroke (the bind; the declaration is not an op)
-//   B  shown = raw + offset AND shown = the ±window windowed MEAN over frames —
-//      the smoothing is exact, and it equals the mean for THIS window (window=7),
-//      which proves the `?window=` level reached the provider's computation
+//   B  shown = raw + offset AND shown = the windowed MEAN over frames —
+//      the smoothing is exact, and it equals the mean for THIS amount
+//      (?smoothing=15 → ±7), which proves the level reached the provider
 //   C  the offset is nonzero over the smoothed region and EXACTLY zero outside;
 //      uncovered points draw at their raw position (untouched)
 //   D  jitter reduced — a covered point's peak-to-peak motion over frames is
@@ -8973,8 +8973,12 @@ async function S52(): Promise<void> {
       `${await channelsMsg()} | ${await bindingsMsg()}`);
 
     // -- A: invoke the ONE command — smooth a region with a chosen window ------
+    // ?smoothing is the number of frames AVERAGED (VMD's control), so a ±7 half-
+    // width is 15. WINDOW stays the half-width because that is what the expected
+    // mean below is computed from — the two must not drift.
     const WINDOW = 7; // ±7 frames → the window is [0,7] at frame 0 = exactly chunk 0
-    const r = await cmd(`smooth #0-199 ?window=${WINDOW}`);
+    const SMOOTHING = 2 * WINDOW + 1;
+    const r = await cmd(`smooth #0-199 ?smoothing=${SMOOTHING}`);
     check("S52: `smooth` acknowledges and hands off to the async producer round-trip",
       r.status === "ok" && /running smooth on 200 points/.test(r.message), JSON.stringify(r));
 

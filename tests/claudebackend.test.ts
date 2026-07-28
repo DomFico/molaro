@@ -585,7 +585,7 @@ test("system prompt teaches the offset axis and its smooth/delay mods (PROMPT_DE
   const p = buildSystemPrompt(sampleContext());
   // the offset axis mechanism + the two shipped commands mods on it
   assert.match(p, /shown = raw \+\s*offset/);
-  assert.match(p, /smooth <region> \?window=N/);
+  assert.match(p, /smooth <region> \?smoothing=N/);
   assert.match(p, /delay <region> \?frames=k/);
   // the authoring PAIR: a produces:channel offset mod + a requires-channel macro that binds
   assert.match(p, /bind all <channel> offset/);
