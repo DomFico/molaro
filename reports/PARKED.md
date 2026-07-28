@@ -190,3 +190,43 @@ same refutation that forced scoping in the first place, and any scope 4 must sur
 
 **Blocked on:** wanting a real file for each case. Every number above is from a synthetic
 fixture; none of the 15 real structures in the evidence base contains one.
+
+## P9 — the missing `spotlight` mod, and `hide all + ~@sel` hiding everything
+
+Two findings from the gesture recon, both measured, neither fixed.
+
+**1. The `spotlight` mod both retired files cite DOES NOT EXIST.**
+`spotlight_rainbow.py` names a plain `spotlight` repeatedly as the one that "gets this
+right" — neighbourhood receding from apparent luminance 0.817 at the rim to 0.268 at the
+core, fading toward the base colour `#e6e6e6` and ending 35/255 away from it, i.e. no
+visible ring. A filesystem-wide search finds only `spotlight_field` and
+`spotlight_rainbow`; it is not in the old `Research/.../lanm_architecture/.molaro/mods`
+copy either, and `git log --all --diff-filter=A -- '*spotlight*'` is empty.
+
+So the mod the owner remembers as "the spotlight" is the sibling that was explicitly
+written as NOT it. Its own comments: *"it does not spotlight anything… every neighbourhood
+atom is fully saturated at full opacity, while the selection is mostly grey and white, so
+the eye is pulled to the surroundings and away from the thing they are meant to
+highlight… It is a churn viewer."*
+
+**Lean:** write it, and the existing analysis says exactly how. The failure is structural,
+not tuning: **every point on the built-in hue ramp is fully saturated, so a bound colour
+axis has no low-salience end and nothing bound to it can recede.** Opacity has such an end,
+which is why the fade already works. A real spotlight therefore grades the surroundings in
+LUMINANCE toward the base colour rather than binding them to hue. Reuse `spotlight_field`
+unchanged — the proximity channel is right; only the consumer is wrong.
+**Cost note:** this is DOMAIN flavour, and it is a `produces: commands` mod, so it needs no
+engine change. It also does not need the per-frame channel at all if it emits static
+shells — see P8's cost table for why a per-frame channel on a gesture path is the trap.
+
+**2. `hide all + ~@sel` hides EVERYTHING and reports success.**
+Measured during the recon: the `+ ~` negation form silently hid all 6000 points of the
+synthetic scene while returning `ok`. The bare-token form errors honestly
+(`hide all + ~#100-140` -> `unexpected "..." — terms are joined with "+"`), so this is the
+`@name` arm specifically. Untruthful success is the worst failure shape this project has,
+and it is squarely the class increment 25 was about.
+**Not diagnosed** — nobody traced whether the negation is dropped during parse or applied
+to an empty set. Do that before assuming it is a one-liner.
+**Consequence for gestures:** it removes the obvious zero-code spotlight template. There is
+no way to say "hide everything except this" in ONE command today, which is why the intent
+has to be packaged as a `produces: commands` mod.
