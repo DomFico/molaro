@@ -1144,10 +1144,25 @@ function splitAndParseValue<T>(
 ): { value: T; expr: string; word: string } | CommandResult {
   const split = splitTrailingWord(args);
   if (split.word === null) {
+    // A LONE VALUE MEANS THE WHOLE SYSTEM: `traceopacity 0.1` == `traceopacity all
+    // 0.1`. splitTrailingWord reports one chunk as {expr: <it>, word: null}, so the
+    // single token is sitting in `expr` — if it parses as this verb's value, the
+    // target was simply omitted, which is the same "empty means everything" rule
+    // the mods and a bare `cartoon` already use.
+    //
+    // NOT ambiguous with a target that happens to look like a value: with one token
+    // there is nothing to be ambiguous WITH, because `<verb> <target>` alone is not
+    // a legal form for these verbs — it was an error a line below this before, so
+    // no existing expression changes meaning. A group genuinely named `red` is
+    // still reachable as `colorpoints red <color>`.
+    const lone = split.expr.trim();
+    const loneValue = lone === "" ? null : parse(lone);
+    if (loneValue !== null) return { value: loneValue, expr: "all", word: lone };
     const art = /^[aeiou]/.test(noun) ? "an" : "a";
     return {
       status: "error",
-      message: `${verb} needs a target and ${art} ${noun} — ${verb} <target> <${noun}> (e.g. ${verb} alpha ${example})`,
+      message: `${verb} needs ${art} ${noun} — ${verb} [<target>] <${noun}> ` +
+        `(e.g. ${verb} alpha ${example}, or ${verb} ${example} for everything)`,
     };
   }
   const value = parse(split.word);

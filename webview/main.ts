@@ -2711,8 +2711,20 @@ async function main(): Promise<void> {
    */
   const channelTargetByName = new Map<string, Int32Array>();
   /** Canonical form of a resolved target: sorted, de-duplicated indices. */
+  /** The whole system, as a target. Real point indices are >= 0, so -1 cannot
+   * collide with a genuine one. */
+  const ALL_TARGET = Int32Array.from([-1]);
   const canonicalTarget = (points: readonly number[]): Int32Array =>
-    Int32Array.from([...new Set(points)]).sort();
+    points.length > 0
+      ? Int32Array.from([...new Set(points)]).sort()
+      // AN EMPTY TARGET IS THE WHOLE SYSTEM, not "no target" — that is what it
+      // means everywhere else (the mod contract says an empty target_indices is
+      // every point). Treating it as unknown made a bare invocation compare equal
+      // to ANY previous target, so `smooth @sel` then bare `smooth` re-bound the
+      // channel computed for @sel and reported success while smoothing 265 points
+      // out of 3341. Canonicalising here rather than at the two call sites is what
+      // keeps the RECORD and the COMPARISON symmetric — they both go through this.
+      : ALL_TARGET;
   const sameTarget = (a: Int32Array | undefined, b: Int32Array): boolean => {
     if (!a || a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -3499,18 +3511,24 @@ async function main(): Promise<void> {
       // showed a static picture, and reported success. Ask instead whether the
       // live values were computed for THIS target.
       //
-      // AN EMPTY TARGET COUNTS AS UNCHANGED, decided rather than inherited. A
-      // bare invocation resolves to no points, and that must not mean "a new
-      // target" — it would recompute on every bare call and hand a
-      // target-dependent provider an empty selection to raise on, turning a
-      // working invocation into a failure attributed to the wrong mod. It must
-      // not mean "skip sequencing" either: a bare `cartoon` legitimately relies
-      // on the first declaration happening. So an empty target still triggers a
-      // FIRST declaration and never a REFRESH — which also preserves the
-      // documented escape hatch of pinning a provider's parameters by running it
-      // by hand and then invoking the consumer bare.
+      // AN EMPTY TARGET IS THE WHOLE SYSTEM. This used to count as UNCHANGED, so a
+      // bare invocation never refreshed — and `smooth @sel` followed by bare
+      // `smooth` silently re-bound @sel's channel, smoothing 265 of 3341 points
+      // while reporting success. The two objections that reasoning rested on are
+      // both answered by canonicalising the empty target (see canonicalTarget):
+      // bare-after-bare compares EQUAL so it does not recompute on every call, and
+      // the provider is still handed the empty target it already knew how to read
+      // as "everything". What is genuinely lost is the escape hatch of pinning a
+      // provider's parameters by hand and then invoking the consumer bare — that
+      // now refreshes. Parameter FORWARDING replaced it: `smooth ?smoothing=15`
+      // reaches the provider directly, which is the better spelling anyway.
       const liveChannel = header.channels.some((c) => c.name === mod.requiresChannel);
-      const staleForThisTarget = liveChannel && points.length > 0 &&
+      // No `points.length > 0` guard any more: an empty target is a REAL target
+      // (the whole system) and must be compared like one. Bare-after-bare still
+      // does not recompute — ALL_TARGET equals ALL_TARGET — which was the original
+      // objection to dropping the guard, and it is answered by canonicalisation
+      // rather than by refusing to compare.
+      const staleForThisTarget = liveChannel &&
         !sameTarget(channelTargetByName.get(mod.requiresChannel!), canonicalTarget(points));
       if (mod.requiresChannel && (!liveChannel || staleForThisTarget)) {
         const dep = resolveChannelDependency(mod, listRecipes());
@@ -4634,6 +4652,27 @@ async function main(): Promise<void> {
       setPlaying,
       panel,
       debug: {
+        /** How many points a declared channel actually gives a NON-ZERO value.
+         *
+         * A test seam, and a narrow one: the bug it exists for is a provider that
+         * did not re-run, where the command's own message was already correct. The
+         * message cannot witness that; only the values can. Returns -1 when the
+         * channel is not declared or its block is absent, so a scenario asserting
+         * on it FAILS loudly rather than passing on a sentinel. */
+        channelNonZero: (name: string): number => {
+          const chunk = player.getFrame(displayedFrame);
+          const block = chunk?.channels?.get(name);
+          if (!chunk || !block) return -1;
+          const comps = header.channels.find((c) => c.name === name)?.components ?? 1;
+          const off = (displayedFrame - chunk.start) * header.n_points * comps;
+          let n = 0;
+          for (let i = 0; i < header.n_points; i++) {
+            let nz = false;
+            for (let c = 0; c < comps; c++) if (Math.abs(block[off + i * comps + c]) > 1e-9) nz = true;
+            if (nz) n++;
+          }
+          return n;
+        },
         /** number of points currently green (pending-target footprint). */
         selCount: (): number => {
           let s = 0;

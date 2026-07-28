@@ -1260,6 +1260,48 @@ test("single-point target pins contained-vs-incident: bonds nomatch, bondsof inc
   assert.deepEqual(edgeOps[0].edgeIds, [0]);
 });
 
+test("a LONE value targets everything — the target is optional on the rep verbs", () => {
+  // `traceopacity 0.1` == `traceopacity all 0.1`. One rule, one seam
+  // (splitAndParseValue), so the whole point/edge/trace grid gets it at once —
+  // which is also why this is asserted across the grid rather than on one verb.
+  const fx = makeRegistry();
+  // TOTAL across every write sink, so this asserts "it wrote" without encoding
+  // which sink each verb happens to use — that mapping is not what is under test.
+  const wrote = () => fx.colorOps.length + fx.colorEachOps.length + fx.eachOps.length +
+    fx.edgeOps.length + fx.endsOps.length + fx.traceOps.length + fx.sizeOps.length +
+    fx.dashOps.length + fx.opacityOps.length;
+  for (const [verb, value] of [
+    ["colorpoints", "red"], ["pointopacity", "0.25"], ["pointsize", "2"],
+    ["colorbonds", "red"], ["bondopacity", "0.25"],
+    ["colortrace", "red"], ["traceopacity", "0.1"],
+  ] as Array<[string, string]>) {
+    const before = wrote();
+    const r = fx.registry.runCommand(`${verb} ${value}`);
+    assert.equal(r.status, "ok", `${verb} ${value} → ${r.message}`);
+    assert.ok(wrote() > before, `${verb} ${value} must WRITE, not just report ok`);
+  }
+});
+
+test("a lone token that is NOT a value is still a usage error, not a silent all", () => {
+  // The rule is "a lone token that PARSES is the value". Junk must not be taken
+  // as a target with a missing value and quietly do nothing, and must not be
+  // taken as a value either — it is a usage error naming the shape.
+  const fx = makeRegistry();
+  const wrote = () => fx.colorOps.length + fx.colorEachOps.length + fx.eachOps.length +
+    fx.edgeOps.length + fx.endsOps.length + fx.traceOps.length + fx.sizeOps.length +
+    fx.dashOps.length + fx.opacityOps.length;
+  const before = wrote();
+  // NOT out-of-range numbers: parseSize/parseOpacity CLAMP by design (-1 -> 0,
+  // 5 -> 1), so `pointopacity 5` is a legitimate lone value that means "all points,
+  // clamped to 1" — exactly as `pointopacity all 5` always has. Junk here means a
+  // token that does not parse AT ALL.
+  for (const text of ["colorpoints notacolor", "pointopacity abc", "pointsize abc"]) {
+    const r = fx.registry.runCommand(text);
+    assert.equal(r.status, "error", text);
+  }
+  assert.equal(wrote(), before, "no lone-junk path wrote anything");
+});
+
 test("the edge verbs: nomatch / bad color / usage / parse errors write NOTHING", () => {
   const { registry, edgeOps } = makeRegistry();
   for (const verb of ["colorbonds", "colorbondsof"]) {
@@ -1271,10 +1313,12 @@ test("the edge verbs: nomatch / bad color / usage / parse errors write NOTHING",
     assert.match(bad.message, /unknown color "notacolor"/);
     const bare = registry.runCommand(verb);
     assert.equal(bare.status, "error", verb);
-    assert.match(bare.message, new RegExp(`${verb} <target> <color>`));
-    const oneArg = registry.runCommand(`${verb} red`); // one chunk = no target
-    assert.equal(oneArg.status, "error", verb);
-    assert.match(oneArg.message, /needs a target and a color/);
+    assert.match(bare.message, new RegExp(`${verb} \\[<target>\\] <color>`));
+    // a lone token that does NOT parse is still a usage error (the lone-value
+    // SUCCESS path lives in its own test — this one is about writes on failure)
+    const loneJunk = registry.runCommand(`${verb} notacolor`);
+    assert.equal(loneJunk.status, "error", verb);
+    assert.match(loneJunk.message, /needs a color/);
     const parseErr = registry.runCommand(`${verb} c0.[x] red`); // [ reserved
     assert.equal(parseErr.status, "error", verb);
   }
@@ -1379,7 +1423,7 @@ test("the dash verbs: nomatch / bad value / usage / parse errors write NOTHING",
     assert.match(bad.message, /not a dash scale: "notanumber"/);
     const bare = registry.runCommand(verb);
     assert.equal(bare.status, "error", verb);
-    assert.match(bare.message, new RegExp(`${verb} <target> <dash scale>`));
+    assert.match(bare.message, new RegExp(`${verb} \\[<target>\\] <dash scale>`));
     const parseErr = registry.runCommand(`${verb} c0.[x] 1`);
     assert.equal(parseErr.status, "error", verb);
   }
@@ -1484,10 +1528,12 @@ test("colortrace: nomatch / bad color / usage / parse errors write NOTHING", () 
   assert.match(bad.message, /unknown color "notacolor"/);
   const bare = registry.runCommand("colortrace");
   assert.equal(bare.status, "error");
-  assert.match(bare.message, /colortrace <target> <color>/);
-  const oneArg = registry.runCommand("colortrace red"); // one chunk = no target
-  assert.equal(oneArg.status, "error");
-  assert.match(oneArg.message, /needs a target and a color/);
+  assert.match(bare.message, /colortrace \[<target>\] <color>/);
+  // ONE TOKEN THAT PARSES = the whole system: the target is optional for these
+    // verbs now, so this is an OK that writes, not a usage error.
+    const loneJunk = registry.runCommand("colortrace notacolor");
+  assert.equal(loneJunk.status, "error");
+  assert.match(loneJunk.message, /needs a color/);
   const parseErr = registry.runCommand("colortrace c0.[x] red"); // [ reserved
   assert.equal(parseErr.status, "error");
   assert.equal(traceOps.length, 0, "no path wrote anything");
@@ -1580,10 +1626,12 @@ test("the size verbs: nomatch / bad size / usage / parse errors write NOTHING", 
     assert.match(bad.message, /not a size: "abc"/);
     const bare = registry.runCommand(verb);
     assert.equal(bare.status, "error", verb);
-    assert.match(bare.message, new RegExp(`${verb} <target> <size>`));
-    const oneArg = registry.runCommand(`${verb} 2`); // one chunk = no target
-    assert.equal(oneArg.status, "error", verb);
-    assert.match(oneArg.message, /needs a target and a size/);
+    assert.match(bare.message, new RegExp(`${verb} \\[<target>\\] <size>`));
+    // ONE TOKEN THAT PARSES = the whole system: the target is optional for these
+    // verbs now, so this is an OK that writes, not a usage error.
+    const loneJunk = registry.runCommand(`${verb} notasize`);
+    assert.equal(loneJunk.status, "error", verb);
+    assert.match(loneJunk.message, /needs a size/);
     const parseErr = registry.runCommand(`${verb} c0.[x] 2`); // [ reserved
     assert.equal(parseErr.status, "error", verb);
   }
@@ -1678,10 +1726,12 @@ test("the opacity verbs: nomatch / bad value / usage / parse errors write NOTHIN
     assert.match(bad.message, /not an opacity: "abc"/);
     const bare = registry.runCommand(verb);
     assert.equal(bare.status, "error", verb);
-    assert.match(bare.message, new RegExp(`${verb} <target> <opacity>`));
-    const oneArg = registry.runCommand(`${verb} 0.5`); // one chunk = no target
-    assert.equal(oneArg.status, "error", verb);
-    assert.match(oneArg.message, /needs a target and an? opacity/);
+    assert.match(bare.message, new RegExp(`${verb} \\[<target>\\] <opacity>`));
+    // ONE TOKEN THAT PARSES = the whole system: the target is optional for these
+    // verbs now, so this is an OK that writes, not a usage error.
+    const loneJunk = registry.runCommand(`${verb} notanopacity`);
+    assert.equal(loneJunk.status, "error", verb);
+    assert.match(loneJunk.message, /needs an? opacity/);
     const parseErr = registry.runCommand(`${verb} c0.[x] 0.5`); // [ reserved
     assert.equal(parseErr.status, "error", verb);
   }
@@ -1698,10 +1748,12 @@ test("colorpoints: nomatch / bad color / usage / parse errors write NOTHING", ()
   assert.match(bad.message, /unknown color "notacolor"/);
   const bare = registry.runCommand("colorpoints");
   assert.equal(bare.status, "error");
-  assert.match(bare.message, /colorpoints <target> <color>/);
-  const oneArg = registry.runCommand("colorpoints red"); // one chunk = no target
-  assert.equal(oneArg.status, "error");
-  assert.match(oneArg.message, /needs a target and a color/);
+  assert.match(bare.message, /colorpoints \[<target>\] <color>/);
+  // ONE TOKEN THAT PARSES = the whole system: the target is optional for these
+    // verbs now, so this is an OK that writes, not a usage error.
+    const loneJunk = registry.runCommand("colorpoints notacolor");
+  assert.equal(loneJunk.status, "error");
+  assert.match(loneJunk.message, /needs a color/);
   const parseErr = registry.runCommand("colorpoints c0.[x] red"); // [ reserved in expressions
   assert.equal(parseErr.status, "error");
   assert.equal(colorOps.length, 0, "no path wrote anything");

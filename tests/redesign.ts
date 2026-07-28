@@ -8336,6 +8336,46 @@ async function S67(): Promise<void> {
   }, "/");
 }
 
+// ============ S69: a bare invocation is a REAL target (the whole system) ======
+// `smooth @sel` then bare `smooth` used to re-bind the channel computed for @sel
+// and report success — 265 of 3341 points smoothed while the message said `all`.
+// The provider never refreshed, because an empty target was treated as UNCHANGED
+// rather than as "every point".
+//
+// Asserted by the PROVIDER RE-RUN, not by the message: the bug's whole character
+// was that the message was already right. The channel's value block is what has
+// to change.
+async function S69(): Promise<void> {
+  console.log("S69 — bare invocation refreshes a target-dependent provider");
+  await withRealDriver(async (d) => {
+    const V = "window.__viewer";
+    const cmd = (t: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(t)})`);
+    const moved = () => d.evaluate<number>(`${V}.debug.channelNonZero("smoothing")`);
+
+    check("S69: (setup) a narrow selection exists",
+      (await cmd("create_sele #0-99 [narrow]")).status === "ok");
+    check("S69: smooth on the narrow selection is accepted",
+      (await cmd("smooth @narrow ?smoothing=5")).status === "ok");
+    // channelNonZero reports -1 until the channel is declared, so it is its own
+    // readiness signal — no second seam to keep in sync.
+    await d.waitFor(`${V}.debug.channelNonZero("smoothing") >= 0`, 40000);
+    const narrow = await moved();
+
+    // BARE: every point. The provider must RE-RUN, and the channel must widen.
+    check("S69: bare smooth is accepted", (await cmd("smooth ?smoothing=5")).status === "ok");
+    await sleep(6000);
+    const all = await moved();
+    // NO sentinel escape: -1 means the channel was not found, and that must FAIL
+    // rather than pass — the first version of this leg had `narrow < 0 || …` in the
+    // condition and would have gone green against a missing seam.
+    check("S69: (setup) the narrow run gave a real, bounded count",
+      narrow > 0 && narrow < 3341, `narrow=${narrow}`);
+    check("S69: a bare invocation WIDENS the channel — it is not treated as unchanged",
+      all > narrow, `narrow=${narrow} bare=${all}`);
+  }, "/");
+}
+
 // ==================== S68: licorice ==========================================
 // The stick representation, on the REAL adk source — licorice needs elements and
 // bonds and fails closed on the synthetic scene, so there is nothing to assert there.
@@ -11583,7 +11623,7 @@ async function S66(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67, S68 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67, S68, S69 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -11626,7 +11666,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
-  S48: "full", S49: "full", S67: "full", S68: "full", S50: "full", S51: "full", S52: "full",
+  S48: "full", S49: "full", S67: "full", S68: "full", S69: "full", S50: "full", S51: "full", S52: "full",
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
   S58: "fast", S59: "fast", S60: "fast", S61: "fast", S62: "fast",
   S63: "fast", S64: "full",
