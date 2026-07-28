@@ -67,7 +67,7 @@ import {
 } from "./commands.ts";
 import { parseTarget, resolveTarget, type Completion } from "./address.ts";
 import { Hierarchy, SelectionModel, type Entry } from "./sets.ts";
-import { pickElement, selectionBounds, type PickSegments } from "./picking.ts";
+import { neighborSubgroups, pickElement, selectionBounds, type PickSegments } from "./picking.ts";
 import {
   CAMERA_FOV_DEG,
   FRAME_DISTANCE_FACTOR,
@@ -3818,6 +3818,38 @@ async function main(): Promise<void> {
       const off = (f - chunk.start) * header.n_points * w;
       return { values: block.subarray(off, off + header.n_points * w), frame: f };
     },
+    /** The frame `?frame=current` resolves to. Before the first chunk lands
+     * `displayedFrame` is -1, which is not a frame the user can mean — report
+     * frame 0, the same substitution channelValues makes. */
+    displayedFrame: () => (displayedFrame === -1 ? 0 : displayedFrame),
+    frameCount: () => nFrames,
+    /** THE `?within=` query. RAW coordinates, deliberately: read straight off
+     * the producer's chunk, NEVER `positionAttr.array`, which is the combined
+     * `raw + offset` array whenever an offset channel is bound (setPositionsFor
+     * above). Measuring the drawn positions would make a bound `smooth`/`delay`
+     * silently change which points are "within" a distance — the flag has to
+     * mean the same thing whatever the representation is doing.
+     *
+     * A frame outside the loaded window returns null (a streamed dataset holds
+     * a window, not the whole set) so the verb can say so instead of answering
+     * from the wrong frame. */
+    neighborhoodSubgroups: (points: readonly number[], radius: number, frame: number): number[] | null => {
+      const chunk = player.getFrame(frame);
+      if (!chunk) return null;
+      const off = (frame - chunk.start) * header.n_points * 3;
+      const raw = chunk.positions.subarray(off, off + header.n_points * 3);
+      const own = new Set<number>();
+      for (const p of points) own.add(hierarchy.subgroupOfPoint(p));
+      // EVERY point is a candidate: no category is excluded by default. A
+      // "skip the background" rule would be a judgement about what the data
+      // means, and getting it wrong silently omits neighbours — so the
+      // surprise stays visible (the result reports what it found) rather than
+      // being pre-empted by a policy the user cannot see. Typed, because this
+      // is one entry per point (222k on the largest sets seen).
+      const candidates = new Uint32Array(header.n_points);
+      for (let p = 0; p < header.n_points; p++) candidates[p] = p;
+      return neighborSubgroups(raw, points, candidates, header.points.subgroup_id, own, radius);
+    },
     edges: header.edges,
     colorEdges,
     traceVertices,
@@ -3972,6 +4004,17 @@ async function main(): Promise<void> {
     opacityPoints: () => 0, opacityEdges: () => 0, opacityTrace: () => 0,
     runAnalysisMod: () => {}, // never reached — mod-invocation verbs refused first
     armRmDeletion: () => {}, // never reached — rm refused first
+    // THE EXPENSIVE READ. Every other real read stays real here because reads
+    // are cheap; this one is an indexed radius query over every point, and
+    // runCommandMacro pre-validates EVERY string before executing ANY, so a
+    // macro emitting `create_sele … ?within=…` would run the query TWICE —
+    // once to find out the command parses, once to do it. Validation only
+    // needs to know the command is well-formed and its target resolves, both
+    // of which happen before this call, so the stub returns an empty
+    // neighbourhood at zero cost. The count a validation pass reports is
+    // discarded (its commitEntries already reports 0 points), so no honest
+    // number is being faked — the work is simply not done twice.
+    neighborhoodSubgroups: () => [],
     saveRep: () => {}, // no-op: a validation pass must never write a mod file
     // reads stay REAL (a macro resolves %groups for pre-validation); writes no-op
     producedEdges: {

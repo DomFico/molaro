@@ -106,6 +106,32 @@ export interface CommandContext {
   pointTypes: readonly string[];
   /** Committed-selection name → its stored entries (for "@name"). */
   committedEntries(): ReadonlyMap<string, readonly Entry[]>;
+  /** THE `?within=` neighbourhood query: every subgroup with at least one
+   * point within `radius` of any of `points`, EXCLUDING the subgroups those
+   * points themselves sit in (the caller re-adds them when `?keep=true`).
+   *
+   * RAW COORDINATES, deliberately: the positions the producer sent for
+   * `frame`, never the `offset`-displaced array the renderer draws. A bound
+   * offset channel (`smooth`, `delay`, any producer's displacement) therefore
+   * cannot silently change which points are "within" a distance — the flag
+   * means the same thing whatever the representation is doing.
+   *
+   * `null` = that frame's coordinates are not in memory (a streamed dataset
+   * holds a window, not the whole set), which the verb reports rather than
+   * answering from the wrong frame.
+   *
+   * Costly enough to matter: the implementation is an indexed radius query
+   * (picking.ts neighborSubgroups), and the VALIDATION context stubs this to
+   * a no-op so pre-validating a macro never pays for it twice. */
+  neighborhoodSubgroups(
+    points: readonly number[],
+    radius: number,
+    frame: number,
+  ): number[] | null;
+  /** The frame being DISPLAYED — what `?frame=current` resolves to. */
+  displayedFrame(): number;
+  /** Total frames — the range an explicit `?frame=N` is checked against. */
+  frameCount(): number;
   /** The gesture focus path: camera tween + yellow flash (main.ts focusPoints). */
   focusPoints(points: number[]): void;
   /** The empty-space-click path: frame the visible scene (parked while editing). */
@@ -525,6 +551,169 @@ export function makeViewHandler(ctx: CommandContext): CommandHandler {
   };
 }
 
+// -- the neighbourhood flags (`?within` / `?keep` / `?frame`) -------------------
+
+/**
+ * The neighbourhood flags create_sele and hide share, declared as an ORDINARY
+ * parameter schema — the same `ModParam[]` a mod declares, so they go through
+ * the same grammar (splitParamBlock), the same coercion, the same fail-closed
+ * refusals, and the same completion as `?params` everywhere else.
+ *
+ * `within` carries NO default and is therefore REQUIRED whenever the block is
+ * typed at all. That is deliberate: there is no defensible default radius —
+ * the right distance is a property of the data, not of the viewer — and a
+ * silently-wrong radius produces a well-formed selection of the wrong points,
+ * which is the failure mode that reads as success.
+ */
+const NEIGHBORHOOD_PARAMS: readonly ModParam[] = [
+  { name: "within", type: "number" },
+  { name: "keep", type: "boolean", default: true },
+  { name: "frame", type: "string", default: "current" },
+];
+
+/** The resolved flags: a radius, whether the named target survives into the
+ * result, and the frame the distance is measured at. */
+interface NeighborhoodFlags {
+  within: number;
+  keep: boolean;
+  frame: number;
+}
+
+/**
+ * Split a mutating verb's arguments into `<target-expr>`, its optional
+ * trailing `[name]`, and its optional `?flag` block — IN THAT ORDER, which is
+ * forced rather than chosen.
+ *
+ * The `?` split runs FIRST and `splitTrailingName` second, so the flags come
+ * LAST: `create_sele <target> [name] ?within=5`. The alternative order is not
+ * merely different, it is mutually exclusive — splitTrailingName requires the
+ * argument string to END with `]`, so splitting the name first would admit
+ * only `<target> ?within=5 [name]` and reject the other, and vice versa. The
+ * tie is broken by bake/bind, whose refusal text already tells users the
+ * `?option=` block "must come LAST"; a second built-in family with the
+ * opposite rule would make the grammar unlearnable.
+ *
+ * `flags: null` = no `?` block was typed, and the caller must then run its
+ * pre-existing path unchanged (byte-identical, no query, no cost).
+ */
+function splitTargetNameFlags(
+  ctx: CommandContext,
+  verb: string,
+  args: string,
+): { expr: string; name: string | null; flags: NeighborhoodFlags | null } | CommandResult {
+  const parts = splitOnUnquoted(args, "?");
+  if (parts.length === 1) {
+    // No unquoted `?` — the legacy shape, verbatim. (An UNBALANCED quote also
+    // lands here, because splitOnUnquoted leaves the tail in-quote; the
+    // malformed target then fails loudly in parseTarget, exactly as before.)
+    const plain = splitTrailingName(args);
+    if ("kind" in plain) return { status: "error", message: plain.message };
+    return { expr: plain.expr, name: plain.name, flags: null };
+  }
+  // A `[name]` typed AFTER the flag block is swallowed into a flag's VALUE,
+  // because the value runs to the end of its `?` segment. Left alone that
+  // surfaces as `parameter "within" expects a number, got "2.1 [a]"` — which
+  // blames the type for what is really an ORDER mistake, the exact confusion
+  // bake/bind's must-come-LAST refusal was written to prevent. No flag value
+  // in this closed schema (a number, a boolean, "current"/digits) can legally
+  // contain `]`, so a bracket in the block is unambiguous: blame the order.
+  if (parts.slice(1).some((s) => s.includes("]"))) {
+    return {
+      status: "error",
+      message:
+        `${verb}: the ?flag block must come LAST — a [name] after it is read as part of a flag's value. ` +
+        `Write ${verb} <target> [name] ?within=<distance>`,
+    };
+  }
+  const parsed = parseVerbParams(verb, NEIGHBORHOOD_PARAMS, args);
+  if ("status" in parsed) return parsed;
+  const split = splitTrailingName(parsed.expr);
+  if ("kind" in split) return { status: "error", message: split.message };
+  // `within` is required, so a successful resolve always carries every value.
+  const values = parsed.params!;
+  const within = values.within as number;
+  if (within < 0) {
+    return { status: "error", message: `${verb}: ?within= must not be negative — got ${within}` };
+  }
+  const frameWord = String(values.frame);
+  let frame: number;
+  if (frameWord === "current") {
+    frame = ctx.displayedFrame();
+  } else if (/^\d+$/.test(frameWord)) {
+    frame = Number(frameWord);
+  } else {
+    return {
+      status: "error",
+      message: `${verb}: ?frame= takes "current" or a frame number — got "${frameWord}"`,
+    };
+  }
+  const total = ctx.frameCount();
+  if (frame < 0 || frame >= total) {
+    return {
+      status: "error",
+      message: `${verb}: frame ${frame} is out of range — this dataset has ${total} frame${total === 1 ? "" : "s"} (0..${total - 1})`,
+    };
+  }
+  return { expr: split.expr, name: split.name, flags: { within, keep: values.keep as boolean, frame } };
+}
+
+/**
+ * Apply the neighbourhood flags to an already-resolved target: measure which
+ * SUBGROUPS have a point within the radius and return the entries the verb
+ * should actually act on, plus the clause its result message must carry.
+ *
+ * WHOLE SUBGROUPS, at subgroup level. A radius cuts through subgroups
+ * arbitrarily, and committing the fragment it happens to touch would produce a
+ * selection whose membership no visible row corresponds to; promoting to the
+ * whole subgroup keeps entry-level parity with what clicking a row selects.
+ * The union with a kept target may therefore be MIXED-LEVEL, which
+ * create_sele's contract already allows and calls correct.
+ *
+ * `?keep=false` excludes at SUBGROUP GRAIN too, and that is reported rather
+ * than assumed: excluding only the named points would strand the rest of their
+ * subgroup, so a point-level target drops its whole subgroup. Saying so is the
+ * difference between a surprising result and a silent one.
+ */
+function applyNeighborhood(
+  ctx: CommandContext,
+  verb: string,
+  entries: Entry[],
+  flags: NeighborhoodFlags,
+): { entries: Entry[]; note: string } | CommandResult {
+  const seen = new Set<number>();
+  const points: number[] = [];
+  for (const e of entries) {
+    for (const p of ctx.hierarchy.pointsOf(e)) {
+      if (!seen.has(p)) {
+        seen.add(p);
+        points.push(p);
+      }
+    }
+  }
+  const ownSubs = new Set<number>();
+  for (const p of points) ownSubs.add(ctx.hierarchy.subgroupOfPoint(p));
+  const near = ctx.neighborhoodSubgroups(points, flags.within, flags.frame);
+  if (near === null) {
+    return {
+      status: "error",
+      message:
+        `${verb}: frame ${flags.frame} is not in memory, so nothing can be measured there — ` +
+        `seek to it first, or use ?frame=current`,
+    };
+  }
+  const out: Entry[] = flags.keep ? [...entries] : [];
+  const already = new Set(out.filter((e) => e.level === "subgroup").map((e) => e.id));
+  const added = [...near].sort((a, b) => a - b);
+  for (const id of added) if (!already.has(id)) out.push({ level: "subgroup", id });
+  const dropped = flags.keep
+    ? ""
+    : `; the target's own ${ownSubs.size} subgroup${ownSubs.size === 1 ? "" : "s"} excluded whole`;
+  const note =
+    ` (${added.length} subgroup${added.length === 1 ? "" : "s"} within ${flags.within} of ` +
+    `${points.length} target point${points.length === 1 ? "" : "s"}, raw coordinates at frame ${flags.frame}${dropped})`;
+  return { entries: out, note };
+}
+
 /**
  * `create_sele <target-expr> [name]` — the first state-mutating verb, and the
  * template every future one inherits: resolve with the SAME resolveTarget
@@ -542,18 +731,31 @@ export function makeViewHandler(ctx: CommandContext): CommandHandler {
  */
 export function makeCreateSeleHandler(ctx: CommandContext): CommandHandler {
   return (args: string): CommandResult => {
-    const split = splitTrailingName(args);
-    if ("kind" in split) return { status: "error", message: split.message };
+    const split = splitTargetNameFlags(ctx, "create_sele", args);
+    if ("status" in split) return split;
     const ast = parseTarget(split.expr);
     if (ast.kind === "error") return { status: "error", message: ast.message };
-    const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
-    if (entries.length === 0) {
+    const resolved = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
+    if (resolved.length === 0) {
       // an empty target commits nothing — nomatch, no mutation
       return { status: "nomatch", message: `nothing matches "${split.expr}"` };
     }
+    let entries = resolved;
+    let note = "";
+    if (split.flags) {
+      const grown = applyNeighborhood(ctx, "create_sele", resolved, split.flags);
+      if ("status" in grown) return grown;
+      if (grown.entries.length === 0) {
+        // ?keep=false with nothing in range — an honest empty result, not a
+        // cheerful selection of the target the user asked to drop
+        return { status: "nomatch", message: `nothing within ${split.flags.within} of "${split.expr}"${grown.note}` };
+      }
+      entries = grown.entries;
+      note = grown.note;
+    }
     const result = ctx.commitEntries(entries, split.name);
     if ("error" in result) return { status: "error", message: result.error };
-    return { status: "ok", message: `created "${result.name}" — ${result.points} points` };
+    return { status: "ok", message: `created "${result.name}" — ${result.points} points${note}` };
   };
 }
 
@@ -631,8 +833,8 @@ export function makeSaveRepHandler(ctx: CommandContext, registry: CommandRegistr
  */
 export function makeHideHandler(ctx: CommandContext): CommandHandler {
   return (args: string): CommandResult => {
-    const split = splitTrailingName(args);
-    if ("kind" in split) return { status: "error", message: split.message };
+    const split = splitTargetNameFlags(ctx, "hide", args);
+    if ("status" in split) return split;
     if (split.expr === "") {
       return { status: "error", message: `hide needs a target — there is no "hide everything"` };
     }
@@ -648,6 +850,20 @@ export function makeHideHandler(ctx: CommandContext): CommandHandler {
       ? (ast.terms as { kind: "ref"; name: string; filter?: unknown }[])
       : null;
     if (refs) {
+      if (split.flags) {
+        // A neighbourhood is a set nobody has committed, so acting on it means
+        // COMMITTING it — and an all-reference target is precisely the case
+        // hide is documented never to commit (it hides the named selections in
+        // place). Rather than carve an exception into that invariant, refuse
+        // and name the two-step that does work.
+        return {
+          status: "error",
+          message:
+            `hide: ?within= finds a set nobody has committed, so it must COMMIT what it finds — but ` +
+            `"${split.expr}" names only committed selections, which hide always hides IN PLACE and never commits. ` +
+            `Write it in two steps: create_sele ${split.expr} ?within=${split.flags.within} [neighbourhood] then hide @neighbourhood`,
+        };
+      }
       if (split.name !== null) {
         return {
           status: "error",
@@ -701,13 +917,24 @@ export function makeHideHandler(ctx: CommandContext): CommandHandler {
     }
     // an uncommitted target: commit the WHOLE target as one new selection,
     // then hide it (one undo unit), entry-level parity exactly as create_sele
-    const entries = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
-    if (entries.length === 0) {
+    const resolved = resolveTarget(ast, ctx.tree, ctx.hierarchy, ctx.pointTypes, ctx.committedEntries());
+    if (resolved.length === 0) {
       return { status: "nomatch", message: `nothing matches "${split.expr}"` };
+    }
+    let entries = resolved;
+    let note = "";
+    if (split.flags) {
+      const grown = applyNeighborhood(ctx, "hide", resolved, split.flags);
+      if ("status" in grown) return grown;
+      if (grown.entries.length === 0) {
+        return { status: "nomatch", message: `nothing within ${split.flags.within} of "${split.expr}"${grown.note}` };
+      }
+      entries = grown.entries;
+      note = grown.note;
     }
     const result = ctx.commitEntries(entries, split.name, true);
     if ("error" in result) return { status: "error", message: result.error };
-    return { status: "ok", message: `created and hid "${result.name}" — ${result.points} points` };
+    return { status: "ok", message: `created and hid "${result.name}" — ${result.points} points${note}` };
   };
 }
 
@@ -3213,7 +3440,12 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registry.register(
     "create_sele",
     makeCreateSeleHandler(ctx),
-    "commit the resolved target as a new selection: create_sele <target> [name]",
+    "commit the resolved target as a new selection: create_sele <target> [name] — " +
+      "optionally GROWN to a neighbourhood with the ?flag block, which comes LAST: " +
+      "?within=<distance> (required; in the data's own coordinate units, measured on RAW coordinates so a bound offset never changes the answer) " +
+      "· ?keep=true|false (default true — whether the named target stays in the result; false drops its whole subgroups) " +
+      "· ?frame=current|<N> (default current — the frame the distance is measured at; always reported). " +
+      "Any subgroup with a point in range comes in ENTIRELY",
   );
   registry.register(
     "save_rep",
@@ -3223,7 +3455,9 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
   registry.register(
     "hide",
     makeHideHandler(ctx),
-    "hide the target (commits an uncommitted target first); hide @name / @name.<pred> for existing selections",
+    "hide the target (commits an uncommitted target first); hide @name / @name.<pred> for existing selections; " +
+      "takes create_sele's neighbourhood ?flag block (?within/?keep/?frame, LAST) on an uncommitted target — " +
+      "refused on an all-@name target, which hide never commits",
   );
   registry.register(
     "show",
@@ -3570,8 +3804,8 @@ export function modInstallReport(outcome: ModInstallOutcome, name: string): Comm
  *     (capped). A string value — or a number with no default — is unenumerable
  *     (empty, never a guess).
  * Settling is completeToken's — identical two-stage behavior to paths. */
-function completeModInvocation(
-  mod: AnalysisMod,
+function completeParamBlock(
+  declared: readonly ModParam[],
   argsStart: number,
   argsHead: string,
   targetSlot: () => Completion,
@@ -3581,7 +3815,6 @@ function completeModInvocation(
   const seg = segs[segs.length - 1];
   const segStart = argsStart + (argsHead.length - seg.length);
   const none: Completion = { start: argsStart + argsHead.length, candidates: [], applied: "" };
-  const declared = mod.params ?? [];
   const eq = seg.indexOf("=");
   if (eq < 0) {
     // parameter NAME slot
@@ -3756,7 +3989,7 @@ function colorSlot(): WordSlot {
 }
 
 /**
- * bake/bind's trailing `?option=value` block — completeModInvocation's exact
+ * bake/bind's trailing `?option=value` block — completeParamBlock's exact
  * shape over a FIXED one-option schema, split at the SAME collision-proof
  * boundary the parser uses (splitOnUnquoted at the reserved `?`), so
  * completion and invocation can never disagree about where the positional
@@ -3942,6 +4175,14 @@ export function completeCommand(
 
   // the built-in verbs with enumerable non-target slots
   switch (verb) {
+    case "create_sele":
+    case "hide":
+      // the neighbourhood `?flag` block, through the SAME completer a mod's
+      // `?params` use — the schema is an ordinary ModParam[], so the flag
+      // names and the boolean's true/false come from the declaration, never a
+      // hand-copied list. With no unquoted `?` typed the target slot runs
+      // unchanged.
+      return completeParamBlock(NEIGHBORHOOD_PARAMS, argsStart, argsHead, targetSlot);
     case "bake":
       // the `?palette=` block first (it can only be trailing); with no
       // unquoted `?` typed, the positional slots complete exactly as before
@@ -4005,7 +4246,7 @@ export function completeCommand(
   // a mod's own verb: the ?parameter slots (the target slot falls through)
   const recipe = getRecipe(verb);
   if (recipe !== undefined && recipe.kind === "analysis") {
-    return completeModInvocation(recipe, argsStart, argsHead, targetSlot);
+    return completeParamBlock(recipe.params ?? [], argsStart, argsHead, targetSlot);
   }
 
   return targetSlot();

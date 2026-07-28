@@ -40,6 +40,7 @@ import type { ChannelDecl } from "../webview/channelmap.ts";
 import { BindingRegistry, type Binding } from "../webview/bindings.ts";
 import { AXIS_DOMAIN, COLOR_AXES, OFFSET_AXIS, SCALAR_AXES, VECTOR_AXES } from "../webview/channelmap.ts";
 import { paletteNames } from "../webview/palettes.ts";
+import { neighborSubgroups } from "../webview/picking.ts";
 
 function makeHeader(): Header {
   const category = [0, 0, 1];
@@ -52,6 +53,11 @@ function makeHeader(): Header {
     subgroups: { "0": "s0", "1": "s1" }, edges: [], polylines: [], channels: [],
   };
 }
+
+/** Coordinates for the 3-point fixture, laid out on the x-axis so the
+ * distances a `?within=` test asserts are readable: p0 (subgroup 0) at the
+ * origin, p1 (subgroup 0) at 1, p2 (subgroup 1) at 2. */
+const POSITIONS = new Float32Array([0, 0, 0, 1, 0, 0, 2, 0, 0]);
 
 function makeRegistry(fixture?: { traceVertices?: number[] }) {
   const header = makeHeader();
@@ -128,11 +134,28 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
   const producedOps: { kind: string; ids: number[]; value?: unknown; a?: number[]; b?: number[] }[] = [];
   // ctx.beginStroke/endStroke markers — the ONE-stroke composition proof
   const strokeEvents: ("begin" | "end")[] = [];
+  // every `?within=` query the handlers asked for — the instrument behind the
+  // "a macro must not run the neighbourhood twice" pin
+  const neighborhoodCalls: { points: number[]; radius: number; frame: number }[] = [];
   const ctx: CommandContext = {
     hierarchy,
     tree: buildTree(header),
     pointTypes: header.points.type,
     committedEntries: () => sels,
+    // the `?within=` query, over the REAL indexed implementation so the verb
+    // tests exercise what ships. Geometry: p0 (sub 0) at the origin, p1 (sub 0)
+    // one unit out, p2 (sub 1) two units out — so a radius under 2 from p0
+    // finds nothing and a radius over 2 finds subgroup 1.
+    neighborhoodSubgroups: (points, radius, frame) => {
+      neighborhoodCalls.push({ points: [...points], radius, frame });
+      if (frame >= header.n_frames) return null;
+      const own = new Set<number>(points.map((p) => hierarchy.subgroupOfPoint(p)));
+      return neighborSubgroups(
+        POSITIONS, points, [0, 1, 2], header.points.subgroup_id, own, radius,
+      );
+    },
+    displayedFrame: () => 0,
+    frameCount: () => header.n_frames,
     focusPoints: () => { calls.focus++; },
     frameVisible: () => { calls.frame++; },
     flashPointRows: () => { calls.flash++; },
@@ -530,7 +553,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     colorOps, colorEachOps, eachOps, edgeOps, endsOps, traceOps, sizeOps, dashOps, opacityOps, modRuns, modRunCode, rmArms, sels,
     bindCalls, bindingReg, orientationOps, offsetOps, elemEachOps, styleOps, shapeOps, shapeActive, bgOps,
     saveRepCalls,
-    produced, producedOps, strokeEvents,
+    produced, producedOps, strokeEvents, neighborhoodCalls,
   };
 }
 
@@ -751,6 +774,185 @@ test("hide @name.<pred> + @other: still all-references — in place at member gr
   assert.ok(hiddenState.members.has("point:2"), "the filtered MEMBER hid");
   assert.equal(hiddenState.whole.get("second"), true);
   assert.notEqual(hiddenState.whole.get("stored"), true, "not the whole selection");
+});
+
+// -- the neighbourhood flags: ?within / ?keep / ?frame ------------------------------
+// Fixture geometry (POSITIONS): p0 (subgroup 0) at the origin, p1 (subgroup 0)
+// at x=1, p2 (subgroup 1) at x=2. So from p0: nothing outside subgroup 0 within
+// 1.9, and subgroup 1 within 2.1.
+
+test("?within: NO flag block is the legacy path, byte-identical and query-free", () => {
+  // The whole promise of an optional flag: a command that does not type one
+  // must not change, and must not pay for the index.
+  const { registry, commits, neighborhoodCalls } = makeRegistry();
+  assert.deepEqual(registry.runCommand("create_sele c0.g0.s0"),
+    { status: "ok", message: 'created "selection_1" — 2 points' });
+  assert.deepEqual(registry.runCommand("hide c0.g0.s0"),
+    { status: "ok", message: 'created and hid "selection_1" — 2 points' });
+  assert.equal(neighborhoodCalls.length, 0, "no ?block typed → the query never ran");
+  assert.equal(commits.length, 2);
+});
+
+test("?within: grows the target to WHOLE subgroups, and REPORTS the frame it used", () => {
+  const { registry, commits, neighborhoodCalls } = makeRegistry();
+  const r = registry.runCommand("create_sele #0 ?within=2.1");
+  assert.equal(r.status, "ok");
+  assert.equal(r.message,
+    'created "selection_1" — 2 points (1 subgroup within 2.1 of 1 target point, raw coordinates at frame 0)');
+  // measured from the target's points, at the displayed frame
+  assert.deepEqual(neighborhoodCalls, [{ points: [0], radius: 2.1, frame: 0 }]);
+  // the kept target entry at its natural level, plus the neighbour at SUBGROUP level
+  assert.deepEqual(commits[0].entries, [{ level: "point", id: 0 }, { level: "subgroup", id: 1 }]);
+});
+
+test("?within: a radius that reaches nothing is an honest nomatch, not an empty ok", () => {
+  const { registry, commits } = makeRegistry();
+  const r = registry.runCommand("create_sele #0 ?within=1.9 ?keep=false");
+  assert.equal(r.status, "nomatch");
+  assert.match(r.message, /^nothing within 1\.9 of "#0"/);
+  assert.equal(commits.length, 0, "nothing committed");
+});
+
+test("?keep=false drops the target at SUBGROUP grain — and says so", () => {
+  const { registry, commits } = makeRegistry();
+  const r = registry.runCommand("create_sele #0 ?within=2.1 ?keep=false");
+  assert.equal(r.status, "ok");
+  // p1 shares subgroup 0 with the target p0, so dropping the target drops p1
+  // too. That is the surprising part, so it is in the message.
+  assert.match(r.message, /the target's own 1 subgroup excluded whole/);
+  assert.deepEqual(commits[0].entries, [{ level: "subgroup", id: 1 }],
+    "only the neighbour subgroup — the target's own subgroup is gone entirely");
+});
+
+test("?within on hide: commits the neighbourhood and hides it in ONE op", () => {
+  const { registry, commits } = makeRegistry();
+  const r = registry.runCommand("hide #0 ?within=2.1");
+  assert.equal(r.status, "ok");
+  assert.match(r.message, /^created and hid "selection_1" — 2 points \(1 subgroup within 2\.1 /);
+  assert.equal(commits.length, 1);
+  assert.equal(commits[0].hide, true, "commit-then-hide, one stroke, as without the flag");
+});
+
+test("hide @name ?within=: REFUSED — hide never commits an all-reference target", () => {
+  const { registry, commits, refOps } = makeRegistry();
+  const r = registry.runCommand("hide @stored ?within=2.1");
+  assert.equal(r.status, "error");
+  assert.match(r.message, /must COMMIT what it finds/);
+  assert.match(r.message, /create_sele @stored \?within=2\.1 \[neighbourhood\] then hide @neighbourhood/,
+    "the refusal names the two-step that works");
+  assert.equal(commits.length, 0, "nothing committed");
+  assert.equal(refOps.length, 0, "and nothing hidden");
+  // create_sele has no such invariant — it always commits, so the flag is fine
+  assert.equal(registry.runCommand("create_sele @stored ?within=2.1").status, "ok");
+});
+
+test("?within is REQUIRED once the block is typed — no default radius, ever", () => {
+  const { registry, commits } = makeRegistry();
+  for (const cmd of ["create_sele #0 ?keep=false", "hide #0 ?frame=0"]) {
+    const r = registry.runCommand(cmd);
+    assert.equal(r.status, "error", cmd);
+    assert.match(r.message, /missing required parameter "within" \(number\)/, cmd);
+  }
+  assert.equal(commits.length, 0);
+});
+
+test("?frame: current by default, an explicit frame is range-checked", () => {
+  const { registry, neighborhoodCalls } = makeRegistry();
+  assert.equal(registry.runCommand("create_sele #0 ?within=2.1 ?frame=current").status, "ok");
+  assert.equal(neighborhoodCalls.at(-1)!.frame, 0);
+  assert.equal(registry.runCommand("create_sele #0 ?within=2.1 ?frame=0").status, "ok");
+  assert.equal(neighborhoodCalls.at(-1)!.frame, 0);
+  // the fixture has ONE frame, so frame 1 is out of range and must not query
+  const before = neighborhoodCalls.length;
+  const oob = registry.runCommand("create_sele #0 ?within=2.1 ?frame=7");
+  assert.equal(oob.status, "error");
+  assert.match(oob.message, /frame 7 is out of range — this dataset has 1 frame \(0\.\.0\)/);
+  assert.equal(neighborhoodCalls.length, before, "an out-of-range frame never reaches the query");
+  // and a word that is neither "current" nor a number
+  assert.match(registry.runCommand("create_sele #0 ?within=2.1 ?frame=last").message,
+    /\?frame= takes "current" or a frame number — got "last"/);
+});
+
+test("neighbourhood flags fail closed: bad names, bad types, negative radius", () => {
+  const { registry, commits } = makeRegistry();
+  const cases: [string, RegExp][] = [
+    ["create_sele #0 ?within=-1", /\?within= must not be negative — got -1/],
+    ["create_sele #0 ?within=near", /parameter "within" expects a number/],
+    ["create_sele #0 ?within=2 ?keep=yes", /parameter "keep" expects true or false/],
+    ["create_sele #0 ?within=2 ?radius=3", /unknown parameter "radius" \(declared: within, keep, frame\)/],
+    ["create_sele #0 ?within=2 ?within=3", /parameter "within" given twice/],
+    ["create_sele #0 ?", /empty parameter — each is \?key=value/],
+    ["create_sele #0 ?within", /parameter "within" must be key=value/],
+    ['create_sele #0 ?within="2', /unbalanced '"' in the invocation/],
+  ];
+  for (const [cmd, re] of cases) {
+    const r = registry.runCommand(cmd);
+    assert.equal(r.status, "error", cmd);
+    assert.match(r.message, re, cmd);
+  }
+  assert.equal(commits.length, 0, "not one of these wrote anything");
+});
+
+test("the flag block comes LAST — after [name], as bake/bind's ?option does", () => {
+  const { registry, commits } = makeRegistry();
+  // `<target> [name] ?flags` is the supported order (the ? split runs first)
+  const r = registry.runCommand("create_sele #0 [near] ?within=2.1");
+  assert.equal(r.status, "ok");
+  assert.equal(commits[0].name, "near");
+  // and the other order blames the ORDER, not the type. Left alone this
+  // surfaces as `parameter "within" expects a number, got "2.1 [near]"` —
+  // technically true and useless, the same trap bake/bind's must-come-LAST
+  // refusal was written for.
+  const wrong = registry.runCommand("create_sele #0 ?within=2.1 [near]");
+  assert.equal(wrong.status, "error", "the name must not migrate into the value");
+  assert.match(wrong.message, /the \?flag block must come LAST — a \[name\] after it is read as part of a flag's value/);
+  assert.doesNotMatch(wrong.message, /expects a number/, "never blame the type for an order mistake");
+  assert.equal(commits.length, 1, "only the correct order committed");
+});
+
+test("?within completes its flag names and the boolean's values", () => {
+  const { registry, ctx } = makeRegistry();
+  const comp = (text: string) => completeCommand(ctx, registry, text, text.length);
+  // flag NAMES come from the declaration, not a hand-copied list
+  assert.deepEqual(comp("create_sele #0 ?").candidates, ["frame", "keep", "within"]);
+  assert.deepEqual(comp("hide #0 ?").candidates, ["frame", "keep", "within"]);
+  assert.deepEqual(comp("create_sele #0 ?k").candidates, ["keep"]);
+  // `applied` is the text appended to what was typed, so "?k" + "eep=" — a
+  // unique flag name settles straight into its value slot
+  assert.equal(comp("create_sele #0 ?k").applied, "eep=");
+  // an already-used flag drops out of the pool (resolveParameters' rule, mirrored)
+  assert.deepEqual(comp("create_sele #0 ?within=2 ?").candidates, ["frame", "keep"]);
+  // the boolean enumerates; the required number has no default so it offers nothing
+  assert.deepEqual(comp("create_sele #0 ?keep=").candidates, ["false", "true"]);
+  assert.deepEqual(comp("create_sele #0 ?within=").candidates, []);
+  // with no unquoted ? typed, the target slot is untouched
+  assert.deepEqual(comp("create_sele c0.").candidates, comp("view c0.").candidates);
+});
+
+test("a macro pre-validates ?within WITHOUT running the query twice", () => {
+  // runCommandMacro validates EVERY string before executing ANY. The
+  // neighbourhood query is the one genuinely expensive read on the context, so
+  // a validation pass must stub it — otherwise every macro command pays for
+  // its radius search twice. This pins the wiring main.ts does (the
+  // validationContext's `neighborhoodSubgroups: () => []`).
+  const real = makeRegistry();
+  const validation = makeRegistry();
+  // the validation context's stub: no query, no cost — main.ts's override
+  const validationCtx: CommandContext = { ...validation.ctx, neighborhoodSubgroups: () => [] };
+  const validationRegistry = createCommandRegistry(validationCtx);
+
+  const cmds = ["create_sele #0 [a] ?within=2.1", "create_sele #1 [b] ?within=2.1"];
+  const out = runCommandMacro("m", cmds, {
+    modNames: new Set<string>(),
+    validate: (c) => validationRegistry.runCommand(c),
+    run: (c) => real.registry.runCommand(c),
+    beginStroke: () => {},
+    endStroke: () => {},
+  });
+  assert.equal(out.status, "ok", out.message);
+  assert.equal(real.neighborhoodCalls.length, 2, "the real query ran ONCE per command");
+  assert.equal(validation.neighborhoodCalls.length, 0,
+    "and the validation pass ran it ZERO times — this fails if the stub is dropped");
 });
 
 // -- ls / rename / clear -------------------------------------------------------------
