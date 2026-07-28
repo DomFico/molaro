@@ -144,6 +144,8 @@ from producer.domain_rules import (
     CROSSLINK_ELEMENTS,
     LINKAGE_ATOM_NAMES,
     MIN_COVALENT_BOND_NM,
+    NAMED_LINKAGE_ATOM_NAMES,
+    NAMED_LINKAGE_PAIRS,
     SOLVENT_RESIDUES,
     VIRTUAL_SITE_ELEMENTS,
     covalent_radius_nm,
@@ -241,6 +243,7 @@ CROSSLINK_CHUNK_PAIRS = 1_000_000
 SCOPE_INTRA = "intra"
 SCOPE_LINKAGE = "linkage"
 SCOPE_CROSSLINK = "crosslink"
+SCOPE_NAMED = "named"
 
 
 def _kdtree(points):
@@ -264,6 +267,7 @@ class InferredBonds(NamedTuple):
     intra: int
     linkage: int
     crosslink: int
+    named: int
     # Candidate bonds discarded by the one-partner-per-hydrogen rule. Not an
     # error — evidence the rule fired.
     hydrogen_candidates_dropped: int
@@ -298,7 +302,7 @@ def infer_bonds(topology, xyz, mode: str = DEFAULT_MODE) -> InferredBonds:
         raise ValueError(f"unknown bond-inference mode {mode!r} (expected one of {MODES})")
     started = time.perf_counter()
     if mode == "off":
-        return InferredBonds(mode, [], 0, 0, 0, 0, 0.0)
+        return InferredBonds(mode, [], 0, 0, 0, 0, 0, 0.0)
 
     xyz = np.asarray(xyz)
     if xyz.ndim != 2 or xyz.shape[1] != 3:
@@ -316,6 +320,7 @@ def infer_bonds(topology, xyz, mode: str = DEFAULT_MODE) -> InferredBonds:
     candidates.extend(_intra_residue_candidates(xyz, table))
     candidates.extend(_linkage_candidates(topology, xyz, table))
     candidates.extend(_crosslink_candidates(xyz, table))
+    candidates.extend(_named_linkage_candidates(topology, xyz, table))
 
     pairs, scope_of, dropped = _resolve(candidates, existing, table)
     counts = Counter(scope_of[p] for p in pairs)
@@ -325,6 +330,7 @@ def infer_bonds(topology, xyz, mode: str = DEFAULT_MODE) -> InferredBonds:
         intra=counts[SCOPE_INTRA],
         linkage=counts[SCOPE_LINKAGE],
         crosslink=counts[SCOPE_CROSSLINK],
+        named=counts[SCOPE_NAMED],
         hydrogen_candidates_dropped=dropped,
         elapsed_s=time.perf_counter() - started,
     )
@@ -477,8 +483,25 @@ def _linkage_candidates(topology, xyz, table: _AtomTable):
     residue is scanned once.
     """
     radius, excluded = table.radius, table.excluded
+
+    def _try(previous: Dict[str, int], current: Dict[str, int]):
+        """Propose every named linkage pair between two residue name-maps."""
+        for tail, head in BACKBONE_LINKAGE_PAIRS:
+            if tail in previous and head in current:
+                i, j = previous[tail], current[head]
+                if i == j or excluded[i] or excluded[j]:
+                    continue
+                dist = float(np.linalg.norm(xyz[i] - xyz[j]))
+                if (
+                    MIN_COVALENT_BOND_NM
+                    <= dist
+                    <= (radius[i] + radius[j]) * COVALENT_BOND_SCALE
+                ):
+                    yield (i, j, dist, SCOPE_LINKAGE)
+
     for chain in topology.chains:
         previous: Optional[Dict[str, int]] = None
+        first: Optional[Dict[str, int]] = None
         for residue in chain.residues:
             current = {
                 atom.name: atom.index
@@ -486,19 +509,24 @@ def _linkage_candidates(topology, xyz, table: _AtomTable):
                 if atom.name in LINKAGE_ATOM_NAMES
             }
             if previous:
-                for tail, head in BACKBONE_LINKAGE_PAIRS:
-                    if tail in previous and head in current:
-                        i, j = previous[tail], current[head]
-                        if excluded[i] or excluded[j]:
-                            continue
-                        dist = float(np.linalg.norm(xyz[i] - xyz[j]))
-                        if (
-                            MIN_COVALENT_BOND_NM
-                            <= dist
-                            <= (radius[i] + radius[j]) * COVALENT_BOND_SCALE
-                        ):
-                            yield (i, j, dist, SCOPE_LINKAGE)
+                yield from _try(previous, current)
+            else:
+                first = current
             previous = current
+        # THE WRAP: a head-to-tail CYCLIC chain closes back on its own first
+        # residue, and that bond is a real amide (or phosphodiester) that the
+        # pairwise walk above structurally cannot see — `zip(rs, rs[1:])` never
+        # reaches (last, first). A cyclosporin-class macrocycle used to render as
+        # an open chain for exactly this reason.
+        #
+        # It is safe for the same reason every other scope is: the covalent window
+        # decides. In a LINEAR chain the termini may fold near each other, but
+        # "near" for a fold is angstroms — a non-bonded C/N pair at <= 0.176 nm is
+        # a steric clash, not a conformation. `previous is not first` keeps a
+        # one-residue chain from bonding to itself; a two-residue chain legitimately
+        # wraps (a cyclic dipeptide is a real diketopiperazine).
+        if first is not None and previous is not None and previous is not first:
+            yield from _try(previous, first)
 
 
 # -- scope 3: chalcogen crosslinks between non-adjacent residues ---------------
@@ -574,6 +602,58 @@ def _crosslink_candidates(xyz, table: _AtomTable):
         for a, j, dist in zip(gi.tolist(), gj.tolist(), d.tolist()):
             lo, hi = (a, j) if a < j else (j, a)
             yield (lo, hi, dist, SCOPE_CROSSLINK)
+
+
+# -- scope 4: named cross-residue linkages (glycosidic, isopeptide) ------------
+
+
+def _named_linkage_candidates(topology, xyz, table: _AtomTable):
+    """Bonds between two DIFFERENT residues whose ATOM NAMES form a pair in
+    ``NAMED_LINKAGE_PAIRS`` — the covalent classes that carry no chalcogen and are
+    not sequence-adjacent, so scopes 1-3 all miss them.
+
+    Structurally this is scope 3 with a different gate: scope 3 seeds on an
+    ELEMENT (S/Se) and pairs against every heavy atom; this seeds on a NAME and
+    pairs only against the partner NAMES that name is declared to bond. That is
+    strictly narrower than scope 3, which is what makes it safe to add — it can
+    propose at most one bond per (name, partner-name, residue-pair) combination
+    inside the covalent window, and never a bond between two atoms whose names the
+    table does not pair.
+
+    Solvent and virtual sites are excluded on both sides, as everywhere; residues
+    are required to DIFFER (a same-residue pair is scope 1's business). Sequence
+    adjacency is deliberately NOT excluded — scope 3's docstring records that the
+    index-arithmetic exclusion was wrong twice, and the name gate here already
+    makes competing with scope 2 impossible (no entry names a backbone tail).
+    """
+    excluded, residue_of = table.excluded, table.residue_of
+    eligible = ~excluded & ~table.is_solvent
+
+    # name -> the atom indices carrying it. Read from the TOPOLOGY, the same
+    # source scope 2 reads names from, rather than widening the shared atom table
+    # with a field only this scope needs. One pass, and only the handful of names
+    # the vocabulary pairs are kept — on a system carrying none of them this scope
+    # yields nothing after a single walk.
+    by_name: Dict[str, List[int]] = {}
+    for atom in topology.atoms:
+        if atom.name in NAMED_LINKAGE_ATOM_NAMES and eligible[atom.index]:
+            by_name.setdefault(atom.name, []).append(atom.index)
+    if not by_name:
+        return
+
+    for left, right in NAMED_LINKAGE_PAIRS:
+        lefts, rights = by_name.get(left), by_name.get(right)
+        if not lefts or not rights:
+            continue
+        gi = np.repeat(np.asarray(lefts, dtype=np.int64), len(rights))
+        gj = np.tile(np.asarray(rights, dtype=np.int64), len(lefts))
+        keep = residue_of[gi] != residue_of[gj]
+        if not keep.any():
+            continue
+        gi, gj, d = _window_survivors(xyz, table, gi[keep], gj[keep])
+        for i, j, dist in zip(gi.tolist(), gj.tolist(), d.tolist()):
+            lo, hi = (i, j) if i < j else (j, i)
+            yield (lo, hi, dist, SCOPE_NAMED)
 
 
 # -- dedupe, the hydrogen rule, and scope attribution --------------------------

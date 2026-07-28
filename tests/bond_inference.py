@@ -1272,54 +1272,68 @@ def check_crosslink_reach():
 
 
 def check_named_coverage_gaps():
-    """The bond classes NO scope reaches, asserted as MISSED rather than left to be
-    discovered by a user opening a glycoprotein.
+    """The cross-residue covalent classes that carry NO chalcogen and are not a
+    sequence-adjacent backbone pair.
 
-    Inference is additive, so each of these renders as disconnected pieces and
-    never as a wrong bond — a coverage gap, not a false graph. That makes them
-    acceptable; it does not make them invisible, which is why domain_rules names
-    them and MdtrajSource puts them in Header.provenance. This block is what stops
-    that list from being prose: if a future scope starts reaching one of these,
-    the corresponding line here goes red and the docs must move with it.
+    THIS BLOCK CHANGED SIDES. It used to assert all four as MISSED — a coverage
+    gap held honest by a red line if a future scope ever reached one. Scope 4 (the
+    named-linkage table) and the scope-2 chain WRAP are that future scope, so each
+    is now asserted CAUGHT, and attributed to the scope that claims it so a bond
+    cannot be smuggled in by the wrong gate.
+
+    What stays missed is asserted too, and deliberately: metal coordination is not
+    a covalent bond, and PyMOL and VMD both leave it undrawn.
     """
     checks = []
 
-    def probe(label, spec, want_pair):
+    def probe(label, spec, want_pair, want_scope=None):
+        """want_scope None = assert MISSED; a scope name = assert FOUND and
+        attributed to that scope."""
         top, xyz, _ = _synthetic(spec)
         got = infer_bonds(top, xyz, DEFAULT_MODE)
         key = tuple(sorted(want_pair))
+        found = key in set(got.pairs)
         d = float(np.linalg.norm(xyz[key[0]] - xyz[key[1]]))
-        checks.append((label, key not in set(got.pairs),
+        if want_scope is None:
+            checks.append((label, not found,
+                           f"target at {d * 10:.3f} A -> "
+                           f"{'FOUND (the docs are now wrong)' if found else 'missed, as documented'}"))
+            return
+        # attribution: exactly one scope may claim it, and it must be the right one
+        counts = {"intra": got.intra, "linkage": got.linkage,
+                  "crosslink": got.crosslink, "named": got.named}
+        checks.append((label, found and counts[want_scope] >= 1,
                        f"target at {d * 10:.3f} A -> "
-                       f"{'FOUND (the docs are now wrong)' if key in set(got.pairs) else 'missed, as documented'}"))
+                       f"{'found' if found else 'MISSED (the fix regressed)'}, "
+                       f"scopes {counts}"))
 
     gly = lambda x: [("N", "N", (x, 0, 0)), ("CA", "C", (x + 0.145, 0, 0)),
                      ("C", "C", (x + 0.297, 0, 0)), ("O", "O", (x + 0.297, 0.123, 0))]
     # head-to-tail cyclic peptide: last residue's C to first residue's N (0.133 nm)
-    probe("head-to-tail cyclic peptide (last C -> first N) is NOT inferred",
+    probe("head-to-tail cyclic peptide (last C -> first N) IS inferred (the scope-2 WRAP)",
           [[("GLY", [("N", "N", (0.0, 0, 0)), ("CA", "C", (0.145, 0, 0))]),
             ("GLY", gly(0.4)),
             ("GLY", [("N", "N", (0.9, 0, 0)), ("CA", "C", (1.045, 0, 0)),
-                     ("C", "C", (0.133, 0, 0))])]], (0, 8))
+                     ("C", "C", (0.133, 0, 0))])]], (0, 8), "linkage")
     # N-glycan: ASN.ND2 - NAG.C1 (0.1441 nm), two non-adjacent residues, no chalcogen
-    probe("N-glycan link ASN.ND2 - NAG.C1 is NOT inferred",
+    probe("N-glycan link ASN.ND2 - NAG.C1 IS inferred (scope 4)",
           [[("ASN", [("CB", "C", (0.0, 0, 0)), ("CG", "C", (0.152, 0, 0)),
                      ("ND2", "N", (0.152, 0.133, 0))]),
             ("GLY", gly(2.0)),
             ("NAG", [("C1", "C", (0.152, 0.2771, 0)), ("O5", "O", (0.152, 0.4211, 0))])]],
-          (2, 7))
+          (2, 7), "named")
     # isopeptide: LYS.NZ - GLY.C (0.133 nm)
-    probe("isopeptide LYS.NZ - GLY.C (ubiquitin/SUMO) is NOT inferred",
+    probe("isopeptide LYS.NZ - GLY.C (ubiquitin/SUMO) IS inferred (scope 4)",
           [[("LYS", [("CE", "C", (0.0, 0, 0)), ("NZ", "N", (0.148, 0, 0))]),
             ("ALA", gly(2.0)),
             ("GLY", [("C", "C", (0.281, 0, 0)), ("O", "O", (0.281, 0.123, 0))])]],
-          (1, 6))
+          (1, 6), "named")
     # covalent ligand through a non-chalcogen: SER.OG - LIG.C1 (0.1432 nm)
-    probe("a covalent ligand bonded through O (no chalcogen) is NOT inferred",
+    probe("a covalent ligand bonded through O (SER.OG - C1) IS inferred (scope 4)",
           [[("SER", [("CB", "C", (0.0, 0, 0)), ("OG", "O", (0.143, 0, 0))]),
             ("ALA", gly(2.0)),
             ("LIG", [("C1", "C", (0.2862, 0, 0)), ("C2", "C", (0.4382, 0, 0))])]],
-          (1, 6))
+          (1, 6), "named")
     # metal-organic: a heme iron inside its own porphyrin (Fe-N 0.204 nm)
     hem = [("FE", "Fe", (0.0, 0, 0))]
     for k, (dx, dy) in enumerate(((0.204, 0.0), (-0.204, 0.0), (0.0, 0.204), (0.0, -0.204))):
@@ -1337,6 +1351,25 @@ def check_named_coverage_gaps():
     checks.append(("...which is the SAME decision that keeps ion coordination shells bare",
                    covalent_radius_nm("ZN") == covalent_radius_nm("__nosuchelement__"),
                    "every metal falls back to COVALENT_RADIUS_DEFAULT_NM"))
+
+    # -- THE NEGATIVE CONTROL for scope 4 -------------------------------------
+    # Everything above would pass just as happily if scope 4 were a plain
+    # non-adjacent distance search — which is the exact implementation that fused
+    # the membrane. So: the SAME geometry at the SAME distance, with atom names
+    # the table does not pair, must stay UNBONDED. If this goes green while the
+    # probes above also go green, the name gate is load-bearing; if it goes red,
+    # scope 4 has quietly become a distance rule and the DMPC block is next.
+    probe("a cross-residue pair at bonding distance whose NAMES are not paired stays UNBONDED",
+          [[("ALA", [("CB", "C", (0.0, 0, 0)), ("CG2", "C", (0.148, 0, 0))]),
+            ("ALA", gly(2.0)),
+            ("LIG", [("C9", "C", (0.281, 0, 0)), ("C8", "C", (0.281, 0.123, 0))])]],
+          (1, 6))
+    # and the mirror: ONE name from the table is not enough — a pair is a PAIR.
+    probe("...and one paired name against an unpaired partner is still UNBONDED",
+          [[("LYS", [("CE", "C", (0.0, 0, 0)), ("NZ", "N", (0.148, 0, 0))]),
+            ("ALA", gly(2.0)),
+            ("LIG", [("C9", "C", (0.281, 0, 0)), ("C8", "C", (0.281, 0.123, 0))])]],
+          (1, 6))
     return all(ok for _, ok, _ in checks), checks
 
 

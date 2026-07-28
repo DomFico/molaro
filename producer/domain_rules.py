@@ -136,22 +136,61 @@ LINKAGE_ATOM_NAMES = frozenset(name for pair in BACKBONE_LINKAGE_PAIRS for name 
 # is what keeps this scope from becoming a general distance search: an unrestricted
 # inter-residue distance search is exactly the unscoped implementation that fused
 # the membrane (see bond_inference's negative control).
-#
-# WHAT THIS LEAVES UNREACHABLE, named rather than discovered later. Every
-# cross-residue covalent bond whose endpoints are BOTH non-chalcogen and whose
-# residues are not a named backbone pair is missed by all three scopes:
-#   * head-to-tail cyclic peptides (last C -> first N: a real amide, but the two
-#     residues are not sequence-adjacent, so scope 2 cannot see it);
-#   * glycosidic and N-glycan linkages (ASN.ND2 - NAG.C1, and sugar-sugar);
-#   * isopeptide bonds (LYS.NZ - GLY.C, i.e. ubiquitin/SUMO conjugates);
-#   * a covalent ligand attached through anything but S/Se (e.g. SER.OG - C).
-# All four MEASURED as missed on purpose-built fixtures (tests/bond_inference.py
-# block J). Inference is additive, so each of these renders as DISCONNECTED
-# pieces rather than as a wrong bond — a coverage gap, never a false graph — and
-# ``MdtrajSource`` says so in ``Header.provenance`` so the omission is readable
-# rather than silent. Widening this set needs the same evidence the current one
-# has: an authoritative external bond list to grade against.
 CROSSLINK_ELEMENTS = frozenset({"S", "SE"})
+
+# NAMED CROSS-RESIDUE LINKAGES (scope 4) — the classes that are real covalent
+# bonds between two residues, carry NO chalcogen, and are not a sequence-adjacent
+# backbone pair, so scopes 1-3 all miss them. Each entry is an unordered pair of
+# ATOM NAMES; a candidate is proposed only when two atoms in DIFFERENT residues
+# carry those two names AND sit inside the same covalent window every other scope
+# uses.
+#
+# WHY A NAME TABLE AND NOT A DISTANCE RULE. The refutation that forced scoping in
+# the first place still stands: a general non-adjacent heavy-atom search fuses the
+# membrane (1,788 sub-0.05 nm pairs, 482 lipids collapsing into 70 components).
+# Restricting by NAME PAIR is the same kind of gate as scope 3's restriction by
+# ELEMENT — a short list of chemistries, not a threshold. The distance window is
+# what makes each entry safe: two non-bonded heavy atoms at <= 0.176 nm would be a
+# steric clash, not a near miss, so the pair requirement and the window together
+# leave no room for a coincidence.
+#
+# EVERY ENTRY IS KEYED ON AN ANOMERIC OR SIDE-CHAIN ATOM, never on a backbone
+# name, so this scope can never propose a second backbone bond and compete with
+# scope 2.
+NAMED_LINKAGE_PAIRS: Tuple[Tuple[str, str], ...] = (
+    # N-glycosylation: the Asn side-chain amide N to a sugar's anomeric carbon.
+    ("ND2", "C1"),
+    # O-glycosylation through Ser / Thr side-chain oxygens.
+    ("OG", "C1"),
+    ("OG1", "C1"),
+    # Sugar-to-sugar glycosidic links, which is what makes a glycan a TREE rather
+    # than a scatter of monosaccharides. 1->3, 1->4 and 1->6 are the common ones;
+    # the ring oxygen (O5) is deliberately absent — it is intra-residue, scope 1's.
+    ("O3", "C1"),
+    ("O4", "C1"),
+    ("O6", "C1"),
+    # Isopeptide: a Lys side-chain N to ANOTHER residue's backbone carbonyl C
+    # (ubiquitin / SUMO conjugation, and the Gln-Lys of a transglutaminase link).
+    ("NZ", "C"),
+    ("NE2", "C"),
+)
+# Every atom name appearing in a named linkage pair — the seed set this scope
+# searches from, derived rather than restated so a new pair cannot be left behind.
+NAMED_LINKAGE_ATOM_NAMES = frozenset(
+    name for pair in NAMED_LINKAGE_PAIRS for name in pair
+)
+
+# WHAT REMAINS UNREACHABLE even with scope 4, named rather than discovered later:
+#   * METAL-ORGANIC coordination (a heme Fe to its porphyrin N). Left out ON
+#     PURPOSE, not overlooked: coordination is not a covalent bond, and PyMOL and
+#     VMD both leave it undrawn. Asserted as missed so the choice stays visible.
+#   * any covalent linkage whose atom names are not in the table above — a novel
+#     conjugation chemistry, or a file using non-standard names for a known one.
+# Inference is additive, so each of these renders as DISCONNECTED pieces rather
+# than as a wrong bond — a coverage gap, never a false graph — and ``MdtrajSource``
+# says so in ``Header.provenance`` so the omission is readable rather than silent.
+# Widening this set needs the same evidence the current one has: a fixture per
+# class, and proof that no real system in the corpus moves.
 
 # Virtual / dummy sites carry no chemistry and must never be bonded: a TIP4P
 # M-site sits ~0.015 nm from its oxygen, so any distance rule would bond it.
