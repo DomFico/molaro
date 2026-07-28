@@ -24,7 +24,7 @@ from producer.serve import run_mod  # noqa: E402
 from producer.synthetic import SyntheticSource  # noqa: E402
 
 MOD_PATH = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".molaro", "mods", "figure_metric.py"
+    os.path.dirname(os.path.abspath(__file__)), "fixtures", "mods", "figure_metric.py"
 )
 
 failures = 0

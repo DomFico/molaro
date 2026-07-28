@@ -780,11 +780,21 @@ before running it**:
 > workspace root (`workspaceFolders[0]`), and **every** path agrees on it: the
 > startup scan, `write_mod`/`saveWorkspaceMod`, and `rm`. The assistant writes
 > there, you read there, `rm` deletes there — one folder, no ambiguity. (The
-> repo's own `viewer/.molaro/mods/` holds the shipped **reference/example** mods
-> — `rg`/`rmsd`/`rmsf` and the synthetic examples — as dev and test assets;
-> they are excluded from the packaged `.vsix`, so a fresh install starts with an
-> empty workspace `.molaro/mods/` that you fill by authoring mods or copying an
-> example. The corpus check can target either location with `--mods-dir`.)
+> repo has NO `.molaro/` of its own any more — that was a third place mods
+> appeared to live and it caused exactly the confusion it looks like it would.
+> There are now **two** locations, and they answer different questions:
+>
+> - **`<repo>/mods/`** — the mods that **SHIP WITH THE EXTENSION**, loaded from
+>   `<extension>/mods` with origin `built-in`. Write a mod here if you want every
+>   install to have it. `tests/shipped_mods.test.ts` pins the roster.
+> - **`~/.molaro/mods/`** — what a **USER** writes. A mod here with the same name
+>   as a shipped one SHADOWS it, which is how you customise a shipped mod without
+>   losing the original.
+>
+> The E2E fixtures that used to sit in `viewer/.molaro/mods/` — `rg`/`rmsd`/`rmsf`
+> and the synthetic examples — are now `tests/fixtures/mods/`, excluded from the
+> `.vsix` by the existing `tests/**` rule. The corpus check targets any location
+> with `--mods-dir`.)
 
 ```python
 # molaro-mod

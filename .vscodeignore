@@ -41,10 +41,10 @@ tsconfig.json
 producer/CONTRACT_FIT_AUDIT.md
 HANDOFF*.md
 
-# Old in-repo workspace mod examples. `.molaro/` is USER data, and since the
-# mods dir went GLOBAL (`~/.molaro/mods`) this copy is not even read — it is
-# kept only for the tests that point at it explicitly. Never ship it.
-.molaro/**
+# (The old in-repo `.molaro/mods` is gone — those were E2E fixtures and now live
+# at tests/fixtures/mods, already excluded by the `tests/**` rule above. There are
+# exactly two mod locations now: `mods/` which SHIPS, and `~/.molaro/mods` which
+# is the user's own and was never in this repo.)
 
 # NOT ignored, deliberately: `mods/` — the mods that COME STANDARD. These are a
 # product surface, loaded from `<extension>/mods` with origin "built-in" beside

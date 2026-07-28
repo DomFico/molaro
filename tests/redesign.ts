@@ -4085,8 +4085,25 @@ async function S22(): Promise<void> {
     check("S22: mods ONLY — no command verbs in the listing",
       !r.message.includes("colorpoints") && !r.message.includes("create_sele"),
       r.message);
-    check("S22: the RETIRED built-in is not listed — no built-in group at all",
-      !lines.includes("built-in:") && !lines.some((l) => /^ {2}rainbow — /.test(l)),
+    // NARROWED, not relaxed. This used to also assert `!lines.includes("built-in:")`
+    // — "no built-in group at all" — which was a PROXY for the real property and was
+    // true only because nothing carried origin "built-in" at the time. Mods now SHIP
+    // with the package and are loaded as built-ins, so a built-in group correctly
+    // exists. The property S22 is actually about is that the RETIRED `rainbow` recipe
+    // is gone, and that is asserted directly below, at the same strength as before.
+    check("S22: the RETIRED `rainbow` built-in is not listed",
+      !lines.some((l) => /^ {2}rainbow — /.test(l)), r.message);
+    // …and the state that replaced the old clause is PINNED rather than left
+    // unasserted, so "a built-in group appeared" can never again be mistaken for a
+    // regression — and a shipped mod silently vanishing from the listing fails here.
+    check("S22: the shipped mods are listed under a built-in header",
+      lines.includes("built-in:") && lines.some((l) => /^ {2}cartoon — /.test(l)),
+      r.message);
+    // The machinery stays HIDDEN even with a built-in group present: a channel mod
+    // another mod requires is not something you type (webview/commands.ts).
+    check("S22: shipped channel machinery is NOT listed, and the hidden count says so",
+      !lines.some((l) => /^ {2}(ribbon_dir|sasa_field|ss_field) — /.test(l)) &&
+        lines.some((l) => /channel mods? hidden/.test(l)),
       r.message);
 
     const stray = await cmd("mods rainbow");
@@ -8185,6 +8202,69 @@ async function S48(): Promise<void> {
   }
 }
 
+// ==================== S67: hide_res / show_res ===============================
+// Two SHIPPED mods whose whole reason to exist is that they are not the built-in
+// `hide`: they write OPACITY, so they create no selection. `hide` on a
+// non-committed target commits one (measured: two identical `hide #0-99` take the
+// committed count 1 -> 3), which fills the selection list when you hide residues
+// one at a time. So the load-bearing assertion here is the NEGATIVE one — the
+// committed count must not move — and it is checked against a live baseline
+// rather than against 0, so it cannot pass by the list happening to be empty.
+async function S67(): Promise<void> {
+  console.log("S67 — hide_res/show_res: points + incident bonds, no selection, ONE undo stroke");
+  await withDriver(async (d) => {
+    const V = "window.__viewer";
+    const cmd = (t: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(t)})`);
+    const op = (i: number) => d.evaluate<number>(`${V}.rep.state.opacity[${i}]`);
+    const eop = (i: number) => d.evaluate<number>(`${V}.rep.state.edgeOpacity[${i}]`);
+    const committed = () => d.evaluate<number>(`${V}.model.committed().length`);
+    const depth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+    // A mod runs through the producer, so its commands land ASYNCHRONOUSLY — poll
+    // the effect rather than sleeping a guessed duration.
+    const until = (expr: string) => d.waitFor(expr, 20000);
+
+    // A real selection first, so "did not grow" is measured against a non-zero
+    // baseline — the assertion this scenario exists for must not pass vacuously.
+    check("S67: (setup) a committed selection exists",
+      (await cmd("create_sele #200-300 [keep]")).status === "ok");
+    const before = await committed();
+    check("S67: (setup) baseline committed count is non-zero", before > 0, `${before}`);
+
+    check("S67: hide_res is accepted", (await cmd("hide_res #0-99")).status === "ok");
+    await until(`${V}.rep.state.opacity[10] === 0`);
+    check("S67: a targeted point is hidden", (await op(10)) === 0);
+    check("S67: a point OUTSIDE the target is untouched", (await op(500)) === 1);
+    check("S67: an incident bond is hidden too — the point of the mod", (await eop(0)) === 0);
+    check("S67: an edge outside the target keeps its opacity", (await eop(3000)) === 1);
+    check("S67: NO selection was created — this is why it is not `hide`",
+      (await committed()) === before, `${before} -> ${await committed()}`);
+
+    // ONE stroke: both writes (points AND bonds) collapse into a single Ctrl+Z.
+    const armed = await depth();
+    await d.evaluate(`${V}.model.undo()`);
+    await until(`${V}.rep.state.opacity[10] === 1`);
+    check("S67: one Ctrl+Z reverts BOTH the point and bond writes",
+      (await op(10)) === 1 && (await eop(0)) === 1);
+    check("S67: …and it was exactly one stroke", (await depth()) === armed - 1);
+
+    // Bare hide_res REFUSES rather than hiding the scene. The refusal itself is
+    // only visible in the terminal panel (PARKED P3), so it is asserted by EFFECT.
+    await cmd("hide_res");
+    await sleep(1500);
+    check("S67: bare hide_res hides NOTHING — there is no 'hide everything'",
+      (await op(10)) === 1 && (await op(3000)) === 1);
+
+    // …while bare show_res is the deliberate opposite: restore the whole system.
+    await cmd("hide_res #0-99");
+    await until(`${V}.rep.state.opacity[10] === 0`);
+    check("S67: show_res is accepted", (await cmd("show_res")).status === "ok");
+    await until(`${V}.rep.state.opacity[10] === 1`);
+    check("S67: bare show_res restores the whole system",
+      (await op(10)) === 1 && (await eop(0)) === 1);
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
 // ============ S49: the keydown guard, after the hold gesture was removed ======
@@ -11313,7 +11393,7 @@ async function S66(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -11356,7 +11436,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
-  S48: "full", S49: "full", S50: "full", S51: "full", S52: "full",
+  S48: "full", S49: "full", S67: "full", S50: "full", S51: "full", S52: "full",
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
   S58: "fast", S59: "fast", S60: "fast", S61: "fast", S62: "fast",
   S63: "fast", S64: "full",

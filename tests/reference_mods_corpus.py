@@ -48,7 +48,7 @@ from producer.serve import run_mod  # noqa: E402
 from producer.synthetic import SyntheticSource  # noqa: E402
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
-MODS = os.path.join(ROOT, ".molaro", "mods")
+MODS = os.path.join(ROOT, "tests", "fixtures", "mods")
 TOL = 1e-4  # nm, absolute
 
 # The atom selection each system's stored RMSD reference was computed over
@@ -342,12 +342,12 @@ def main() -> int:
 if __name__ == "__main__":
     import argparse
     ap = argparse.ArgumentParser(description="Verify reference mods against the corpus.")
-    ap.add_argument("--mod", help="verify a single named workspace mod (.molaro/mods/<name>.py)")
+    ap.add_argument("--mod", help="verify a single named mod (<mods-dir>/<name>.py)")
     ap.add_argument("--system", default="03_adk_psf_dcd", help="corpus system id")
     ap.add_argument("--observable", default="rg_mean", help="stored reference observable key")
     ap.add_argument("--selection", help="mdtraj atom selection for the target set (default: whole system)")
-    ap.add_argument("--mods-dir", help="directory holding <mod>.py (default: the repo's viewer/.molaro/mods; "
-                                       "pass a workspace root's .molaro/mods to verify an assistant-authored mod)")
+    ap.add_argument("--mods-dir", help="directory holding <mod>.py (default: the repo's tests/fixtures/mods; "
+                                       "pass ~/.molaro/mods to verify a user-authored mod, or the repo's mods/ for a shipped one)")
     args = ap.parse_args()
     if args.mod:
         raise SystemExit(_report_named(

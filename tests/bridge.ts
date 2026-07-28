@@ -39,16 +39,50 @@ const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 // incapable of touching the real .molaro/mods: no code path here ever
 // resolves the real directory when the override is set — which is exactly
 // what makes the guarantee hold even when a scenario is SIGKILLed mid-run.
+// tests/fixtures/mods, NOT a `.molaro/mods` inside the repo. These are E2E
+// FIXTURES — index_ramp, xy_metric, rg, rmsd… — and the old location made them
+// look like a third place mods "live", alongside the shipped set and the user's
+// own dir. There are now exactly two real mod locations: `<repo>/mods` (ships with
+// the extension) and `~/.molaro/mods` (what a USER writes). This is neither.
 const modsDir = process.env.E2E_MODS_DIR
   ? resolve(process.env.E2E_MODS_DIR)
-  : join(root, ".molaro", "mods");
+  : join(root, "tests", "fixtures", "mods");
 
 // The harness's workspace mods: the REAL example files from the mods dir
 // (the same pure parser the extension host uses) plus one deliberately
 // broken runtime mod (out-of-range scalars) so the fail-closed no-write
 // path is drivable end-to-end.
+/** The SHIPPED mods (`<root>/mods`), loaded with origin "built-in" exactly as the
+ * extension host does. Without this the harness saw only the example workspace
+ * mods, so the mods that actually come with the package — cartoon, live_sasa,
+ * live_ss, hide_res, show_res and their machinery — had NO end-to-end coverage at
+ * all: a scenario could only reach them by being handed E2E_MODS_DIR, which is the
+ * destructive-flow override and points AWAY from the real set.
+ *
+ * Deliberately NOT gated on E2E_MODS_DIR: that override exists to protect the
+ * user's own mods dir from `rm all` (S29), and the shipped dir is read-only
+ * product content that no scenario deletes, so the two are independent. */
+function shippedMods(): AnalysisMod[] {
+  const dir = join(root, "mods");
+  const out: AnalysisMod[] = [];
+  try {
+    for (const f of readdirSync(dir).filter((x) => x.endsWith(".py")).sort()) {
+      const parsed = parseModFile(readFileSync(join(dir, f), "utf-8"), "built-in");
+      if (parsed.ok) out.push(parsed.mod);
+      else console.error(`[bridge] skipped shipped mod ${f}: ${parsed.error}`);
+    }
+  } catch {
+    /* no mods/ — fine */
+  }
+  return out;
+}
+
 function harnessMods(): AnalysisMod[] {
   const mods: AnalysisMod[] = [];
+  // Shipped first, then workspace — and a workspace mod of the same name WINS,
+  // mirroring loadAllMods in src/extension.ts so the harness cannot disagree with
+  // the product about which copy is in force.
+  const shipped = shippedMods();
   try {
     for (const f of readdirSync(modsDir).filter((x) => x.endsWith(".py")).sort()) {
       const parsed = parseModFile(readFileSync(join(modsDir, f), "utf-8"), "workspace");
@@ -58,6 +92,8 @@ function harnessMods(): AnalysisMod[] {
   } catch {
     /* no .molaro/mods — fine */
   }
+  const shadowed = new Set(mods.map((m) => m.name));
+  mods.unshift(...shipped.filter((m) => !shadowed.has(m.name)));
   mods.push({
     name: "broken_ramp",
     kind: "analysis",

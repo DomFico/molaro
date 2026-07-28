@@ -30,10 +30,12 @@ const MODS_DIR = join(import.meta.dirname, "..", "mods");
 /** The exact shipped roster. Adding one is an edit HERE first. */
 const EXPECTED = [
   "cartoon",
+  "hide_res",
   "live_sasa",
   "live_ss",
   "ribbon_dir",
   "sasa_field",
+  "show_res",
   "ss_field",
 ] as const;
 
@@ -129,8 +131,8 @@ test("the mods listing hides machinery, names how many, and keeps the rest", () 
   );
   assert.deepEqual(
     shown.map((m) => m.name).sort(),
-    ["cartoon", "live_sasa", "live_ss"],
-    "what remains listed is exactly the three mods a person invokes",
+    ["cartoon", "hide_res", "live_sasa", "live_ss", "show_res"],
+    "what remains listed is exactly the mods a person invokes",
   );
 
   // Guards the guard: if `requires-channel` were ever dropped from the consumers,
