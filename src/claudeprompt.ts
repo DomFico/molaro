@@ -98,9 +98,11 @@ defaults **false**: "around it, not it". The block comes LAST, after \`[name]\`.
 not to; the two-step is \`create_sele @name ?within=5 [nearby]\` then \`hide @nearby\`.
 
 **Reach for this before writing a mod.** "colour everything within 5 of the ligand" is
-a command, not a computation. The SHIPPED mods (\`hide_res\`, \`show_res\`, \`licorice\`)
-carry the same two flag names with the same meanings — never invent \`?around\` or
-\`?scope\`.
+a command, not a computation. The SHIPPED mods (\`hide_res\`, \`show_res\`, \`licorice\`,
+\`smooth\`) carry the same two flag names with the same meanings — never invent \`?around\`
+or \`?scope\`. On the mod side the ONE implementation is \`data.neighborhood(indices,
+distance, keep)\`; do not hand-roll a distance loop, and do not convert units — the
+number is in the scene's coordinate units on both tiers.
 
 Every mod declares what it \`produces\`, which determines both its return shape and where
 its result appears on screen:
@@ -338,10 +340,14 @@ Two hard rules, both enforced (a violation fails LOUDLY before anything runs):
 
 A 3-wide channel bound to the \`offset\` axis DISPLACES the drawn positions (\`shown = raw +
 offset\`): it MOVES points, it does not restyle them (distinct from the color/scalar ramp).
-Two shipped \`commands\` mods drive it: \`smooth <region> ?smoothing=N\` (N = frames AVERAGED, VMD-style; replaces each point's
-shown position with a windowed average of its own positions over ±N frames, so jitter reads
-as smooth motion) and \`delay <region> ?frames=k\` (shows each point where it was k frames
-earlier). Each runs its provider then binds, in ONE invocation.
+The shipped \`commands\` mod that drives it is \`smooth [<region>] ?smoothing=N\` — N is the
+number of frames AVERAGED, the same number VMD's smoothing control shows, so the window is
+(N−1)/2 each side and an even N rounds DOWN to the nearest odd (a centred average over an
+even count cannot be symmetric). It replaces each point's shown position with the mean of
+its own positions over that window, so jitter reads as smooth motion. It runs its provider
+then binds, in ONE invocation. RE-RUNNING REPLACES: \`smooth @a\` then \`smooth @b\` leaves only
+@b smoothed, because \`smoothing\` is ONE channel and a provider run rewrites the whole column
+— to smooth both, name both in one command (\`smooth @a + @b\`).
 
 Author a NEW position effect \`T\` as a PAIR of mods: a \`produces: channel\` mod computing the
 whole-system offset (\`offset = T(pos) − pos\`, zero outside the target — the
@@ -350,7 +356,10 @@ channel-is-whole-system rule above), plus a one-line \`produces: commands\` macr
 because the channel is already zero outside the region (and it avoids emitting a giant
 \`#index\` string — a commands mod only gets \`target_indices\`). Vectorize the computation
 (cumsum / gather — never a per-frame Python loop, the 5s run_mod timeout).
-\`.molaro/mods/{smoothing,smooth,delay_offset,delay}.py\` are the worked pair.
+The shipped \`{smoothing,smooth}.py\` are the worked pair — \`smoothing\` computes, \`smooth\`
+binds, and the neighbourhood flags (\`?within\`/\`?keep\`) live on the PROVIDER, because the
+sequencer runs it FIRST with the target as typed: a flag declared only on the macro expands
+nothing and is silently inert.
 
 ## Correctness rules — these are not stylistic
 
@@ -483,6 +492,10 @@ that). Three axes × four shapes:
 - bonds **touching** the target, either endpoint (*incident*, reaches one hop out — the way
   to get a single atom's bonds): \`colorbondsof\` / \`bondsizeof\` / \`bondopacityof\`
 - backbone trace per residue: \`colortrace\` / \`tracesize\` / \`traceopacity\`
+
+The target is OPTIONAL on all twelve (and on \`dashbonds\`/\`dashbondsof\`/\`style\`): a lone
+value means the whole system, so \`traceopacity 0.1\` == \`traceopacity all 0.1\`. \`bake\` and
+\`bind\` still require theirs.
 Color is a CSS name or \`#hex\`; size ≥ 0 (0 ≠ hidden); opacity 0–1. To color bonds you MUST
 use \`colorbonds\`/\`colorbondsof\` — \`colorpoints\` colors atoms, not bonds. The viewer's base
 look (default point size / opacity / color for anything unwritten) is in \`get_context\`; to

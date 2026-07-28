@@ -3202,7 +3202,7 @@ async function S16body(withProducedGroup: boolean): Promise<void> {
       ["colorbondsof nothere red", "nomatch"],
       ["colorbonds alpha notacolor", "error"],
       ["colorbondsof", "error"],
-      ["colorbonds red", "error"], // one chunk: a color but no target
+      ["colorbonds notacolor", "error"], // one chunk that is NOT a value: still the usage error
     ];
     for (const [text, status] of quiet) {
       const r = await cmd(text);
@@ -3211,6 +3211,21 @@ async function S16body(withProducedGroup: boolean): Promise<void> {
     check("S16: ...none of them wrote a single component",
       await equalsSnap("__quiet2E", "edgeColorA"));
     check("S16: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet2);
+
+    // -- (g2) THE LONE VALUE: no target means the whole system --------------------
+    // `colorbonds red` was the error probe above until the target became optional.
+    // Asserted on the BUFFER, not the message: every bug in this family reported a
+    // correct-sounding count over values that had not moved.
+    const loneE = await cmd("colorbonds red");
+    check("S16: colorbonds red — a lone value means the WHOLE system",
+      loneE.status === "ok", JSON.stringify(loneE));
+    check("S16: ...and it WROTE the edge-colour buffer",
+      !(await equalsSnap("__quiet2E", "edgeColorA")));
+    check("S16: ...as exactly one stroke", (await undoDepth()) === depthQuiet2 + 1);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S16: ...one Ctrl+Z puts it back byte-for-byte",
+      (await equalsSnap("__quiet2E", "edgeColorA")) && (await undoDepth()) === depthQuiet2);
 
     if (withProducedGroup) {
       // The OTHER cross-talk direction: the whole header-edge matrix above —
@@ -3398,7 +3413,7 @@ async function S17(): Promise<void> {
       ["colortrace nothere red", "nomatch"],
       ["colortrace alpha notacolor", "error"],
       ["colortrace", "error"],
-      ["colortrace red", "error"], // one chunk: a color but no target
+      ["colortrace notacolor", "error"], // one chunk that is NOT a value: still the usage error
     ];
     for (const [text, status] of quiet) {
       const r = await cmd(text);
@@ -3407,6 +3422,18 @@ async function S17(): Promise<void> {
     check("S17: ...none of them wrote a single component",
       await equalsSnap("__quiet2T", "traceColor"));
     check("S17: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet2);
+
+    // -- (g2) THE LONE VALUE (see S16) -------------------------------------------
+    const loneT = await cmd("colortrace red");
+    check("S17: colortrace red — a lone value means the WHOLE system",
+      loneT.status === "ok", JSON.stringify(loneT));
+    check("S17: ...and it WROTE the trace-colour buffer",
+      !(await equalsSnap("__quiet2T", "traceColor")));
+    check("S17: ...as exactly one stroke", (await undoDepth()) === depthQuiet2 + 1);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S17: ...one Ctrl+Z puts it back byte-for-byte",
+      (await equalsSnap("__quiet2T", "traceColor")) && (await undoDepth()) === depthQuiet2);
 
     await d.screenshot(`${REPORT}/S17_colortrace.png`);
   });
@@ -3622,7 +3649,7 @@ async function S18(): Promise<void> {
       ["pointsize nothere 2", "nomatch"],
       ["pointsize alpha abc", "error"],
       ["pointsize", "error"],
-      ["bondsizeof 2", "error"], // one chunk: a size but no target
+      ["bondsizeof abc", "error"], // one chunk that is NOT a value: still the usage error
       ["tracesize alpha.[x] 2", "error"], // [ reserved
     ];
     for (const [text, status] of quiet) {
@@ -3632,6 +3659,17 @@ async function S18(): Promise<void> {
     check("S18: ...none of them wrote a single component anywhere",
       (await changedBuffers()) === "[]");
     check("S18: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet);
+
+    // -- (j) THE LONE VALUE (see S16) --------------------------------------------
+    const loneS = await cmd("bondsizeof 2");
+    check("S18: bondsizeof 2 — a lone value means the WHOLE system",
+      loneS.status === "ok", JSON.stringify(loneS));
+    check("S18: ...and it WROTE a buffer", (await changedBuffers()) !== "[]");
+    check("S18: ...as exactly one stroke", (await undoDepth()) === depthQuiet + 1);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S18: ...one Ctrl+Z puts every buffer back",
+      (await changedBuffers()) === "[]" && (await undoDepth()) === depthQuiet);
 
     await d.screenshot(`${REPORT}/S18_size.png`);
   });
@@ -3882,7 +3920,7 @@ async function S19(): Promise<void> {
       ["pointopacity nothere 0.5", "nomatch"],
       ["pointopacity alpha abc", "error"],
       ["pointopacity", "error"],
-      ["bondopacityof 0.5", "error"], // one chunk: a value but no target
+      ["bondopacityof abc", "error"], // one chunk that is NOT a value: still the usage error
       ["traceopacity alpha.[x] 0.5", "error"], // [ reserved
     ];
     for (const [text, status] of quiet) {
@@ -3892,6 +3930,17 @@ async function S19(): Promise<void> {
     check("S19: ...none of them wrote a single component anywhere",
       (await changedBuffers()) === "[]");
     check("S19: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet);
+
+    // -- (i) THE LONE VALUE (see S16) --------------------------------------------
+    const loneO = await cmd("bondopacityof 0.5");
+    check("S19: bondopacityof 0.5 — a lone value means the WHOLE system",
+      loneO.status === "ok", JSON.stringify(loneO));
+    check("S19: ...and it WROTE a buffer", (await changedBuffers()) !== "[]");
+    check("S19: ...as exactly one stroke", (await undoDepth()) === depthQuiet + 1);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S19: ...one Ctrl+Z puts every buffer back",
+      (await changedBuffers()) === "[]" && (await undoDepth()) === depthQuiet);
 
     await d.screenshot(`${REPORT}/S19_opacity.png`);
   });
@@ -5202,7 +5251,7 @@ async function S29(): Promise<void> {
   // manifest comparison at the end additionally proves non-interference on
   // every green run. Registry order = sorted filenames, then the fileless
   // `broken_ramp` the harness appends last.
-  const realDir = ".molaro/mods";
+  const realDir = "tests/fixtures/mods";
   const realManifest = (): string =>
     readdirSync(realDir).filter((f) => f.endsWith(".py")).sort()
       .map((f) => `${f}:${createHash("sha256").update(readFileSync(join(realDir, f))).digest("hex")}`)
@@ -5345,7 +5394,7 @@ async function S29(): Promise<void> {
     delete process.env.E2E_MODS_DIR;
     rmSync(modsDir, { recursive: true, force: true });
   }
-  check("S29: the REAL .molaro/mods was never touched (manifest byte-identical)",
+  check("S29: the REAL fixtures mods dir was never touched (manifest byte-identical)",
     realManifest() === manifestBefore);
 }
 
@@ -7167,7 +7216,7 @@ async function S40(): Promise<void> {
 }
 
 // ========== S41: per-target style — the highlight obeys the style axis ========
-// A-2's visible proof: `stylepoints <target> matte` kills the specular
+// A-2's visible proof: `stylepoints <target> standard` ADDS the specular
 // highlight on exactly the styled elements (style index rides a per-element
 // attribute; params come from ONE packed uniform array, looked up in the
 // vertex stage). Default = byte-identical `standard` — the full lane pins
@@ -7214,27 +7263,34 @@ async function S41(): Promise<void> {
         return sum / 9;
       })()`);
     };
-    const base = await centerLum("standard");
-    check("S41: (baseline) the standard highlight saturates the center", base > 245, `lum=${base}`);
-    const styled = await cmd("stylepoints #150 matte");
-    check("S41: stylepoints reports the action", styled.status === "ok" && styled.message === "styled 1 points matte",
+    // MATTE IS THE SHIPPED DEFAULT (styles.ts registers it first, and registration
+    // order IS the shader index, so an unstyled element reads vec4[0] = matte).
+    // So the baseline carries NO specular and `standard` is the deviation. This
+    // scenario used to run the other way round; inverting it keeps the same
+    // measurement and — the part that matters — keeps the write OBSERVABLE:
+    // styling to `matte` would write index 0 over buffers already full of 0, and
+    // all three buffer assertions below would pass without the command running.
+    const base = await centerLum("matte");
+    check("S41: (baseline) the DEFAULT is matte — no saturated highlight", base < 245, `lum=${base}`);
+    const styled = await cmd("stylepoints #150 standard");
+    check("S41: stylepoints reports the action", styled.status === "ok" && styled.message === "styled 1 points standard",
       JSON.stringify(styled));
-    const matte = await centerLum("matte");
-    check("S41: MATTE KILLS THE HIGHLIGHT — center luminance drops measurably",
-      base - matte > 12, `standard=${base} matte=${matte}`);
+    const lit = await centerLum("standard");
+    check("S41: STANDARD ADDS THE HIGHLIGHT — center luminance rises measurably",
+      lit - base > 12 && lit > 245, `matte=${base} standard=${lit}`);
     // buffer truth + the other domains' writers
     check("S41: the style buffer holds the index", (await d.evaluate<number>(`${V}.rep.state.style[150]`)) === 1);
-    await cmd("stylebonds all matte");
+    await cmd("stylebonds all standard");
     check("S41: edge style buffer written", (await d.evaluate<number>(`${V}.rep.state.edgeStyle[0]`)) === 1);
-    await cmd("styletrace all matte");
+    await cmd("styletrace all standard");
     const tStyled = await d.evaluate<boolean>(`${V}.rep.state.traceStyle.every((x) => x === 1)`);
     check("S41: trace style buffer written (map-up covers every vertex under all)", tStyled);
     await d.ctrlZ(); await sleep(200);
     await d.ctrlZ(); await sleep(200);
     await d.ctrlZ(); await sleep(200);
     const back = await centerLum("restored");
-    check("S41: three undos → highlight restored, buffers pristine",
-      back > 245 && (await d.evaluate<number>(`${V}.rep.state.style[150]`)) === 0 &&
+    check("S41: three undos → back to the matte default, buffers pristine",
+      back < 245 && (await d.evaluate<number>(`${V}.rep.state.style[150]`)) === 0 &&
         (await d.evaluate<number>(`${V}.rep.state.edgeStyle[0]`)) === 0,
       `lum=${back}`);
   });
@@ -8078,7 +8134,7 @@ async function S48(): Promise<void> {
   console.log("S48 — requires-channel: provider-then-consumer, the partial-state limit, missing provider");
   const modsDir = mkdtempSync(join(tmpdir(), "molaro-s48-mods-"));
   try {
-    copyFileSync(join(".molaro/mods", "channel_flow.py"), join(modsDir, "channel_flow.py"));
+    copyFileSync(join("tests", "fixtures", "mods", "channel_flow.py"), join(modsDir, "channel_flow.py"));
     // a consumer that REQUIRES flow_dir; `?bad=true` returns out-of-[0,1] values
     // so its per-point-scalar bind FAILS (the partial-state trigger).
     writeFileSync(join(modsDir, "flow_probe.py"), [
@@ -8300,14 +8356,34 @@ async function S67(): Promise<void> {
 
     // `status: "ok"` is only the SYNC ack — a mod that fails later still acks ok —
     // so it is backed immediately by the EFFECT below.
-    check("S67: ?within is accepted on a real system",
+    // THE UNIT, pinned by contrast. `?within` is in the SCENE'S coordinate units
+    // — nm here — so 5 is 50 A and reaches the whole 3 nm protein. Read together
+    // with the 0.5 leg below (176 atoms), these two numbers cannot both hold under
+    // any other unit, which is exactly what nothing in the suite could say when
+    // the mods were silently multiplying by 10.
+    check("S67: ?within=5 is SCENE UNITS (5 nm) — it reaches essentially everything",
       (await cmd("hide_res #0-9 ?within=5")).status === "ok");
+    await d.waitFor(
+      `${V}.rep.state.opacity.reduce((n, v, i) => n + (i > 9 && v === 0 ? 1 : 0), 0) > 3000`, 30000);
+    const wide = await d.evaluate<number>(
+      `${V}.rep.state.opacity.reduce((n, v, i) => n + (i > 9 && v === 0 ? 1 : 0), 0)`);
+    check("S67: …a 5 nm shell on a ~3 nm protein is whole-system, not a shell",
+      wide > 3000, `hidden=${wide}`);
+    await cmd("show_res");
+    // WAIT ON THE WHOLE BUFFER, not atom 0. Under the default ?keep=false the
+    // target is never hidden, so `opacity[0] === 1` is already true the instant
+    // show_res is issued — a wait that cannot fail, which let the NEXT count
+    // measure the previous run's leftovers (measured: 3322 instead of 176).
+    await d.waitFor(`${V}.rep.state.opacity.every((v) => v === 1)`, 30000);
+
+    check("S67: ?within is accepted on a real system",
+      (await cmd("hide_res #0-9 ?within=0.5")).status === "ok");
     await d.waitFor(
       `${V}.rep.state.opacity.reduce((n, v, i) => n + (i > 9 && v === 0 ? 1 : 0), 0) > 0`, 30000);
 
     check("S67: ?within leaves the TARGET itself visible — around it, not it",
       (await op(0)) === 1 && (await op(5)) === 1 && (await op(9)) === 1);
-    // COUNT, not "some". On adk a 5 A shell around #0-9 expands BY RESIDUE to 176
+    // COUNT, not "some". On adk a 0.5 nm (= 5 A) shell around #0-9 expands BY RESIDUE to 176
     // atoms in 6 DISJOINT runs, so this pins two things at once: that a multi-range
     // `#` list is emitted validly (the exact shape the `#`-per-part bug produced
     // invalidly — "expected # to start each index"), and that the shell is byres
@@ -8320,9 +8396,13 @@ async function S67(): Promise<void> {
 
     // ?keep=true brings the target along; exclude (default) leaves it out.
     await cmd("show_res");
-    await d.waitFor(`${V}.rep.state.opacity[0] === 1`, 30000);
+    // WAIT ON THE WHOLE BUFFER, not atom 0. Under the default ?keep=false the
+    // target is never hidden, so `opacity[0] === 1` is already true the instant
+    // show_res is issued — a wait that cannot fail, which let the NEXT count
+    // measure the previous run's leftovers (measured: 3322 instead of 176).
+    await d.waitFor(`${V}.rep.state.opacity.every((v) => v === 1)`, 30000);
     check("S67: ?keep=true is accepted",
-      (await cmd("hide_res #0-9 ?within=5 ?keep=true")).status === "ok");
+      (await cmd("hide_res #0-9 ?within=0.5 ?keep=true")).status === "ok");
     await d.waitFor(`${V}.rep.state.opacity[0] === 0`, 30000);
     // include brings the target's WHOLE RESIDUES along, not just the 10 named atoms:
     // 195 total vs 176 for exclude. Asserting the exact number is what distinguishes
@@ -8332,7 +8412,11 @@ async function S67(): Promise<void> {
       (await d.evaluate<number>(
         `${V}.rep.state.opacity.reduce((n, v) => n + (v === 0 ? 1 : 0), 0)`)) === 195);
     await cmd("show_res");
-    await d.waitFor(`${V}.rep.state.opacity[0] === 1`, 30000);
+    // WAIT ON THE WHOLE BUFFER, not atom 0. Under the default ?keep=false the
+    // target is never hidden, so `opacity[0] === 1` is already true the instant
+    // show_res is issued — a wait that cannot fail, which let the NEXT count
+    // measure the previous run's leftovers (measured: 3322 instead of 176).
+    await d.waitFor(`${V}.rep.state.opacity.every((v) => v === 1)`, 30000);
   }, "/");
 }
 
@@ -9750,7 +9834,7 @@ async function S55(): Promise<void> {
       ["dashbonds nothere 2", "nomatch"],
       ["dashbonds alpha abc", "error"],
       ["dashbonds", "error"],
-      ["dashbondsof 2", "error"], // one chunk: a scale but no target
+      ["dashbondsof abc", "error"], // one chunk that is NOT a value: still the usage error
       ["dashbonds alpha.[x] 2", "error"], // [ reserved
     ];
     for (const [text, status] of quiet) {
@@ -9760,6 +9844,17 @@ async function S55(): Promise<void> {
     check("S55: ...none of them wrote a single component anywhere",
       (await changedBuffers()) === "[]");
     check("S55: ...none of them pushed a stroke", (await undoDepth()) === depthQuiet);
+
+    // -- (j) THE LONE VALUE (see S16) --------------------------------------------
+    const loneD = await cmd("dashbondsof 2");
+    check("S55: dashbondsof 2 — a lone value means the WHOLE system",
+      loneD.status === "ok", JSON.stringify(loneD));
+    check("S55: ...and it WROTE a buffer", (await changedBuffers()) !== "[]");
+    check("S55: ...as exactly one stroke", (await undoDepth()) === depthQuiet + 1);
+    await d.ctrlZ();
+    await sleep(120);
+    check("S55: ...one Ctrl+Z puts every buffer back",
+      (await changedBuffers()) === "[]" && (await undoDepth()) === depthQuiet);
 
     await d.screenshot(`${REPORT}/S55_dash.png`);
   });

@@ -278,7 +278,7 @@ Results are always de-duplicated.
 
 ## The mods that ship with the extension
 
-Six live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
+Seven live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
 the same name in your own dir SHADOWS a shipped one, which is how you customise one
 without losing the original.
 
@@ -288,8 +288,9 @@ without losing the original.
 | `licorice` | CPK sticks with genuinely SPLIT bonds — each half takes its endpoint's colour |
 | `hide_res` / `show_res` | fade points AND their incident bonds in one stroke, creating no selection |
 | `live_sasa` / `live_ss` | colour that follows the trajectory |
+| `smooth` | a temporal moving average over positions — jitter out, motion in |
 
-Three more (`ribbon_dir`, `sasa_field`, `ss_field`) are **machinery**: they supply a
+Four more (`ribbon_dir`, `sasa_field`, `smoothing`, `ss_field`) are **machinery**: they supply a
 channel their consumer declares with `# requires-channel:` and run automatically. The
 `mods` listing hides them and prints how many were hidden — `help <name>` still
 describes them.
@@ -330,6 +331,34 @@ untouched. No target means everything. `?within` here expands by whole residues,
 unit as the built-in flag (scene coordinate units — nm for an mdtraj source, so a
 5 Å shell is `?within=0.5`), and is measured at **frame 0** — a mod is not told
 which frame is displayed.
+
+### `smooth`
+
+```
+smooth [<target>] ?smoothing=<N> ?within=<d> ?keep=<bool>
+```
+
+Replaces each targeted point's **shown** position with the mean of its own positions
+over `N` frames — the temporal moving average, and `N` is the same number VMD's
+trajectory-smoothing control shows. `5` averages five frames, higher is smoother, `0`
+is off. An even `N` rounds down to the nearest odd, because a centred average over an
+even count cannot be symmetric. No target means everything.
+
+The underlying positions are never touched: `smooth` writes a channel and binds it to
+the **offset** axis, so `shown = raw + offset`. Unbind and the original motion is back,
+byte for byte.
+
+**Re-running REPLACES, it does not add.** `smooth @a` then `smooth @b` leaves only
+`@b` smoothed, because `smoothing` is one channel and a provider run rewrites the
+whole column. To smooth both, name both in ONE command — `smooth @a + @b`. This is
+the one place the grid's usual "each command adds a bit more" intuition does not hold,
+and the mod says so when it runs.
+
+`smooth` is the macro half of a two-mod pair: `smoothing` (hidden machinery) computes
+the channel, `smooth` binds it. Two mods rather than one because a `produces: channel`
+mod cannot also issue commands. `?within`/`?keep` live on the **provider**, where the
+expansion happens before the numbers are computed — putting them only on the macro
+made them silently inert, which is exactly the bug this pairing avoids.
 
 ## Creating selections: `create_sele`
 
@@ -458,11 +487,22 @@ hidden set. That shapes the pair's asymmetry:
 ## The representation family: color, size, and opacity
 
 ```
-colorpoints  <t> <color> │ pointsize  <t> <size> │ pointopacity  <t> <a>
-colorbonds   <t> <color> │ bondsize   <t> <size> │ bondopacity   <t> <a>
-colorbondsof <t> <color> │ bondsizeof <t> <size> │ bondopacityof <t> <a>
-colortrace   <t> <color> │ tracesize  <t> <size> │ traceopacity  <t> <a>
+colorpoints  [<t>] <color> │ pointsize  [<t>] <size> │ pointopacity  [<t>] <a>
+colorbonds   [<t>] <color> │ bondsize   [<t>] <size> │ bondopacity   [<t>] <a>
+colorbondsof [<t>] <color> │ bondsizeof [<t>] <size> │ bondopacityof [<t>] <a>
+colortrace   [<t>] <color> │ tracesize  [<t>] <size> │ traceopacity  [<t>] <a>
 ```
+
+**The target is optional across the whole grid** — a lone value means the
+whole system, so `traceopacity 0.1` is `traceopacity all 0.1` and
+`colorpoints red` paints everything. Nothing became ambiguous: with one token
+there is nothing to be ambiguous *with*, because `<verb> <target>` on its own
+was never legal — it was the error immediately below. No existing command
+changes meaning, and a selection named `red` is still reached by
+`colorpoints red <color>`. The same holds for every verb built on this front
+half — `dashbonds` / `dashbondsof` and `style` take a lone value too. `bake`
+and `bind` do **not**: they carry several arguments, so a missing target there
+would have to be guessed rather than inferred.
 
 The **representation** verbs form a grid: four *shapes* (how a point set
 maps onto a renderable primitive) × three *axes* (color, size, opacity) —

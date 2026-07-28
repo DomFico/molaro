@@ -581,12 +581,18 @@ test("system prompt teaches durability: derive vocabulary at run time, respect t
 // -- the 2026-07-23 attended prompt pass: offset axis, background, and the
 // run-use correctness rules folded from reports/PROMPT_DELTA.md. Each guards a
 // shipped surface with a documented failure so it can't rot back out.
-test("system prompt teaches the offset axis and its smooth/delay mods (PROMPT_DELTA 2026-07-23)", () => {
+test("system prompt teaches the offset axis and its smooth mod (PROMPT_DELTA 2026-07-23)", () => {
   const p = buildSystemPrompt(sampleContext());
-  // the offset axis mechanism + the two shipped commands mods on it
+  // the offset axis mechanism + the shipped commands mod on it
   assert.match(p, /shown = raw \+\s*offset/);
-  assert.match(p, /smooth <region> \?smoothing=N/);
-  assert.match(p, /delay <region> \?frames=k/);
+  // TARGET OPTIONAL — the lone-value form reaches the mods too
+  assert.match(p, /smooth \[<region>\] \?smoothing=N/);
+  // `delay` is NOT asserted: it does not ship (the roster is cartoon, licorice,
+  // hide_res/show_res, live_sasa/live_ss, smooth + 4 machinery providers), and
+  // the prompt claiming a command the user cannot run is the defect this
+  // replaces. What IS pinned is the standing behaviour a caller must know:
+  assert.match(p, /RE-RUNNING REPLACES/);
+  assert.match(p, /frames AVERAGED/);
   // the authoring PAIR: a produces:channel offset mod + a requires-channel macro that binds
   assert.match(p, /bind all <channel> offset/);
   // offset is a bind-only vector axis in the bake/bind reference
