@@ -55,6 +55,11 @@ const COMPLETION_HEADERS: Record<CompletionKind, string> = {
   channel: "channels:",
   axis: "axes:",
   value: "values:",
+  // NOT "values:" — a `hint` parameter's list is a suggestion, not the legal
+  // set, and a header that reads the same as an exhaustive one would tell the
+  // user these are the only values it takes. The header carries the difference
+  // because the candidate list alone cannot.
+  suggestion: "suggested values (any value accepted):",
   group: "produced-edge groups:",
 };
 

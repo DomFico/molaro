@@ -682,8 +682,16 @@ export interface Completion {
    *   "channel" declared channel names (bake/bind's read vocabulary)
    *   "axis"    bindable axis tokens (bake/bind/unbind)
    *   "value"   a fixed value vocabulary (booleans, styles, shapes,
-   *             colors, mod selectors, verb names for help) */
-  kind?: "filter" | "param" | "channel" | "axis" | "value" | "group";
+   *             colors, mod selectors, verb names for help) — EXHAUSTIVE:
+   *             these are the legal values
+   *   "suggestion" a NON-exhaustive vocabulary (a `hint` parameter's declared
+   *             values): the candidates are suggestions and the slot accepts
+   *             values outside them. Split from "value" because the two render
+   *             identically otherwise, and a completion list that looks
+   *             exhaustive when it is not misreports the legal domain —
+   *             the candidate list is a claim about the slot, so a suggesting
+   *             slot must say so */
+  kind?: "filter" | "param" | "channel" | "axis" | "value" | "suggestion" | "group";
 }
 
 /** The closed completion-kind vocabulary, as its own name — the SINGLE

@@ -284,7 +284,7 @@ header line:
 
     # param: <name> <type> [<default>]
 
-\`<type>\` is \`number\`, \`string\`, \`boolean\`, \`color\`, or \`choice\`. A default makes the
+\`<type>\` is \`number\`, \`string\`, \`boolean\`, \`color\`, \`choice\`, or \`hint\`. A default makes the
 parameter optional; a parameter with **no default is REQUIRED** at invocation. A \`color\`
 param behaves exactly like \`string\` (the value reaches \`compute\` as a plain token) but its
 \`?<name>=\` slot tab-completes CSS color names — declare it for a color-valued parameter.
@@ -315,6 +315,17 @@ field is not in the tool schema), so a \`choice\` mod authored via write_mod fai
 ("needs at least one option") and never registers. When authoring through write_mod, use
 \`string\` for a choice-shaped param (and validate inside \`compute\`); author a real \`choice\`
 mod as a hand-written file.
+
+**A SUGGESTED set, not a fixed one — \`hint\`.** Same line shape as \`choice\`
+(\`# param: <name> hint <sug1> <sug2> …\`, first value the default), and the OPPOSITE rule:
+the listed values are what the \`?<name>=\` slot tab-completes, and ANY value is still
+accepted — a \`hint\` validates exactly like \`string\`. Reach for it when a few values are
+worth discovering but the legal domain is wider than a list, which is the case whenever the
+domain depends on run-time state a header cannot know. The built-in
+\`?frame=<current|N>\` is the worked example: \`current\` is worth suggesting, every frame
+index is legal, and \`choice\` would have refused the integers. Validate the wider domain in
+\`compute\`, where the state is known. The write_mod limitation above applies identically —
+write_mod cannot carry the suggestion list, so author a real \`hint\` mod as a file.
 
 ## Requiring a channel — one invocation instead of two
 

@@ -60,16 +60,22 @@ export type ModAxis = (typeof MOD_AXES)[number];
  * ONLY enumerated thing a parameter schema carries — a param's name and default
  * are per-mod DATA, not an enumerated set. Kept closed and small (three scalars
  * plus `color` — a string-VALUED token, coerced to a string like `string`, whose
- * value slot completes CSS color names — and `choice`, a string-VALUED token
- * restricted to a declared option set, whose value slot completes those options;
- * nothing speculative) exactly like MOD_PRODUCES / MOD_AXES, and guarded the same
- * way (tests/recipes.test.ts). Every surface derives from this: the header parser
- * validates against it; the header IS the schema's single source. The wire and
- * the producer carry VALUES, not the type set — so it is a one-language enum, not
- * a cross-language twin (the producer never authors a parameter declaration, it
- * only consumes already-typed values, and a `color`/`choice` arrives as its plain
- * string token). See reports/MOD_PARAMS_PHASE0.md. */
-export const MOD_PARAM_TYPES = ["number", "string", "boolean", "color", "choice"] as const;
+ * value slot completes CSS color names — and the two VALUE-LIST types, `choice`
+ * and `hint`, which share a header grammar and differ in exactly one thing: what
+ * the list is FOR. A `choice`'s list RESTRICTS (validation refuses anything
+ * else); a `hint`'s list only SUGGESTS (validation accepts any text, exactly as
+ * `string` does). `hint` exists for the parameter shape neither `choice` nor
+ * `number` can state — a value that is either a known literal token or any
+ * member of a wider domain, where `choice` would refuse the domain and `number`
+ * could neither express nor complete the literal. Nothing speculative) exactly
+ * like MOD_PRODUCES / MOD_AXES, and guarded the same way (tests/recipes.test.ts).
+ * Every surface derives from this: the header parser validates against it; the
+ * header IS the schema's single source. The wire and the producer carry VALUES,
+ * not the type set — so it is a one-language enum, not a cross-language twin (the
+ * producer never authors a parameter declaration, it only consumes already-typed
+ * values, and a `color`/`choice`/`hint` arrives as its plain string token).
+ * See reports/MOD_PARAMS_PHASE0.md. */
+export const MOD_PARAM_TYPES = ["number", "string", "boolean", "color", "choice", "hint"] as const;
 export type ModParamType = (typeof MOD_PARAM_TYPES)[number];
 
 /** A parameter value once coerced to its declared type. */
@@ -77,9 +83,11 @@ export type ParamValue = number | string | boolean;
 
 /** One declared parameter of an analysis mod (a `# param: <name> <type>
  * [<default>]` header line). `default` present ⟺ the header declared one;
- * absent = the parameter is REQUIRED at invocation. `options` is present ⟺
- * `type === "choice"` — the string-VALUED set the parameter accepts; the FIRST
- * option is the default (so a `choice` always has one, is never "required"). */
+ * absent = the parameter is REQUIRED at invocation. `options` is present ⟺ the
+ * type declares a VALUE LIST (`choice` or `hint`) — the declared string-VALUED
+ * tokens, in header order, with the FIRST as the default (so neither type is
+ * ever "required"). The TYPE, never the presence of this field, says what the
+ * list DOES: a `choice` is restricted to it, a `hint` merely suggests it. */
 export interface ModParam {
   name: string;
   type: ModParamType;
@@ -379,11 +387,11 @@ export function serializeMod(mod: Mod): string {
     ...(mod.edgeGroup ? [`# edge-group: ${mod.edgeGroup}`] : []),
     ...(mod.requiresChannel ? [`# requires-channel: ${mod.requiresChannel}`] : []),
     ...(mod.params ?? []).map((p) =>
-      // A `choice` serializes its OPTION LIST (the default is the first option,
-      // so it round-trips without being written twice); every other type writes
-      // its optional default as the rest-of-line.
-      p.type === "choice"
-        ? `# param: ${p.name} choice ${(p.options ?? []).join(" ")}`
+      // A VALUE-LIST type (`choice`/`hint`) serializes its LIST (the default is
+      // the first entry, so it round-trips without being written twice); every
+      // other type writes its optional default as the rest-of-line.
+      declaresValueList(p.type)
+        ? `# param: ${p.name} ${p.type} ${(p.options ?? []).join(" ")}`
         : `# param: ${p.name} ${p.type}${p.default !== undefined ? ` ${p.default}` : ""}`,
     ),
     ...(mod.author ? [`# author: ${mod.author}`] : []),
@@ -431,19 +439,28 @@ function coerceValue(
     if (raw === "false") return { ok: true, value: false };
     return { ok: false, reason: `expects true or false, got "${String(raw)}"` };
   }
-  // `string` and `color` both coerce to a STRING — a color value IS a color
-  // token (a CSS name like `lightgreen`, or a hex like `#ff8800`). A color is
-  // deliberately NOT color-validated here: the only color parser (parseColor)
+  // `string`, `color` and `hint` all coerce to a STRING — a color value IS a
+  // color token (a CSS name like `lightgreen`, or a hex like `#ff8800`). A color
+  // is deliberately NOT color-validated here: the only color parser (parseColor)
   // lives in commands.ts, which imports THIS module, so importing it back would
   // introduce a circular import. Coerce-as-string and let the command/mod path
   // validate the color downstream. The `"` refusal is uniform (see above).
-  if (type === "string" || type === "color") {
+  //
+  // `hint` sits in THIS branch, not next to `choice`, and that placement IS the
+  // rule: a hint's declared values are SUGGESTIONS, so the option set must be
+  // unreachable from its coercion — the restricting code lives in the `choice`
+  // branch a hint never enters. Its real domain (a literal token OR a wider set,
+  // range-checked against live state the header cannot know) belongs to whatever
+  // owns the parameter, downstream, exactly as a color's does.
+  if (type === "string" || type === "color" || type === "hint") {
     if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean") {
       const s = String(raw);
       if (s.includes('"')) return { ok: false, reason: `cannot contain a double-quote, got "${s}"` };
       return { ok: true, value: s };
     }
-    return { ok: false, reason: `expects a ${type}, got "${String(raw)}"` };
+    // "expects a hint" would name the DECLARATION, not the value's domain — the
+    // one place the shared branch must not share its wording.
+    return { ok: false, reason: `expects ${type === "hint" ? "a text value" : `a ${type}`}, got "${String(raw)}"` };
   }
   // `choice` coerces to a STRING like `string`/`color`, then FAIL-CLOSED restricts
   // it to the declared option set — an unlisted value is refused loudly, the same
@@ -471,14 +488,36 @@ function coerceValue(
 
 const PARAM_NAME_RE = /^[a-z][a-z0-9_-]*$/;
 
+/** Does this type declare a VALUE LIST as the rest of its header line (rather
+ * than a single default)? THE one predicate the header grammar, the serializer
+ * and the completion pool all key off — never three type tests to keep
+ * agreeing. What the list is FOR is the TYPE's business, not this predicate's:
+ * `choice` restricts to it, `hint` only suggests it. */
+export function declaresValueList(type: ModParamType): boolean {
+  return type === "choice" || type === "hint";
+}
+
+/** What a value-list type calls its entries in its own refusals: the noun, and
+ * the placeholder the "want:" line spells the grammar with. `choice` keeps the
+ * exact wording it has always had. */
+function valueListWords(type: ModParamType): { noun: string; slot: string } {
+  return type === "choice"
+    ? { noun: "option", slot: "opt" }
+    : { noun: "suggestion", slot: "sug" };
+}
+
 /** Parse one `# param:` header line. Two grammars, on the declared type:
  *   any scalar/color: `<name> <type> [<default…>]` — the default is the REST of
  *     the line (so a string default may hold spaces), coerced against the type;
- *   `choice`: `<name> choice <opt1> <opt2> …` — the rest is a whitespace-separated
- *     OPTION LIST (each a plain string token), and the FIRST option is the default
- *     (a choice always has one). At least one option is required.
- * A malformed default/option fails at parse/registration time — loud, before any
- * run. Total: never throws. */
+ *   a VALUE-LIST type (`choice` / `hint`, see declaresValueList):
+ *     `<name> <type> <v1> <v2> …` — the rest is a whitespace-separated list of
+ *     plain string tokens, and the FIRST is the default (so neither is ever
+ *     "required"). At least one value is required: a `choice` with no options
+ *     admits nothing, and a `hint` with no suggestions IS a `string` — either
+ *     way the header says something other than what it meant, so it fails here
+ *     rather than at a run.
+ * A malformed default/list entry fails at parse/registration time — loud, and
+ * naming the parameter, before any run. Total: never throws. */
 export function parseParamLine(
   line: string,
 ): { ok: true; param: ModParam } | { ok: false; error: string } {
@@ -494,19 +533,21 @@ export function parseParamLine(
     return { ok: false, error: `parameter "${name}": type must be ${MOD_PARAM_TYPES.join(" | ")} (got "${typeTok}")` };
   }
   const type = typeTok as ModParamType;
-  if (type === "choice") {
+  if (declaresValueList(type)) {
+    const { noun, slot } = valueListWords(type);
     const options = defRaw === undefined ? [] : defRaw.trim().split(/\s+/).filter((t) => t !== "");
     if (options.length === 0) {
-      return { ok: false, error: `parameter "${name}" (choice) needs at least one option — want: # param: ${name} choice <opt1> <opt2> …` };
+      return { ok: false, error: `parameter "${name}" (${type}) needs at least one ${noun} — want: # param: ${name} ${type} <${slot}1> <${slot}2> …` };
     }
-    // Each option is a plain string token — validate it (the uniform `"` refusal)
-    // so an unusable option fails at parse, not at a later invocation.
+    // Each entry is a plain string token — validate it (the uniform `"` refusal)
+    // so an unusable one fails at parse, not at a later invocation.
     for (const o of options) {
       const c = coerceValue("string", o);
-      if (!c.ok) return { ok: false, error: `parameter "${name}" option ${c.reason}` };
+      if (!c.ok) return { ok: false, error: `parameter "${name}" ${noun} ${c.reason}` };
     }
-    // The first option is the default — a choice is never "required" (it has a
-    // sensible one by construction), and the default is trivially in-set.
+    // The first entry is the default — a value-list param is never "required"
+    // (it has a sensible one by construction), and for a `choice` the default is
+    // thereby trivially in-set.
     return { ok: true, param: { name, type, default: options[0], options } };
   }
   if (defRaw !== undefined && defRaw.trim() !== "") {

@@ -949,6 +949,40 @@ test("?within completes its flag names and the boolean's values", () => {
   assert.deepEqual(comp("create_sele c0.").candidates, comp("view c0.").candidates);
 });
 
+test("?frame is a `hint`: it SUGGESTS 'current' and still takes any frame index", () => {
+  // THE REAL CONSUMER. `?frame=` takes the literal `current` or a frame index —
+  // the shape neither `choice` (which would refuse every index) nor `number`
+  // (which can neither express nor complete the literal) can state. As a
+  // `string` it completed NOTHING, so the literal was undiscoverable from the
+  // terminal; as a `hint` the literal is offered and the index still runs.
+  const { registry, ctx, neighborhoodCalls } = makeRegistry();
+  const comp = (text: string) => completeCommand(ctx, registry, text, text.length);
+
+  // COMPLETION: the literal is offered, on both verbs that carry the block,
+  // and it is labelled a SUGGESTION (not an exhaustive value list)
+  for (const verb of ["create_sele", "hide"]) {
+    const c = comp(`${verb} #0 ?frame=`);
+    assert.deepEqual(c.candidates, ["current"], verb);
+    assert.equal(c.kind, "suggestion", `${verb}: the list is advisory, and says so`);
+    // a unique suggestion settles like every other slot — the ONE shared path
+    assert.equal(c.applied, "current", verb);
+    assert.deepEqual(comp(`${verb} #0 ?frame=cur`).applied, "rent", verb);
+  }
+  // a value outside the suggestion completes nothing — never a guess
+  assert.deepEqual(comp("create_sele #0 ?frame=0").candidates, []);
+  // the flag NAME pool is unchanged (the type moved, the schema did not)
+  assert.deepEqual(comp("create_sele #0 ?").candidates, ["frame", "keep", "within"]);
+
+  // RUNTIME, unchanged: the suggestion restricts nothing. An index still runs,
+  // and the domain rule stays where live state is known (splitTargetNameFlags).
+  assert.equal(registry.runCommand("create_sele #0 ?within=2.1 ?frame=0").status, "ok");
+  assert.equal(neighborhoodCalls.at(-1)!.frame, 0);
+  assert.equal(registry.runCommand("create_sele #0 ?within=2.1 ?frame=current").status, "ok");
+  // ...and an out-of-domain word is still REFUSED there, with the same wording
+  assert.match(registry.runCommand("create_sele #0 ?within=2.1 ?frame=last").message,
+    /\?frame= takes "current" or a frame number — got "last"/);
+});
+
 test("a macro pre-validates ?within WITHOUT running the query twice", () => {
   // runCommandMacro validates EVERY string before executing ANY. The
   // neighbourhood query is the one genuinely expensive read on the context, so
@@ -3641,6 +3675,77 @@ test("completeCommand: ?param VALUES — a choice param completes its options; e
     // a non-option prefix is empty (nothing to guess)
     assert.deepEqual(comp("scopemod c0 ?scope=z").candidates, []);
   } finally { unregisterRecipe("scopemod"); }
+});
+
+test("completeCommand: ?param VALUES — a hint param SUGGESTS its values (kind 'suggestion') and accepts others", () => {
+  // The pair a `choice` cannot state: the token `auto` OR any number. The
+  // completion offers the literals; VALIDATION lets anything through, and the
+  // two must be visibly different or the candidate list misreports the domain —
+  // hence kind "suggestion" (the terminal's header for it says any value is
+  // accepted) against a choice's exhaustive "value".
+  const fx = makeRegistry();
+  const mod: AnalysisMod = {
+    name: "hintmod", kind: "analysis", produces: "commands", origin: "workspace",
+    params: [{ name: "at", type: "hint", default: "auto", options: ["auto", "always"] }],
+    code: "def compute(data, target_indices, params):\n    return []",
+  };
+  registerRecipe(mod);
+  fx.registry.register("hintmod", makeAnalysisModHandler(fx.ctx, mod), "test mod");
+  const comp = (text: string) => completeCommand(fx.ctx, fx.registry, text, text.length);
+  try {
+    // empty value → ALL suggestions, sorted, kind "suggestion" — same pool
+    // shape and same settle path as a choice, one honest label apart
+    assert.deepEqual(comp("hintmod c0 ?at="),
+      { start: 15, candidates: ["always", "auto"], applied: "a", kind: "suggestion" });
+    // a prefix narrows and extends to the unique match
+    assert.deepEqual(comp("hintmod c0 ?at=au"),
+      { start: 15, candidates: ["auto"], applied: "to", kind: "suggestion" });
+    // a value OUTSIDE the suggestions completes nothing — a suggesting slot
+    // still never invents a guess
+    assert.deepEqual(comp("hintmod c0 ?at=7").candidates, []);
+    // ...but it RUNS. The completion pool is advisory; only the parse decides.
+    const off = parseModParams(mod, "c0 ?at=7");
+    assert.ok(!("status" in off), JSON.stringify(off));
+    if (!("status" in off)) assert.deepEqual(off.params, { at: "7" });
+    const listed = parseModParams(mod, "c0 ?at=always");
+    if (!("status" in listed)) assert.deepEqual(listed.params, { at: "always" });
+    // nothing typed → the first suggestion is the default
+    const bare = parseModParams(mod, "c0");
+    if (!("status" in bare)) assert.deepEqual(bare.params, { at: "auto" });
+  } finally { unregisterRecipe("hintmod"); }
+});
+
+test("completeCommand: a hint and a choice with the SAME list differ in kind and in what they accept", () => {
+  // The one-line difference, pinned side by side: the declaration shape is
+  // identical, so the TYPE is the only thing carrying restrict-vs-suggest —
+  // through completion (kind) and through validation (refusal).
+  const fx = makeRegistry();
+  const opts = ["auto", "always"];
+  const hintMod: AnalysisMod = {
+    name: "hintpair", kind: "analysis", produces: "commands", origin: "workspace",
+    params: [{ name: "at", type: "hint", default: "auto", options: [...opts] }],
+    code: "def compute(data, target_indices, params):\n    return []",
+  };
+  const choiceMod: AnalysisMod = { ...hintMod, name: "choicepair",
+    params: [{ name: "at", type: "choice", default: "auto", options: [...opts] }] };
+  registerRecipe(hintMod);
+  registerRecipe(choiceMod);
+  fx.registry.register("hintpair", makeAnalysisModHandler(fx.ctx, hintMod), "test mod");
+  fx.registry.register("choicepair", makeAnalysisModHandler(fx.ctx, choiceMod), "test mod");
+  const comp = (text: string) => completeCommand(fx.ctx, fx.registry, text, text.length);
+  try {
+    // SAME candidates...
+    assert.deepEqual(comp("hintpair c0 ?at=").candidates, comp("choicepair c0 ?at=").candidates);
+    // ...DIFFERENT kind (the header the terminal prints is the whole difference
+    // the user sees between an exhaustive list and a suggested one)
+    assert.equal(comp("hintpair c0 ?at=").kind, "suggestion");
+    assert.equal(comp("choicepair c0 ?at=").kind, "value");
+    // ...and different acceptance
+    assert.ok(!("status" in parseModParams(hintMod, "c0 ?at=7")), "the hint accepts an unlisted value");
+    const refused = parseModParams(choiceMod, "c0 ?at=7");
+    assert.ok("status" in refused && refused.status === "error", "the choice still REFUSES it");
+    if ("status" in refused) assert.match(refused.message, /must be one of auto, always/);
+  } finally { unregisterRecipe("hintpair"); unregisterRecipe("choicepair"); }
 });
 
 test("completeCommand: ?param VALUES — a color param completes CSS names, exactly like the color slot", () => {

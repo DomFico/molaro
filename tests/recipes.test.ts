@@ -67,6 +67,7 @@ test("registerRecipe: a name → recipe map mods register into", () => {
 
 import {
   channelProviders,
+  declaresValueList,
   resolveChannelDependency,
   parseModFile,
   parseParamLine,
@@ -548,13 +549,15 @@ test("a commands mod round-trips through serialize → parse (the write_mod file
 
 // -- P-1: parameters — MOD_PARAM_TYPES single source, parse, resolve, round-trip --
 
-test("MOD_PARAM_TYPES is exactly the scalar types plus color and choice, and parseParamLine validates against it", () => {
-  assert.deepEqual([...MOD_PARAM_TYPES].sort(), ["boolean", "choice", "color", "number", "string"].sort());
+test("MOD_PARAM_TYPES is exactly the scalar types plus color and the two value-list types, and parseParamLine validates against it", () => {
+  assert.deepEqual([...MOD_PARAM_TYPES].sort(), ["boolean", "choice", "color", "hint", "number", "string"].sort());
   for (const t of MOD_PARAM_TYPES) {
-    // `choice` alone is malformed (it needs an option list); give it one so the
-    // valid-parse assertion holds for every declared type. Every other type
-    // parses bare (default optional).
-    const r = parseParamLine(t === "choice" ? `p ${t} a b` : `p ${t}`);
+    // a VALUE-LIST type alone is malformed (it needs its list); give it one so
+    // the valid-parse assertion holds for every declared type. Every other type
+    // parses bare (default optional). The predicate is the implementation's own
+    // (declaresValueList) — a hand-copied `t === "choice" || t === "hint"` here
+    // is the second list this whole guard exists to prevent.
+    const r = parseParamLine(declaresValueList(t) ? `p ${t} a b` : `p ${t}`);
     assert.ok(r.ok, `type ${t} must parse${r.ok ? "" : " — " + r.error}`);
     if (r.ok) assert.equal(r.param.type, t);
   }
@@ -605,6 +608,77 @@ test("choice param type: option-list header, first is the default, validates to 
     // the serialized header writes the option list (default NOT duplicated)
     assert.match(serializeMod(mod), /# param: scope choice within any/);
   }
+});
+
+test("hint param type: the declared values SUGGEST, they never restrict — and choice still restricts", () => {
+  // THE GAP `hint` fills: a parameter whose value is a known literal token OR
+  // any member of a wider domain. `choice` would refuse the domain; `number`
+  // can neither express nor complete the literal. So the list is advisory.
+
+  // header grammar: identical in SHAPE to choice — `<name> hint <v1> <v2> …`,
+  // the FIRST value is the default (a hint is never "required").
+  assert.deepEqual(parseParamLine("frame hint current"),
+    { ok: true, param: { name: "frame", type: "hint", default: "current", options: ["current"] } });
+  assert.deepEqual(parseParamLine("anchor hint  first   last mid"),
+    { ok: true, param: { name: "anchor", type: "hint", default: "first", options: ["first", "last", "mid"] } });
+  // declaresValueList is THE predicate the grammar/serializer/completion share
+  assert.deepEqual(MOD_PARAM_TYPES.filter(declaresValueList).sort(), ["choice", "hint"]);
+
+  // FAIL-CLOSED at declaration, loudly, naming the offender. A hint with NO
+  // suggestions is just a `string`, so the header said something other than it
+  // meant — refuse rather than silently degrade.
+  const none = parseParamLine("frame hint");
+  assert.ok(!none.ok);
+  if (!none.ok) {
+    assert.match(none.error, /parameter "frame" \(hint\) needs at least one suggestion/);
+    assert.match(none.error, /# param: frame hint <sug1> <sug2>/, "the refusal spells the grammar");
+  }
+  // a suggestion carrying a double-quote can't round-trip the invocation string
+  assert.match((parseParamLine('frame hint cur"rent') as { error: string }).error,
+    /parameter "frame" suggestion cannot contain a double-quote/);
+
+  // VALIDATION — the whole point. Same declared list, two types:
+  const hint: ModParam[] = [{ name: "frame", type: "hint", default: "current", options: ["current"] }];
+  const choice: ModParam[] = [{ name: "frame", type: "choice", default: "current", options: ["current"] }];
+  // a SUGGESTED value passes through as its token (both types agree here)
+  assert.deepEqual(resolveParameters(hint, new Map<string, unknown>([["frame", "current"]])),
+    { ok: true, values: { frame: "current" } });
+  // an OFF-LIST value is ACCEPTED by the hint — it coerces exactly as a string
+  // would, and the real domain rule lives downstream where live state is known
+  assert.deepEqual(resolveParameters(hint, new Map<string, unknown>([["frame", "7"]])),
+    { ok: true, values: { frame: "7" } });
+  assert.deepEqual(resolveParameters(hint, new Map<string, unknown>([["frame", "anything at all"]])),
+    { ok: true, values: { frame: "anything at all" } });
+  // a NATIVE scalar folds into the string carrier too (the assistant path)
+  assert.deepEqual(resolveParameters(hint, new Map<string, unknown>([["frame", 7]])),
+    { ok: true, values: { frame: "7" } });
+  // ...and the SAME list under `choice` still REFUSES it. This pair is the
+  // feature: one grammar, two contracts, and choice's is unchanged.
+  const restricted = resolveParameters(choice, new Map<string, unknown>([["frame", "7"]]));
+  assert.ok(!restricted.ok);
+  if (!restricted.ok) assert.match(restricted.error, /parameter "frame" must be one of current, got "7"/);
+
+  // the uniform `"` refusal still applies (a hint widens the DOMAIN, not the grammar)
+  assert.match((resolveParameters(hint, new Map<string, unknown>([["frame", 'a"b']])) as { error: string }).error,
+    /parameter "frame" cannot contain a double-quote/);
+  // a non-scalar names the value's domain, not the declaration ("expects a hint"
+  // would describe the header, which is not what the user typed)
+  assert.match((resolveParameters(hint, new Map<string, unknown>([["frame", {}]])) as { error: string }).error,
+    /parameter "frame" expects a text value/);
+  // nothing passed → the first suggestion fills as the default (never "required")
+  assert.deepEqual(resolveParameters(hint, new Map()), { ok: true, values: { frame: "current" } });
+
+  // round-trips through serialize → parse: the LIST is written, the default is
+  // not duplicated (it is the first entry)
+  const mod: AnalysisMod = {
+    name: "framed", kind: "analysis", produces: "per-frame-series", origin: "workspace",
+    params: [{ name: "frame", type: "hint", default: "current", options: ["current", "first"] }],
+    code: "def compute(data, target_indices, params):\n    return [1.0]",
+  };
+  const back = parseModFile(serializeMod(mod), "workspace");
+  assert.ok(back.ok, back.ok ? "" : back.error);
+  if (back.ok) assert.deepEqual(back.mod, mod);
+  assert.match(serializeMod(mod), /# param: frame hint current first/);
 });
 
 test("color param type: coerces its token to a string (a color IS a token), a default round-trips", () => {

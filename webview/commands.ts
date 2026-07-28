@@ -29,6 +29,7 @@ import {
   splitTrailingName,
   splitTrailingWord,
   type Completion,
+  type CompletionKind,
   type EdgeIndexSpec,
   type Segment,
   type TargetAst,
@@ -573,7 +574,17 @@ const NEIGHBORHOOD_PARAMS: readonly ModParam[] = [
   // INSTEAD of it directly". The domain-tier mods use the same default, because one
   // flag name with two defaults is the ambiguity this whole design set out to remove.
   { name: "keep", type: "boolean", default: false },
-  { name: "frame", type: "string", default: "current" },
+  // `hint`, not `string` and not `choice`: this flag takes the literal token
+  // `current` OR any frame index, which is exactly the shape neither of the
+  // other two states. A `choice` would restrict it to `current` and refuse
+  // every index; a `string` (what it was) accepts both but can enumerate
+  // neither, so `?frame=<TAB>` offered nothing and the literal was
+  // undiscoverable from the UI — the only way to learn it was the docs. The
+  // suggestion is `current`; the LEGAL domain stays where it can be checked
+  // against live state, in splitTargetNameFlags below (the `current`-or-digits
+  // read and the range check against frameCount() — a header can no more know
+  // how many frames are loaded than it can know the right radius).
+  { name: "frame", type: "hint", default: "current", options: ["current"] },
 ];
 
 /** The resolved flags: a radius, whether the named target survives into the
@@ -3853,25 +3864,41 @@ function completeParamBlock(
   // VALUE slot: enumerable for a boolean (true/false), a `color` (CSS color
   // NAMES — the SAME pool + settle path the colorpoints/background color slot
   // uses, single-sourced via colorSlot(); hex stays open input, exactly like
-  // that slot), a `choice` (its declared option set), or a `number` WITH a
-  // default (offered as the lone suggestion — an empty slot Tabs in the
+  // that slot), a `choice` (its declared option set), a `hint` (its declared
+  // SUGGESTIONS — same pool shape, different kind: see below), or a `number`
+  // WITH a default (offered as the lone suggestion — an empty slot Tabs in the
   // default). An EMPTY value token completes the WHOLE pool (completeToken's
   // startsWith("") + the shared cap), so `?flag=`/`?scope=`/`?color=` offer
   // everything, capped, without a typed prefix; a prefix still filters. A
   // string value — or a number with no default — stays unenumerable.
+  //
+  // The KIND is where `choice` and `hint` part. Both offer a declared list, but
+  // a choice's list is the legal set and a hint's is not, and the candidates
+  // alone cannot say which — so the hint slot carries kind "suggestion", whose
+  // terminal header states that any value is accepted. Same pool, same settle
+  // path, one honest label.
   const param = declared.find((p) => p.name === seg.slice(0, eq).trim());
   if (!param) return none;
   let pool: string[];
-  if (param.type === "boolean") pool = ["true", "false"];
-  else if (param.type === "color") pool = colorSlot().pool();
-  else if (param.type === "choice") pool = param.options ?? [];
-  else if (param.type === "number") pool = param.default !== undefined ? [String(param.default)] : [];
-  else return none; // string — no enumerable value vocabulary
+  let kind: CompletionKind = "value";
+  // EXHAUSTIVE over ModParamType (the `never` default): a type added to
+  // MOD_PARAM_TYPES without a decision here fails to compile rather than
+  // silently completing nothing.
+  switch (param.type) {
+    case "boolean": pool = ["true", "false"]; break;
+    case "color": pool = colorSlot().pool(); break;
+    case "choice": pool = param.options ?? []; break;
+    case "hint": pool = param.options ?? []; kind = "suggestion"; break;
+    case "number": pool = param.default !== undefined ? [String(param.default)] : []; break;
+    case "string": return none; // no enumerable value vocabulary
+    default: {
+      const _exhaustive: never = param.type;
+      return _exhaustive;
+    }
+  }
   const value = seg.slice(eq + 1);
   const lead = value.length - value.trimStart().length;
-  return completeToken(segStart + eq + 1 + lead, value.slice(lead), pool, {
-    kind: "value",
-  });
+  return completeToken(segStart + eq + 1 + lead, value.slice(lead), pool, { kind });
 }
 
 /** Quote-aware whitespace chunking WITH OFFSETS — splitTrailingWord's exact
