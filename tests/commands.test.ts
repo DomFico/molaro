@@ -793,9 +793,12 @@ test("?within: NO flag block is the legacy path, byte-identical and query-free",
   assert.equal(commits.length, 2);
 });
 
-test("?within: grows the target to WHOLE subgroups, and REPORTS the frame it used", () => {
+test("?within ?keep=true: grows the target to WHOLE subgroups, and REPORTS the frame it used", () => {
   const { registry, commits, neighborhoodCalls } = makeRegistry();
-  const r = registry.runCommand("create_sele #0 ?within=2.1");
+  // ?keep=true is EXPLICIT here: the default is false ("around it, not it" — the
+  // flag's own name asks for the neighbourhood), so keeping the target is the
+  // opt-in and this test is about that shape.
+  const r = registry.runCommand("create_sele #0 ?within=2.1 ?keep=true");
   assert.equal(r.status, "ok");
   assert.equal(r.message,
     'created "selection_1" — 2 points (1 subgroup within 2.1 of 1 target point, raw coordinates at frame 0)');
@@ -813,6 +816,23 @@ test("?within: a radius that reaches nothing is an honest nomatch, not an empty 
   assert.equal(commits.length, 0, "nothing committed");
 });
 
+test("?keep DEFAULTS to false — the flag asks for the neighbourhood, not the target", () => {
+  // The default was flipped from true after the owner specified this feature as
+  // "around a selection INSTEAD of it directly". Pinned because a default is
+  // exactly the kind of thing that drifts silently, and because the DOMAIN-tier
+  // mods (hide_res/show_res/licorice) carry the same default — one flag name with
+  // two defaults is the ambiguity this whole design set out to remove.
+  const { registry, commits } = makeRegistry();
+  const bare = registry.runCommand("create_sele #0 ?within=2.1");
+  const explicit = registry.runCommand("create_sele #0 ?within=2.1 ?keep=false");
+  assert.equal(bare.status, "ok");
+  assert.equal(explicit.status, "ok");
+  assert.deepEqual(commits[0].entries, commits[1].entries,
+    "bare ?within must behave exactly as ?keep=false");
+  assert.deepEqual(commits[0].entries, [{ level: "subgroup", id: 1 }],
+    "the target's own subgroup is NOT in the result");
+});
+
 test("?keep=false drops the target at SUBGROUP grain — and says so", () => {
   const { registry, commits } = makeRegistry();
   const r = registry.runCommand("create_sele #0 ?within=2.1 ?keep=false");
@@ -826,7 +846,7 @@ test("?keep=false drops the target at SUBGROUP grain — and says so", () => {
 
 test("?within on hide: commits the neighbourhood and hides it in ONE op", () => {
   const { registry, commits } = makeRegistry();
-  const r = registry.runCommand("hide #0 ?within=2.1");
+  const r = registry.runCommand("hide #0 ?within=2.1 ?keep=true");
   assert.equal(r.status, "ok");
   assert.match(r.message, /^created and hid "selection_1" — 2 points \(1 subgroup within 2\.1 /);
   assert.equal(commits.length, 1);
@@ -843,7 +863,7 @@ test("hide @name ?within=: REFUSED — hide never commits an all-reference targe
   assert.equal(commits.length, 0, "nothing committed");
   assert.equal(refOps.length, 0, "and nothing hidden");
   // create_sele has no such invariant — it always commits, so the flag is fine
-  assert.equal(registry.runCommand("create_sele @stored ?within=2.1").status, "ok");
+  assert.equal(registry.runCommand("create_sele @stored ?within=2.1 ?keep=true").status, "ok");
 });
 
 test("?within is REQUIRED once the block is typed — no default radius, ever", () => {

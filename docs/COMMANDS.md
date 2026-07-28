@@ -276,6 +276,59 @@ Results are always de-duplicated.
 - **Bare `view`** (no argument) frames the visible scene — the empty-space
   click analog.
 
+## The mods that ship with the extension
+
+Six live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
+the same name in your own dir SHADOWS a shipped one, which is how you customise one
+without losing the original.
+
+| mod | what it does |
+|---|---|
+| `cartoon` | the backbone trace, widened by secondary structure, `?colorby` 12 schemes |
+| `licorice` | CPK sticks with genuinely SPLIT bonds — each half takes its endpoint's colour |
+| `hide_res` / `show_res` | fade points AND their incident bonds in one stroke, creating no selection |
+| `live_sasa` / `live_ss` | colour that follows the trajectory |
+
+Three more (`ribbon_dir`, `sasa_field`, `ss_field`) are **machinery**: they supply a
+channel their consumer declares with `# requires-channel:` and run automatically. The
+`mods` listing hides them and prints how many were hidden — `help <name>` still
+describes them.
+
+### `licorice`
+
+```
+licorice <target> ?color=<c> ?size=<n> ?colorby=<scheme> ?within=<d> ?keep=<bool>
+```
+
+Every atom a small sphere, every bond a tube of the same radius, and each bond SPLIT
+into two halves taking its endpoints' colours — so a C–N bond is half skeleton, half
+nitrogen-blue. Hydrogens and the bonds touching them are drawn thinner, the PyMOL
+convention.
+
+- **`?color`** paints CARBON. Any element whose CPK colour would be too close to it is
+  moved to a reserve colour — otherwise `?color=red` would leave oxygen the same red
+  and the split would say nothing. Only the colliding element moves; the rest keep CPK.
+- **`?colorby`** — `element` (default), `flat`, `chain`, `rainbow`, `bfactor`,
+  `occupancy`, `plddt`, `sasa`, `rmsf`, `ss`, `hydrophobicity`, `charge`, `polarity`.
+  Five are genuinely **per-atom** (`bfactor`, `occupancy`, `plddt`, `sasa`, `rmsf`) —
+  which is what makes a bond carry a gradient along its length. The rest are residue
+  properties broadcast to their atoms, so both halves of an intra-residue bond match
+  because they genuinely do. A scheme whose column is CONSTANT refuses rather than
+  painting a confident picture of nothing.
+
+### `hide_res` / `show_res`
+
+```
+hide_res <target> ?opacity=<0..1> ?within=<d> ?keep=<bool>
+show_res <target> ?opacity=<0..1> ?within=<d> ?keep=<bool>
+```
+
+Points and every edge with at least one endpoint in the target — the renderer's own
+rule for a hidden point. Unlike the built-in `hide`, these write **opacity** and commit
+**no selection**, so hiding twenty residues one at a time leaves your selection list
+untouched. No target means everything. `?within` here expands by whole residues and is
+measured at **frame 0** — a mod is not told which frame is displayed.
+
 ## Creating selections: `create_sele`
 
 ```
@@ -293,6 +346,37 @@ full address grammar above (any term kind, any union); no new syntax.
   the smallest free `selection_N`, exactly like the button. The name is the
   *trailing* bracketed run; inside the target expression itself `[` `]`
   remain reserved (parse error).
+- **`?within=<distance>` — the neighbourhood flags.** After the target (and after
+  `[name]`, if any), an optional `?key=value` block re-targets the command to what
+  is NEAR what you named, expanded to WHOLE SUBGROUPS:
+
+  ```
+  create_sele <target> [name] ?within=<distance> ?keep=<bool> ?frame=<current|N>
+  hide        <target>        ?within=<distance> ?keep=<bool> ?frame=<current|N>
+  ```
+
+  - **`?within`** is the radius, in the contract's coordinate units. It is
+    **required** once the block is typed — there is deliberately no default,
+    because a sensible radius is a property of the data, not of the grammar.
+  - **`?keep`** (default **`false`**) — whether the target you named is itself in
+    the result. False means "around it, **not** it", which is the reason the flag
+    exists; `?keep=true` adds the target's whole subgroups back. Exclusion is at
+    SUBGROUP grain, so dropping the target drops the rest of its subgroup too, and
+    the result message says so.
+  - **`?frame`** (default `current`) — the frame the distance is measured at. The
+    result **always reports it**, because the same radius on the same scene gives
+    different answers at different frames and you should never have to guess which
+    you got. Coordinates are read RAW, so a channel bound to the `offset` axis
+    (`smooth`, `delay`) cannot silently move the answer.
+
+  The block must come **LAST** — after `[name]`, not before it. A `[name]` typed
+  after the flags is swallowed into a flag's value, and the error says so.
+
+  **`hide @name ?within=` is refused.** `hide` on an all-reference target hides in
+  place and commits nothing, but a neighbourhood is not the thing you named, so it
+  would have to commit — which would break that invariant. The refusal names the
+  two-step that works: `create_sele @name ?within=5 [nearby]` then `hide @nearby`.
+
 - **Entries keep their level.** The target commits as exactly the entries it
   resolves to — a group-level path stores **one group entry** (the member
   list shows that single coarse row), a leaf or `#` target stores point

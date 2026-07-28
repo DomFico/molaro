@@ -31,6 +31,7 @@ const MODS_DIR = join(import.meta.dirname, "..", "mods");
 const EXPECTED = [
   "cartoon",
   "hide_res",
+  "licorice",
   "live_sasa",
   "live_ss",
   "ribbon_dir",
@@ -131,7 +132,7 @@ test("the mods listing hides machinery, names how many, and keeps the rest", () 
   );
   assert.deepEqual(
     shown.map((m) => m.name).sort(),
-    ["cartoon", "hide_res", "live_sasa", "live_ss", "show_res"],
+    ["cartoon", "hide_res", "licorice", "live_sasa", "live_ss", "show_res"],
     "what remains listed is exactly the mods a person invokes",
   );
 

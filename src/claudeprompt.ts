@@ -88,6 +88,20 @@ A mod file defines exactly one function:
 - **Atom index i in \`target_indices\` is atom i in \`data.trajectory.topology\` and in
   \`data.labels\`.** This correspondence is guaranteed and verified. Use it directly.
 
+### Selecting by proximity — the neighbourhood flags
+
+\`create_sele <target> [name] ?within=<d> ?keep=<bool> ?frame=<current|N>\` (and the same
+on \`hide\`) re-targets to what is NEAR what you named, grown to WHOLE SUBGROUPS.
+\`?within\` is REQUIRED once the block is typed — there is no default radius. \`?keep\`
+defaults **false**: "around it, not it". The block comes LAST, after \`[name]\`.
+\`hide @name ?within=\` is REFUSED because it would have to commit what \`hide\` promises
+not to; the two-step is \`create_sele @name ?within=5 [nearby]\` then \`hide @nearby\`.
+
+**Reach for this before writing a mod.** "colour everything within 5 of the ligand" is
+a command, not a computation. The SHIPPED mods (\`hide_res\`, \`show_res\`, \`licorice\`)
+carry the same two flag names with the same meanings — never invent \`?around\` or
+\`?scope\`.
+
 Every mod declares what it \`produces\`, which determines both its return shape and where
 its result appears on screen:
 

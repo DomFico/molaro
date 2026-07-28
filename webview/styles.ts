@@ -48,8 +48,9 @@ export const STANDARD_STYLE: Style = {
   specPower: 48,
 };
 
-/** A second style AS DATA. Differs from standard only in the specular
- * term: proof the axis composes without touching shape or channels. */
+/** THE DEFAULT (registered first — see below). Differs from `standard` only in
+ * the specular term, which is the whole point: it is proof the style axis composes
+ * without touching shape or channels, and it is the look the viewer ships with. */
 export const MATTE_STYLE: Style = {
   name: "matte",
   lambertFloor: 0.55,
@@ -74,7 +75,7 @@ export function registerStyle(style: Style): void {
 }
 
 /** A style's shader index — REGISTRATION ORDER, the same order
- * stylesAsUniformArray packs. -1 = unknown. Index 0 is `standard` (the
+ * stylesAsUniformArray packs. -1 = unknown. Index 0 is `matte` (the
  * default: every style buffer initializes to 0). */
 export function styleIndex(name: string): number {
   let i = 0;
@@ -111,5 +112,15 @@ export function listStyles(): Style[] {
   return [...styles.values()];
 }
 
-registerStyle(STANDARD_STYLE);
+// MATTE IS REGISTERED FIRST, AND THAT IS WHAT MAKES IT THE DEFAULT: index is
+// registration order, and every element's style buffer initialises to 0. The look
+// people want out of the box is matte — a specular highlight on a 200k-atom scene
+// reads as glare rather than as roundness — so matte is index 0 and `standard`
+// (the old default, one restrained highlight) stays available BY NAME.
+//
+// Consequences, both deliberate: `save_rep` records nothing for index 0
+// (webview/saverep.ts), so a matte scene stays clean in a saved rep; and every
+// pixel baseline that samples a lit surface MOVED when this flipped, which is a
+// look change, not a regression.
 registerStyle(MATTE_STYLE);
+registerStyle(STANDARD_STYLE);

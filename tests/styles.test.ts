@@ -48,7 +48,11 @@ test("the registry: both built-ins registered, lookup by name, registration orde
   assert.equal(getStyle("matte"), MATTE_STYLE);
   assert.equal(getStyle("nope"), undefined);
   const names = listStyles().map((s) => s.name);
-  assert.deepEqual(names.slice(0, 2), ["standard", "matte"]);
+  // MATTE FIRST — registration order IS the shader index, and index 0 is what
+  // every element's style buffer initialises to, so this ordering is the thing
+  // that makes matte the shipped default. Swapping these two lines swaps the
+  // viewer's default look.
+  assert.deepEqual(names.slice(0, 2), ["matte", "standard"]);
 });
 
 test("matte differs from standard ONLY in the specular strength", () => {
@@ -68,15 +72,20 @@ test("register replaces by name (the mod-registry discipline)", () => {
 });
 
 test("A-2: the registry packs for the shader — index = registration order, capacity fails closed", () => {
-  assert.equal(styleIndex("standard"), 0, "standard is index 0 — the buffers' default");
-  assert.equal(styleIndex("matte"), 1);
+  // MATTE is index 0 — the shipped default, because every element's style buffer
+  // initialises to 0. `standard` (the old default, one restrained highlight) is
+  // still registered and still reachable by name; it is just no longer what you
+  // get without asking.
+  assert.equal(styleIndex("matte"), 0, "matte is index 0 — the buffers' default");
+  assert.equal(styleIndex("standard"), 1);
   assert.equal(styleIndex("nope"), -1);
   const arr = stylesAsUniformArray();
   assert.equal(arr.length, MAX_STYLES * 4);
-  assert.deepEqual([...arr.slice(0, 4)], [0.55, 0.45, 0.35, 48].map(Math.fround),
-    "vec4[0] = standard exactly (float32)");
-  assert.deepEqual([...arr.slice(4, 8)], [0.55, 0.45, 0, 48].map(Math.fround),
-    "vec4[1] = matte exactly (float32)");
+  assert.deepEqual([...arr.slice(0, 4)], [0.55, 0.45, 0, 48].map(Math.fround),
+    "vec4[0] = matte exactly (float32) — specStrength 0 is what 'matte' MEANS, and " +
+    "vec4[0] is what an unstyled element reads");
+  assert.deepEqual([...arr.slice(4, 8)], [0.55, 0.45, 0.35, 48].map(Math.fround),
+    "vec4[1] = standard exactly (float32)");
   assert.equal(arr[listStyles().length * 4], 0, "past the registry: zero-padded");
   // capacity: registering beyond MAX_STYLES throws (fail closed, no silent
   // truncation of the uniform array); re-registering an EXISTING name is

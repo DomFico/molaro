@@ -8248,21 +8248,207 @@ async function S67(): Promise<void> {
       (await op(10)) === 1 && (await eop(0)) === 1);
     check("S67: …and it was exactly one stroke", (await depth()) === armed - 1);
 
-    // Bare hide_res REFUSES rather than hiding the scene. The refusal itself is
-    // only visible in the terminal panel (PARKED P3), so it is asserted by EFFECT.
-    await cmd("hide_res");
-    await sleep(1500);
-    check("S67: bare hide_res hides NOTHING — there is no 'hide everything'",
-      (await op(10)) === 1 && (await op(3000)) === 1);
-
-    // …while bare show_res is the deliberate opposite: restore the whole system.
-    await cmd("hide_res #0-99");
+    // NO TARGET MEANS EVERYTHING, both ways — the rule `cartoon` uses. hide_res
+    // briefly REFUSED an empty target (copying the built-in `hide`'s "there is no
+    // hide everything"); that refusal is gone, because these write opacity and both
+    // Ctrl+Z and show_res are ways back, so it guarded nothing.
+    check("S67: bare hide_res is accepted", (await cmd("hide_res")).status === "ok");
     await until(`${V}.rep.state.opacity[10] === 0`);
-    check("S67: show_res is accepted", (await cmd("show_res")).status === "ok");
+    check("S67: bare hide_res hides the WHOLE system, not just part of it",
+      (await op(10)) === 0 && (await op(3000)) === 0 && (await eop(0)) === 0);
+
+    check("S67: bare show_res is accepted", (await cmd("show_res")).status === "ok");
     await until(`${V}.rep.state.opacity[10] === 1`);
     check("S67: bare show_res restores the whole system",
-      (await op(10)) === 1 && (await eop(0)) === 1);
+      (await op(10)) === 1 && (await op(3000)) === 1 && (await eop(0)) === 1);
+
+    // A whole-system target collapses to the `all` KEYWORD rather than a range over
+    // every index — on adk that was a literal `#0-3340`. Bare and explicit must
+    // therefore behave identically.
+    check("S67: an explicit whole-system target is accepted",
+      (await cmd("hide_res all")).status === "ok");
+    await until(`${V}.rep.state.opacity[10] === 0`);
+    check("S67: …and hides everything, exactly like the bare form",
+      (await op(3000)) === 0 && (await eop(0)) === 0);
+    await cmd("show_res");
+    await until(`${V}.rep.state.opacity[10] === 1`);
+
+    // ?opacity — the same verb covers "gone" and "ghost".
+    check("S67: ?opacity is accepted",
+      (await cmd("hide_res #0-99 ?opacity=0.25")).status === "ok");
+    await until(`Math.abs(${V}.rep.state.opacity[10] - 0.25) < 1e-6`);
+    check("S67: ?opacity sets the value asked for, on points AND bonds",
+      Math.abs((await op(10)) - 0.25) < 1e-6 && Math.abs((await eop(0)) - 0.25) < 1e-6);
+    await cmd("show_res");
+    await until(`${V}.rep.state.opacity[10] === 1`);
   });
+
+  // ?within needs COORDINATES, so it runs on the REAL adk source — the synthetic
+  // scene has no trajectory and the mod fails closed there. This block is why the
+  // `#`-per-part bug reached the owner: an earlier attempt to add it silently did
+  // not apply, so `?within` (then named ?within) shipped with no coverage at all.
+  await withRealDriver(async (d) => {
+    const V = "window.__viewer";
+    const cmd = (t: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(t)})`);
+    const op = (i: number) => d.evaluate<number>(`${V}.rep.state.opacity[${i}]`);
+
+    // PROVE the real source is loaded before asserting anything about it, so the
+    // block cannot pass vacuously against the wrong scene.
+    const nPts = await d.evaluate<number>(`${V}.rep.state.color.length / 3`);
+    check("S67: (setup) the REAL adk source is loaded (3341 atoms)", nPts === 3341, `n=${nPts}`);
+
+    // `status: "ok"` is only the SYNC ack — a mod that fails later still acks ok —
+    // so it is backed immediately by the EFFECT below.
+    check("S67: ?within is accepted on a real system",
+      (await cmd("hide_res #0-9 ?within=5")).status === "ok");
+    await d.waitFor(
+      `${V}.rep.state.opacity.reduce((n, v, i) => n + (i > 9 && v === 0 ? 1 : 0), 0) > 0`, 30000);
+
+    check("S67: ?within leaves the TARGET itself visible — around it, not it",
+      (await op(0)) === 1 && (await op(5)) === 1 && (await op(9)) === 1);
+    // COUNT, not "some". On adk a 5 A shell around #0-9 expands BY RESIDUE to 176
+    // atoms in 6 DISJOINT runs, so this pins two things at once: that a multi-range
+    // `#` list is emitted validly (the exact shape the `#`-per-part bug produced
+    // invalidly — "expected # to start each index"), and that the shell is byres
+    // rather than raw-atom (a raw-atom shell here is 68 atoms, so the two counts
+    // cannot be confused).
+    const hidden = await d.evaluate<number>(
+      `${V}.rep.state.opacity.reduce((n, v, i) => n + (i > 9 && v === 0 ? 1 : 0), 0)`);
+    check("S67: …and the whole MULTI-RANGE, BYRES neighbourhood was hidden (176 atoms)",
+      hidden === 176, `hidden=${hidden}`);
+
+    // ?keep=true brings the target along; exclude (default) leaves it out.
+    await cmd("show_res");
+    await d.waitFor(`${V}.rep.state.opacity[0] === 1`, 30000);
+    check("S67: ?keep=true is accepted",
+      (await cmd("hide_res #0-9 ?within=5 ?keep=true")).status === "ok");
+    await d.waitFor(`${V}.rep.state.opacity[0] === 0`, 30000);
+    // include brings the target's WHOLE RESIDUES along, not just the 10 named atoms:
+    // 195 total vs 176 for exclude. Asserting the exact number is what distinguishes
+    // "byres include" from "exclude plus the literal target".
+    check("S67: ?keep=true brings the target's whole residues too (195 atoms)",
+      (await op(0)) === 0 && (await op(9)) === 0 &&
+      (await d.evaluate<number>(
+        `${V}.rep.state.opacity.reduce((n, v) => n + (v === 0 ? 1 : 0), 0)`)) === 195);
+    await cmd("show_res");
+    await d.waitFor(`${V}.rep.state.opacity[0] === 1`, 30000);
+  }, "/");
+}
+
+// ==================== S68: licorice ==========================================
+// The stick representation, on the REAL adk source — licorice needs elements and
+// bonds and fails closed on the synthetic scene, so there is nothing to assert there.
+//
+// Two properties are pinned because both break silently. HYDROGENS ARE THINNER than
+// heavy atoms (the PyMOL convention), asserted as a RATIO over the distinct sizes
+// rather than at hardcoded indices, so it cannot rot when the element layout moves.
+// And the bonds are genuinely SPLIT: `bicolorbonds` snapshots each endpoint's colour
+// into edgeColorA/edgeColorB, so a C-N bond is half skeleton, half nitrogen-blue —
+// a whole-edge approximation would satisfy "did it colour", so the assertion is that
+// the two ends DIFFER.
+async function S68(): Promise<void> {
+  console.log("S68 — licorice: CPK atoms, thinner hydrogens, genuinely split bonds");
+  await withRealDriver(async (d) => {
+    const V = "window.__viewer";
+    const cmd = (t: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(t)})`);
+
+    check("S68: licorice runs on a real system", (await cmd("licorice")).status === "ok");
+    await d.waitFor(`new Set(${V}.rep.state.size).size > 1`, 30000);
+
+    const sizes = await d.evaluate<number[]>(
+      `Array.from(new Set(${V}.rep.state.size)).sort((a,b)=>a-b)`);
+    check("S68: exactly TWO stick widths — heavy atoms and thinner hydrogens",
+      sizes.length === 2, JSON.stringify(sizes));
+    const ratio = sizes[0] / sizes[1];
+    check("S68: the thin one is HYDROGEN_SCALE of the other (0.62)",
+      Math.abs(ratio - 0.62) < 0.01, `ratio=${ratio.toFixed(4)} sizes=${JSON.stringify(sizes)}`);
+
+    const split = await d.evaluate<boolean>(`(() => {
+      const A = ${V}.rep.state.edgeColorA, B = ${V}.rep.state.edgeColorB;
+      for (let e = 0; e < A.length; e += 3)
+        if (A[e] !== B[e] || A[e+1] !== B[e+1] || A[e+2] !== B[e+2]) return true;
+      return false; })()`);
+    check("S68: at least one bond is genuinely SPLIT (edgeColorA !== edgeColorB)", split);
+
+    const before = await d.evaluate<number>(`Math.max(...${V}.rep.state.size)`);
+    check("S68: ?size=2 is accepted", (await cmd("licorice ?size=2")).status === "ok");
+    await d.waitFor(`Math.max(...${V}.rep.state.size) > ${before} + 1e-6`, 30000);
+    const after = await d.evaluate<number>(`Math.max(...${V}.rep.state.size)`);
+    check("S68: ?size doubles the stick width", Math.abs(after / before - 2) < 0.01,
+      `${before} -> ${after}`);
+
+    // ---- ?colorby ----------------------------------------------------------
+    // The point of per-ATOM schemes is that a BOND carries the gradient: its two
+    // halves take its two endpoints' colours, so a stick between a buried atom and
+    // an exposed one changes colour at its midpoint. That is asserted directly.
+    const distinctPointColours = async () => d.evaluate<number>(`(() => {
+      const c = ${V}.rep.state.color, seen = new Set();
+      for (let i = 0; i < c.length; i += 3) seen.add(c[i] + "," + c[i+1] + "," + c[i+2]);
+      return seen.size; })()`);
+    const splitBonds = async () => d.evaluate<number>(`(() => {
+      const A = ${V}.rep.state.edgeColorA, B = ${V}.rep.state.edgeColorB;
+      let n = 0;
+      for (let e = 0; e < A.length; e += 3)
+        if (A[e] !== B[e] || A[e+1] !== B[e+1] || A[e+2] !== B[e+2]) n++;
+      return n; })()`);
+
+    check("S68: ?colorby=sasa is accepted", (await cmd("licorice ?colorby=sasa")).status === "ok");
+    await d.waitFor(`(() => { const c = ${V}.rep.state.color, s = new Set();
+      for (let i = 0; i < c.length; i += 3) s.add(c[i]+","+c[i+1]+","+c[i+2]);
+      return s.size > 4; })()`, 40000);
+    const sasaColours = await distinctPointColours();
+    // A per-RESIDUE scheme would give ~one colour per residue; a per-ATOM ramp gives
+    // many more. The threshold is well above the element count CPK produces (~5).
+    check("S68: ?colorby=sasa paints a per-ATOM ramp, not a handful of element colours",
+      sasaColours > 4, `distinct colours=${sasaColours}`);
+    check("S68: …and bonds carry the gradient — many are split across their two halves",
+      (await splitBonds()) > 0, `split=${await splitBonds()}`);
+
+    check("S68: ?colorby=ss is accepted", (await cmd("licorice ?colorby=ss")).status === "ok");
+    await d.waitFor(`(() => { const c = ${V}.rep.state.color, s = new Set();
+      for (let i = 0; i < c.length; i += 3) s.add(c[i]+","+c[i+1]+","+c[i+2]);
+      return s.size <= 4 && s.size >= 1; })()`, 40000);
+    const ssColours = await distinctPointColours();
+    // PyMOL's cbss triple: helix / sheet / coil. Never more than three (+ any
+    // unscored atoms left at their previous colour).
+    check("S68: ?colorby=ss collapses to the cbss classes, not a ramp",
+      ssColours <= 4, `distinct colours=${ssColours}`);
+
+    // plddt REFUSES on adk: its B-factor column is PSF-derived and constant 0, so
+    // colouring by it would paint the whole system "low confidence" orange — a
+    // confident picture of nothing. The refusal is asynchronous, so it is asserted
+    // by EFFECT: the colours must not change.
+    const beforePlddt = await distinctPointColours();
+    await cmd("licorice ?colorby=plddt");
+    await sleep(4000);
+    check("S68: ?colorby=plddt REFUSES a constant B-factor column rather than lying",
+      (await distinctPointColours()) === beforePlddt,
+      `${beforePlddt} -> ${await distinctPointColours()}`);
+
+    // A bad `choice` is refused SYNCHRONOUSLY by resolveParameters — before the mod
+    // is dispatched at all — so this is an error result, not an async failure. The
+    // message must name the legal values, or the refusal is useless to the user.
+    // ---- ?color must never leave a heteroatom the SAME colour as carbon --------
+    // A bicoloured bond only says anything if its two halves differ. `?color=red`
+    // naively leaves oxygen at CPK red, so a C-O stick comes out solid red. The
+    // collision resolver moves the colliding element instead; carbon keeps what was
+    // asked for. Asserted by EFFECT: with a red skeleton the scene must still hold
+    // more than one distinct colour, and bonds must still be split.
+    check("S68: ?color=red is accepted", (await cmd("licorice ?color=red")).status === "ok");
+    await d.waitFor(`(() => { const c = ${V}.rep.state.color, s = new Set();
+      for (let i = 0; i < c.length; i += 3) s.add(c[i]+","+c[i+1]+","+c[i+2]);
+      return s.size > 1; })()`, 40000);
+    check("S68: a red skeleton still leaves the heteroatoms distinguishable",
+      (await distinctPointColours()) > 1, `distinct=${await distinctPointColours()}`);
+    check("S68: …and bonds are still genuinely split under a colliding ?color",
+      (await splitBonds()) > 0, `split=${await splitBonds()}`);
+
+    const bad = await cmd("licorice ?colorby=nonsense");
+    check("S68: an unknown ?colorby is refused UP FRONT, naming the legal values",
+      bad.status === "error" && /off.*plddt.*sasa.*ss/.test(bad.message), JSON.stringify(bad));
+  }, "/");
 }
 
 // ============================ runner ==========================================
@@ -11393,7 +11579,7 @@ async function S66(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67, S68 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -11436,7 +11622,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S32: "fast", S33: "fast", S34: "fast", S35: "full", S36: "fast",
   S37: "fast", S38: "fast", S39: "fast", S40: "fast", S41: "fast",
   S42: "fast", S43: "fast", S44: "fast", S45: "fast", S46: "full", S47: "full",
-  S48: "full", S49: "full", S67: "full", S50: "full", S51: "full", S52: "full",
+  S48: "full", S49: "full", S67: "full", S68: "full", S50: "full", S51: "full", S52: "full",
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
   S58: "fast", S59: "fast", S60: "fast", S61: "fast", S62: "fast",
   S63: "fast", S64: "full",

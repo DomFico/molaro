@@ -567,7 +567,12 @@ export function makeViewHandler(ctx: CommandContext): CommandHandler {
  */
 const NEIGHBORHOOD_PARAMS: readonly ModParam[] = [
   { name: "within", type: "number" },
-  { name: "keep", type: "boolean", default: true },
+  // DEFAULT FALSE, overriding the "dropping what you named is surprising" reading:
+  // the flag's own name asks for the NEIGHBOURHOOD, so returning the neighbourhood is
+  // not a surprise — and the owner specified this feature as "around a selection
+  // INSTEAD of it directly". The domain-tier mods use the same default, because one
+  // flag name with two defaults is the ambiguity this whole design set out to remove.
+  { name: "keep", type: "boolean", default: false },
   { name: "frame", type: "string", default: "current" },
 ];
 
@@ -3443,7 +3448,7 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "commit the resolved target as a new selection: create_sele <target> [name] — " +
       "optionally GROWN to a neighbourhood with the ?flag block, which comes LAST: " +
       "?within=<distance> (required; in the data's own coordinate units, measured on RAW coordinates so a bound offset never changes the answer) " +
-      "· ?keep=true|false (default true — whether the named target stays in the result; false drops its whole subgroups) " +
+      "· ?keep=true|false (default false — the named target is NOT in the result; true adds its whole subgroups back) " +
       "· ?frame=current|<N> (default current — the frame the distance is measured at; always reported). " +
       "Any subgroup with a point in range comes in ENTIRELY",
   );
