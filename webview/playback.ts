@@ -179,8 +179,14 @@ export class StreamingPlayer<P> {
    * the new block); this converges the cache to the new shape by refetching
    * on demand. Accounting is reset exactly (each entry's own bytes were
    * tracked, so the total zeroes cleanly); in-flight requests are left to
-   * complete (their replies drop harmlessly if superseded — onChunk only
-   * caches when the slot is empty and re-validation happens at the call site).
+   * complete, and their replies are KEPT — a reply that crosses a declaration
+   * comes back NEW-shape (the producer augments from the next request it
+   * PROCESSES, not the next one sent), which is precisely the shape this
+   * refetch wants. onChunk only caches when the slot is empty, and the call
+   * site's validation admits a chunk newer than its own request epoch
+   * (contract validateFrameChunkAgainst, two-list form). It did not always:
+   * demanding exact equality with the epoch made every such reply throw, which
+   * is reports/PARKED.md P9.
    * The eager form of the ruled S2/S3 "lazy per-chunk upgrade": simple,
    * bounded (the working set is the prefetch window), and it converges in one
    * round-trip. A per-entry shape tag + read-time staleness check would make

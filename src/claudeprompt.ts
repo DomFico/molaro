@@ -85,6 +85,17 @@ A mod file defines exactly one function:
   \`data.edges\`**, or it silently scores those residues as bondless. \`topology.bonds\`
   remains "what the file said"; \`data.edges\` is "what is on screen". Same both-truths
   shape as \`frame_stride\`/\`n_frames_in_file\`.
+- \`data.channel(name)\` is a declared per-point-per-frame channel's CURRENT values, as a
+  read-only \`(n_frames, n_points, components)\` float32 array — or \`None\` when nothing of
+  that name is declared. \`data.give_header().channels\` lists what IS declared right now,
+  including channels another mod produced earlier in this session.
+  **A channel is one column and a provider run rewrites the column**, so a \`produces:
+  channel\` mod that is TARGET-SCOPED must read the column first and overwrite only the rows
+  its \`target_indices\` names — otherwise running it on a second region silently stops the
+  first (that is what \`mods/smoothing.py\` does, and why). Use \`np.array(prior, ...)\`, never
+  \`asarray\`: the view is read-only. Static \`per_point\`/\`per_frame\` channels carry their
+  values on the declaration (\`data.give_header().channels[i].data\`) and \`data.channel\`
+  refuses them rather than returning \`None\`.
 - \`target_indices\` is a list of atom indices (ints) that the user's target resolved to,
   in trajectory atom order. An empty list means the whole system.
 - **Atom index i in \`target_indices\` is atom i in \`data.trajectory.topology\` and in

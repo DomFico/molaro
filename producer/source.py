@@ -13,9 +13,16 @@ needs the default for its ``--max-frames`` CLI default and imports
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Optional, Tuple
+from dataclasses import replace
+from typing import List, Optional, Tuple
 
-from contract.contract import FrameChunk, Header
+from contract.contract import (
+    SCOPE_PER_POINT_PER_FRAME,
+    Channel,
+    FrameChunk,
+    Header,
+    channel_components,
+)
 
 # Display frame cap ------------------------------------------------------------
 #
@@ -162,6 +169,101 @@ class EdgeView:
 
 class DataSource(ABC):
     """Answers the two logical protocol requests (SPEC.md)."""
+
+    # -- the session's channel set: the mods' READ face (P10) ------------------
+    #
+    # A channel is one column, and a provider run REPLACES it. To add to what is
+    # already there — or merely to leave it alone outside its own target — a
+    # provider has to be able to READ it, and it could not: ``give_header()``
+    # reported ``channels=[]`` on the real source ("deferred this increment"), so
+    # `smooth @a` then `smooth @b` ended with @a's offsets zeroed and only @b
+    # moving (measured on adk: A alone 19 points, B afterwards 12 with A stopped).
+    # The mod surface was WRITE-ONLY about derived state.
+    #
+    # The values already live producer-side; only the read face was missing. The
+    # serve loop owns both halves — ``header.channels`` (the declarations, which
+    # ``apply_channel_delta`` appends to in place) and the produced (T, N, C)
+    # blocks — and publishes THOSE OBJECTS here, by reference, once. So there is
+    # ONE truth: what a mod reads is the same list the served header serializes
+    # and the same array the frame stream slices. Nothing is copied and nothing
+    # can drift.
+
+    def attach_session_channels(self, declarations, values) -> None:
+        """Publish the LIVE session channel set onto the mod-facing surface.
+
+        ``declarations`` is the served header's own ``channels`` list and
+        ``values`` the produced-block store, both held BY REFERENCE so a
+        mid-session declaration is visible to the very next mod run without a
+        second publish. Called once by the serve loop; a source used outside it
+        (unit tests, the fixture generators) simply never has it called and
+        reports its own channels, exactly as before."""
+        self._session_channels = declarations
+        self._session_channel_values = values
+
+    def _header_channels(self, own: List[Channel]) -> List[Channel]:
+        """The channel list a ``give_header()`` should report: the source's OWN
+        declarations until the serve loop attaches the session set, and the live
+        session set (own + every mid-session delta) afterwards.
+
+        Every ``give_header`` implementation routes its channel list through
+        here — that is what makes ``data.give_header().channels`` inside a mod
+        the truth instead of a snapshot taken at load. The Channel records are
+        de-aliased (``replace``) so a mod poking at what it reads cannot reach
+        into the served header; the static ``data`` lists inside them are
+        shared, as every other header field already is."""
+        live = getattr(self, "_session_channels", None)
+        return [replace(c) for c in (own if live is None else live)]
+
+    def channel(self, name: str):
+        """The current VALUES of a declared per-point-per-frame channel as a
+        READ-ONLY ``(n_frames, n_points, components)`` float32 array — or
+        ``None`` when nothing of that name is declared.
+
+        This is the accessor an accumulating provider needs: read what is there,
+        overwrite only the rows your target names, return the whole column. The
+        shape is the ``(t, n, c)`` reshape of the flat frame-major block a
+        channel mod returns, so read and write are the same layout.
+
+        SCOPE: per-point-per-frame only, and that is a refusal rather than a
+        ``None`` for the others — a static ``per_point``/``per_frame`` channel
+        carries its values inline on the declaration
+        (``data.give_header().channels``), a different shape with a different
+        meaning, and silently handing back one when the other was asked for is
+        the confusion this whole family of bugs is made of.
+
+        READ-ONLY on purpose: a mod CONSUMES a channel, it does not set one.
+        The only way to write a channel is to return it from a
+        ``produces: channel`` compute, which is validated (length, finiteness,
+        width) before anything is installed. A writable view would route around
+        every one of those checks."""
+        import numpy as np
+
+        decl = next((c for c in self._header_channels([]) if c.name == name), None)
+        if decl is None:
+            return None
+        if decl.scope != SCOPE_PER_POINT_PER_FRAME:
+            raise ValueError(
+                f"data.channel({name!r}): that is a {decl.scope} channel, whose values "
+                f"ride its declaration — read them from data.give_header().channels. "
+                f"data.channel() returns per_point_per_frame values only."
+            )
+        comps = channel_components(decl)
+        t, n = int(self.n_frames), int(self.n_points)  # type: ignore[attr-defined]
+        store = getattr(self, "_session_channel_values", None) or {}
+        arr = store.get(name)
+        if arr is None:
+            # Declared in the HEADER rather than produced mid-session (the
+            # synthetic source's `energy`/`flow`): its values live in the frame
+            # stream and nowhere else, so read them from there. Same shape, same
+            # read-only guarantee — the caller cannot tell the two apart, which
+            # is the point.
+            block = self.give_frames(0, t).channels.get(name)
+            if block is None:
+                return None
+            arr = np.frombuffer(block, dtype="<f4").reshape(t, n, comps)
+        view = np.asarray(arr, dtype="<f4").reshape(t, n, comps).view()
+        view.setflags(write=False)
+        return view
 
     @abstractmethod
     def give_header(self) -> Header:

@@ -175,6 +175,35 @@ nucleic sugar signature — falling back to the current classification test. Tha
 banked Rule #5 (*derive vocabulary at run time, do not trust one system's classification*)
 applied to the same function that already encodes the CA / P / C4' vocabulary.
 
+**⚠ THAT LEAN, IMPLEMENTED NAIVELY, IS WRONG — MEASURED 2026-07-28 before writing it.**
+A pre-implementation probe over the corpus and all three owner systems reproduced the
+table above exactly (BACD 20 anchored + **7** orphans; 10GJ + **1**, `8OG13`) and found a
+**FALSE POSITIVE the lean would have introduced**: the AlphaFold system's `ADP1`. ADP is a
+free ligand that genuinely carries a ribose `C4'`, `O4'`, `O5'`, `O3'` — the whole sugar
+signature — so a structural nucleic test matches it and would thread a LONE LIGAND into a
+backbone polyline. (It matched via `O5'`; its phosphorus atoms are named `PA`/`PB`, not
+`P`.) This is increment 63's lesson repeating: *a proof set of all-bare or all-complete
+residues hides the bug, which lives in the in-between case.*
+
+**The discriminator is POLYMER LINKAGE, not atom inventory — measured:**
+
+| residue | cross-residue bonds in the DRAWN edge list | verdict |
+|---|---|---|
+| `ADP1` (AF cif) | **NONE** — alone in its own chain | a monomer, must get NO anchor |
+| `8OG13` (10GJ) | `DA12–8OG13` and `8OG13–DA14` | in the chain, must get an anchor |
+
+So the structural branches must ALSO require the residue to be covalently attached to a
+sequence-neighbour, which is principled rather than a patch: **a trace is a POLYMER
+backbone, and a residue not bonded to a neighbour is not part of a polymer whatever atoms
+it carries.** `trace_anchor_indices` cannot see linkage (it receives one residue's
+name→index map), so the caller must supply it — and the caller must also supply ELEMENTS,
+since the banked `_signature_kind` rule turns on them: a calcium named `CA` is
+*structurally* unable to be an alpha carbon only if the element is checked.
+
+**Blast radius, RE-MEASURED and much smaller than feared:** every corpus system has
+**ZERO** orphans, so no corpus polyline count, pixel baseline or `acceptance_corpus`
+figure moves. Only the owner's own non-corpus systems gain vertices (BACD +7, 10GJ +1).
+
 **Blast radius, why it is a separate increment:** it changes `header.polylines`, which
 feeds the trace, the ribbon/cartoon, `colortrace`/`tracesize`, and the trace-gap rule from
 increment 54. Any system with a modified residue gains vertices, so E2E pixel baselines
@@ -250,7 +279,82 @@ to an empty set. Do that before assuming it is a one-liner.
 no way to say "hide everything except this" in ONE command today, which is why the intent
 has to be packaged as a `produces: commands` mod.
 
-## P9 addendum — MEASURED: the channel-provider path is broken, two ways
+## P9 addendum — defect 1 CLOSED (root-caused and fixed); defect 2 still open
+
+**Defect 1 was NOT "invoking a channel mod by name is broken".** It was a
+FRAMES request racing the declaration, and the mod's name had nothing to do with
+it. Root cause, evidence and fix are below the original text, which is kept
+because its measurements were right even where its diagnosis was not.
+
+**REPRODUCED** on real adk (3341 atoms, 98 frames) through the command path:
+`ribbon_dir all` then `sasa_field all` →
+`error: frame chunk: channel blocks [ribbon_dir,sasa_field] do not match
+declared per_point_per_frame channels [ribbon_dir]`, twice, in the status bar and
+the console. And DETERMINISTICALLY on the synthetic source, in one JS turn (no
+sleeps, no timing luck): issue the mod's run_mod and a seek to an uncached chunk
+together, so the frames request is necessarily sent after run_mod and before its
+reply can be processed. FIFO does the rest. That is S70.
+
+**ROOT CAUSE.** `webview/main.ts` captured the declared channel set when a frames
+request was SENT and demanded EXACT set equality of the reply, on the reasoning
+(in the code) that *"under the serial-FIFO producer this can only ever equal the
+current set"*. That is false, and this is the whole bug: FIFO orders REPLIES; it
+does not stop a frames request sent before a declaration from being PROCESSED
+after it. A channel mod holds the producer's single loop for the WHOLE of its
+compute — long enough on a real trajectory that ordinary playback issues several
+requests into that window — and each of them queues behind it and comes back
+carrying the block `install_channel` had just stored. The belt then threw a valid
+chunk away, printed
+`channel blocks [...] do not match declared per_point_per_frame channels [...]`
+to the status bar, and left the chunk uncached — so the channel that had just
+announced itself "bindable now" would not bind (`no values in hand for channel
+"x" at the current frame`).
+
+**The by-name/consumer asymmetry in the table below is NOT structural — it is
+TIMING, and this was measured rather than reasoned.** The first hypothesis was
+that both arms fail and the consumer merely hides it (the chunk error goes to the
+status bar, and a successful bind rewrites that line). MEASURED FALSE: with the
+fix removed, `ribbon_dir all` then `live_sasa all` on adk gives 2 chunk errors,
+the status bar still showing the failure, and the consumer failing LOUDLY in the
+terminal —
+
+    live_sasa → command 1 is invalid ("bind polymer.A.1-214 sasa_field
+    tracecolor 0 1 ?palette=bluewhitered"): no values in hand for channel
+    "sasa_field" at the current frame. Nothing ran.
+
+So the consumer is not immune and does not mask anything. Whether either arm
+fails depends only on whether a frames request happened to be issued during that
+mod's compute — which depends on the playhead, the cache and the trajectory
+length, not on how the mod was invoked. The original table caught the defect
+firing in one arm and not the other in one session; the by-name/consumer framing
+it suggested was a coincidence of that session.
+
+**Why it "did not reproduce on the neutral path".** Nothing overlapped there. On
+the synthetic source with playback paused and the working set cached, no frames
+request is ever in flight across a declaration — which is exactly the shape S46
+tests, and why S46 passed throughout. Forcing the overlap reproduces it on
+synthetic in one JS turn (S70).
+
+**FIX** — `contract/contract.{py,ts}` `validate_frame_chunk_against` takes an
+optional SECOND list, and `main.ts` passes both: the reply's channel set must be
+a superset of the epoch at SEND (an old-shape reply arriving late is still an
+error — the S1 seam) and a subset of what is declared at RECEIVE (a block nothing
+declared is still an error). Declarations only ever append, so the producer's set
+at processing time lies between them; a chunk NEWER than its request is precisely
+what `invalidateAll` is refetching for, so it is kept and cached.
+
+**Tests** — `tests/contract.test.ts` + `tests/test_channel_delta.py` (both twins,
+both bounds, plus "the tolerated extra block is still length-checked"), and
+**S70**, which forces the overlap deterministically and asserts on VALUES: the
+chunk is cached, the channel binds, `channelNonZero` is non-zero. Measured red
+without the fix: 4/4 checks fail while the mod's own "declared … bindable now"
+line stays green — a message-level check could not have caught this.
+
+**DEFECT 2 (`spotlight_rainbow`) IS STILL OPEN** and was not investigated here.
+Fixing defect 1 did not obviously fix it: its failure is target-dependent
+staleness, a different mechanism.
+
+## P9 addendum — the ORIGINAL text (measurements right, diagnosis wrong)
 
 Written before this was measured; the numbers now exist and change the priority.
 Reproduced in the real bundle against real adk (3341 atoms, 98 frames), by hand
@@ -285,7 +389,40 @@ Converting it to a contiguous `<f4` block changed nothing — identical error.
 **Not root-caused.** Defect 1 is the one to chase first: it is shipped functionality,
 it is reproducible in one command, and fixing it may well fix defect 2.
 
-## P10 — a mod cannot read an existing channel, so nothing can ACCUMULATE
+## P10 — CLOSED: a mod can now read an existing channel
+
+The lean below was taken almost verbatim. `producer/source.py` gains
+`data.channel(name)` — a declared per-point-per-frame channel's current values as
+a read-only `(n_frames, n_points, components)` float32 array, `None` when
+undeclared — beside `data.labels` and `data.edges`, on the base source so every
+source has it. `give_header().channels` stops lying: it reports the LIVE session
+set, so a channel another mod declared mid-session is visible. The serve loop
+publishes both halves by REFERENCE, once (`attach_session_channels`), so what a
+mod reads is the same list the header serializes and the same array the frame
+stream slices — no second copy to drift.
+
+`mods/smoothing.py` then starts from the column as it stands and overwrites only
+the rows its target names. MEASURED on adk, the same system as the report:
+`smooth @a` → 265 points moving; `smooth @b` → **530**, per-region {a: 265,
+b: 265}. With the read removed: {a: **0**, b: 265} — the reported symptom exactly.
+
+NOT additive, deliberately: an offset is a POSITION, so re-running on the SAME
+region replaces that region (idempotent), which makes `smooth @a ?smoothing=0` a
+targeted off switch. `smooth @a + @b` still works and is still the way to say
+"these, at this level, in one step".
+
+**Tests** — `tests/test_produced_channel_serve.py` (the read face through the
+real serve loop + a two-disjoint-target accumulate proof; 5 checks red without
+the fix) and S52 section F (the SHIPPED `smooth`, asserted on the offset buffer
+at both regions; red without the fix at `one: 0`).
+
+**WHAT REMAINS UNREAD.** This closes channels only. A mod still cannot read a
+colour, a size, an opacity or the displayed frame — the rest of the family this
+entry named. `data.channel` does not reach `per_point`/`per_frame` static
+channels either; it refuses them by name and points at
+`give_header().channels[i].data`, where their values already are.
+
+## P10 — the original entry
 
 Found by the owner: "if I ran smooth on another part of the structure is it supposed to
 override the other thing?" It is, and it cannot do otherwise today.

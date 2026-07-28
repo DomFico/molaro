@@ -20,6 +20,7 @@ from contract.contract import (  # noqa: E402
     Channel,
     ContractError,
     apply_channel_delta,
+    channel_components,
     channel_delta_from_obj,
     channel_delta_to_obj,
     decode_frame_chunk,
@@ -143,11 +144,45 @@ def main() -> int:
         "do not match declared",
     )
     rejects(
-        "post-delta chunk fails the PRE set (never subset-tolerant)",
+        "post-delta chunk fails the PRE set (ONE list is never subset-tolerant)",
         lambda: validate_frame_chunk_against(post_chunk, n_f, n_p, pre_capture),
         "do not match declared",
     )
     check("epoch quadrants: the two valid quadrants validated silently above", True)
+
+    # -- the RECEIVE-side rule: a chunk NEWER than its request epoch (P9) -------
+    # MEASURED on real adk: a frames request issued while a channel mod computes
+    # captures an epoch WITHOUT the channel, and the serial-FIFO producer answers
+    # it AFTER install_channel — so the reply carries a block the epoch never
+    # named. One-list equality rejected that chunk, which is what made a shipped
+    # `produces: channel` mod run BY NAME look broken. Two lists bound the reply
+    # on both sides instead: epoch-at-send <= blocks <= declared-at-receive.
+    validate_frame_chunk_against(post_chunk, n_f, n_p, pre_capture, header.channels)
+    check("a chunk NEWER than its request epoch is ACCEPTED (the P9 arm)", True)
+    validate_frame_chunk_against(pre_chunk, n_f, n_p, pre_capture, header.channels)
+    check("...and a reply built BEFORE the delta still validates on the same pair", True)
+    rejects(
+        "a MISSING required block is still refused (the lower bound bites)",
+        lambda: validate_frame_chunk_against(
+            pre_chunk, n_f, n_p, header.channels, header.channels),
+        "do not match declared",
+    )
+    rejects(
+        "a block nothing declared is still refused (the upper bound bites)",
+        lambda: validate_frame_chunk_against(post_chunk, n_f, n_p, pre_capture, pre_capture),
+        "do not match declared",
+    )
+    wrong_width = [
+        Channel(name=c.name, scope=c.scope, dtype=c.dtype,
+                components=(1 if channel_components(c) == 3 else 3))
+        if c.scope == "per_point_per_frame" else c
+        for c in header.channels
+    ]
+    rejects(
+        "the tolerated extra block is still LENGTH-checked against its declaration",
+        lambda: validate_frame_chunk_against(post_chunk, n_f, n_p, pre_capture, wrong_width),
+        "bytes, expected",
+    )
 
     print("ALL PASS" if failures == 0 else f"{failures} FAILURES")
     return 0 if failures == 0 else 1

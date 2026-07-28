@@ -8593,6 +8593,92 @@ async function S68(): Promise<void> {
   }, "/");
 }
 
+// ====== S70: a frame request that CROSSES a channel declaration (P9) ==========
+// THE DEFECT (reports/PARKED.md P9, measured on real adk before this): invoking a
+// shipped `produces: channel` mod BY NAME reported
+//   error: frame chunk: channel blocks [sasa_field] do not match declared
+//          per_point_per_frame channels []
+// and the channel — which had just announced itself "bindable now" — would not
+// bind. The producer is serial FIFO, so a frames request SENT before a channel
+// mod's declaration can still be PROCESSED after it; the reply then legitimately
+// carries a block the request's epoch never named, and the request-epoch belt
+// threw it away. FIFO orders replies; it does not stop that.
+//
+// WHY S46 NEVER SAW IT, and why this scenario is not a duplicate: S46 pauses
+// playback and runs the mod with the working set already cached, so no frames
+// request is ever in flight across the declaration. The overlap is the whole bug.
+//
+// DETERMINISTIC BY CONSTRUCTION — no sleeps, no timing luck. The run_mod request
+// and a seek to an UNCACHED chunk are issued in ONE JS turn, so the frames
+// request is necessarily sent after run_mod and before the run_mod reply can be
+// processed. FIFO does the rest.
+//
+// ASSERTED ON VALUES, not on the message: the chunk that crossed the declaration
+// must be CACHED, the channel must BIND, and the bound channel must have non-zero
+// values at the displayed frame. Without the fix all three go red (measured:
+// getFrame(140) === null, bind → "no values in hand for channel", channelNonZero
+// → -1) while the mod's own "declared … bindable now" line stays green — which is
+// exactly why a message-level check could not have caught this.
+async function S70(): Promise<void> {
+  console.log("S70 — a frames request that crosses a channel declaration is kept, not dropped");
+  await withDriver(async (d) => {
+    const cmd = (text: string) =>
+      d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+    const statusText = () =>
+      d.evaluate<string>(`(document.getElementById("status") || {}).textContent ?? ""`);
+    // FAR sits outside the prefetch window (chunk 17 of 19 at 8 frames/chunk), so
+    // the seek below is a GUARANTEED cache miss and therefore a real request.
+    const FAR = 140;
+
+    await d.evaluate(`${V}.setPlaying(false)`);
+    await d.evaluate(`${V}.player.seek(0)`);
+    await d.evaluate(`void (window.__chunkErrs = [], (() => { const e = console.error.bind(console);
+      console.error = (...a) => { window.__chunkErrs.push(a.map(String).join(" ")); e(...a); }; })())`);
+    check("S70: (setup) the far chunk is NOT cached, so the seek must hit the wire",
+      (await d.evaluate<boolean>(`${V}.player.getFrame(${FAR}) === null`)));
+
+    // ONE JS turn: the mod's run_mod goes out, then a frames request for the
+    // uncached far chunk. Nothing can process the run_mod reply in between.
+    const fired = await d.evaluate<{ status: string; inFlight: number }>(`(() => {
+      const r = ${V}.command("channel_flow all");
+      ${V}.player.seek(${FAR});
+      return { status: r.status, inFlight: ${V}.player.stats().inFlight };
+    })()`);
+    check("S70: (setup) the mod dispatched AND a frames request went out behind it",
+      fired.status === "ok" && fired.inFlight > 0, JSON.stringify(fired));
+
+    await d.waitFor(`/flow_dir/.test(${V}.command("channels").message)`, 40000)
+      .catch(() => { /* timeout → the checks below go red */ });
+    check("S70: the channel declares mid-session, as it always did",
+      /flow_dir — vector \(3-wide\) · per-frame/.test((await cmd("channels")).message));
+
+    // (1) THE CHUNK SURVIVES. It is newer than its own request epoch — exactly
+    //     the shape invalidateAll is refetching for — so it is cached, not thrown.
+    await d.waitFor(`${V}.player.getFrame(${FAR}) !== null`, 20000).catch(() => {});
+    check("S70: the chunk that crossed the declaration is KEPT (cached, not dropped)",
+      await d.evaluate<boolean>(`${V}.player.getFrame(${FAR}) !== null`),
+      JSON.stringify(await d.evaluate(`${V}.player.stats()`)));
+    check("S70: …and nothing reported a frame-chunk failure",
+      !/frame chunk/.test(await statusText())
+        && (await d.evaluate<string[]>(`window.__chunkErrs`)).every((m) => !/frame chunk/.test(m)),
+      `${await statusText()} | ${JSON.stringify(await d.evaluate(`window.__chunkErrs`))}`);
+
+    // (2) VALUES, at the displayed frame — read BEFORE anything that could
+    //     re-request and paper over a dropped chunk (a later seek re-prefetches
+    //     with a correct epoch and self-heals, which is exactly how a check
+    //     placed after one would pass over the bug).
+    await d.waitFor(`${V}.debug.channelNonZero("flow_dir") > 0`, 20000).catch(() => {});
+    const nz = await d.evaluate<number>(`${V}.debug.channelNonZero("flow_dir")`);
+    check("S70: …and its VALUES are live at the displayed frame (never the -1 sentinel)",
+      nz > 0, `channelNonZero=${nz}`);
+
+    // (3) THE CHANNEL IS USABLE. "bindable now" has to be true, not just said.
+    const bind = await cmd("bind all flow_dir orientation");
+    check("S70: the freshly declared channel actually BINDS (the claim it made)",
+      bind.status === "ok", JSON.stringify(bind));
+  });
+}
+
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
 // ============ S49: the keydown guard, after the hold gesture was removed ======
@@ -9237,6 +9323,43 @@ async function S52(): Promise<void> {
       (await channelsMsg()).includes("smoothing"), await channelsMsg());
     await seekTo(30);
     check("S52: a further seek does not re-displace (truly unbound)", await zeroCopy());
+
+    // -- F: A SECOND REGION DOES NOT STOP THE FIRST (P10) ----------------------
+    // A channel is one column and a provider run rewrites the column, so this
+    // mod used to ZERO every point it was not asked about: `smooth @a` then
+    // `smooth @b` left @a standing still (measured on adk — A alone 19 points,
+    // B afterwards 12 with A stopped). It could not do otherwise, because a mod
+    // could not READ a channel. `data.channel("smoothing")` is that read, and
+    // the provider now starts from the column as it stands and overwrites only
+    // the rows its own target names.
+    //
+    // ON VALUES: the offset buffer at BOTH regions, not the count in a message.
+    // #0-199 is smoothed above; #400-599 here; they are disjoint and 3000 is in
+    // neither. Without the fix the first region's offsets come back exactly 0.
+    const before2nd = await d.evaluate<number>(
+      `${V}.rep.state.offset.slice(0, 600).reduce((a, x) => a + Math.abs(x), 0)`);
+    check("S52: (setup) region 1's offsets are zeroed while unbound",
+      before2nd === 0, `sum=${before2nd}`);
+    const r2 = await cmd(`smooth #400-599 ?smoothing=${SMOOTHING}`);
+    check("S52: a second `smooth` on a DISJOINT region is accepted",
+      r2.status === "ok", JSON.stringify(r2));
+    await d.waitFor(`${V}.command("bindings").message.includes("smoothing")`, 20000);
+    await seekTo(0);
+    await d.waitFor(
+      `${V}.player.getFrame(0) !== null && ${V}.rep.state.offset.slice(1200, 1800).some((x) => Math.abs(x) > 1e-3)`,
+      20000).catch(() => { /* timeout → the checks below go red */ });
+    await rafs();
+    const regions = await d.evaluate<{ one: number; two: number; neither: number }>(`(() => {
+      const off = ${V}.rep.state.offset;
+      const sum = (lo, hi) => { let s = 0; for (let p = lo; p <= hi; p++)
+        s += Math.abs(off[p*3]) + Math.abs(off[p*3+1]) + Math.abs(off[p*3+2]); return s; };
+      return { one: sum(0, 199), two: sum(400, 599), neither: sum(2900, 3099) };
+    })()`);
+    check("S52: the SECOND region is smoothed", regions.two > 1e-2, JSON.stringify(regions));
+    check("S52: …and the FIRST region is STILL smoothed — a run preserves what it did not target",
+      regions.one > 1e-2, JSON.stringify(regions));
+    check("S52: …while a region neither run named stays exactly zero",
+      regions.neither === 0, JSON.stringify(regions));
   });
 }
 
@@ -11736,7 +11859,7 @@ async function S66(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67, S68, S69 };
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67, S68, S69, S70 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -11782,7 +11905,7 @@ const TIER: Record<string, "fast" | "full"> = {
   S48: "full", S49: "full", S67: "full", S68: "full", S69: "full", S50: "full", S51: "full", S52: "full",
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
   S58: "fast", S59: "fast", S60: "fast", S61: "fast", S62: "fast",
-  S63: "fast", S64: "full",
+  S63: "fast", S64: "full", S70: "full",
   // S66 opens a REAL dataset twice (once per inference mode) and pixel-asserts an
   // INFERRED bond. Two real mdtraj loads make it slow, so it rides the full lane
   // — but it is the only scenario in this file that would notice covalent-bond

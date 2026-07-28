@@ -276,6 +276,111 @@ def main() -> int:
           f"scalar[0]={float(np_scalar_block[0])} vec[0,0]={np_vec_block[0, 0].tolist()}")
     validate_frame_chunk(chunk7, header7)
 
+    # == P10: a mod can READ the channel set and a channel's VALUES =============
+    #
+    # Before this, `data.give_header().channels` was hardcoded `[]` on the real
+    # source and a produced channel's values were unreachable from a mod at all.
+    # A provider run therefore REPLACED the whole column and could not do
+    # otherwise: `smooth @a` then `smooth @b` left only @b moving (measured on
+    # adk — A alone 19 points, B afterwards 12 with A stopped). The mod surface
+    # was write-only about derived state.
+    #
+    # Every check below reads through the SAME serve loop a real run uses, so it
+    # exercises the attach seam (serve -> source.attach_session_channels) rather
+    # than a stand-in.
+    src8 = SyntheticSource(n_points=N, n_frames=T, seed=8)
+
+    # A reporting mod: it declares a channel whose values ENCODE what it could
+    # see, so the assertions read data rather than a message.
+    #   [0] number of per_point_per_frame channels give_header() reports
+    #   [1] 1 if "heat8" is among them
+    #   [2] 1 if data.channel("heat8") is not None
+    #   [3] that channel's value at (frame 3, point 2)
+    #   [4] 1 if data.channel("nope") is None
+    #   [5] 1 if data.channel("mass") REFUSES (a per_point channel is not this)
+    #   [6] 1 if the returned view is READ-ONLY
+    reporter = (
+        "def compute(data, target_indices):\n"
+        "    h = data.give_header(); N, T = h.n_points, h.n_frames\n"
+        "    ppf = [c.name for c in h.channels if c.scope == 'per_point_per_frame']\n"
+        "    arr = data.channel('heat8')\n"
+        "    facts = [float(len(ppf)), 1.0 if 'heat8' in ppf else 0.0,\n"
+        "             1.0 if arr is not None else 0.0,\n"
+        "             float(arr[3][2][0]) if arr is not None else -1.0,\n"
+        "             1.0 if data.channel('nope') is None else 0.0]\n"
+        "    try:\n"
+        "        data.channel('mass'); facts.append(0.0)\n"
+        "    except ValueError:\n"
+        "        facts.append(1.0)\n"
+        "    ro = 0.0\n"
+        "    if arr is not None:\n"
+        "        try:\n"
+        "            arr[0][0][0] = 99.0\n"
+        "        except ValueError:\n"
+        "            ro = 1.0\n"
+        "    facts.append(ro)\n"
+        "    vals = [0.0] * (T * N)\n"
+        "    for i, v in enumerate(facts):\n"
+        "        vals[i] = v\n"
+        "    return {'components': 1, 'values': vals}\n"
+    )
+    r8 = _run(src8, [
+        _crun("heat8", _channel_mod("heat8", 1, "f * 0.5 + p * 0.25")),
+        _crun("report", reporter),
+        {"type": "frames", "start": 0, "count": 1},
+    ])
+    check("(setup) the channel to be read declared",
+          "channel" in json.loads(r8[0].decode("utf-8")).get("values", {}),
+          r8[0].decode("utf-8")[:200])
+    check("(setup) the reading mod ran without error",
+          "channel" in json.loads(r8[1].decode("utf-8")).get("values", {}),
+          r8[1].decode("utf-8")[:300])
+    facts = np.frombuffer(decode_frame_chunk(r8[2]).channels["report"], dtype="<f4")
+    check("give_header().channels REPORTS the mid-session declaration to a mod",
+          facts[0] == 3.0 and facts[1] == 1.0,
+          f"ppf count={facts[0]} heat8 present={facts[1]}")
+    check("data.channel(name) hands a mod the channel's VALUES",
+          facts[2] == 1.0 and abs(float(facts[3]) - (3 * 0.5 + 2 * 0.25)) < 1e-6,
+          f"present={facts[2]} value@(f3,p2)={facts[3]} expected={3 * 0.5 + 2 * 0.25}")
+    check("data.channel of an UNDECLARED name is None, not an error",
+          facts[4] == 1.0, str(facts[4]))
+    check("data.channel of a per_point channel REFUSES (it is a different shape)",
+          facts[5] == 1.0, str(facts[5]))
+    check("the view a mod gets is READ-ONLY (a channel is written by returning one)",
+          facts[6] == 1.0, str(facts[6]))
+
+    # -- THE ACCUMULATE PROOF: run 2 preserves run 1's values outside its target
+    # This is the measured P10 symptom, in miniature: two runs of the same
+    # provider on DISJOINT targets. Reading the prior column is what lets the
+    # second run leave the first one's points alone; without the read it can
+    # only zero them, which is `smooth @a` then `smooth @b`.
+    accum = (
+        "def compute(data, target_indices):\n"
+        "    import numpy as np\n"
+        "    h = data.give_header(); N, T = h.n_points, h.n_frames\n"
+        "    prior = data.channel('acc')\n"
+        "    out = (np.zeros((T, N, 1), dtype='<f4') if prior is None\n"
+        "           else np.array(prior, dtype='<f4'))\n"
+        "    for p in target_indices:\n"
+        "        out[:, p, 0] = 7.0\n"
+        "    return {'components': 1, 'values': out}\n"
+    )
+    src9 = SyntheticSource(n_points=N, n_frames=T, seed=9)
+    r9 = _run(src9, [
+        _crun("acc", accum, target=[1, 2, 3]),
+        {"type": "frames", "start": 0, "count": 1},
+        _crun("acc", accum, target=[10, 11]),
+        {"type": "frames", "start": 0, "count": 1},
+    ])
+    first = np.frombuffer(decode_frame_chunk(r9[1]).channels["acc"], dtype="<f4")
+    second = np.frombuffer(decode_frame_chunk(r9[3]).channels["acc"], dtype="<f4")
+    check("run 1 marks exactly its own target",
+          sorted(np.flatnonzero(first).tolist()) == [1, 2, 3],
+          str(np.flatnonzero(first).tolist()))
+    check("run 2 on a DISJOINT target keeps run 1's values — nothing accumulated before",
+          sorted(np.flatnonzero(second).tolist()) == [1, 2, 3, 10, 11],
+          str(np.flatnonzero(second).tolist()))
+
     print("ALL PASS" if failures == 0 else f"{failures} FAILURES")
     return 0 if failures == 0 else 1
 

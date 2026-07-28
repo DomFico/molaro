@@ -405,16 +405,51 @@ export function validateFrameChunk(chunk: FrameChunk, header: Header): void {
  * declared set can grow mid-session, a chunk must be validated against the
  * set AS OF ITS REQUEST — the caller captures `channels` when the request
  * is sent and validates the reply against that capture, so a reply built
- * before a later delta never races the delta's application. Exact set
- * equality is preserved per epoch; nothing is subset-tolerant.
+ * before a later delta never races the delta's application.
  * `channels` may be a full channel list; only its per_point_per_frame
  * entries participate.
+ *
+ * ONE LIST (`allowed` omitted) means EXACT set equality — the producer-side
+ * rule, where the header validated against IS the header the chunk was
+ * encoded from.
+ *
+ * TWO LISTS is the RECEIVE-side rule, and it exists because exact equality
+ * against the request epoch is WRONG for a consumer, measurably: a frames
+ * request issued WHILE a channel mod is computing captures an epoch without
+ * that channel, but the serial-FIFO producer answers it AFTER install, so the
+ * reply legitimately carries a block the epoch never named. Rejecting it is how
+ * a shipped `produces: channel` mod invoked by name came to report
+ * `channel blocks [sasa_field] do not match declared per_point_per_frame
+ * channels []` on a real trajectory (reports/PARKED.md P9). The declared set
+ * only ever GROWS (`applyChannelDelta` appends and refuses duplicates), so the
+ * set the producer held when it processed the request lies BETWEEN the two:
+ *
+ *   - `channels` — declared when the request was SENT. Every one MUST have a
+ *     block: a reply that dropped one is an old-shape reply arriving late,
+ *     which FIFO forbids (the S1 seam).
+ *   - `allowed`  — declared when the reply was RECEIVED. No block may name
+ *     anything outside it: a block for a channel never declared here is a
+ *     genuine protocol violation.
+ *
+ * Between them, an extra block is a chunk NEWER than its request — exactly
+ * the shape the consumer wants after a mid-flight delta, so it is accepted
+ * (and every present block is still length-checked).
+ *
+ * THE HONEST LIMIT: the lower bound is the REQUEST EPOCH, not the producer's
+ * actual set at processing time, because a consumer cannot know which side of a
+ * delta its request was served on. Under the FIFO transport that costs nothing
+ * — a reply built BEFORE a delta is delivered BEFORE the delta's own reply, so
+ * the consumer has not mirrored the delta yet and the two lists are equal. If
+ * the transport is ever made concurrent, a genuinely stale reply would pass
+ * this check; closing THAT needs a generation tag on the wire, not a tighter
+ * rule here.
  */
 export function validateFrameChunkAgainst(
   chunk: FrameChunk,
   nFrames: number,
   nPoints: number,
   channels: Channel[],
+  allowed?: Channel[],
 ): void {
   if (!isInt(chunk.count) || chunk.count < 1) fail("frame chunk: count must be >= 1");
   if (!isInt(chunk.start) || chunk.start < 0 || chunk.start + chunk.count > nFrames) {
@@ -429,17 +464,29 @@ export function validateFrameChunkAgainst(
       `frame chunk: positions block has ${chunk.positions.length} floats, expected ${expectedPos}`,
     );
   }
-  const streamed = channels.filter((c) => c.scope === "per_point_per_frame");
+  const required = channels.filter((c) => c.scope === "per_point_per_frame");
+  const permitted = (allowed ?? channels).filter((c) => c.scope === "per_point_per_frame");
+  const byName = new Map(permitted.map((c) => [c.name, c] as const));
   const got = [...chunk.channels.keys()].sort();
-  const want = streamed.map((c) => c.name).sort();
-  if (got.length !== want.length || got.some((name, i) => name !== want[i])) {
+  // A REQUIRED block that is missing names the request-epoch set (what the reply
+  // was supposed to carry); an UNKNOWN block names the permitted set (what it
+  // was allowed to carry). One-list callers see the original text either way,
+  // because the two sets are then the same list.
+  if (required.some((c) => !chunk.channels.has(c.name))) {
     fail(
       `frame chunk: channel blocks [${got}] do not match declared ` +
-        `per_point_per_frame channels [${want}]`,
+        `per_point_per_frame channels [${required.map((c) => c.name).sort()}]`,
     );
   }
-  for (const ch of streamed) {
-    const arr = chunk.channels.get(ch.name) as Float32Array;
+  if (got.some((name) => !byName.has(name))) {
+    fail(
+      `frame chunk: channel blocks [${got}] do not match declared ` +
+        `per_point_per_frame channels [${[...byName.keys()].sort()}]`,
+    );
+  }
+  for (const name of got) {
+    const ch = byName.get(name)!;
+    const arr = chunk.channels.get(name) as Float32Array;
     const expectedCh = chunk.count * nPoints * channelComponents(ch);
     if (arr.length !== expectedCh) {
       fail(

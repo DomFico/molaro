@@ -132,6 +132,28 @@ name.
 
 ## 2. The seams, enumerated — what I can prove, test, and NOT test
 
+> **CORRECTED AFTER THE FACT (PARKED P9).** The S1 analysis below is right
+> and the belt it specifies is wrong, and the two CONTRADICT EACH OTHER on
+> the very case this paragraph names. "Any `frames` request issued AFTER
+> queues behind the compute and is built from the post-mutation header
+> (new-shape — correct)" — yes. But that request was SENT before the
+> declaration was mirrored, so its captured epoch does NOT name the new
+> channel, and "exact set equality per epoch — never subset-tolerant" (§1)
+> then REJECTS the chunk this paragraph just called correct. Measured on
+> real adk: a channel mod holds the serial loop for the length of its
+> compute, every frames request issued in that window comes back carrying
+> the new block, and the belt threw each one away with
+> `channel blocks [...] do not match declared per_point_per_frame channels
+> [...]` — so a shipped provider run by name looked broken and its
+> just-declared channel would not bind.
+>
+> The belt's rule is now a RANGE, not a point: epoch-at-send ⊆ blocks ⊆
+> declared-at-receive. The "what I cannot test" note below is the reason
+> this survived — the belt was only ever exercised with forged cases at the
+> function level, where the forged "post vs pre" quadrant was ASSERTED to
+> throw. The E2E overlap that the real system produces every time a slow
+> channel mod runs was never constructed until S70.
+
 **S1 — chunk in flight when the declaration lands: impossible by
 construction, and I cannot construct it to test it.** The declaration
 rides the run_mod REPLY. Replies are strictly FIFO with requests, and the

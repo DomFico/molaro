@@ -404,7 +404,11 @@ def validate_frame_chunk(chunk: FrameChunk, header: Header) -> None:
 
 
 def validate_frame_chunk_against(
-    chunk: FrameChunk, n_frames: int, n_points: int, channels: List[Channel]
+    chunk: FrameChunk,
+    n_frames: int,
+    n_points: int,
+    channels: List[Channel],
+    allowed: Optional[List[Channel]] = None,
 ) -> None:
     """Validate a chunk against an EXPLICIT channel list instead of a Header.
 
@@ -412,9 +416,44 @@ def validate_frame_chunk_against(
     set can grow mid-session, a chunk must be validated against the set AS OF
     ITS REQUEST — the caller captures ``channels`` when the request is sent
     and validates the reply against that capture, so a reply built before a
-    later delta never races the delta's application. Exact set equality is
-    preserved per epoch; nothing is subset-tolerant. ``channels`` may be a
+    later delta never races the delta's application. ``channels`` may be a
     full channel list; only its per_point_per_frame entries participate.
+
+    ONE LIST (``allowed`` omitted) means EXACT set equality — the producer-side
+    rule, where the header being validated against IS the header the chunk was
+    encoded from.
+
+    TWO LISTS is the RECEIVE-side rule, and it exists because exact equality
+    against the request epoch is WRONG for a consumer, measurably: a frames
+    request issued WHILE a channel mod is computing captures an epoch without
+    that channel, but the serial-FIFO producer answers it AFTER install, so the
+    reply legitimately carries a block the epoch never named. Rejecting that
+    reply is how a shipped `produces: channel` mod invoked by name came to
+    report `channel blocks [sasa_field] do not match declared
+    per_point_per_frame channels []` on a real trajectory (reports/PARKED.md
+    P9). The declared set only ever GROWS (``apply_channel_delta`` appends and
+    refuses duplicates), so the set the producer held when it processed the
+    request lies BETWEEN the two:
+
+      * ``channels``  — declared when the request was SENT. Every one of these
+        MUST have a block: a reply that dropped one is a genuine old-shape
+        reply arriving late, which FIFO forbids (the S1 seam).
+      * ``allowed``   — declared when the reply was RECEIVED. No block may name
+        anything outside this: a block for a channel the consumer has never
+        heard declared is a genuine protocol violation.
+
+    Between them, an extra block is a chunk that is NEWER than its request —
+    exactly the shape the consumer wants after a mid-flight delta, so it is
+    accepted (and every present block is still length-checked).
+
+    THE HONEST LIMIT: the lower bound is the REQUEST EPOCH, not the producer's
+    actual set at processing time, because a consumer cannot know which side of
+    a delta its request was served on. Under the FIFO transport that costs
+    nothing — a reply built BEFORE a delta is delivered BEFORE the delta's own
+    reply, so the consumer has not mirrored the delta yet and the two lists are
+    equal. If the transport is ever made concurrent, a genuinely stale reply
+    would pass this check; closing THAT needs a generation tag on the wire, not
+    a tighter rule here.
     """
 
     def fail(msg: str) -> None:
@@ -430,18 +469,33 @@ def validate_frame_chunk_against(
     expected_pos = chunk.count * n_points * 3 * 4
     if len(chunk.positions) != expected_pos:
         fail(f"positions block is {len(chunk.positions)} bytes, expected {expected_pos}")
-    streamed = [c for c in channels if c.scope == SCOPE_PER_POINT_PER_FRAME]
-    declared = [c.name for c in streamed]
-    if sorted(chunk.channels.keys()) != sorted(declared):
+    required = [c for c in channels if c.scope == SCOPE_PER_POINT_PER_FRAME]
+    permitted = (
+        required if allowed is None
+        else [c for c in allowed if c.scope == SCOPE_PER_POINT_PER_FRAME]
+    )
+    by_name = {c.name: c for c in permitted}
+    got = sorted(chunk.channels.keys())
+    # A REQUIRED block that is missing names the request-epoch set (what the
+    # reply was supposed to carry); an UNKNOWN block names the permitted set
+    # (what it was allowed to carry). One-list callers see the original text
+    # either way, because the two sets are then the same list.
+    if any(c.name not in chunk.channels for c in required):
         fail(
-            f"channel blocks {sorted(chunk.channels.keys())} do not match declared "
-            f"per_point_per_frame channels {sorted(declared)}"
+            f"channel blocks {got} do not match declared "
+            f"per_point_per_frame channels {sorted(c.name for c in required)}"
         )
-    for ch in streamed:
-        got = len(chunk.channels[ch.name])
+    if any(name not in by_name for name in got):
+        fail(
+            f"channel blocks {got} do not match declared "
+            f"per_point_per_frame channels {sorted(by_name)}"
+        )
+    for name in got:
+        ch = by_name[name]
+        n_bytes = len(chunk.channels[name])
         expected_ch = chunk.count * n_points * channel_components(ch) * 4
-        if got != expected_ch:
-            fail(f"channel {ch.name!r} block is {got} bytes, expected {expected_ch}")
+        if n_bytes != expected_ch:
+            fail(f"channel {ch.name!r} block is {n_bytes} bytes, expected {expected_ch}")
 
 
 # ---------------------------------------------------------------------------

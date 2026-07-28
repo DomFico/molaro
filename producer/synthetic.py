@@ -211,7 +211,10 @@ class SyntheticSource(DataSource):
             subgroups=subgroups,
             edges=edges,
             polylines=polylines,
-            channels=[
+            # Routed through _header_channels so a mid-session declaration joins
+            # this source's OWN four (P10) — before the serve loop attaches its
+            # live set this is byte-identical to returning the list directly.
+            channels=self._header_channels([
                 Channel(
                     name="mass",
                     scope="per_point",
@@ -234,7 +237,7 @@ class SyntheticSource(DataSource):
                 # (min/max are omitted: their semantics for vector channels are
                 # deliberately unstated in v0.1.0.)
                 Channel(name="flow", scope="per_point_per_frame", components=3),
-            ],
+            ]),
         )
 
     def give_frames(self, start: int, count: int) -> FrameChunk:

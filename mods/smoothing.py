@@ -29,10 +29,12 @@
 #
 # WHOLE-SYSTEM CHANNEL, TARGETED EFFORT. A channel's length is always the whole
 # system (n_frames * n_points * 3); `target_indices` only chooses WHICH points
-# are worth smoothing. Points outside the target get a ZERO offset (they stay at
-# their raw position), so binding the channel over `all` displaces exactly the
-# targeted region and leaves everything else untouched. An empty target (a bare
-# `smooth`) smooths every point.
+# are worth smoothing. A point outside the target keeps whatever offset it
+# already had — zero on a first run, so binding the channel over `all` displaces
+# exactly the targeted region and leaves everything else where it was; and on a
+# LATER run, the offset an earlier `smooth` gave it, so smoothing a second region
+# no longer stops the first. An empty target (a bare `smooth`) smooths every
+# point and so rewrites the whole column.
 #
 # EDGE POLICY. The window is CENTERED with half-width `window`: frame t averages
 # frames [t-window, t+window]. Near the ends that range is CLAMPED to
@@ -115,12 +117,33 @@ def compute(data, target_indices, params):
     # The displacement that carries each point from raw onto its windowed mean.
     offset = smoothed - pos  # (t, n, 3); shown = raw + offset = smoothed
 
-    # Zero the offset OUTSIDE the target: same whole-system length, effort only
-    # where asked. An empty target means the whole system (no masking).
+    # OUTSIDE THE TARGET, KEEP WHAT IS ALREADY THERE. A channel is one column and
+    # a provider run rewrites the whole column, so this mod used to ZERO every
+    # point it was not asked about — which meant `smooth @a` then `smooth @b`
+    # ended with @a standing still and only @b moving (measured on adk: A alone
+    # 19 points, B afterwards 12 with A stopped). It could not do otherwise: a
+    # mod could not READ a channel, so there was nothing to preserve onto.
+    # `data.channel` is that read, and this is the whole fix — start from the
+    # column as it stands and overwrite only the rows this target names.
+    #
+    # NOT ADDITIVE, deliberately. Re-running on the SAME target must land on the
+    # same picture rather than double-displacing, and an offset is a POSITION,
+    # not an increment: two 5-frame averages summed is not a 5-frame average. So
+    # targeted rows are REPLACED (idempotent) and untargeted rows are LEFT — which
+    # also makes `smooth @a ?smoothing=0` the way to stop @a alone.
+    #
+    # An empty target means the whole system, so every row is written and there is
+    # nothing to preserve — byte-identical to before for that case.
     if target_indices:
+        prior = data.channel("smoothing")
+        # np.array, never asarray: the view is READ-ONLY and asarray would hand
+        # it straight back whenever the dtypes happened to match.
+        base = (np.zeros((t, n, 3), dtype=np.float64) if prior is None
+                else np.array(prior, dtype=np.float64))
         keep = np.zeros(n, dtype=bool)
         keep[np.asarray(target_indices, dtype=int)] = True
-        offset[:, ~keep, :] = 0.0
+        base[:, keep, :] = offset[:, keep, :]
+        offset = base
 
     # Return the ndarray directly (components=3). install_channel accepts a numpy
     # array and stores it without boxing an N*T*3 Python list.

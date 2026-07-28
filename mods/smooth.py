@@ -8,7 +8,7 @@
 # param: keep boolean false
 # author: Example Author
 # source: https://github.com/DomFico/molaro
-# description: One command to make a region's motion read smoothly instead of jittery — a temporal moving average over the positions. `smooth <region> ?smoothing=N` replaces each targeted point's shown position with the mean of its own positions over N frames — the same number VMD's trajectory-smoothing control shows. 5 averages 5 frames; higher is smoother; 0 is off. An even N rounds down to the nearest odd, because a centred average over an even count cannot be symmetric. Runs the `smoothing` provider on the region, then binds it to the offset axis. RE-RUNNING REPLACES, IT DOES NOT ADD: `smooth @a` then `smooth @b` leaves only @b smoothed. To smooth both, name both in ONE command — `smooth @a + @b` — because the address grammar unions with `+`. Undoable in one step.
+# description: One command to make a region's motion read smoothly instead of jittery — a temporal moving average over the positions. `smooth <region> ?smoothing=N` replaces each targeted point's shown position with the mean of its own positions over N frames — the same number VMD's trajectory-smoothing control shows. 5 averages 5 frames; higher is smoother; 0 is off. An even N rounds down to the nearest odd, because a centred average over an even count cannot be symmetric. Runs the `smoothing` provider on the region, then binds it to the offset axis. IT ACCUMULATES BY REGION: `smooth @a` then `smooth @b` leaves BOTH smoothed, because a region you do not name keeps the smoothing it already had. Re-running on the SAME region replaces that region's smoothing (so `smooth @a ?smoothing=0` stops @a alone, and `smooth all ?smoothing=0` stops everything). Undoable in one step.
 
 # THE MACRO half of the two-mod smoothing pair (like cartoon over ribbon_dir).
 #
@@ -25,18 +25,22 @@
 # default. (This mod does not itself read `smoothing`; it declares it only so the
 # invocation accepts it and it forwards.)
 #
-# WHY A SECOND RUN REPLACES THE FIRST, and why that is not a choice this mod made.
+# WHY A SECOND RUN NO LONGER STOPS THE FIRST.
 #
-# `smoothing` is ONE channel — one column of values — and a provider run REPLACES
-# it. So `smooth @a` then `smooth @b` ends with @a's offsets zeroed and only @b
-# moving. Measured: A alone moves 19 points, B alone moves 12 and A has stopped,
-# `A + B` in one command moves 31 and covers both.
+# `smoothing` is ONE channel — one column of values — and a provider run rewrites
+# the whole column. It used to zero every point it was not asked about, so
+# `smooth @a` then `smooth @b` ended with @a's offsets gone and only @b moving
+# (measured: A alone 19 points, B afterwards 12 with A stopped). That was not a
+# choice: a mod could not READ a channel, so a provider had no way to see what a
+# previous run had smoothed, and nothing to preserve.
 #
-# Accumulating would mean adding to what is already there, and a mod CANNOT read
-# an existing channel: `give_header()` reports `channels=[]`, so a provider has no
-# way to see what a previous run smoothed. There is nothing to add onto. Until a
-# mod can read channel values back, "smooth this as well" has exactly one spelling,
-# and it is the union: `smooth @a + @b`.
+# `data.channel("smoothing")` is that read, and the provider now starts from the
+# column as it stands and overwrites only the rows its target names. So
+# `smooth @a` then `smooth @b` leaves both smoothed, and `smooth @a + @b` — still
+# the way to say "these, at this level, in one step" — remains equivalent for a
+# first run. Re-running on the SAME region replaces that region (it is not
+# additive: an offset is a position, and two averages summed is not an average),
+# which makes `?smoothing=0` a targeted OFF switch.
 #
 # WHY BIND `all`. `smoothing` is a whole-system channel that is ZERO outside the
 # region it was told to smooth, so binding it over `all` displaces exactly that

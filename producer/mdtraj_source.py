@@ -1270,7 +1270,14 @@ class MdtrajSource(DataSource):
             subgroups=self.subgroups,
             edges=self._edge_list,
             polylines=self.polylines,
-            channels=[],  # deferred this increment
+            # The SESSION's channels, not a hardcoded empty list. This source
+            # declares none of its own at load — a trajectory file carries
+            # coordinates, and every channel here is DERIVED by a mod — but the
+            # serve loop attaches its live set (see DataSource._header_channels),
+            # so a mod that calls give_header() mid-session sees every channel
+            # declared so far. It used to see `[]` unconditionally, which is why
+            # nothing could accumulate onto an existing channel (P10).
+            channels=self._header_channels([]),
             # Say what was done to the coordinates, every time — including when
             # nothing was. A mod analysing this trajectory sees exactly these
             # coordinates, so the assistant must be able to read what they are.

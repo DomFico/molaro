@@ -15,10 +15,14 @@
  * delta that obsoletes it (contract/SPEC.md "Channel deltas", note; the S1
  * seam in reports/B3_PHASE0.md). If this transport is ever made concurrent /
  * out-of-order (ids on the wire, parallel producer workers), that proof dies
- * and the request-epoch belt (validateFrameChunkAgainst against the set
- * captured per request in main.ts) becomes the SOLE guarantee — it must
- * already be load-bearing before this invariant is relaxed. Do not add
- * out-of-order correlation here without revisiting that seam.
+ * and the request-epoch belt (validateFrameChunkAgainst in main.ts) becomes
+ * the SOLE guarantee — it must already be load-bearing before this invariant
+ * is relaxed. Do not add out-of-order correlation here without revisiting that
+ * seam. Note what FIFO does NOT give you, and what P9 cost: it orders replies,
+ * it does not stop a frames request SENT before a delta from being PROCESSED
+ * after it. The belt therefore bounds the reply's channel set on both sides
+ * (epoch at send ⊆ blocks ⊆ declared at receive) rather than pinning it to the
+ * epoch alone.
  */
 
 export type ProducerRequest =

@@ -1070,6 +1070,49 @@ carries a `bond inference: …` line whenever inference ran.
 read-only — a mod consumes connectivity, it does not author it. (A mod that
 *authors* edges declares `produces: edges`; that is a different surface.)
 
+#### The channels declared so far, and their values: `data.channel`
+
+```python
+data.give_header().channels        # every channel declared RIGHT NOW, deltas included
+data.channel("smoothing")          # -> read-only (n_frames, n_points, components) float32
+data.channel("nothing_here")       # -> None
+```
+
+`data.give_header().channels` is **live**: a channel another mod declared
+earlier in this session is in that list, not just the ones the dataset loaded
+with. `data.channel(name)` then gives that channel's current **values**, shaped
+`(n_frames, n_points, components)` — the same frame-major layout a
+`produces: channel` mod returns flat, so read and write are one shape. An
+undeclared name is `None`, so `if data.channel(x) is None:` is the test for "has
+anyone computed this yet".
+
+**Why this exists: a channel is one column, and a provider run rewrites the
+column.** Without a read, a second run can only zero whatever the first one did
+— which is exactly what `smooth @a` then `smooth @b` used to do, leaving @a
+standing still (19 points moving, then 12, with the first set stopped). A
+provider that reads first can start from the column as it stands and overwrite
+only the rows its `target_indices` names, which is what `mods/smoothing.py` now
+does:
+
+```python
+prior = data.channel("smoothing")
+base = np.zeros((t, n, 3)) if prior is None else np.array(prior, dtype=np.float64)
+base[:, mask, :] = new_offsets[:, mask, :]      # only the rows this run was asked about
+return {"values": np.ascontiguousarray(base, dtype="<f4"), "components": 3}
+```
+
+Note `np.array`, not `np.asarray`: the view is **read-only**. A mod consumes a
+channel; the only way to write one is to return it from a `produces: channel`
+compute, where the length, finiteness and width checks live. A writable view
+would route around all of them.
+
+**Scope.** `data.channel` answers for `per_point_per_frame` channels only —
+produced ones and any the dataset declared itself, indistinguishably. A static
+`per_point`/`per_frame` channel carries its values inline on its declaration
+(`data.give_header().channels[i].data`), a different shape meaning a different
+thing, so asking `data.channel` for one is a **refusal naming where to look**,
+never a `None` that reads as "not there".
+
 **Index alignment — the load-bearing guarantee.** Point index `i` in header
 order **is** atom index `i` in `traj.topology` **and** column `i` in
 `traj.xyz`. So `target_indices` (header order) can index the trajectory

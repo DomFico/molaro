@@ -24,6 +24,7 @@ import {
   validateFrameChunk,
   validateFrameChunkAgainst,
   validateHeader,
+  type Channel,
   type FrameChunk,
   type Header,
 } from "../contract/contract.ts";
@@ -204,19 +205,70 @@ test("channel deltas: chunks validate against the channel set AS OF THEIR REQUES
   applyChannelDelta(header, parseChannelDelta(deltaScalarRaw));
   applyChannelDelta(header, parseChannelDelta(deltaVectorRaw));
 
-  // the request-epoch rule, all four quadrants, exact set equality:
+  // the ONE-LIST rule, all four quadrants, exact set equality:
   validateFrameChunkAgainst(preChunk, header.n_frames, header.n_points, preCapture); // pre vs pre: ok
   validateFrameChunkAgainst(postChunk, header.n_frames, header.n_points, header.channels); // post vs post: ok
   assert.throws( // pre vs post: the old-shape chunk fails the NEW set by name
     () => validateFrameChunkAgainst(preChunk, header.n_frames, header.n_points, header.channels),
     /channel blocks .* do not match declared/,
   );
-  assert.throws( // post vs pre: never subset-tolerant in either direction
+  assert.throws( // post vs pre: one list is never subset-tolerant in either direction
     () => validateFrameChunkAgainst(postChunk, header.n_frames, header.n_points, preCapture),
     /channel blocks .* do not match declared/,
   );
   // the delegating form still validates against the header's CURRENT set
   validateFrameChunk(postChunk, header);
+});
+
+test("channel deltas: a chunk NEWER than its request epoch is accepted (P9)", () => {
+  // THE MEASURED DEFECT (reports/PARKED.md P9, reproduced on real adk): a frames
+  // request issued while a channel mod computes captures an epoch WITHOUT the
+  // channel; the serial-FIFO producer answers it AFTER install_channel, so the
+  // reply carries a block the epoch never named. Under one-list equality the
+  // consumer threw `channel blocks [ribbon_dir,sasa_field] do not match declared
+  // per_point_per_frame channels [ribbon_dir]` and dropped a perfectly good
+  // chunk — which is what made a shipped provider run BY NAME look broken.
+  const header = parseHeader(headerText);
+  const preCapture = header.channels.slice(); // epoch AT SEND
+  const postChunk = decodeFrameChunk(chunkPostBytes); // reply the producer built AFTER install
+  applyChannelDelta(header, parseChannelDelta(deltaScalarRaw));
+  applyChannelDelta(header, parseChannelDelta(deltaVectorRaw));
+
+  // post vs (pre .. current): ACCEPTED — this is the arm that used to throw.
+  validateFrameChunkAgainst(
+    postChunk, header.n_frames, header.n_points, preCapture, header.channels);
+  // and the same two lists still accept a reply the producer built BEFORE the
+  // delta but that FIFO delivered first (blocks == the epoch exactly)
+  validateFrameChunkAgainst(
+    decodeFrameChunk(chunkBytes), header.n_frames, header.n_points, preCapture, header.channels);
+
+  // BOTH BOUNDS STILL BITE.
+  // (a) a block MISSING for a channel declared when the request was SENT is an
+  //     old-shape reply arriving late — FIFO forbids it, so it stays an error.
+  assert.throws(
+    () => validateFrameChunkAgainst(
+      decodeFrameChunk(chunkBytes), header.n_frames, header.n_points,
+      header.channels, header.channels),
+    /channel blocks .* do not match declared/,
+  );
+  // (b) a block for a channel NOTHING has declared is a protocol violation —
+  //     `allowed` is the upper bound, not a licence for anything at all.
+  assert.throws(
+    () => validateFrameChunkAgainst(
+      postChunk, header.n_frames, header.n_points, preCapture, preCapture),
+    /channel blocks .* do not match declared/,
+  );
+  // (c) the extra block is still LENGTH-checked against its own declaration:
+  //     tolerating the name never means tolerating the bytes.
+  const wrongWidth: Channel[] = header.channels.map((c) =>
+    c.scope === "per_point_per_frame"
+      ? { ...c, components: (c.components === 3 ? 1 : 3) as 1 | 3 }
+      : c);
+  assert.throws(
+    () => validateFrameChunkAgainst(
+      postChunk, header.n_frames, header.n_points, preCapture, wrongWidth),
+    /block has \d+ floats, expected/,
+  );
 });
 
 test("channel deltas: produced values pinned at two (frame, element) sites, both widths", () => {

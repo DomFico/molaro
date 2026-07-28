@@ -4384,19 +4384,33 @@ async function main(): Promise<void> {
     },
     (start, count) => {
       // THE request-epoch belt (B-3, S1 seam): capture the declared channel
-      // set AS OF THIS REQUEST and validate the reply against that capture,
-      // not against `header` (which a delta may have grown between send and
-      // receive). Under the serial-FIFO producer this can only ever equal
-      // the current set — the belt is the guarantee that survives if that
-      // invariant is ever relaxed. A slice() is a per-request snapshot; the
-      // per-flip applier tolerates a chunk lacking a not-yet-declared block.
+      // set AS OF THIS REQUEST. It is the LOWER bound of what the reply may
+      // carry — every channel declared when the request was sent must have a
+      // block, so an old-shape reply arriving after the delta that obsoletes
+      // it is still refused. A slice() is a per-request snapshot; the per-flip
+      // applier tolerates a chunk lacking a not-yet-declared block.
+      //
+      // THE UPPER bound is `header.channels` AT RECEIVE TIME, and it must not
+      // be the same list. The belt used to demand exact equality with the
+      // epoch, on the reasoning that "under the serial-FIFO producer this can
+      // only ever equal the current set". MEASURED FALSE on real adk: a frames
+      // request issued WHILE a channel mod computes captures an epoch without
+      // that channel, and FIFO then answers it AFTER install_channel — so the
+      // reply carries a block the epoch never named, and the belt rejected a
+      // perfectly good chunk with `channel blocks [ribbon_dir,sasa_field] do
+      // not match declared per_point_per_frame channels [ribbon_dir]`. That is
+      // reports/PARKED.md P9: a shipped provider run BY NAME looked broken.
+      // The reply's set lies BETWEEN the two bounds (declarations only ever
+      // append), and a chunk NEWER than its request is exactly what
+      // invalidateAll is refetching for — so it is accepted, and cached.
       const requestedChannels = header.channels.slice();
       transport
         .request({ type: "frames", start, count })
         .then((bytes) => {
           rejectIfErrorPayload(bytes);
           const chunk = decodeFrameChunk(bytes);
-          validateFrameChunkAgainst(chunk, nFrames, header.n_points, requestedChannels);
+          validateFrameChunkAgainst(
+            chunk, nFrames, header.n_points, requestedChannels, header.channels);
           if (!zeroCopyLogged) {
             zeroCopyLogged = true;
             console.log(

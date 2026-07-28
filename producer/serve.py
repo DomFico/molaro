@@ -539,6 +539,15 @@ def serve(source: SyntheticSource, stdin: BinaryIO, stdout: BinaryIO,
     # where arr is a (T, N, C) little-endian float32 numpy array.
     produced: dict = {}
 
+    # P10 — the mods' READ face onto exactly this state. Both objects go by
+    # REFERENCE, once: `header.channels` is the list apply_channel_delta appends
+    # to and header_to_json serializes, and `produced` is the dict every frames
+    # reply slices. So `data.give_header().channels` and `data.channel(name)`
+    # inside a mod are the SAME truth the wire carries — a second copy is how
+    # they would drift. The source still owns no channel state of its own; it
+    # only reads through.
+    source.attach_session_channels(header.channels, produced)
+
     def install_channel(spec: dict) -> dict:
         """Atomically DECLARE + STORE a produced channel; returns the reply
         payload (the declaration + any coherence warning). Fail-closed: any
