@@ -78,7 +78,9 @@ A mod file defines exactly one function:
   would move coordinates), so the two disagree: on a membrane system the topology declares
   50,495 bonds while the viewer draws 173,940, and a custom residue or ligand a file
   declares no bonds for (DMPC, ADP, a phosphorylated residue, a non-standard amino acid)
-  has **nothing** in \`topology.bonds\`. **Any mod reasoning about connectivity — bonded
+  has **nothing** in \`topology.bonds\`. Inference also closes CYCLIC peptides head-to-tail
+  and infers glycosidic and isopeptide links, so a glycan or a ubiquitin conjugate is ONE
+  connected graph on screen while the topology holds loose pieces. **Any mod reasoning about connectivity — bonded
   hydrogen counts, side-chain adjacency, ring detection, contacts — must read
   \`data.edges\`**, or it silently scores those residues as bondless. \`topology.bonds\`
   remains "what the file said"; \`data.edges\` is "what is on screen". Same both-truths

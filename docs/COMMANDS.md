@@ -1053,9 +1053,12 @@ for i, j in data.edges:  # iterable
 `data.trajectory.topology.bonds` is **what the file said**. `data.edges` is
 **what is on screen**, and since covalent-bond inference landed the two are not
 the same list. Inference (`producer/bond_inference.py`) adds the bonds a file
-leaves out — a CONECT-less ligand or lipid, a nucleic `O3'-P` backbone — but it
-deliberately does **not** mutate the topology, because that object is also what a
-mod reads coordinates from and what the periodic-wrapping grouping is built on.
+leaves out — a CONECT-less ligand or lipid, a nucleic `O3'-P` backbone, the
+head-to-tail closure of a cyclic peptide, and the glycosidic and isopeptide links
+that would otherwise leave a glycan or a ubiquitin conjugate in disconnected
+pieces — but it deliberately does **not** mutate the topology, because that object
+is also what a mod reads coordinates from and what the periodic-wrapping grouping
+is built on.
 On the corpus membrane the gap is 50 495 declared bonds against 173 940 drawn.
 
 So a mod that walks `topology.bonds` to reason about connectivity is reasoning
