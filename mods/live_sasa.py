@@ -4,6 +4,8 @@
 # produces: commands
 # requires-channel: sasa_field
 # param: palette string auto
+# param: within number 0
+# param: keep boolean false
 # author: Molaro assistant
 # source: https://github.com/DomFico/molaro
 # description: ONE COMMAND that makes the backbone trace's colour FOLLOW THE TRAJECTORY by solvent accessibility — it binds the per-frame `sasa_field` channel to the trace's colour axis, and a bound axis re-derives on every frame flip, so a residue that buries itself darkens as it does. The provider runs automatically. It MATCHES its static twin `cartoon ?colorby=sasa`: both read through the same diverging blue-white-red ramp with HIGH = RED. It replaces the trace COLOUR and nothing else — no widths, no shapes, no orientation: run `cartoon` for the look, then this to animate the colour (it also stands alone; the trace draws as a tube by default). TARGET-SCOPED: `live_sasa polymer.A` animates that chain only. `?palette=<name>` overrides the ramp (`palettes` lists them). Colouring one target with this and another with `live_ss` puts two different quantities through one ramp in one picture, with nothing on screen to tell them apart.
@@ -60,6 +62,24 @@ def _ranges(nums):
 
 
 def compute(data, target_indices, params=None):
+    # `?within=<d>` re-targets to the NEIGHBOURHOOD of what you named, whole
+    # subgroups at a time; `?keep=true` brings the target itself along. The distance
+    # is in the SCENE'S COORDINATE UNITS — one implementation, one unit, shared with
+    # the built-in `create_sele`/`hide` flags (producer/source.py `neighborhood`).
+    # 0 (the default) means "the target itself" and costs nothing.
+    _p = params or {}
+    try:
+        _within = float(_p.get("within", 0.0))
+    except (TypeError, ValueError):
+        raise ValueError(f'live_sasa: within must be a distance in scene units, got "{_p.get("within")}".')
+    if _within < 0:
+        raise ValueError(f"live_sasa: within must be a positive distance, got {_within}.")
+    _keep = _p.get("keep", False)
+    if not isinstance(_keep, bool):
+        raise ValueError(f'live_sasa: keep must be true or false, got "{_keep}".')
+    if _within > 0:
+        target_indices = data.neighborhood(target_indices, _within, _keep)
+
     # `params` is None for a RAW caller; the viewer always forwards the complete
     # effective set with every declared default filled in.
     params = params or {}

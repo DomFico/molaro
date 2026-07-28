@@ -138,63 +138,6 @@ FALLBACK = "pink"
 
 
 
-def _residue_atoms(top, indices):
-    """Every atom of every residue that any of `indices` belongs to (`byres`)."""
-    residues = {top.atom(int(i)).residue.index for i in indices}
-    return {a.index for r in residues for a in top.residue(r).atoms}
-
-
-def _around(data, target_indices, distance, keep=False):
-    """Atoms near the target, WHOLE RESIDUES AT A TIME.
-
-    A radius through raw atoms cuts residues in half — you get the two side-chain
-    carbons that happen to fall inside 5 A and not the rest of the ring, which reads
-    as damage rather than as a neighbourhood. So the shell is expanded with `byres`:
-    a residue with ANY atom in range comes in ENTIRELY. That is what PyMOL's
-    `byres (all within 5 of sel)` does and what people mean by "around".
-
-    `scope` decides whether the thing you named comes along, and it is applied at
-    RESIDUE grain too — otherwise excluding "the target atoms" would leave the rest
-    of the target's own residue behind, which is the same half-a-residue artefact
-    one level up:
-      exclude (default) — the neighbourhood WITHOUT the target's own residues.
-      include           — the neighbourhood AND the target's residues, whole.
-
-    MEASURED AT FRAME 0, which is a real limitation rather than an oversight: a mod
-    is never told which frame is displayed (the run_mod request carries code, target,
-    params and nothing else — reports/PARKED.md P9). Correct for a binding site,
-    wrong for anything that diffuses. Re-run after scrubbing to re-measure.
-    """
-    import numpy as np
-    from scipy.spatial import cKDTree
-
-    traj = data.trajectory
-    if traj is None:
-        raise RuntimeError(
-            "?around needs a trajectory-backed dataset with coordinates and a "
-            "topology; the synthetic source has neither."
-        )
-    sel = sorted({int(i) for i in target_indices})
-    if not sel:
-        raise ValueError(
-            "?around needs a target to be around — bare `?around` would mean "
-            '"everything except everything". Name a selection, a residue or a chain.'
-        )
-    top = traj.topology
-    xyz = np.asarray(traj.xyz[0], dtype=np.float64)
-    hits = cKDTree(xyz).query_ball_point(xyz[sel], distance)
-    near = _residue_atoms(top, {int(j) for group in hits for j in group})
-    own = _residue_atoms(top, sel)
-    near = (near | own) if keep else (near - own)
-    if not near:
-        raise ValueError(
-            f"?within={distance} found no residues within {distance} of the "
-            f"target (measured at frame 0). Try a larger radius, or "
-            f"?keep=true to keep the target itself."
-        )
-    return sorted(near)
-
-
 _PDB_EXTS = (".pdb", ".ent", ".pdb1")
 _CIF_EXTS = (".cif", ".mmcif")
 
@@ -1279,7 +1222,7 @@ def compute(data, target_indices, params):
     if not isinstance(keep, bool):
         raise ValueError(f'licorice: keep must be true or false, got "{keep}".')
     if within > 0:
-        target_indices = _around(data, target_indices, within, keep)
+        target_indices = data.neighborhood(target_indices, within, keep)
 
     idx = list(target_indices) if target_indices else list(range(n))
 

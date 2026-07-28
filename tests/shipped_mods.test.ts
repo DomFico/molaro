@@ -37,6 +37,8 @@ const EXPECTED = [
   "ribbon_dir",
   "sasa_field",
   "show_res",
+  "smooth",
+  "smoothing",
   "ss_field",
 ] as const;
 
@@ -85,7 +87,7 @@ test("the shipped set is CLOSED under requires-channel", () => {
   const consumers = all.filter((m) => m.requiresChannel);
   // Guards the guard: if the roster ever loses every consumer this test would
   // pass vacuously, which would hide exactly the regression it exists for.
-  assert.ok(consumers.length >= 3, `expected shipped consumers, got ${consumers.length}`);
+  assert.ok(consumers.length >= 4, `expected shipped consumers, got ${consumers.length}`);
 
   for (const m of consumers) {
     const provider = supplied.get(m.requiresChannel!);
@@ -127,18 +129,18 @@ test("the mods listing hides machinery, names how many, and keeps the rest", () 
 
   assert.deepEqual(
     machinery.map((m) => m.name).sort(),
-    ["ribbon_dir", "sasa_field", "ss_field"],
+    ["ribbon_dir", "sasa_field", "smoothing", "ss_field"],
     "the three channel providers are the machinery",
   );
   assert.deepEqual(
     shown.map((m) => m.name).sort(),
-    ["cartoon", "hide_res", "licorice", "live_sasa", "live_ss", "show_res"],
+    ["cartoon", "hide_res", "licorice", "live_sasa", "live_ss", "show_res", "smooth"],
     "what remains listed is exactly the mods a person invokes",
   );
 
   // Guards the guard: if `requires-channel` were ever dropped from the consumers,
   // NOTHING would be classed as machinery and this would pass by listing all six.
-  assert.equal(machinery.length, 3, "machinery must be detected, not vacuously empty");
+  assert.equal(machinery.length, 4, "machinery must be detected, not vacuously empty");
 });
 
 test("a channel mod NOBODY requires is NOT hidden", () => {

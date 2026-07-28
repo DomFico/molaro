@@ -6,6 +6,8 @@
 # param: colorby choice chain ss rainbow bfactor plddt occupancy hydrophobicity sasa rmsf charge polarity flat
 # param: color color auto
 # param: style choice ribbon tube
+# param: within number 0
+# param: keep boolean false
 # author: Molaro assistant
 # source: https://github.com/DomFico/molaro
 # description: The cartoon view — the backbone TRACE widened by each stretch's majority secondary structure and coloured by `?colorby`: `chain` (default; one hue per chain, shade per SS class), `ss` (PyMOL's cbss triple), `rainbow` (residue order per chain), `bfactor`, `plddt` (AlphaFold's four published bands; opt-in, never inferred), `occupancy`, `hydrophobicity`, `sasa`, `rmsf`, `charge`, `polarity`, `flat`. Continuous schemes share ONE diverging blue-white-red ramp, HIGH = RED. NUCLEIC residues are drawn too, at ONE uniform width — there is no DSSP for a nucleic acid and none is invented — so a protein/DNA complex gets one coherent picture with the widths carrying the protein's secondary structure and the nucleic backbone a plain cord. The four schemes that are AMINO-ACID concepts (`ss`, `hydrophobicity`, `charge`, `polarity`) colour the protein and leave the nucleic part unscored grey, and refuse outright when there is no protein to colour; the rest work on both. `?color=<c>` REPLACES a scheme's automatic variation — every chain that colour, classes as shades of it, a ramp white->it — and is refused, with a reason, on `plddt` and `rainbow`. `?style=ribbon` (default) binds `ribbon_dir` and draws oriented strips (protein: the carbonyl face; nucleic: the base-plane face); `?style=tube` draws round cords. The cross-section is SCENE-LEVEL, so a mixed complex cannot have protein ribbons and nucleic tubes at once — pick one for the whole picture. These colours are STATIC — one picture for the whole run; for colour that follows the trajectory, run `live_sasa` (or `live_ss`). Band widths are ANGSTROM globals at the top of the file. It writes the TRACE only — no atom, no bond, no camera.
@@ -1285,6 +1287,24 @@ def _rmsf_per_residue(traj, top, header, ridxs, scheme):
 
 # ================================== the mod ==================================
 def compute(data, target_indices, params=None):
+    # `?within=<d>` re-targets to the NEIGHBOURHOOD of what you named, whole
+    # subgroups at a time; `?keep=true` brings the target itself along. The distance
+    # is in the SCENE'S COORDINATE UNITS — one implementation, one unit, shared with
+    # the built-in `create_sele`/`hide` flags (producer/source.py `neighborhood`).
+    # 0 (the default) means "the target itself" and costs nothing.
+    _p = params or {}
+    try:
+        _within = float(_p.get("within", 0.0))
+    except (TypeError, ValueError):
+        raise ValueError(f'cartoon: within must be a distance in scene units, got "{_p.get("within")}".')
+    if _within < 0:
+        raise ValueError(f"cartoon: within must be a positive distance, got {_within}.")
+    _keep = _p.get("keep", False)
+    if not isinstance(_keep, bool):
+        raise ValueError(f'cartoon: keep must be true or false, got "{_keep}".')
+    if _within > 0:
+        target_indices = data.neighborhood(target_indices, _within, _keep)
+
     # `params` is None for a RAW caller (a harness invoking compute directly); the
     # viewer always forwards the complete effective set with every declared default
     # filled in, which is why `?color` needs the literal `auto` sentinel for "unset".

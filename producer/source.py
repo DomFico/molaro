@@ -236,6 +236,80 @@ class DataSource(ABC):
             self._label_view = view
         return view
 
+    def neighborhood(self, indices, distance, keep=False):
+        """Points near ``indices``, grown to WHOLE SUBGROUPS. THE one implementation.
+
+        WHY THIS IS HERE AND NOT COPIED INTO EACH MOD. It was pasted into three mods
+        first, and the unit was wrong in all three at once — `?within=5` meant 5 A in
+        a mod and 5 scene units in the built-in `create_sele`/`hide`, an 18x-211x
+        difference the owner caught by looking at the screen. Four more mods wanted
+        the same helper. Seven copies of a distance rule is a standing invitation to
+        that bug, so there is now one copy and one unit.
+
+        ``distance`` is in the SCENE'S COORDINATE UNITS — the same number the
+        built-in flags take, deliberately, so one flag name means one thing. For an
+        mdtraj-backed source that is nanometres.
+
+        BYRES BY SUBGROUP, matching the neutral tier exactly: the viewer's own
+        ``subgroup_id`` is the grouping, not the topology's residue table, so a mod
+        and the built-in cannot disagree about what "whole" means. A radius through
+        raw points cuts a subgroup in half, which reads as damage rather than as a
+        neighbourhood.
+
+        ``keep`` decides whether the named target comes along, applied at SUBGROUP
+        grain too — excluding only the named points would strand the rest of their
+        subgroup, which is the same half-a-subgroup artefact one level up.
+
+        MEASURED AT FRAME 0, and that is a real limitation rather than an oversight:
+        a mod is never told which frame is displayed (the run request carries code,
+        target, parameters and nothing else). Correct for a static site, wrong for
+        anything that diffuses; re-run after scrubbing to re-measure. The built-in
+        flags DO measure at the displayed frame, so the two agree only at frame 0
+        until that field exists.
+        """
+        import numpy as np
+
+        traj = self.trajectory
+        if traj is None:
+            raise RuntimeError(
+                "?within needs a coordinate-backed dataset; this source has none."
+            )
+        sel = sorted({int(i) for i in indices})
+        if not sel:
+            raise ValueError(
+                "?within needs a target to be around — bare `?within` would mean "
+                '"everything except everything". Name a selection or a region.'
+            )
+        if not (distance > 0):
+            raise ValueError(
+                f"?within must be a positive distance in scene units, got {distance}."
+            )
+        sub = self.give_header().points.subgroup_id
+        xyz = np.asarray(traj.xyz[0], dtype=np.float64)
+
+        try:
+            from scipy.spatial import cKDTree
+            hits = cKDTree(xyz).query_ball_point(xyz[sel], float(distance))
+            near_pts = {int(j) for group in hits for j in group}
+        except ImportError:                      # scipy is an mdtraj dependency, but
+            d2 = float(distance) ** 2            # never make the fallback a surprise
+            near_pts = {
+                int(j) for j in range(len(sub))
+                if ((xyz[j] - xyz[sel]) ** 2).sum(axis=1).min() <= d2
+            }
+
+        own_subs = {sub[i] for i in sel}
+        near_subs = {sub[j] for j in near_pts}
+        wanted = (near_subs | own_subs) if keep else (near_subs - own_subs)
+        out = sorted(i for i in range(len(sub)) if sub[i] in wanted)
+        if not out:
+            raise ValueError(
+                f"?within={distance} found nothing within {distance} scene units of "
+                "the target (measured at frame 0). Try a larger radius, or "
+                "?keep=true to keep the target itself."
+            )
+        return out
+
     @property
     def edges(self) -> EdgeView:
         """The connectivity the viewer DRAWS, in header edge order — see
