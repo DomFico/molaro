@@ -8373,6 +8373,24 @@ async function S69(): Promise<void> {
       narrow > 0 && narrow < 3341, `narrow=${narrow}`);
     check("S69: a bare invocation WIDENS the channel — it is not treated as unchanged",
       all > narrow, `narrow=${narrow} bare=${all}`);
+
+    // ---- and a PARAMETER change refreshes too --------------------------------
+    // Same target (both bare), different level. Comparing only targets missed
+    // this: `smooth ?smoothing=1` then `?smoothing=10` re-bound the first one's
+    // numbers and reported success. Asserted on the VALUES, because the message
+    // was already right — the offsets must actually get bigger.
+    const magnitude = () => d.evaluate<number>(`(() => {
+      const b = ${V}.debug.channelSum ? ${V}.debug.channelSum("smoothing") : -1;
+      return b; })()`);
+    check("S69: a light smoothing is accepted", (await cmd("smooth ?smoothing=3")).status === "ok");
+    await sleep(6000);
+    const light = await magnitude();
+    check("S69: (setup) the light run produced a real magnitude", light > 0, `light=${light}`);
+    check("S69: a heavier smoothing is accepted", (await cmd("smooth ?smoothing=21")).status === "ok");
+    await sleep(6000);
+    const heavy = await magnitude();
+    check("S69: changing ?smoothing REFRESHES the provider — same target, new level",
+      heavy > light * 1.2, `light=${light} heavy=${heavy}`);
   }, "/");
 }
 

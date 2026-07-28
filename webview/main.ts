@@ -2710,6 +2710,25 @@ async function main(): Promise<void> {
    * tests/channel_mirror.test.ts enforces.
    */
   const channelTargetByName = new Map<string, Int32Array>();
+  /** What PARAMETERS the live channel's values were computed with — the target's
+   * sibling. A target-dependent provider is stale when the target moves; a
+   * PARAMETERISED one is equally stale when the level moves, and comparing only
+   * targets missed it: two bare `smooth ?smoothing=1` then `?smoothing=10` runs
+   * have the same (empty) target, so the second re-bound the first one's numbers
+   * and reported success. Keyed by channel name, written at the same one site. */
+  const channelParamsByName = new Map<string, string>();
+  /** Canonical signature of the values a provider's DECLARED parameters took, so
+   * the record and the staleness test compare the same thing. Restricted to the
+   * provider's own names: a consumer parameter the provider does not declare
+   * cannot change the channel, so it must not force a recompute. */
+  const paramSignature = (
+    declared: readonly { name: string }[] | undefined,
+    values: Record<string, unknown> | undefined,
+  ): string => JSON.stringify(
+    (declared ?? [])
+      .map((d) => [d.name, values?.[d.name] ?? null] as const)
+      .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+  );
   /** Canonical form of a resolved target: sorted, de-duplicated indices. */
   /** The whole system, as a target. Real point indices are >= 0, so -1 cannot
    * collide with a genuine one. */
@@ -3219,6 +3238,7 @@ async function main(): Promise<void> {
     delta: Channel,
     points: readonly number[],
     warning?: string,
+    params?: Record<string, unknown>,
   ): void => {
     const existing = header.channels.find((c) => c.name === delta.name);
     if (!existing) {
@@ -3230,6 +3250,7 @@ async function main(): Promise<void> {
     // must move with it. One write site covers both a hand-typed provider run
     // and a sequenced one, so the two can never disagree.
     channelTargetByName.set(delta.name, canonicalTarget(points));
+    channelParamsByName.set(delta.name, paramSignature(mod.params, params));
     // REDO CANNOT CROSS THIS. A declaration is not an op — it records nothing and
     // is not undoable — but ops already walked back may have READ this channel's
     // values, and a re-declaration replaces those values in place. Replaying them
@@ -3457,7 +3478,7 @@ async function main(): Promise<void> {
           // the declaration into THIS header so the channel becomes bindable
           // with no reload — the conversational property. Declaring is not
           // binding; the user binds it to an axis afterwards.
-          declareProducedChannel(mod, checked.channel, points, checked.warning);
+          declareProducedChannel(mod, checked.channel, points, checked.warning, params);
           return true;
         } else if ("edges" in checked) {
           // produces: edges — MID-SESSION LIVE AUTHORING (this ends the former
@@ -3528,8 +3549,16 @@ async function main(): Promise<void> {
       // does not recompute — ALL_TARGET equals ALL_TARGET — which was the original
       // objection to dropping the guard, and it is answered by canonicalisation
       // rather than by refusing to compare.
-      const staleForThisTarget = liveChannel &&
-        !sameTarget(channelTargetByName.get(mod.requiresChannel!), canonicalTarget(points));
+      // Resolve the provider BEFORE deciding staleness — resolveChannelDependency
+      // is a pure static analysis (it runs nothing), and the test needs to know
+      // which of the consumer's parameters would reach the provider.
+      const preDep = mod.requiresChannel ? resolveChannelDependency(mod, listRecipes()) : null;
+      const preProvider = preDep && "provider" in preDep ? getRecipe(preDep.provider) : null;
+      const wouldForward = preProvider && preProvider.kind === "analysis" ? preProvider.params : undefined;
+      const staleForThisTarget = liveChannel && (
+        !sameTarget(channelTargetByName.get(mod.requiresChannel!), canonicalTarget(points)) ||
+        channelParamsByName.get(mod.requiresChannel!) !== paramSignature(wouldForward, params)
+      );
       if (mod.requiresChannel && (!liveChannel || staleForThisTarget)) {
         const dep = resolveChannelDependency(mod, listRecipes());
         if ("error" in dep) {
@@ -4672,6 +4701,17 @@ async function main(): Promise<void> {
             if (nz) n++;
           }
           return n;
+        },
+        /** Total absolute magnitude of a declared channel's block. A second seam
+         * beside channelNonZero: COUNT witnesses a target change, MAGNITUDE
+         * witnesses a level change, and the parameter bug moved only the latter. */
+        channelSum: (name: string): number => {
+          const chunk = player.getFrame(displayedFrame);
+          const block = chunk?.channels?.get(name);
+          if (!chunk || !block) return -1;
+          let t = 0;
+          for (let i = 0; i < block.length; i++) t += Math.abs(block[i]);
+          return t;
         },
         /** number of points currently green (pending-target footprint). */
         selCount: (): number => {
