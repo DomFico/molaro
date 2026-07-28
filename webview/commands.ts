@@ -63,6 +63,7 @@ import {
   resolveParameters,
   type AnalysisMod,
   type Mod,
+  type ModParam,
   type ParamValue,
   type RecipeOrigin,
   channelConsumers,
@@ -1613,33 +1614,129 @@ export function applyScalarsToAxis(
 export const PALETTE_OPTION = "palette";
 
 /**
- * Split a bake/bind argument list into its POSITIONAL head and its trailing
- * `?key=value` OPTION block, then resolve the one option there is.
+ * How one verb's `?key=value` block WORDS its refusals. The grammar is shared
+ * (`splitParamBlock`); only the vocabulary differs, because a mod calls these
+ * "parameters" while bake/bind call their one the "option". Kept as message
+ * text rather than a noun so every refusal stays greppable verbatim.
+ */
+export interface ParamDiction {
+  /** follows `${label}: ` when a `?` segment is empty. */
+  empty: string;
+  /** follows `${label}: ` when a segment carries no `=`. */
+  notKeyValue: (seg: string) => string;
+}
+
+/** The mod/`?param` diction — "parameter", each is ?key=value. */
+const PARAM_DICTION: ParamDiction = {
+  empty: "empty parameter — each is ?key=value",
+  notKeyValue: (seg) => `parameter "${seg}" must be key=value`,
+};
+
+/** One `?key=value` segment, already split and unwrapped. `quoted` records
+ * whether the value arrived as a single fully-quoted region — bake/bind's
+ * one-word rule fires only on an UNQUOTED value, so the distinction has to
+ * survive the split. */
+export interface ParamSegment {
+  key: string;
+  value: string;
+  quoted: boolean;
+}
+
+/**
+ * THE shared `?key=value` grammar for every verb that takes one — mods
+ * (`<mod> <target> ?k=v`), bake/bind's `?palette=`, and the neighbourhood
+ * flags on create_sele/hide. Splits a verb's argument string into its
+ * POSITIONAL head and the parameter segments after the first UNQUOTED `?`.
  *
  * WHY THE `?` SIGIL. `?` is a RESERVED character in the address grammar
- * (address.ts RESERVED — `token()` throws on it and `parseTarget` errors),
- * so an unquoted `?` can never occur inside a target expression: the split
- * point is collision-proof, which is exactly the property mod parameters
- * (`<mod> <target> ?k=v`) already rely on. And because the option is NAMED,
- * it cannot be confused with the optional trailing `<min> <max>` pair or
- * misread as the `<axis>`/`<channel>` word — a BARE trailing palette name
- * would be taken by the back-to-front word walk as the axis, reporting a
- * baffling "no channel named color". Positional ambiguity is impossible
- * here, not merely unlikely.
+ * (address.ts RESERVED — `token()` throws on it and `parseTarget` errors), so
+ * an unquoted `?` can never occur inside a target expression: the split point
+ * is collision-proof rather than heuristic.
  *
- * FAIL-CLOSED, in the shape parseModParams uses — including BOTH of its
- * quote guards (dropping either inverts the grammar's own quoting
- * convention): an unbalanced `"` is rejected loudly before the split (an
- * unclosed quote would silently swallow the `?option` into the target), and
- * a single fully-quoted value unwraps (so `?palette="gray"` names gray, not
- * `"gray"`). An empty segment, a segment without `=`, an unknown key, a
- * repeated key, an unregistered palette name, or a value carrying trailing
- * words is an error naming what was expected — never a silent default,
- * since a silently-ignored palette means the user's chosen coloring quietly
- * isn't what they asked for. The trailing-words refusal exists because the
- * value swallows to the end of its `?` segment: `?palette=gray 0 2.5` must
- * blame the ORDER (the option comes last), never a palette name the user
- * did not type.
+ * FAIL-CLOSED, with both quote guards (dropping either inverts the grammar's
+ * own quoting convention): an unbalanced `"` is rejected loudly BEFORE the
+ * split (an unclosed quote would silently swallow the `?block` into the
+ * target), and a single fully-quoted value unwraps (so `?palette="gray"` names
+ * gray, not `"gray"`) — but only when there is no interior quote, so `"a" "b"`
+ * is not mangled to `a" "b`; a stray interior `"` survives to the caller's
+ * coercion, which refuses it.
+ *
+ * What this does NOT decide, deliberately: duplicate keys, unknown keys, and
+ * value validity. Those checks fire in a DIFFERENT ORDER on the two surfaces
+ * that existed before this was factored out (a mod refuses a duplicate before
+ * an unknown name, because unknown names are resolveParameters' job at the
+ * end; bake/bind refuses an unknown option first), and each caller's refusal
+ * text is pinned by tests. So each caller keeps its own short loop over these
+ * segments and the shared part is exactly what is genuinely identical.
+ *
+ * The head is returned RAW (untrimmed) — bake/bind hands it to a trailing-word
+ * walk that trims for itself, the schema path trims. With no unquoted `?` the
+ * head is the whole argument string and `segs` is empty.
+ */
+export function splitParamBlock(
+  label: string,
+  args: string,
+  diction: ParamDiction,
+): { head: string; segs: ParamSegment[] } | CommandResult {
+  // With an ODD quote count the `?` may sit inside the unclosed quote and
+  // never split — the block would silently vanish into the target. Reject
+  // before splitting; a legal invocation always has balanced quotes.
+  if (((args.match(/"/g) ?? []).length) % 2 !== 0) {
+    return { status: "error", message: `${label}: unbalanced '"' in the invocation` };
+  }
+  const parts = splitOnUnquoted(args, "?");
+  const segs: ParamSegment[] = [];
+  for (let i = 1; i < parts.length; i++) {
+    const seg = parts[i].trim();
+    if (seg === "") return { status: "error", message: `${label}: ${diction.empty}` };
+    const eq = seg.indexOf("=");
+    if (eq < 0) return { status: "error", message: `${label}: ${diction.notKeyValue(seg)}` };
+    const key = seg.slice(0, eq).trim();
+    let value = seg.slice(eq + 1).trim();
+    let quoted = false;
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"') &&
+        value.indexOf('"', 1) === value.length - 1) {
+      value = value.slice(1, -1);
+      quoted = true;
+    }
+    segs.push({ key, value, quoted });
+  }
+  return { head: parts[0], segs };
+}
+
+/** bake/bind's diction: they have exactly ONE option, so every refusal names
+ * it rather than talking about "parameters" in general. */
+const PALETTE_DICTION: ParamDiction = {
+  empty: `empty option — the option is ?${PALETTE_OPTION}=<name>`,
+  notKeyValue: (seg) => `option "${seg}" must be key=value — ?${PALETTE_OPTION}=<name>`,
+};
+
+/**
+ * Split a bake/bind argument list into its POSITIONAL head and its trailing
+ * `?key=value` OPTION block (the shared `splitParamBlock` grammar — same
+ * collision-proof `?` boundary, same two quote guards), then resolve the one
+ * option there is.
+ *
+ * Because the option is NAMED, it cannot be confused with the optional
+ * trailing `<min> <max>` pair or misread as the `<axis>`/`<channel>` word — a
+ * BARE trailing palette name would be taken by the back-to-front word walk as
+ * the axis, reporting a baffling "no channel named color". Positional
+ * ambiguity is impossible here, not merely unlikely.
+ *
+ * FAIL-CLOSED throughout: an empty segment, a segment without `=`, an unknown
+ * key, a repeated key, an unregistered palette name, or a value carrying
+ * trailing words is an error naming what was expected — never a silent
+ * default, since a silently-ignored palette means the user's chosen coloring
+ * quietly isn't what they asked for. The trailing-words refusal exists because
+ * the value swallows to the end of its `?` segment: `?palette=gray 0 2.5` must
+ * blame the ORDER (the option comes last), never a palette name the user did
+ * not type.
+ *
+ * The per-segment checks stay HERE rather than in the shared splitter because
+ * their ORDER is load-bearing and differs from the schema path's: an unknown
+ * option is refused before a duplicate one, whereas a mod refuses a duplicate
+ * first and leaves unknown names to resolveParameters at the end. Both orders
+ * are pinned by tests; the shared part is exactly what is identical.
  *
  * Returns the head text plus the palette name, NORMALIZED: an explicitly
  * named default resolves to `undefined` so "on the default" has one
@@ -1649,27 +1746,11 @@ function splitPaletteOption(
   verb: string,
   args: string,
 ): { head: string; palette: string | undefined } | CommandResult {
-  // parseModParams' unbalanced-quote rejection, verbatim: with an odd quote
-  // count the `?` may sit inside the unclosed quote and never split — the
-  // option would silently vanish into the target. Reject before splitting.
-  if (((args.match(/"/g) ?? []).length) % 2 !== 0) {
-    return { status: "error", message: `${verb}: unbalanced '"' in the invocation` };
-  }
-  const segs = splitOnUnquoted(args, "?");
-  if (segs.length === 1) return { head: args, palette: undefined };
+  const block = splitParamBlock(verb, args, PALETTE_DICTION);
+  if ("status" in block) return block;
   let palette: string | undefined;
   let seen = false;
-  for (let i = 1; i < segs.length; i++) {
-    const seg = segs[i].trim();
-    if (seg === "") {
-      return { status: "error", message: `${verb}: empty option — the option is ?${PALETTE_OPTION}=<name>` };
-    }
-    const eq = seg.indexOf("=");
-    if (eq < 0) {
-      return { status: "error", message: `${verb}: option "${seg}" must be key=value — ?${PALETTE_OPTION}=<name>` };
-    }
-    const key = seg.slice(0, eq).trim();
-    let value = seg.slice(eq + 1).trim();
+  for (const { key, value, quoted } of block.segs) {
     if (key !== PALETTE_OPTION) {
       return {
         status: "error",
@@ -1680,12 +1761,7 @@ function splitPaletteOption(
       return { status: "error", message: `${verb}: option "${key}" given twice` };
     }
     seen = true;
-    // parseModParams' single-fully-quoted unwrap, verbatim (no interior
-    // quote), so quoting a value follows the grammar's one convention.
-    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"') &&
-        value.indexOf('"', 1) === value.length - 1) {
-      value = value.slice(1, -1);
-    } else if (/\s/.test(value)) {
+    if (!quoted && /\s/.test(value)) {
       // The value swallowed trailing words — an out-of-order option
       // (`?palette=gray 0 2.5`, or the option typed before the target).
       // Blame the ORDER, not a palette name the user never typed.
@@ -1705,7 +1781,7 @@ function splitPaletteOption(
     // canonical: the default is stored as "no palette named"
     palette = value === DEFAULT_PALETTE_NAME ? undefined : value;
   }
-  return { head: segs[0], palette };
+  return { head: block.head, palette };
 }
 
 /** The bake/bind SHARED argument front half: strip the trailing `?option`
@@ -2428,54 +2504,57 @@ export function makeAnalysisModHandler(ctx: CommandContext, mod: AnalysisMod): C
   };
 }
 
-/** Split a mod invocation `<target> ?k=v ?k2=v2` into its target expression and
- * its resolved parameter set (defaults filled, types coerced, all validated
- * against the mod's declared schema — the SHARED resolveParameters). Fail-closed:
- * an unknown/malformed/wrong-typed/missing parameter is a CommandResult error and
- * nothing runs. `params` is undefined when the mod declares none and none were
- * passed (the two-arg call path). Exported for the invocation test. */
+/**
+ * THE schema-driven `?param` entrance: split a verb invocation
+ * `<positional head> ?k=v ?k2=v2` into its head expression and its resolved
+ * parameter set (defaults filled, types coerced, all validated against the
+ * declared schema — the SHARED resolveParameters).
+ *
+ * Generalized past mods deliberately: the schema is a plain `ModParam[]`, and
+ * `resolveParameters` never knew what a mod was, so a BUILT-IN verb declaring
+ * its own parameters (create_sele/hide's neighbourhood flags) goes through the
+ * exact same grammar, the exact same coercion, and the exact same fail-closed
+ * refusals as a mod's `?params`. One parameter facility for the whole command
+ * layer, not one per verb family.
+ *
+ * Fail-closed: an unknown/malformed/wrong-typed/missing/duplicated parameter is
+ * a CommandResult error and nothing runs. `params` is absent when the schema is
+ * empty and none were passed (the two-arg call path a paramless mod relies on).
+ *
+ * Check ORDER is load-bearing and preserved from the mod path: a DUPLICATE key
+ * is refused during the walk, an UNKNOWN key at the end by resolveParameters
+ * (which names the declared set). bake/bind's one option refuses in the
+ * opposite order and keeps its own loop — see splitPaletteOption.
+ */
+export function parseVerbParams(
+  label: string,
+  params: readonly ModParam[],
+  args: string,
+): { expr: string; params?: Record<string, ParamValue> } | CommandResult {
+  const block = splitParamBlock(label, args, PARAM_DICTION);
+  if ("status" in block) return block;
+  const passed = new Map<string, unknown>();
+  for (const { key, value } of block.segs) {
+    if (passed.has(key)) {
+      return { status: "error", message: `${label}: parameter "${key}" given twice` };
+    }
+    passed.set(key, value);
+  }
+  const resolved = resolveParameters(params, passed);
+  if (!resolved.ok) return { status: "error", message: `${label}: ${resolved.error}` };
+  return {
+    expr: block.head.trim(),
+    ...(Object.keys(resolved.values).length ? { params: resolved.values } : {}),
+  };
+}
+
+/** The mod-shaped adapter over parseVerbParams — a mod's label is its name and
+ * its schema is its declared params. Exported for the invocation test. */
 export function parseModParams(
   mod: AnalysisMod,
   args: string,
 ): { expr: string; params?: Record<string, ParamValue> } | CommandResult {
-  // An unbalanced `"` would silently let an unclosed quote in a value swallow the
-  // following `?param` (there is no escape). Reject it loudly instead — a legal
-  // invocation always has balanced quotes (paired label / value delimiters).
-  if (((args.match(/"/g) ?? []).length) % 2 !== 0) {
-    return { status: "error", message: `${mod.name}: unbalanced '"' in the invocation` };
-  }
-  const segs = splitOnUnquoted(args, "?");
-  const expr = segs[0].trim();
-  const passed = new Map<string, unknown>();
-  for (let i = 1; i < segs.length; i++) {
-    const seg = segs[i].trim();
-    if (seg === "") {
-      return { status: "error", message: `${mod.name}: empty parameter — each is ?key=value` };
-    }
-    const eq = seg.indexOf("=");
-    if (eq < 0) {
-      return { status: "error", message: `${mod.name}: parameter "${seg}" must be key=value` };
-    }
-    const key = seg.slice(0, eq).trim();
-    let value = seg.slice(eq + 1).trim();
-    // Unwrap ONLY a single fully-quoted region (no interior quote), so a value
-    // may hold a `?` or edge spaces when quoted, while `"a" "b"` is NOT mangled
-    // to `a" "b`. A stray interior `"` survives to coerceValue, which refuses it.
-    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"') &&
-        value.indexOf('"', 1) === value.length - 1) {
-      value = value.slice(1, -1);
-    }
-    if (passed.has(key)) {
-      return { status: "error", message: `${mod.name}: parameter "${key}" given twice` };
-    }
-    passed.set(key, value);
-  }
-  const resolved = resolveParameters(mod.params ?? [], passed);
-  if (!resolved.ok) return { status: "error", message: `${mod.name}: ${resolved.error}` };
-  return {
-    expr,
-    ...(Object.keys(resolved.values).length ? { params: resolved.values } : {}),
-  };
+  return parseVerbParams(mod.name, mod.params ?? [], args);
 }
 
 /** The refusal that follows a mod-emitted COMMAND (not the caller): `rm` and
