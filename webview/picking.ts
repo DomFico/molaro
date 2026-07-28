@@ -336,11 +336,37 @@ export function selectionBounds(
 
 /**
  * Neighbor subgroups: subgroups (drawn from `candidatePoints`) with any point
- * within `radius` of any selected point. Brute-force radius query; acceptable
- * over the non-bulk population at current scales. A spatial index (uniform grid
- * / k-d tree) is the future optimization if this gets slow.
+ * within `radius` of any selected point — the query behind the `?within=`
+ * neighbourhood flag on create_sele/hide.
  *
- * @param candidatePoints  point indices to consider (e.g. all non-bulk points).
+ * INDEXED, not brute force, and that is load-bearing rather than decorative.
+ * The original was the obvious double loop, O(|selected| x |candidates|), with
+ * a note deferring the index. Measured on synthetic uniform scenes (bare Node
+ * against this module, median of 3-5) before wiring it to a verb:
+ *
+ *                                          double loop    uniform grid
+ *     N=50 000,  |sel|=2 000                   249 ms          2.0 ms
+ *     N=222 227, |sel|=200                     111 ms          6.3 ms
+ *     N=222 227, |sel|=2 000                   853 ms          7.9 ms
+ *     N=222 227, |sel|=2 000, wide radius      443 ms         10.5 ms
+ *
+ * The command layer runs this on the main thread, so 853 ms is a visible
+ * freeze of the renderer AND the terminal. The early `break` in the double
+ * loop only helps when something IS in range: a SMALL radius on a big scene --
+ * the common `?within=` case -- short-circuits nothing and pays the full
+ * product, which is why the worst column is the realistic one.
+ *
+ * THE CELL-SIZE TRAP, pinned here because it is re-discoverable: sizing cells
+ * at exactly `radius` allocates (extent/radius)^3 cells, which for a small
+ * radius on a large scene is not slow but FATAL -- r=0.001 over a 5-unit box
+ * asks for 1.25e11 cells and dies on `new Int32Array` with `RangeError: Array
+ * buffer allocation failed`. The cell size is therefore FLOORED so the grid
+ * stays ~O(candidates) cells regardless of radius. Correctness survives the
+ * floor because the 27-cell neighbourhood covers the query sphere for ANY
+ * cell >= radius; a floored (larger) cell just puts more candidates in each
+ * bucket, which the exact distance test then rejects.
+ *
+ * @param candidatePoints  point indices to consider.
  * @param subgroupOfPoint  subgroup id per point index.
  * @param selfSubgroups    subgroups already in the selection (excluded).
  */
@@ -352,27 +378,99 @@ export function neighborSubgroups(
   selfSubgroups: Set<number>,
   radius: number,
 ): number[] {
-  const r2 = radius * radius;
   const found = new Set<number>();
   const nSel = selectedIndices.length;
   const nCand = candidatePoints.length;
-  for (let ci = 0; ci < nCand; ci++) {
-    const cp = candidatePoints[ci];
-    const sub = subgroupOfPoint[cp];
-    if (selfSubgroups.has(sub) || found.has(sub)) continue;
-    const x = positions[cp * 3];
-    const y = positions[cp * 3 + 1];
-    const z = positions[cp * 3 + 2];
-    for (let si = 0; si < nSel; si++) {
-      const sp = selectedIndices[si];
-      const dx = positions[sp * 3] - x;
-      const dy = positions[sp * 3 + 1] - y;
-      const dz = positions[sp * 3 + 2] - z;
-      if (dx * dx + dy * dy + dz * dz <= r2) {
-        found.add(sub);
-        break;
+  if (nSel === 0 || nCand === 0) return [];
+  // A negative radius squared the same as its magnitude in the double loop;
+  // keep that, and size cells off the magnitude so the floor stays sane.
+  const r = Math.abs(radius);
+  const r2 = r * r;
+
+  // -- bounds over the CANDIDATES (the set being indexed) ---------------------
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < nCand; i++) {
+    const p = candidatePoints[i] * 3;
+    const x = positions[p], y = positions[p + 1], z = positions[p + 2];
+    if (x < minX) minX = x;
+    if (x > maxX) maxX = x;
+    if (y < minY) minY = y;
+    if (y > maxY) maxY = y;
+    if (z < minZ) minZ = z;
+    if (z > maxZ) maxZ = z;
+  }
+
+  // -- cell size: >= radius (correctness) and floored (the trap above) --------
+  const ext = Math.max(maxX - minX, maxY - minY, maxZ - minZ, 1e-9);
+  const cell = Math.max(r, ext / Math.max(1, Math.cbrt(2 * nCand)), 1e-9);
+  const nx = Math.max(1, Math.ceil((maxX - minX) / cell) + 1);
+  const ny = Math.max(1, Math.ceil((maxY - minY) / cell) + 1);
+  const nz = Math.max(1, Math.ceil((maxZ - minZ) / cell) + 1);
+  const nCells = nx * ny * nz;
+
+  // -- bucket the candidates: counting sort into a CSR-style pair of arrays,
+  // so the index is two flat typed arrays and never nCells sub-arrays --------
+  const starts = new Int32Array(nCells + 1);
+  const cellOf = new Int32Array(nCand);
+  for (let i = 0; i < nCand; i++) {
+    const p = candidatePoints[i] * 3;
+    const ix = Math.min(nx - 1, Math.max(0, Math.floor((positions[p] - minX) / cell)));
+    const iy = Math.min(ny - 1, Math.max(0, Math.floor((positions[p + 1] - minY) / cell)));
+    const iz = Math.min(nz - 1, Math.max(0, Math.floor((positions[p + 2] - minZ) / cell)));
+    const c = (iz * ny + iy) * nx + ix;
+    cellOf[i] = c;
+    starts[c + 1]++;
+  }
+  for (let c = 0; c < nCells; c++) starts[c + 1] += starts[c];
+  const items = new Int32Array(nCand);
+  const cursor = starts.slice(0, nCells);
+  for (let i = 0; i < nCand; i++) items[cursor[cellOf[i]]++] = candidatePoints[i];
+
+  // -- query: each selected point tests only its 27 neighbouring cells --------
+  for (let si = 0; si < nSel; si++) {
+    const sp = selectedIndices[si] * 3;
+    const x = positions[sp], y = positions[sp + 1], z = positions[sp + 2];
+    const ix = Math.floor((x - minX) / cell);
+    const iy = Math.floor((y - minY) / cell);
+    const iz = Math.floor((z - minZ) / cell);
+    for (let dz = -1; dz <= 1; dz++) {
+      const kz = iz + dz;
+      if (kz < 0 || kz >= nz) continue;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ky = iy + dy;
+        if (ky < 0 || ky >= ny) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const kx = ix + dx;
+          if (kx < 0 || kx >= nx) continue;
+          const c = (kz * ny + ky) * nx + kx;
+          for (let t = starts[c]; t < starts[c + 1]; t++) {
+            const cp = items[t];
+            const sub = subgroupOfPoint[cp];
+            if (selfSubgroups.has(sub) || found.has(sub)) continue;
+            const q = cp * 3;
+            const ddx = positions[q] - x;
+            const ddy = positions[q + 1] - y;
+            const ddz = positions[q + 2] - z;
+            neighborPairTests++;
+            if (ddx * ddx + ddy * ddy + ddz * ddz <= r2) found.add(sub);
+          }
+        }
       }
     }
   }
   return [...found];
+}
+
+let neighborPairTests = 0;
+
+/** Exact point-pair distance tests neighborSubgroups has performed — the
+ * instrument that proves the spatial index is load-bearing rather than
+ * decorative. The double loop it replaced performs |selected| x |candidates|
+ * of these in the worst case (nothing in range, so nothing short-circuits);
+ * the grid performs a small multiple of the occupied 27-cell neighbourhoods.
+ * A test asserts the gap, so reverting to brute force fails a test rather
+ * than only a stopwatch. Counted INSIDE the loop so it cannot drift. */
+export function neighborPairTestCount(): number {
+  return neighborPairTests;
 }

@@ -5,7 +5,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { neighborSubgroups, pickElement, pickPoint, selectionBounds } from "../webview/picking.ts";
+import {
+  neighborPairTestCount,
+  neighborSubgroups,
+  pickElement,
+  pickPoint,
+  selectionBounds,
+} from "../webview/picking.ts";
 import type { PickGeometry } from "../webview/picking.ts";
 
 /**
@@ -211,6 +217,155 @@ test("neighborSubgroups finds nearby subgroups, excludes self", () => {
     2,
   );
   assert.deepEqual(out.sort(), [1]);
+});
+
+// -- the spatial index behind `?within=` ---------------------------------------
+// neighborSubgroups was a double loop, O(|selected| x |candidates|), carrying a
+// note deferring the index. Wiring it to a VERB made the deferral expensive:
+// measured on synthetic uniform scenes, N=222 227 with |sel|=2 000 and a small
+// radius took 853 ms on the main thread (the common case -- a small radius
+// short-circuits nothing, so the early `break` never fires). The grid does the
+// same query in 7.9 ms. These tests pin correctness against a brute-force
+// oracle, pin the allocation trap, and pin that the index is actually doing the
+// work rather than sitting there.
+
+/** The double loop this replaced, verbatim in behaviour — the oracle. */
+function neighborSubgroupsBrute(
+  positions: Float32Array,
+  selectedIndices: ArrayLike<number>,
+  candidatePoints: ArrayLike<number>,
+  subgroupOfPoint: ArrayLike<number>,
+  selfSubgroups: Set<number>,
+  radius: number,
+): number[] {
+  const r2 = radius * radius;
+  const found = new Set<number>();
+  for (let ci = 0; ci < candidatePoints.length; ci++) {
+    const cp = candidatePoints[ci];
+    const sub = subgroupOfPoint[cp];
+    if (selfSubgroups.has(sub) || found.has(sub)) continue;
+    const x = positions[cp * 3], y = positions[cp * 3 + 1], z = positions[cp * 3 + 2];
+    for (let si = 0; si < selectedIndices.length; si++) {
+      const sp = selectedIndices[si];
+      const dx = positions[sp * 3] - x;
+      const dy = positions[sp * 3 + 1] - y;
+      const dz = positions[sp * 3 + 2] - z;
+      if (dx * dx + dy * dy + dz * dz <= r2) {
+        found.add(sub);
+        break;
+      }
+    }
+  }
+  return [...found];
+}
+
+/** Deterministic PRNG so a failure is reproducible, never "it passed last time". */
+function lcg(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+}
+
+function randomScene(n: number, membersPerSub: number, extent: number, seed: number) {
+  const rnd = lcg(seed);
+  const positions = new Float32Array(n * 3);
+  const subgroupOfPoint = new Int32Array(n);
+  for (let p = 0; p < n; p++) {
+    positions[p * 3] = rnd() * extent;
+    positions[p * 3 + 1] = rnd() * extent;
+    positions[p * 3 + 2] = rnd() * extent;
+    subgroupOfPoint[p] = Math.floor(p / membersPerSub);
+  }
+  return { positions, subgroupOfPoint };
+}
+
+test("neighborSubgroups: the grid agrees with the brute-force oracle, over many scenes", () => {
+  // Randomized differential test across radii that span the cell size: below
+  // it (the floored-cell path), around it, and well above it (many cells per
+  // query). An off-by-one in the 27-cell walk shows up as a missing subgroup.
+  for (let seed = 1; seed <= 25; seed++) {
+    const n = 400 + (seed % 7) * 130;
+    const { positions, subgroupOfPoint } = randomScene(n, 5 + (seed % 4), 10, seed);
+    const selected: number[] = [];
+    for (let i = 0; i < 1 + (seed % 17); i++) selected.push((seed * 37 + i * 11) % n);
+    const candidates: number[] = [];
+    for (let p = 0; p < n; p++) candidates.push(p);
+    const selfSubs = new Set<number>(selected.map((s) => subgroupOfPoint[s]));
+    for (const radius of [0, 0.01, 0.25, 1, 2.5, 9, 100]) {
+      const got = neighborSubgroups(positions, selected, candidates, subgroupOfPoint, selfSubs, radius);
+      const want = neighborSubgroupsBrute(positions, selected, candidates, subgroupOfPoint, selfSubs, radius);
+      assert.deepEqual(
+        [...got].sort((a, b) => a - b),
+        [...want].sort((a, b) => a - b),
+        `seed ${seed}, n ${n}, radius ${radius}`,
+      );
+    }
+  }
+});
+
+test("neighborSubgroups: a SPARSE candidate subset indexes only itself", () => {
+  // The index is built over `candidatePoints`, not over every point — a point
+  // outside the candidate set must never be returned even when it is nearest.
+  const { positions, subgroupOfPoint } = randomScene(600, 3, 8, 99);
+  const candidates: number[] = [];
+  for (let p = 0; p < 600; p += 7) candidates.push(p);
+  const selected = [1, 2, 3];
+  const selfSubs = new Set<number>(selected.map((s) => subgroupOfPoint[s]));
+  for (const radius of [0.5, 2, 6]) {
+    assert.deepEqual(
+      neighborSubgroups(positions, selected, candidates, subgroupOfPoint, selfSubs, radius).sort((a, b) => a - b),
+      neighborSubgroupsBrute(positions, selected, candidates, subgroupOfPoint, selfSubs, radius).sort((a, b) => a - b),
+      `radius ${radius}`,
+    );
+  }
+});
+
+test("neighborSubgroups: a TINY radius on a large extent does not blow the allocator", () => {
+  // THE TRAP, armed so it cannot be re-discovered: cells sized at exactly
+  // `radius` need (extent/radius)^3 of them. At r=0.001 over a 5-unit box that
+  // is 1.25e11 cells and `new Int32Array` throws
+  //   RangeError: Array buffer allocation failed
+  // — not slow, dead. The floored cell size is what makes this a no-op.
+  const { positions, subgroupOfPoint } = randomScene(5_000, 4, 5, 7);
+  const candidates: number[] = [];
+  for (let p = 0; p < 5_000; p++) candidates.push(p);
+  assert.doesNotThrow(() => {
+    const out = neighborSubgroups(positions, [0, 1, 2], candidates, subgroupOfPoint, new Set([0]), 0.001);
+    assert.ok(Array.isArray(out));
+  });
+  // and a radius of exactly zero, the degenerate floor
+  assert.doesNotThrow(() => neighborSubgroups(positions, [0], candidates, subgroupOfPoint, new Set(), 0));
+});
+
+test("neighborSubgroups: the index is LOAD-BEARING — the double loop fails this", () => {
+  // Deterministic proof, not a stopwatch: count the exact distance tests. The
+  // double loop performs |selected| x |candidates| of them whenever nothing is
+  // in range (a small radius short-circuits neither the `break` nor the
+  // `found.has` skip) — that is the case built here, so the bound below is the
+  // one number that separates an index from no index.
+  const n = 40_000;
+  const nSel = 500;
+  const { positions, subgroupOfPoint } = randomScene(n, 6, 40, 4242);
+  const candidates: number[] = [];
+  for (let p = 0; p < n; p++) candidates.push(p);
+  const selected: number[] = [];
+  for (let i = 0; i < nSel; i++) selected.push(i * 7 % n);
+  const selfSubs = new Set<number>(selected.map((s) => subgroupOfPoint[s]));
+
+  const before = neighborPairTestCount();
+  const got = neighborSubgroups(positions, selected, candidates, subgroupOfPoint, selfSubs, 0.001);
+  const tests = neighborPairTestCount() - before;
+
+  // nothing is in range at r=0.001, so the brute force would pay the full
+  // product and short-circuit nothing.
+  assert.deepEqual(got, [], "the probe is only meaningful when nothing is in range");
+  const bruteWorstCase = nSel * n; // 20 000 000
+  assert.ok(
+    tests < bruteWorstCase / 100,
+    `expected the grid to test far fewer than the ${bruteWorstCase} pairs the double loop would; got ${tests}`,
+  );
+  // and it must still be doing real work — a query that tested NOTHING would
+  // pass the bound above while being silently broken.
+  assert.ok(tests > 0, "the query performed no distance tests at all");
 });
 
 // -- pick state does not leak between calls -----------------------------------
