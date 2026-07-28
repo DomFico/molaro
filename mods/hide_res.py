@@ -7,7 +7,7 @@
 # param: opacity number 0.0
 # author: Molaro assistant
 # source: https://github.com/DomFico/molaro
-# description: Hide a target's ATOMS AND ITS BONDS in one stroke — one Ctrl+Z puts it all back. Fades the points to opacity 0 and every edge with AT LEAST ONE endpoint in the target, which is the same rule the renderer itself uses for a hidden point ("edges drop when either endpoint hides"), so the bonds joining the target to its neighbours go too instead of dangling into nothing. Bare `hide_res`, with no target, hides EVERYTHING — the same "no target means all" rule `cartoon` uses — and `show_res` or one Ctrl+Z brings it back. This is a REPRESENTATION change, not the built-in `hide`: it writes opacity and creates NO selection, so hiding twenty residues one at a time leaves your selection list exactly as it was. The trace is deliberately untouched, so a cartoon keeps its ribbon while the side chains go — hide the atoms, keep the fold.
+# description: Hide a target's ATOMS AND ITS BONDS in one stroke — one Ctrl+Z puts it all back. Fades the points to opacity 0 and every edge with AT LEAST ONE endpoint in the target, which is the same rule the renderer itself uses for a hidden point ("edges drop when either endpoint hides"), so the bonds joining the target to its neighbours go too instead of dangling into nothing. Bare `hide_res`, with no target, hides EVERYTHING — the same "no target means all" rule `cartoon` uses — and `show_res` or one Ctrl+Z brings it back. This is a REPRESENTATION change, not the built-in `hide`: it writes opacity and creates NO selection, so hiding twenty residues one at a time leaves your selection list exactly as it was. The trace is deliberately untouched, so a cartoon keeps its ribbon while the side chains go — hide the atoms, keep the fold. `?within=<d>` re-targets to the NEIGHBOURHOOD of what you named, whole residues at a time, and `?keep=true` brings the target itself along. THE DISTANCE IS IN THE SCENE'S COORDINATE UNITS — the same number the built-in `create_sele`/`hide` flags take, so one flag name means one thing everywhere; for an mdtraj-backed source that is nanometres, so a 5 A shell is `?within=0.5`.
 
 # WHY THIS EXISTS WHEN `hide` ALREADY DOES SOMETHING SIMILAR.
 #
@@ -43,9 +43,6 @@
 HIDDEN_OPACITY = 0.0
 
 
-# Angstrom -> nanometre. The viewer's coordinates are nm (mdtraj's unit); `?around`
-# is stated in ANGSTROM because that is what a structural biologist types.
-ANGSTROM_NM = 0.1
 
 
 def _residue_atoms(top, indices):
@@ -92,13 +89,13 @@ def _around(data, target_indices, distance, keep=False):
         )
     top = traj.topology
     xyz = np.asarray(traj.xyz[0], dtype=np.float64)
-    hits = cKDTree(xyz).query_ball_point(xyz[sel], distance * ANGSTROM_NM)
+    hits = cKDTree(xyz).query_ball_point(xyz[sel], distance)
     near = _residue_atoms(top, {int(j) for group in hits for j in group})
     own = _residue_atoms(top, sel)
     near = (near | own) if keep else (near - own)
     if not near:
         raise ValueError(
-            f"?within={distance} found no residues within {distance} A of the "
+            f"?within={distance} found no residues within {distance} of the "
             f"target (measured at frame 0). Try a larger radius, or "
             f"?keep=true to keep the target itself."
         )
@@ -162,9 +159,9 @@ def compute(data, target_indices, params=None):
     try:
         within = float(params.get("within", 0.0))
     except (TypeError, ValueError):
-        raise ValueError(f'hide_res: around must be a number of angstroms, got "{{params.get("around")}}".')
+        raise ValueError(f'hide_res: around must be a distance in scene coordinate units, got "{{params.get("around")}}".')
     if within < 0:
-        raise ValueError(f"hide_res: around must be a positive distance in angstroms, got {{around}}.")
+        raise ValueError(f"hide_res: around must be a positive distance in scene coordinate units, got {{around}}.")
     keep = params.get("keep", False)
     if not isinstance(keep, bool):
         raise ValueError(f'hide_res: scope must be "exclude" or "include", got "{{scope}}".')

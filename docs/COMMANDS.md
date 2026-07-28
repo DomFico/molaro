@@ -326,8 +326,10 @@ show_res <target> ?opacity=<0..1> ?within=<d> ?keep=<bool>
 Points and every edge with at least one endpoint in the target — the renderer's own
 rule for a hidden point. Unlike the built-in `hide`, these write **opacity** and commit
 **no selection**, so hiding twenty residues one at a time leaves your selection list
-untouched. No target means everything. `?within` here expands by whole residues and is
-measured at **frame 0** — a mod is not told which frame is displayed.
+untouched. No target means everything. `?within` here expands by whole residues, takes the SAME
+unit as the built-in flag (scene coordinate units — nm for an mdtraj source, so a
+5 Å shell is `?within=0.5`), and is measured at **frame 0** — a mod is not told
+which frame is displayed.
 
 ## Creating selections: `create_sele`
 
@@ -355,9 +357,13 @@ full address grammar above (any term kind, any union); no new syntax.
   hide        <target>        ?within=<distance> ?keep=<bool> ?frame=<current|N>
   ```
 
-  - **`?within`** is the radius, in the contract's coordinate units. It is
-    **required** once the block is typed — there is deliberately no default,
-    because a sensible radius is a property of the data, not of the grammar.
+  - **`?within`** is the radius, **in the scene's coordinate units** — not
+    Ångström. It is **required** once the block is typed: there is deliberately no
+    default, because a sensible radius is a property of the data, not of the
+    grammar. For an mdtraj-backed source the unit is nanometres, so a 5 Å shell is
+    `?within=0.5`. The shipped mods take the same number in the same unit; they
+    briefly did not, and `?within=5` selected 184 atoms through a mod and the
+    ENTIRE 3,341-atom system through the built-in.
   - **`?keep`** (default **`false`**) — whether the target you named is itself in
     the result. False means "around it, **not** it", which is the reason the flag
     exists; `?keep=true` adds the target's whole subgroups back. Exclusion is at

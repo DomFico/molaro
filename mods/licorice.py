@@ -9,7 +9,7 @@
 # param: keep boolean false
 # author: Molaro assistant
 # source: https://github.com/DomFico/molaro
-# description: Licorice (stick) representation, PyMOL-style. `licorice <region> ?color=<css/hex> ?size=<multiplier>` sizes the region's atoms and bonds to one uniform stick radius (scaled by `?size`, 1.0 = the built-in radii) and colours it CPK-style: carbon atoms take the chosen colour, every other element takes its CPK colour (N blue, O red, S yellow, P orange, …), and every bond is split into two HALVES, each half taking its endpoint atom's colour — so a C–N bond is half skeleton, half nitrogen-blue, exactly like a PyMOL stick. `?color` COLOURS CARBON, and any element whose CPK colour would be too close to it is moved out of the way — `?color=red` would otherwise make oxygen the same red as the skeleton and a C-O stick would come out solid, defeating the split; oxygen goes magenta instead and everything else keeps its CPK colour. HYDROGENS and the bonds to them are drawn THINNER (see HYDROGEN_SCALE), the way PyMOL draws sticks, so a hydrogen reads as attached rather than as another heavy atom. Bare `licorice` with no target does the whole system. Runs on the region you give it, does NOT touch the backbone trace, and lands in one undo stroke.
+# description: Licorice (stick) representation, PyMOL-style. `licorice <region> ?color=<css/hex> ?size=<multiplier>` sizes the region's atoms and bonds to one uniform stick radius (scaled by `?size`, 1.0 = the built-in radii) and colours it CPK-style: carbon atoms take the chosen colour, every other element takes its CPK colour (N blue, O red, S yellow, P orange, …), and every bond is split into two HALVES, each half taking its endpoint atom's colour — so a C–N bond is half skeleton, half nitrogen-blue, exactly like a PyMOL stick. `?color` COLOURS CARBON, and any element whose CPK colour would be too close to it is moved out of the way — `?color=red` would otherwise make oxygen the same red as the skeleton and a C-O stick would come out solid, defeating the split; oxygen goes magenta instead and everything else keeps its CPK colour. HYDROGENS and the bonds to them are drawn THINNER (see HYDROGEN_SCALE), the way PyMOL draws sticks, so a hydrogen reads as attached rather than as another heavy atom. Bare `licorice` with no target does the whole system. Runs on the region you give it, does NOT touch the backbone trace, and lands in one undo stroke. `?within=<d>` re-targets to the NEIGHBOURHOOD of what you named, whole residues at a time, and `?keep=true` brings the target itself along. THE DISTANCE IS IN THE SCENE'S COORDINATE UNITS — the same number the built-in `create_sele`/`hide` flags take, so one flag name means one thing everywhere; for an mdtraj-backed source that is nanometres, so a 5 A shell is `?within=0.5`.
 
 # WHAT LICORICE IS. The "sticks" look: every atom is a small sphere and every
 # bond a cylinder of the SAME radius, so a molecule reads as one connected rod
@@ -136,9 +136,6 @@ CPK = {
 FALLBACK = "pink"
 
 
-# Angstrom -> nanometre. The viewer's coordinates are nm (mdtraj's unit); `?around`
-# is stated in ANGSTROM because that is what a structural biologist types.
-ANGSTROM_NM = 0.1
 
 
 def _residue_atoms(top, indices):
@@ -185,13 +182,13 @@ def _around(data, target_indices, distance, keep=False):
         )
     top = traj.topology
     xyz = np.asarray(traj.xyz[0], dtype=np.float64)
-    hits = cKDTree(xyz).query_ball_point(xyz[sel], distance * ANGSTROM_NM)
+    hits = cKDTree(xyz).query_ball_point(xyz[sel], distance)
     near = _residue_atoms(top, {int(j) for group in hits for j in group})
     own = _residue_atoms(top, sel)
     near = (near | own) if keep else (near - own)
     if not near:
         raise ValueError(
-            f"?within={distance} found no residues within {distance} A of the "
+            f"?within={distance} found no residues within {distance} of the "
             f"target (measured at frame 0). Try a larger radius, or "
             f"?keep=true to keep the target itself."
         )
@@ -1275,9 +1272,9 @@ def compute(data, target_indices, params):
     try:
         within = float(params.get("within", 0.0))
     except (TypeError, ValueError):
-        raise ValueError(f'licorice: around must be a number of angstroms, got "{params.get("around")}".')
+        raise ValueError(f'licorice: around must be a distance in scene coordinate units, got "{params.get("around")}".')
     if within < 0:
-        raise ValueError(f"licorice: around must be a positive distance in angstroms, got {within}.")
+        raise ValueError(f"licorice: around must be a positive distance in scene coordinate units, got {within}.")
     keep = params.get("keep", False)
     if not isinstance(keep, bool):
         raise ValueError(f'licorice: keep must be true or false, got "{keep}".')
