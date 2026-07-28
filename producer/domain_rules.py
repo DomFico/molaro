@@ -247,6 +247,8 @@ def trace_anchor_indices(
     residue_atoms_by_name: "dict[str, int]",
     is_protein: bool,
     is_nucleic: bool,
+    element_by_name: "Optional[dict[str, Optional[str]]]" = None,
+    linked_to_neighbour: bool = False,
 ) -> Optional[int]:
     """Pick one anchor atom index for a residue's contribution to a backbone
     trace, or None if this residue contributes no trace point.
@@ -254,6 +256,31 @@ def trace_anchor_indices(
     ``residue_atoms_by_name`` maps atom name -> global atom index within the
     residue. Protein residues anchor on CA; nucleic on P then C4'; everything
     else (CG beads, solvent, ligands) has no anchor -> trace degrades to nothing.
+
+    THE STRUCTURAL FALLBACK (Rule #5: derive vocabulary at run time, do not trust
+    one library's classification). ``is_protein``/``is_nucleic`` come from mdtraj's
+    residue-NAME tables, so a MODIFIED or non-standard residue carrying a complete
+    backbone is classified as neither and gets no anchor — the trace then steps
+    over it, the step usually exceeds the gap-break distance, and the trace visibly
+    BREAKS. Measured: BACD's 27-residue peptide threaded only 20 (ABU/DHBR/DALA all
+    unclassified), and 10GJ's 8-oxoguanine split its chain into two polylines.
+
+    So when the classification says nothing, the ATOMS decide — under TWO gates,
+    both load-bearing:
+
+    * ELEMENTS, not just names. The banked ``_signature_kind`` rule: a calcium
+      named ``CA`` is *structurally* unable to be an alpha carbon only if the
+      element is checked. Without ``element_by_name`` the fallback does not run.
+    * COVALENT LINKAGE to a neighbour. A trace is a POLYMER backbone, and a
+      residue not bonded to a neighbour is not part of a polymer whatever atoms it
+      carries. This gate is not decorative: MEASURED, the AlphaFold system's free
+      ``ADP`` ligand carries a complete ribose signature (C4'/O4'/O5'/O3'), so a
+      names-only fallback threads a LONE LIGAND into a backbone polyline. ADP has
+      zero cross-residue bonds; 8OG13 has two (DA12 and DA14). That is the whole
+      difference, and it is the caller's to supply.
+
+    A residue mdtraj DOES classify is unaffected — the two early returns below
+    exit before the fallback, so no currently-traced system can change.
     """
     if is_protein:
         return residue_atoms_by_name.get("CA")
@@ -264,4 +291,28 @@ def trace_anchor_indices(
             if alt in residue_atoms_by_name:
                 return residue_atoms_by_name[alt]
         return None
+
+    if element_by_name is None or not linked_to_neighbour:
+        return None
+
+    def _is(name: str, symbol: str) -> bool:
+        return (
+            name in residue_atoms_by_name
+            and (element_by_name.get(name) or "").upper() == symbol
+        )
+
+    # A protein backbone: N-CA-C with the elements to match.
+    if _is("N", "N") and _is("CA", "C") and _is("C", "C"):
+        return residue_atoms_by_name["CA"]
+
+    # A nucleic backbone: the sugar's C4' plus a phosphate/linking oxygen. Anchor
+    # on P when present, else the same fallbacks the classified path uses.
+    if _is("C4'", "C") and any(
+        _is(n, s) for n, s in (("P", "P"), ("O5'", "O"), ("O3'", "O"))
+    ):
+        if _is("P", "P"):
+            return residue_atoms_by_name["P"]
+        for alt in NUCLEIC_TRACE_FALLBACKS:
+            if alt in residue_atoms_by_name:
+                return residue_atoms_by_name[alt]
     return None

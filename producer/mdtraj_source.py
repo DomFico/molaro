@@ -1217,6 +1217,28 @@ class MdtrajSource(DataSource):
             g = group_id[next(res.atoms).index]
             residues_by_group.setdefault(g, []).append(res)
 
+        # WHICH RESIDUES ARE COVALENTLY LINKED TO A NEIGHBOUR, from the edge list
+        # the viewer actually DRAWS (declared + inferred). This is what lets the
+        # structural anchor fallback tell a modified residue sitting IN a chain
+        # from a free ligand that merely carries the same atoms: a trace is a
+        # POLYMER backbone. Restricted to the same group, which is what a backbone
+        # means here — the polylines below are built per group.
+        #
+        # _edges() has already run (see the caller), so this is the drawn list,
+        # not the topology's declared one — which matters, because the linkage
+        # that makes a modified residue part of its chain is often the INFERRED
+        # one (10GJ's 8OG13 is bonded to DA12 and DA14 only after inference).
+        residue_of = np.empty(top.n_atoms, dtype=np.int64)
+        for res in top.residues:
+            for a in res.atoms:
+                residue_of[a.index] = res.index
+        linked: set = set()
+        for i, j in self._edge_list:
+            ri, rj = int(residue_of[i]), int(residue_of[j])
+            if ri != rj and group_id[i] == group_id[j]:
+                linked.add(ri)
+                linked.add(rj)
+
         for g in sorted(residues_by_group):
             # Trace-anchor global index for every residue in this group that has
             # one, in residue order.
@@ -1224,7 +1246,11 @@ class MdtrajSource(DataSource):
             for res in residues_by_group[g]:
                 names = {a.name: a.index for a in res.atoms}
                 anchor = trace_anchor_indices(
-                    names, bool(res.is_protein), bool(res.is_nucleic)
+                    names,
+                    bool(res.is_protein),
+                    bool(res.is_nucleic),
+                    {a.name: (a.element.symbol if a.element else None) for a in res.atoms},
+                    res.index in linked,
                 )
                 if anchor is not None:
                     run.append(anchor)
@@ -1353,17 +1379,17 @@ class MdtrajSource(DataSource):
             f"{report.added} bonds inferred from covalent radii "
             f"(Cordero radii x {bond_inference.COVALENT_BOND_SCALE}): "
             f"intra-residue {report.intra}, backbone linkage {report.linkage}, "
-            f"crosslink {report.crosslink}"
+            f"crosslink {report.crosslink}, named linkage {report.named}"
         )
         if suppressed:
             detail += f"; {suppressed} then suppressed as cross-box"
         detail += (
             ". Additive only — no bond the topology declares was removed, and no "
-            "coordinate was touched. NOT reached: metal-organic bonds (a heme Fe "
-            "stays unbonded), glycosidic/N-glycan links, isopeptide bonds, "
-            "head-to-tail cyclic peptides, and covalent ligand links through "
-            "anything but S/Se — those render as disconnected pieces rather than "
-            "as a wrong bond."
+            "coordinate was touched. NOT reached: metal-organic coordination (a "
+            "heme Fe stays unbonded — coordination is not a covalent bond, and "
+            "PyMOL and VMD leave it undrawn too), and any covalent linkage whose "
+            "atom names are not in the named-linkage table — those render as "
+            "disconnected pieces rather than as a wrong bond."
         )
         if report.mode == "nonsolvent":
             return f"bond inference: NONSOLVENT (solvent residues excluded) — {detail}"

@@ -96,7 +96,8 @@ from producer.bond_inference import (  # noqa: E402
     infer_bonds_unscoped,
 )
 from producer.corpus import corpus_root, resolve_system  # noqa: E402
-from producer.domain_rules import (  # noqa: E402
+from producer.domain_rules import (
+    trace_anchor_indices,  # noqa: E402
     COVALENT_BOND_SCALE,
     MIN_COVALENT_BOND_NM,
     covalent_radius_nm,
@@ -1587,6 +1588,116 @@ def _source_for(path, trajectory=None, mode=DEFAULT_MODE):
     return MdtrajSource(path, trajectory, os.path.basename(path), [], infer_bonds=mode)
 
 
+
+def check_trace_anchor_structural():
+    """P7 — the TRACE half of "custom residues are not drawn properly". Increment 63
+    fixed the BOND half; a residue mdtraj's name tables do not classify still got no
+    trace anchor, so the backbone stepped over it and (past the gap-break distance)
+    the trace visibly BROKE.
+
+    The fix derives the anchor from the ATOMS under two gates, and this block exists
+    because the SECOND gate is the one a reasonable implementation omits. Both are
+    graded on the owner's own files, through the REAL producer, in the header.
+    """
+    checks = []
+    def header(name):
+        # corpus_root() IS the owner's benchmark_systems dir; these three files sit
+        # at its top level beside the numbered corpus systems.
+        return MdtrajSource(_bench(name)).give_header()
+
+    # -- (1) a modified-residue PEPTIDE threads end to end, in ONE polyline -------
+    # BACD is a 27-residue peptide whose ABU/DHBR/DALA residues mdtraj classifies as
+    # neither protein nor nucleic. It used to thread 20 of 27.
+    try:
+        h = header("BACD.pdb")
+        v = sum(len(p) for p in h.polylines)
+        checks.append(("BACD: all 27 residues carry a trace vertex (was 20)",
+                       v == 27, f"{len(h.polylines)} polyline(s), {v} vertices"))
+        checks.append(("...and it is ONE unbroken polyline, not fragments",
+                       len(h.polylines) == 1, f"{len(h.polylines)} polylines"))
+    except Exception as e:
+        checks.append(("BACD reachable", False, f"{type(e).__name__}: {e}"))
+
+    # -- (2) a modified BASE rejoins its strand ---------------------------------
+    # 10GJ's 8-oxoguanine split chain 9 into two polylines (resSeq 1-12, 14-147).
+    try:
+        h = header("10GJ.cif")
+        v = sum(len(p) for p in h.polylines)
+        checks.append(("10GJ: 8OG gains its vertex and its strand is rejoined",
+                       (len(h.polylines), v) == (10, 1047),
+                       f"{len(h.polylines)} polylines, {v} vertices (was 11/1046)"))
+    except Exception as e:
+        checks.append(("10GJ reachable", False, f"{type(e).__name__}: {e}"))
+
+    # -- (3) THE TWO GATES, asserted WHERE THEY LIVE ----------------------------
+    # A header vertex COUNT cannot witness either gate, and finding that out is why
+    # this block is written this way. ADP is alone in its group, so even if the
+    # fallback wrongly anchored it, its run would be one vertex and `len >= 2` would
+    # drop it — the count is identical either way. An assertion that cannot move
+    # when the thing it guards is removed is not a test, so these call the rule
+    # directly, with the REAL atom names and elements of the residues in question.
+    try:
+        h = header("fold_halm2_hala2_adp_mg_zn_thr42_seed_1_model_1.cif")
+        v = sum(len(p) for p in h.polylines)
+        checks.append(("AF cif: header vertices unchanged at 1055",
+                       v == 1055, f"{v}"))
+    except Exception as e:
+        checks.append(("AF cif reachable", False, f"{type(e).__name__}: {e}"))
+
+    # ADP's real atom inventory: a COMPLETE ribose signature. Its phosphorus is
+    # named PA/PB, so it matches through O5'. Unlinked -> no anchor; the SAME
+    # residue linked -> an anchor. That pair is the linkage gate, isolated.
+    adp_names = {"C1'": 0, "C2'": 1, "C3'": 2, "C4'": 3, "O4'": 4, "O5'": 5,
+                 "O3'": 6, "PA": 7, "PB": 8, "N9": 9}
+    adp_els = {"C1'": "C", "C2'": "C", "C3'": "C", "C4'": "C", "O4'": "O",
+               "O5'": "O", "O3'": "O", "PA": "P", "PB": "P", "N9": "N"}
+    checks.append((
+        "a free ligand with a FULL ribose signature gets NO anchor (linkage gate)",
+        trace_anchor_indices(adp_names, False, False, adp_els, False) is None,
+        "ADP: C4'+O4'+O5'+O3', zero cross-residue bonds"))
+    checks.append((
+        "...and the SAME residue, linked, DOES — so the gate is linkage, not names",
+        trace_anchor_indices(adp_names, False, False, adp_els, True) == 3,
+        "linked -> anchors on C4' (NUCLEIC_TRACE_FALLBACKS; no atom named P)"))
+
+    # The element gate, isolated: a calcium named CA cannot be an alpha carbon.
+    # Defensive rather than witnessed by any corpus file, which is exactly why it
+    # is asserted here instead of being left to a comment.
+    ca_names = {"N": 0, "CA": 1, "C": 2}
+    checks.append((
+        "N/CA/C with the RIGHT elements anchors on CA",
+        trace_anchor_indices(ca_names, False, False,
+                             {"N": "N", "CA": "C", "C": "C"}, True) == 1,
+        "elements N,C,C"))
+    checks.append((
+        "...but a CALCIUM named CA does not — the element is checked, not the name",
+        trace_anchor_indices(ca_names, False, False,
+                             {"N": "N", "CA": "CA", "C": "C"}, True) is None,
+        "elements N,CA,C -> refused"))
+    checks.append((
+        "...and no element map at all disables the fallback entirely",
+        trace_anchor_indices(ca_names, False, False, None, True) is None,
+        "element_by_name=None"))
+
+    # -- (4) the corpus does not move -------------------------------------------
+    # Every corpus system has ZERO unclassified-but-backboned residues (measured),
+    # so the fallback must be inert on all of them. If one of these moves, the
+    # fallback is reaching something it should not.
+    for sysname, want in (("02_trpcage_atomistic", 20), ("03_adk_psf_dcd", 214),
+                          ("09_nucleic_duplex", 24), ("06_membrane_complex", 1472)):
+        try:
+            spec = resolve_system(sysname)
+            h = MdtrajSource(spec["topology"], spec.get("trajectory"), spec["name"],
+                             spec["ligand_residues"]).give_header()
+            v = sum(len(p) for p in h.polylines)
+            checks.append((f"{sysname}: UNCHANGED at {want} trace vertices",
+                           v == want, f"{v}"))
+        except Exception as e:
+            checks.append((f"{sysname} reachable", False, f"{type(e).__name__}: {e}"))
+
+    return all(ok for _, ok, _ in checks), checks
+
+
 def check_complaint_files_through_producer():
     """Blocks A, B and E grade the four files the brief complains about by calling
     infer_bonds() on a bare md.load() topology. That skips everything the producer
@@ -1782,6 +1893,10 @@ def main() -> int:
     print("\n--- K. cost, which nothing here used to constrain ---")
     total &= _run("cost scales with atoms, not residue records", check_cost)
     total &= _run("an ordinary file never imports scipy", check_no_scipy_for_ordinary_files)
+
+    print("\n--- L2. P7: the TRACE half of the modified-residue complaint ---")
+    total &= _run("a structural trace anchor, gated on POLYMER LINKAGE",
+                  check_trace_anchor_structural)
 
     print("\n--- L. the four complaint files, through the REAL producer ---")
     total &= _run("nucleic backbone, HO5', ADP/TPO, DMPC, BACD vs its PSF",
