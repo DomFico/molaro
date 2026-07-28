@@ -284,3 +284,32 @@ Converting it to a contiguous `<f4` block changed nothing — identical error.
 
 **Not root-caused.** Defect 1 is the one to chase first: it is shipped functionality,
 it is reproducible in one command, and fixing it may well fix defect 2.
+
+## P10 — a mod cannot read an existing channel, so nothing can ACCUMULATE
+
+Found by the owner: "if I ran smooth on another part of the structure is it supposed to
+override the other thing?" It is, and it cannot do otherwise today.
+
+MEASURED on adk: `smooth A` moves 19 points; `smooth B` afterwards moves 12 and **A has
+stopped**; `smooth A + B` in one command moves 31 and covers both.
+
+**Why it is structural.** A channel is one column and a provider run replaces it. To add
+to what is there, a provider would have to READ the current values — and it cannot:
+`producer/mdtraj_source.py:1273` hardcodes `channels=[]` ("deferred this increment"), so
+`data.give_header().channels` is an empty list for every mod. There is nothing to
+accumulate onto.
+
+This is the same family as the two gaps already recorded: **the mod surface is
+write-only about derived state.** A mod cannot read a colour, a size, an opacity
+(spotlight_rainbow's header says so), the displayed frame (P9), or a channel's current
+values (this). Each has produced a user-visible surprise.
+
+**Lean:** expose the declared channels and their values read-only on the mod surface, the
+same shape `data.edges` and `data.labels` already have — `data.channel("smoothing")`
+returning None when undeclared. That single accessor would unblock accumulate-style mods
+generally, not just smoothing, and it is a producer-side addition rather than a wire
+change (the values already live producer-side; the header field is what was deferred).
+
+**Not urgent, and there is a correct spelling today**: the address grammar unions with
+`+`, so `smooth @a + @b` expresses "both" exactly. Documented in the mod, since the
+override is genuinely surprising and was found the hard way.

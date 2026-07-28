@@ -8,7 +8,7 @@
 # param: keep boolean false
 # author: Example Author
 # source: https://github.com/DomFico/molaro
-# description: One command to make a region's motion read smoothly instead of jittery — a temporal moving average over the positions. `smooth <region> ?smoothing=N` replaces each targeted point's shown position with the mean of its own positions over N frames — the same number VMD's trajectory-smoothing control shows. 5 averages 5 frames; higher is smoother; 0 is off. An even N rounds down to the nearest odd, because a centred average over an even count cannot be symmetric. Runs the `smoothing` provider on the region, then binds it to the offset axis. Undoable in one step; re-run with a new amount or region to change it.
+# description: One command to make a region's motion read smoothly instead of jittery — a temporal moving average over the positions. `smooth <region> ?smoothing=N` replaces each targeted point's shown position with the mean of its own positions over N frames — the same number VMD's trajectory-smoothing control shows. 5 averages 5 frames; higher is smoother; 0 is off. An even N rounds down to the nearest odd, because a centred average over an even count cannot be symmetric. Runs the `smoothing` provider on the region, then binds it to the offset axis. RE-RUNNING REPLACES, IT DOES NOT ADD: `smooth @a` then `smooth @b` leaves only @b smoothed. To smooth both, name both in ONE command — `smooth @a + @b` — because the address grammar unions with `+`. Undoable in one step.
 
 # THE MACRO half of the two-mod smoothing pair (like cartoon over ribbon_dir).
 #
@@ -24,6 +24,19 @@
 # declares — so `smooth region ?smoothing=7` computes a 7-frame average, not the
 # default. (This mod does not itself read `smoothing`; it declares it only so the
 # invocation accepts it and it forwards.)
+#
+# WHY A SECOND RUN REPLACES THE FIRST, and why that is not a choice this mod made.
+#
+# `smoothing` is ONE channel — one column of values — and a provider run REPLACES
+# it. So `smooth @a` then `smooth @b` ends with @a's offsets zeroed and only @b
+# moving. Measured: A alone moves 19 points, B alone moves 12 and A has stopped,
+# `A + B` in one command moves 31 and covers both.
+#
+# Accumulating would mean adding to what is already there, and a mod CANNOT read
+# an existing channel: `give_header()` reports `channels=[]`, so a provider has no
+# way to see what a previous run smoothed. There is nothing to add onto. Until a
+# mod can read channel values back, "smooth this as well" has exactly one spelling,
+# and it is the union: `smooth @a + @b`.
 #
 # WHY BIND `all`. `smoothing` is a whole-system channel that is ZERO outside the
 # region it was told to smooth, so binding it over `all` displaces exactly that
