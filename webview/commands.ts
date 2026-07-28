@@ -78,14 +78,6 @@ import {
 import { buildRepMod, serializeRepCommands, type RepSnapshot } from "./saverep.ts";
 import type { Entry, Hierarchy } from "./sets.ts";
 
-/** The hold gesture's default command template. `{target}` is replaced by the
- * resolved selection. Lives here so the webview default and the host's
- * getConfiguration fallback are ONE value — two spellings of a default is the
- * two-lists shape, and it fails silently (the gesture would work in one context
- * and not the other). `view` is neutral and camera-only: a default gesture should
- * demonstrate the feature without writing state nobody asked for. */
-export const DEFAULT_HOLD_COMMAND = "view {target}";
-
 export type CommandStatus = "ok" | "nomatch" | "error";
 
 export interface CommandResult {
@@ -2674,10 +2666,8 @@ export function makeModsHandler(): CommandHandler {
       r.kind === "representation"
         ? `representation · ${r.axis}`
         : `analysis · ${r.produces}${r.produces === "per-point-scalar" ? ` → ${r.axis}` : ""}`;
-    // Demote a channel mod that exists to serve another: say what it is for,
-    // instead of presenting it beside the mods a person actually types. It stays
-    // listed and stays invocable — a mod's name is its verb, so omitting it would
-    // make this listing lie about what `help` and tab-completion still know.
+    // Kept for the machinery mods that survive the filter below (a channel mod
+    // nobody requires is still yours to type, and says nothing extra).
     line += machineryNote("channel" in r ? r.channel : undefined, consumers);
     if (r.author) line += ` · by ${r.author}`;
     if (r.source) line += ` · ${r.source}`;
@@ -2697,11 +2687,41 @@ export function makeModsHandler(): CommandHandler {
       if (group) group.push(r);
       else byOrigin.set(r.origin, [r]);
     }
+    // HIDE the machinery: a `channel` mod that another mod declares as its
+    // provider runs AUTOMATICALLY and is not something you type. Derived from the
+    // registry at run time (who requires what), never a hardcoded name list, so a
+    // new provider demotes itself and a channel mod nobody requires still lists.
+    //
+    // This REVERSES an earlier decision, and the reason it changed is worth
+    // keeping. The old note read: "It stays listed and stays invocable — a mod's
+    // name is its verb, so omitting it would make this listing lie about what
+    // `help` and tab-completion still know." That rested on the provider being
+    // invocable, which was MEASURED to be false: `sasa_field @site` — a shipped
+    // provider, by name, on real adk — fails with `channel blocks [sasa_field] do
+    // not match declared per_point_per_frame channels []`, while `live_sasa`
+    // driving the same provider works. So listing them beside the mods you type
+    // was advertising three verbs that do not work (reports/PARKED.md P9).
+    //
+    // The honesty the old note was protecting is kept a different way: the count
+    // of what was hidden is PRINTED. Omitting them silently is what would lie.
+    const isMachinery = (r: Mod): boolean =>
+      machineryNote("channel" in r ? r.channel : undefined, consumers) !== "";
+    let hidden = 0;
     const lines: string[] = [];
     for (const [origin, group] of byOrigin) {
+      const shown = group.filter((r) => !isMachinery(r));
+      hidden += group.length - shown.length;
+      if (shown.length === 0) continue;
       lines.push(`${origin}:`);
-      for (const r of group) lines.push(recipeLine(r, consumers));
+      for (const r of shown) lines.push(recipeLine(r, consumers));
     }
+    if (hidden > 0) {
+      lines.push(
+        `(${hidden} channel mod${hidden === 1 ? "" : "s"} hidden — machinery that runs ` +
+        `automatically for the mods above; \`help <name>\` still describes them)`,
+      );
+    }
+    if (lines.length === 0) return { status: "ok", message: "no recipes" };
     return { status: "ok", message: capLines(lines, "recipes") };
   };
 }

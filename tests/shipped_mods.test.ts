@@ -23,7 +23,7 @@ import { test } from "node:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 
-import { parseModFile } from "../webview/recipes.ts";
+import { channelConsumers, machineryNote, parseModFile } from "../webview/recipes.ts";
 
 const MODS_DIR = join(import.meta.dirname, "..", "mods");
 
@@ -112,4 +112,40 @@ test("a malformed shipped file would be REJECTED, not silently accepted", () => 
   const broken = good.replace("# produces: channel", "# produces: nonsense");
   const parsed = parseModFile(broken, "built-in");
   assert.equal(parsed.ok, false, "a bad `produces` must fail the parse");
+});
+
+test("the mods listing hides machinery, names how many, and keeps the rest", () => {
+  // The listing is what the owner reads, so it is what this asserts — via the same
+  // channelConsumers/machineryNote pair the handler uses, over the real shipped set.
+  const all = parseAll().map(({ mod }) => mod);
+  const consumers = channelConsumers(all);
+  const machinery = all.filter((m) => machineryNote(m.channel, consumers) !== "");
+  const shown = all.filter((m) => machineryNote(m.channel, consumers) === "");
+
+  assert.deepEqual(
+    machinery.map((m) => m.name).sort(),
+    ["ribbon_dir", "sasa_field", "ss_field"],
+    "the three channel providers are the machinery",
+  );
+  assert.deepEqual(
+    shown.map((m) => m.name).sort(),
+    ["cartoon", "live_sasa", "live_ss"],
+    "what remains listed is exactly the three mods a person invokes",
+  );
+
+  // Guards the guard: if `requires-channel` were ever dropped from the consumers,
+  // NOTHING would be classed as machinery and this would pass by listing all six.
+  assert.equal(machinery.length, 3, "machinery must be detected, not vacuously empty");
+});
+
+test("a channel mod NOBODY requires is NOT hidden", () => {
+  // The rule is derived from who-requires-what, not from `produces === "channel"`.
+  // A standalone channel mod is still yours to type, so it must keep listing.
+  const all = parseAll().map(({ mod }) => mod);
+  const orphan = { name: "lonely_field", channel: "lonely_field" } as { name: string; channel?: string; requiresChannel?: string };
+  const consumers = channelConsumers([...all, orphan]);
+  assert.equal(machineryNote(orphan.channel, consumers), "",
+    "a channel nobody requires earns no machinery note, so it stays listed");
+  assert.notEqual(machineryNote("sasa_field", consumers), "",
+    "(control) a channel that IS required still earns one");
 });

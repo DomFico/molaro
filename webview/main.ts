@@ -47,10 +47,10 @@ import {
   type RepresentationState,
 } from "./representation.ts";
 import { buildTree } from "./classification.ts";
-import { HOLD_MS, flashRow, mountTree, type TreeHandle } from "./tree.ts";
+import { flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
-import { DEFAULT_HOLD_COMMAND, applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
+import { applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
 import { BindingRegistry, type Binding } from "./bindings.ts";
 import { AXIS_DOMAIN, BIND_DASH_MAX, BIND_SIZE_MAX, mapScalar, OFFSET_AXIS, ORIENTATION_AXIS, SCALAR_AXES, VECTOR_AXES, type BindAxis } from "./channelmap.ts";
 import { bindTypedResult } from "./claudebind.ts";
@@ -4234,59 +4234,14 @@ async function main(): Promise<void> {
     focusPoints(hierarchy.subgroupPoints(hierarchy.subgroupOfPoint(idx)));
   });
 
-  // -- the hold gesture ---------------------------------------------------------
-  //
-  // Hold the key over a point and, after a dwell, a COMMAND TEMPLATE from settings
-  // runs with the resolved target substituted in. The webview knows only "run this
-  // string" — the template names whatever operation the workspace wants, so no
-  // application vocabulary lands in here.
-  //
-  // It goes through runCommand, the same entry typing uses, so the effect is
-  // pre-validated and lands as ONE undo stroke. No new verb, no new context
-  // method, no direct write.
-  //
-  // DWELL, not press-and-release, reusing tree.ts's HOLD_MS so the two hold-feels
-  // cannot drift apart. The resolving target is shown WHILE the dwell runs, which
-  // is what a release-triggered version would have bought — you see which
-  // selection it resolved to before it commits — without a second gesture stage.
-  // Moving the pointer cancels.
-  //
-  // RESOLUTION, decided rather than left implicit: the point under the cursor, then
-  // the committed selections containing it. None → refuse and say so, because a
-  // gesture that silently does nothing is indistinguishable from a broken key.
-  // Several → the most recently created, since that is the one you just made; its
-  // name is displayed during the dwell, so the choice is visible before it acts.
-  const HOLD_KEY = "f";
-  // The default lives HERE and the host imports it as its getConfiguration
-  // fallback, so the two cannot disagree. `view` is chosen because it is neutral
-  // vocabulary and camera-only — a default gesture should demonstrate the feature
-  // without writing state the user did not ask for.
-  const holdTemplate = String(
-    (window as unknown as { __VIEWER__?: { holdCommand?: string } })
-      .__VIEWER__?.holdCommand ?? DEFAULT_HOLD_COMMAND);
-  let lastPointer: { x: number; y: number } | null = null;
-  let holdTimer: number | null = null;
-  let holdFrom: { x: number; y: number } | null = null;
-  const cancelHold = (): void => {
-    if (holdTimer !== null) { window.clearTimeout(holdTimer); holdTimer = null; }
-    holdFrom = null;
-  };
-  /** The committed selection under a point: the most recently created one that
-   * contains it, or null. */
-  const selectionAt = (idx: number): string | null => {
-    const all = model.committed();
-    for (let i = all.length - 1; i >= 0; i--) if (all[i].set.contains(idx)) return all[i].name;
-    return null;
-  };
-  const quoted = (name: string): string => (/^[A-Za-z0-9_-]+$/.test(name) ? name : `"${name}"`);
   /** Is this element TEXT ENTRY — somewhere a bare letter is content, not a command?
    *
+   * Kept when the hold gesture was removed, because it guards the keys BELOW too.
    * The guard used to be `tagName === "INPUT" || "TEXTAREA"`, which swallowed every
    * key for ANY input — including `<input type=range>`, which is the frame scrubber.
-   * Clicking the scrubber leaves it focused, so scrub-then-press silently killed the
-   * hold gesture AND Ctrl+Z / Ctrl+Shift+Z / Escape (this one handler owns them all)
-   * until the user happened to click the canvas again. Measured before this fix:
-   * hold-F left the status untouched and Ctrl+Z went `undo 9 -> 9`.
+   * Clicking the scrubber leaves it focused, so scrub-then-press silently killed
+   * Ctrl+Z, Ctrl+Shift+Z and Escape until the user happened to click the canvas
+   * again. Measured before the fix: Ctrl+Z went `undo 9 -> 9`.
    *
    * FAIL-CLOSED: an input type we do not recognise counts as text entry, so adding a
    * new text field can never silently unguard typing. Only the types that cannot
@@ -4301,52 +4256,11 @@ async function main(): Promise<void> {
     if (el.tagName !== "INPUT") return false;
     return !NON_TEXT_INPUT_TYPES.has((el as HTMLInputElement).type.toLowerCase());
   };
-  window.addEventListener("pointermove", (e) => {
-    lastPointer = { x: e.clientX, y: e.clientY };
-    if (holdFrom && Math.hypot(e.clientX - holdFrom.x, e.clientY - holdFrom.y) > CLICK_MOVE_THRESHOLD) {
-      cancelHold();
-      setStatus("hold cancelled — pointer moved");
-    }
-  });
-  window.addEventListener("keyup", (e) => {
-    if (e.key.toLowerCase() !== HOLD_KEY) return;
-    // Say so. Releasing early used to cancel SILENTLY and leave the "hold to
-    // run: …" prompt on screen indefinitely, which reads as still-pending. The
-    // message belongs HERE and not inside cancelHold, because the fire path
-    // calls cancelHold too and a fired hold must keep its own result line.
-    const wasDwelling = holdTimer !== null;
-    cancelHold();
-    if (wasDwelling) setStatus("hold cancelled — key released early");
-  });
 
   // -- keys: Escape cancels; Ctrl+Z undo, Ctrl+Shift+Z redo (state, never camera) --
   window.addEventListener("keydown", (e) => {
     if (isTextEntry(e.target as HTMLElement | null)) return;
-    if (e.key.toLowerCase() === HOLD_KEY && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey) {
-      // Auto-repeat is a SECOND keydown with the key still physically down. Without
-      // this, a 2 s hold fired ~5 times (measured: undo depth 1 -> 6) and cost five
-      // Ctrl+Z presses to undo — because holdTimer is cleared at the top of the
-      // firing callback, so the next repeat sees an idle machine. Scoped to this
-      // branch on purpose: holding Ctrl+Z to walk back a stack must keep repeating.
-      if (e.repeat) return;
-      if (holdTimer !== null || !holdTemplate || !lastPointer) return; // already dwelling / unbound / no pointer yet
-      const idx = pickAt(lastPointer.x, lastPointer.y);
-      const name = idx >= 0 ? selectionAt(idx) : null;
-      if (name === null) {
-        setStatus(idx < 0 ? "hold: nothing under the pointer" : "hold: that point is in no committed selection");
-        return;
-      }
-      const text = holdTemplate.replaceAll("{target}", `@${quoted(name)}`);
-      holdFrom = { ...lastPointer };
-      setStatus(`hold to run: ${text}`);
-      holdTimer = window.setTimeout(() => {
-        holdTimer = null; holdFrom = null;
-        const r = runCommand(text);
-        setStatus(`${text} → ${r.message}`);
-      }, HOLD_MS);
-      return;
-    }
-    if (e.key === "Escape") {
+  if (e.key === "Escape") {
       // exit edit mode without committing, else discard the pending target
       refreshPoints(model.editing ? model.endEdit() : model.clearPending());
     } else if ((e.ctrlKey || e.metaKey) && !e.shiftKey && (e.key === "z" || e.key === "Z")) {

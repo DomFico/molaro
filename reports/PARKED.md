@@ -1,12 +1,31 @@
 # Parked — forks declined during the overnight run, each with a lean
 
-## P1 — hold-F gesture semantics
-**Parked by the brief.** Item E answered reachability only; the build waits.
-**Lean:** dwell-to-fire while showing the resolving selection name during the dwell,
-moving off to cancel. It gets run-on-release's safety (you see what resolved before
-it acts) without a second gesture stage or a second hold-feel, and it reuses
-`HOLD_MS` from `tree.ts` so the two holds cannot drift apart.
-**Blocked on:** nothing technical. It is a taste call on a live surface.
+## P1 — hold-F gesture semantics — CLOSED: THE GESTURE WAS REMOVED
+
+This entry was stale twice over and is now moot. It read "Parked by the brief… the
+build waits… Blocked on: nothing technical" long after every element of its lean had
+SHIPPED verbatim (dwell-to-fire, the resolving name shown during the dwell, move-off
+cancels, `HOLD_MS` shared with `tree.ts`).
+
+The gesture is now **gone**, at the owner's request, along with the
+`molaro.viewer.holdCommand` setting and the two spotlight mods. It was removed not
+because the gesture was broken — it demonstrably worked — but because the only thing
+worth binding to it did not, and the feature was not mission-critical. See P9.
+
+**What survived the removal, deliberately:** the keydown TEXT-ENTRY guard. That was
+never gesture machinery — the one keydown listener also owns Escape, Ctrl+Z and
+Ctrl+Shift+Z, and the old `tagName === "INPUT"` form meant clicking the frame scrubber
+(an `<input type=range>`) silently killed all of them until you clicked the canvas
+again. S49 is now that guard's scenario, asserting BOTH directions: a range input must
+not swallow the keys, a text input must still swallow them.
+
+**If it is ever rebuilt**, the recon that preceded the removal measured what to fix
+first, and none of it is lost: `{target}` resolved ONLY to a committed selection (so
+you could not act on an unselected atom — a `{point}`/`{subgroup}` token was the
+cheapest real win); `rm` was reachable from the gesture and armed a real deletion
+because the destructive-verb refusal only guarded mod macros; and a gesture-fired mod
+that FAILED was indistinguishable from one that worked, because the outcome went only
+to the terminal panel (PARKED P3).
 
 ## P2 — a guard that every pending-set mutation records an op
 `commit()`'s justification rests on strict LIFO covering every mutation of the interim
@@ -230,3 +249,38 @@ to an empty set. Do that before assuming it is a one-liner.
 **Consequence for gestures:** it removes the obvious zero-code spotlight template. There is
 no way to say "hide everything except this" in ONE command today, which is why the intent
 has to be packaged as a `produces: commands` mod.
+
+## P9 addendum — MEASURED: the channel-provider path is broken, two ways
+
+Written before this was measured; the numbers now exist and change the priority.
+Reproduced in the real bundle against real adk (3341 atoms, 98 frames), by hand
+through the command path with NO gesture involved:
+
+| invocation | result |
+|---|---|
+| `sasa_field @site` — a SHIPPED provider, alone | **error**: `frame chunk: channel blocks [sasa_field] do not match declared per_point_per_frame channels []` |
+| `live_sasa @site` — its consumer, auto-running it | **ok**, "1 binding live", undo depth 2 |
+| `spotlight_field @site` — alone | same error |
+| `spotlight_rainbow @site` — its consumer, auto-running it | **error**, undo depth 1, nothing landed |
+
+So there are TWO defects, and the first is not spotlight-specific:
+
+1. **Invoking any `produces: channel` mod directly is broken.** The producer emits a
+   channel block that the viewer has no matching declaration for. `sasa_field` — which
+   ships, and which `live_sasa` drives successfully — fails exactly the same way when
+   run by name. This is a live defect in shipped functionality that nothing tests: the
+   corpus gates drive providers only through their consumers.
+2. **`spotlight_rainbow`'s consumer path fails where `live_sasa`'s succeeds.** The
+   structural difference is that `spotlight_field` is TARGET-DEPENDENT — it recomputes
+   proximity against the selection you name — while `sasa_field`, `ss_field` and
+   `ribbon_dir` all compute whole-system values and ignore the target. That is the same
+   path a previous increment reworked ("the viewer now records which target each
+   channel's values describe and re-runs the provider when it no longer matches").
+
+**A hypothesis that was TESTED AND REJECTED**, recorded so nobody re-runs it: that
+`spotlight_field` returning a boxed Python list (327,418 floats on adk) instead of the
+`np.ascontiguousarray(..., dtype="<f4")` the shipped providers all use was the cause.
+Converting it to a contiguous `<f4` block changed nothing — identical error.
+
+**Not root-caused.** Defect 1 is the one to chase first: it is shipped functionality,
+it is reproducible in one command, and fixing it may well fix defect 2.

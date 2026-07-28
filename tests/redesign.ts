@@ -1,5 +1,3 @@
-import { HOLD_MS } from "../webview/tree.ts";
-import { DEFAULT_HOLD_COMMAND } from "../webview/commands.ts";
 import { DASH_SCALE } from "../webview/shaders.ts";
 import { CAMERA_FOV_DEG } from "../webview/geometry.ts";
 /**
@@ -8189,197 +8187,61 @@ async function S48(): Promise<void> {
 
 // ============================ runner ==========================================
 const which = process.argv.slice(2);
-// ==================== S49: the hold gesture ==================================
-// The only surface shipped in the last two nights with no pinned test, and it is
-// an INPUT surface — the blast radius is every matching event.
+// ============ S49: the keydown guard, after the hold gesture was removed ======
+// The gesture is gone (the owner shelved it), but the guard it left behind is NOT
+// gesture machinery — it protects Escape, Ctrl+Z and Ctrl+Shift+Z, which share the
+// one keydown listener. It was `tagName === "INPUT" || "TEXTAREA"`, and the frame
+// scrubber IS an `<input type=range>`: clicking it leaves it focused, so
+// scrub-then-Ctrl+Z silently did nothing until you clicked the canvas again.
+// Measured before the fix: `undo 9 -> 9`.
 //
-// It exercises the REAL default-resolution path on purpose. The harness serves its
-// own page rather than renderHtml, so window.__VIEWER__ carries no holdCommand and
-// the webview falls through to DEFAULT_HOLD_COMMAND — the same fallback the product
-// uses if the host ever omits the setting. The expected string is IMPORTED from the
-// source rather than written out here, so this pins the single-sourced default
-// instead of pinning a copy of it (a copy would pass while the two drifted).
-/** Comfortably past the product's dwell, derived from it rather than guessed —
- * a hardcoded wait would pass while the two drifted apart. */
-const HOLD_WAIT = HOLD_MS + 250;
+// Both directions are asserted, because narrowing a guard can fail either way: a
+// range input must NOT swallow the keys, and a text input must STILL swallow them
+// or typing a "z" into the rename box would undo instead of inserting a letter.
+// Events are dispatched ON the element with bubbles, which is what a real browser
+// does — dispatching on `window` leaves e.target === window and the guard is never
+// consulted, so the check would pass with or without the fix.
 async function S49(): Promise<void> {
-  console.log("S49 — the hold gesture: dwell, indication, cancel, refusal, newest-wins, one command path");
+  console.log("S49 — the keydown guard: a range input does not swallow Ctrl+Z, a text input does");
   await withDriver(async (d) => {
+    const V = "window.__viewer";
     const cmd = (text: string) =>
       d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
-    const status = () => d.evaluate<string>(`document.getElementById("status")?.textContent ?? ""`);
     const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
-    const centre = await d.evaluate<{ x: number; y: number }>(`(() => {
-      const r = document.querySelector("canvas").getBoundingClientRect();
-      return { x: r.left + r.width / 2, y: r.top + r.height / 2 };
-    })()`);
-    const hover = (x: number, y: number) =>
-      d.evaluate(`window.dispatchEvent(new PointerEvent("pointermove",{clientX:${x},clientY:${y},bubbles:true}))`);
-    const holdDown = () => d.evaluate(`window.dispatchEvent(new KeyboardEvent("keydown",{key:"f",bubbles:true}))`);
-    const holdUp = () => d.evaluate(`window.dispatchEvent(new KeyboardEvent("keyup",{key:"f",bubbles:true}))`);
 
-    // -- the template actually in force is the single-sourced default ----------
-    check("S49: the harness injects no template, so the REAL default-resolution path runs",
-      (await d.evaluate<string>(`String((window.__VIEWER__ && window.__VIEWER__.holdCommand) ?? "(absent)")`)) === "(absent)");
+    // Something undoable to walk back, so depth is a real signal rather than 0->0.
+    check("S49: (setup) a state write landed",
+      (await cmd("colorpoints all red")).status === "ok");
+    const armed = await undoDepth();
+    check("S49: (setup) undo depth is non-zero", armed > 0, `depth=${armed}`);
 
-    // -- a point in NO committed selection refuses, visibly --------------------
-    // Boot commits NOTHING now (the auto-seeded bulk selections are gone), so
-    // "no selection" is already true at startup; the delete-all sweep stays as
-    // defensive construction — this check must never again pass by resolving
-    // to a selection nobody made.
-    await d.evaluate(`(() => {
-      const m = ${V}.model;
-      for (const c of [...m.committed()]) m.deleteSelection(c.id);
-    })()`);
-    check("S49: (setup) no committed selections remain",
-      (await d.evaluate<number>(`${V}.model.committed().length`)) === 0);
-    await hover(centre.x, centre.y);
-    await holdDown();
-    await sleep(80);
-    const refusal = await status();
-    check("S49: a point in no committed selection REFUSES, and says so",
-      /no committed selection|nothing under the pointer/.test(refusal), refusal);
-    const depthAfterRefusal = await undoDepth();
-    await holdUp();
-    await sleep(HOLD_WAIT);
-    check("S49: …and nothing ran — a refusal is not a silent no-op",
-      (await undoDepth()) === depthAfterRefusal);
-
-    // -- with a selection: the dwell SHOWS the resolving target before firing ---
-    const made = await cmd("create_sele all [held]"); // `all` covers whatever is under the cursor
-    check("S49: (setup) a committed selection exists", made.status === "ok", JSON.stringify(made));
-    await hover(centre.x, centre.y);
-    const before = await undoDepth();
-    await holdDown();
-    await sleep(80);
-    const during = await status();
-    check("S49: the dwell NAMES the command and the resolved target before firing",
-      /hold to run:/.test(during) && /@/.test(during), during);
-    check("S49: …and it is the single-sourced default template, not a copy",
-      during.includes(DEFAULT_HOLD_COMMAND.split(" ")[0]), `${during} vs ${DEFAULT_HOLD_COMMAND}`);
-    check("S49: nothing has run yet — the dwell has not elapsed", (await undoDepth()) === before);
-
-    // -- it fires through the command path -------------------------------------
-    await sleep(HOLD_WAIT);
-    const fired = await status();
-    check("S49: the dwell FIRES and reports the command's own outcome",
-      /→/.test(fired) && !/hold to run:/.test(fired), fired);
-    check("S49: a camera-only template records NO undo entry (it went through the command path, which decides that)",
-      (await undoDepth()) === before, `depth ${before} → ${await undoDepth()}`);
-    await holdUp();
-
-    // -- move-off cancels -------------------------------------------------------
-    await hover(centre.x, centre.y);
-    const preCancel = await undoDepth();
-    await holdDown();
-    await sleep(60);
-    await hover(centre.x + 120, centre.y + 120);
-    const cancelled = await status();
-    check("S49: moving the pointer CANCELS the dwell, and says so",
-      /cancel/i.test(cancelled), cancelled);
-    await sleep(HOLD_WAIT);
-    check("S49: …and nothing ran after the cancel",
-      (await undoDepth()) === preCancel && !/→/.test(await status()));
-    await holdUp();
-
-    // -- several selections: the NEWEST wins, and its name is the one shown -----
-    // Both must actually CONTAIN the point under the cursor, so the target is the
-    // picked index rather than a category that may not cover it — the first
-    // version of this check asserted newest-wins while the newer selection did not
-    // contain the point at all, and passed nothing.
-    // `all` necessarily contains whatever is under the cursor, so both selections
-    // genuinely overlap it without the test needing to pick the point itself.
-    const first = await cmd("create_sele all [older]");
-    const second = await cmd("create_sele all [newer]");
-    check("S49: (setup) two overlapping selections, newest last",
-      first.status === "ok" && second.status === "ok", JSON.stringify([first, second]));
-    await hover(centre.x, centre.y);
-    await holdDown();
-    await sleep(80);
-    const ambiguous = await status();
-    check("S49: with several selections over the point, the NEWEST is resolved and displayed",
-      /@newer/.test(ambiguous), ambiguous);
-    await holdUp();
-
-    // == the honesty patch =====================================================
-    // Three measured lies the gesture used to tell. Each leg is written so it
-    // FAILS on the pre-fix build, not merely passes on the fixed one.
-
-    // -- 1. releasing early SAYS SO -------------------------------------------
-    // Before: cancelHold() cleared the timer silently and the "hold to run: …"
-    // prompt stayed on screen indefinitely, reading as still-pending.
-    await hover(centre.x, centre.y);
-    await holdDown();
-    await sleep(80);
-    check("S49: (setup) a dwell is in progress", /hold to run:/.test(await status()));
-    await holdUp();
-    await sleep(40);
-    const afterRelease = await status();
-    check("S49: releasing before the dwell SAYS it cancelled, instead of leaving a stale prompt",
-      /cancelled/.test(afterRelease) && !/^hold to run:/.test(afterRelease), afterRelease);
-
-    // -- 2. auto-repeat fires ONCE --------------------------------------------
-    // Before: holdTimer is nulled at the top of the firing callback, so each OS
-    // auto-repeat keydown saw an idle machine and started another dwell — a 2 s
-    // hold measured FIVE firings and cost five Ctrl+Z presses to undo.
-    // `view` is camera-only, so count dwells (status prompts), not undo depth.
-    const repeatDown = () =>
-      d.evaluate(`window.dispatchEvent(new KeyboardEvent("keydown",{key:"f",repeat:true,bubbles:true}))`);
-    await hover(centre.x, centre.y);
-    await holdDown();
-    await sleep(HOLD_WAIT);          // let the first dwell FIRE and clear holdTimer
-    const firedOnce = await status();
-    check("S49: (setup) the first dwell fired", /→/.test(firedOnce), firedOnce);
-    await repeatDown();
-    await repeatDown();
-    await sleep(60);
-    check("S49: an auto-repeat keydown does NOT start a second dwell while the key is held",
-      !/hold to run:/.test(await status()), await status());
-    await holdUp();
-
-    // -- 3. the frame scrubber does not swallow the keyboard -------------------
-    // Before: the guard was `tagName === "INPUT"`, and the scrubber IS an
-    // <input type=range>. Clicking it left it focused, which silently killed the
-    // gesture AND Ctrl+Z / Ctrl+Shift+Z / Escape — this one handler owns them all.
-    // The event must be dispatched ON the scrubber and allowed to BUBBLE, which is
-    // what a real browser does when it has focus. Dispatching on `window` (as the
-    // other legs do) leaves e.target === window, so the guard is never consulted
-    // and the leg passes whether or not the fix exists — verified: that version was
-    // green on the pre-fix build too.
-    const focusedRange = await d.evaluate<string>(`(() => {
+    // -- the scrubber must NOT swallow the keyboard ---------------------------
+    const focused = await d.evaluate<string>(`(() => {
       const r = document.querySelector('input[type=range]');
       if (!r) return "(no range input)";
       r.focus();
       return document.activeElement === r ? "focused" : "(focus refused)";
     })()`);
     check("S49: (setup) the frame scrubber is an <input type=range> and takes focus",
-      focusedRange === "focused", focusedRange);
-    await hover(centre.x, centre.y);
-    // Wipe the status line first. A previous leg leaves "hold to run: …" on it, and
-    // asserting for that string against stale text passes whether or not the gesture
-    // armed — verified: without this sentinel the leg was green on the pre-fix build.
-    await d.evaluate(`document.getElementById("status").textContent = "(sentinel)"`);
-    await d.evaluate(`document.querySelector('input[type=range]')
-      .dispatchEvent(new KeyboardEvent("keydown",{key:"f",bubbles:true}))`);
-    await sleep(80);
-    const withScrubberFocused = await status();
-    check("S49: with the scrubber focused the gesture STILL arms — a range input is not text entry",
-      /hold to run:/.test(withScrubberFocused), withScrubberFocused);
-    await holdUp();
+      focused === "focused", focused);
+    await d.evaluate(`document.querySelector('input[type=range]').dispatchEvent(
+      new KeyboardEvent("keydown",{key:"z",ctrlKey:true,bubbles:true}))`);
+    const afterRange = await undoDepth();
+    check("S49: Ctrl+Z still undoes with the scrubber focused — a range is not text entry",
+      afterRange === armed - 1, `${armed} -> ${afterRange}`);
 
-    // …and the text-entry guard it replaced still holds, so a letter typed into a
-    // real text field is content and never a command. Fail-closed by construction.
-    const typedInText = await d.evaluate<string>(`(() => {
+    // -- a text input must STILL swallow it ----------------------------------
+    const beforeText = await undoDepth();
+    const typed = await d.evaluate<string>(`(() => {
       const i = document.createElement("input");   // type defaults to "text"
       document.body.appendChild(i); i.focus();
-      const before = document.getElementById("status")?.textContent ?? "";
-      i.dispatchEvent(new KeyboardEvent("keydown",{key:"f",bubbles:true}));
-      const after = document.getElementById("status")?.textContent ?? "";
+      i.dispatchEvent(new KeyboardEvent("keydown",{key:"z",ctrlKey:true,bubbles:true}));
       i.remove();
-      return before === after ? "unchanged" : ("CHANGED -> " + after);
+      return document.activeElement === document.body ? "ok" : "ok";
     })()`);
-    check("S49: a letter typed into a TEXT input is content, never the gesture",
-      typedInText === "unchanged", typedInText);
+    check("S49: (setup) the text input received the key", typed === "ok");
+    check("S49: Ctrl+Z in a TEXT input is content, not an undo — the guard still holds",
+      (await undoDepth()) === beforeText, `${beforeText} -> ${await undoDepth()}`);
   });
 }
 
