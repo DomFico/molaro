@@ -89,9 +89,20 @@ export function pickPoint(
  *     value`, exactly the tube radius / ribbon half-width the shader draws.
  *     Zero ⇒ collapsed ⇒ never covers, matching the shader's zero-radius
  *     discard.
+ *   - `alphaA[s]` / `alphaB[s]` — the OPACITY-BUFFER VALUE at each end
+ *     (`edgeOpacity[e]` for an edge — the one per-edge alpha, so both ends
+ *     carry it; `traceOpacity[vertex]` for a trace/ribbon segment — per-end,
+ *     because the drawn body interpolates between its two vertices' alphas).
+ *     The rendered alpha at a point on the body is the SAME linear blend the
+ *     shader's varying performs, and exactly zero there means the fragment is
+ *     discarded — see the zero-alpha rule on pickElement.
+ *
+ * REQUIRED, not optional: a caller that forgets an alpha buffer must fail the
+ * typecheck rather than silently fall back to "everything is opaque" — that
+ * silent default is precisely the defect this pair exists to close.
  *
  * The caller supplies STATIC connectivity once and refreshes the half-width
- * values from the live representation buffers before each pick.
+ * and alpha values from the live representation buffers before each pick.
  */
 export interface PickSegments {
   count: number;
@@ -99,6 +110,8 @@ export interface PickSegments {
   pointB: ArrayLike<number>;
   halfA: ArrayLike<number>;
   halfB: ArrayLike<number>;
+  alphaA: ArrayLike<number>;
+  alphaB: ArrayLike<number>;
 }
 
 /**
@@ -110,6 +123,12 @@ export interface PickGeometry {
   /** per-point size-buffer value (length N) — `rep.state.size`. World sphere
    * radius = `worldPerSize × pointSize[p]`, the impostor's drawn radius. */
   pointSize: ArrayLike<number>;
+  /** per-point opacity-buffer value (length N) — `rep.state.opacity`, the
+   * alpha the sphere pass actually draws with. Exactly zero ⇒ the fragment
+   * shader discards ⇒ zero pixels ⇒ not pickable (see the zero-alpha rule on
+   * pickElement). REQUIRED for the same fail-closed reason as the segment
+   * alphas: an omitted buffer must not read as "opaque". */
+  pointOpacity: ArrayLike<number>;
   /** world units per size-buffer unit (`k`); the ONE scene-scale constant the
    * renderer multiplies every stored size by (geometry.worldPerSizeUnit). */
   worldPerSize: number;
@@ -144,6 +163,33 @@ export interface PickGeometry {
  * If NOTHING covers the cursor, it falls back to the legacy nearest-CENTER test
  * within `basePixelThreshold`, so a small/precise element still picks exactly
  * and clicking empty space near it never over-grabs.
+ *
+ * ZERO ALPHA IS NOT PICKABLE — an element that draws no pixels cannot be
+ * clicked. Visibility and opacity are SEPARATE buffers: hide/show writes
+ * `visible`, the opacity verbs and any mod writing the opacity axis write
+ * `opacity`/`edgeOpacity`/`traceOpacity`. Consulting only the first left an
+ * element at alpha 0 rendering nothing yet fully clickable, so a click on
+ * apparent empty space — or on a tube/ribbon genuinely behind it — selected
+ * something the user could not see.
+ *
+ * The rule is EXACTLY ZERO, which is the renderer's own rule: every geometry
+ * fragment shader discards on `alpha <= 0.0` (sphere `vOpacity`, edge tube
+ * `col.a` after the A→B mix, trace tube/ribbon `vColor.a` after the per-vertex
+ * interpolation). This reproduces that test on the CPU — no threshold, because
+ * a deliberately faint layer at alpha 0.1 is genuinely on screen and must stay
+ * clickable; any cutoff above zero would silently kill it.
+ *
+ * SKIP, DON'T ABORT. Every alpha rejection is a `continue`, never a return: the
+ * front-most search keeps scanning, so the click passes THROUGH the invisible
+ * element and resolves to whatever is drawn behind it. A zero-alpha point is
+ * dropped from BOTH the cover test and the nearest-center fallback (one guard,
+ * top of the same loop body), so it cannot win by either route. Suppressing the
+ * hit and returning nothing would still swallow the click, which is the symptom
+ * itself.
+ *
+ * Reversibility is free: the alphas are READ from the buffers the renderer
+ * draws with, so restoring opacity restores pickability with no second mask to
+ * keep in sync.
  *
  * The size-aware reach only EXTENDS the legacy pick — it never shrinks or
  * reorders it. A point is a "cover" candidate only where its DRAWN radius
@@ -235,8 +281,13 @@ export function pickElement(
 
   // -- point candidates -------------------------------------------------------
   const pointSize = geom.pointSize;
+  const pointOpacity = geom.pointOpacity;
   for (let p = 0; p < nPoints; p++) {
     if (visible && visible[p] < 0.5) continue;
+    // ZERO ALPHA DRAWS NOTHING (the sphere shader's `vOpacity <= 0.0` discard).
+    // `continue`, so the scan keeps going and the click reaches what is behind
+    // — and so this point is out of the nearest-center fallback below too.
+    if (pointOpacity[p] <= 0) continue;
     const w = project(p);
     if (w <= 0) continue;
     const sx = out.sx, sy = out.sy;
@@ -269,6 +320,25 @@ export function pickElement(
       const a = seg.pointA[s];
       const b = seg.pointB[s];
       if (visible && (visible[a] < 0.5 || visible[b] < 0.5)) continue; // tube collapses if either end hidden
+      // ZERO ALPHA AT BOTH ENDS ⇒ the whole body draws nothing, whatever the
+      // hit parameter turns out to be — the same rule as the per-t test below,
+      // evaluated on the same seam as the visibility collapse because it cannot
+      // vary along the segment. For an EDGE this is the whole story (one
+      // `edgeOpacity[e]` rides both ends, so the shader's A→B mix is constant);
+      // for a trace/ribbon segment it fires only when BOTH vertices are at
+      // zero. Skips two projections for a fully faded-out scene.
+      //
+      // SUBSUMED, deliberately: alphaT is a convex combination of these two, so
+      // both ≤ 0 forces alphaT ≤ 0 for every t and the per-t test below would
+      // reject the same segments on its own — MEASURED by mutation (deleting
+      // this line alone leaves the whole suite green, deleting the per-t test
+      // alone does not). It is a short-circuit, not a second rule: it changes
+      // the cost of `bondopacity all 0` on a 173 940-edge scene, never an
+      // answer, and it belongs on the seam that already collapses a tube whose
+      // endpoint is hidden.
+      const aA = seg.alphaA[s];
+      const aB = seg.alphaB[s];
+      if (aA <= 0 && aB <= 0) continue;
       const wA = project(a);
       if (wA <= 0) continue;
       const axA = out.sx, ayA = out.sy;
@@ -286,6 +356,13 @@ export function pickElement(
       const ex = px - clickPxX;
       const ey = py - clickPxY;
       const d2 = ex * ex + ey * ey;
+      // ALPHA interpolated along the drawn segment, exactly as the shader's
+      // varying does between the two end colors — a trace/ribbon body fading
+      // from a written vertex to an unwritten one draws a gradient, and only
+      // the end that reaches literal zero draws nothing. `continue` keeps the
+      // front-most search alive so the click falls through to what is behind.
+      const alphaT = aA + t * (aB - aA);
+      if (alphaT <= 0) continue;
       // half-width and depth interpolated along the drawn segment.
       const depthT = wA + t * (wB - wA);
       if (depthT <= 0) continue;

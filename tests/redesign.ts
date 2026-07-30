@@ -11212,6 +11212,12 @@ async function S62(): Promise<void> {
 // enlarged elements and asserts the pick resolves to THAT element, while a
 // small/precise element still picks exactly and empty space over-grabs nothing.
 //
+// Part F extends the SAME principle — the hit test must match what is drawn —
+// to the OPACITY axis. `visible` and `opacity` are separate buffers and the
+// pick read only the first, so an element faded to alpha 0 drew zero pixels yet
+// stayed fully clickable. Zero alpha is now unpickable on all three primitives,
+// and the click passes THROUGH to what is behind rather than being swallowed.
+//
 // The legacy fixed threshold (webview/main.ts PICK_PIXEL_THRESHOLD).
 const PICK_THRESHOLD_PX = 12;
 async function S63(): Promise<void> {
@@ -11384,6 +11390,170 @@ async function S63(): Promise<void> {
     await pick(pp.x, pp.y);
     check("S63: …and the pick after that does not rebuild it again",
       (await refreshes()) === afterWrite, `${afterWrite} -> ${await refreshes()}`);
+
+    // -- F) ZERO OPACITY IS NOT PICKABLE ---------------------------------------
+    // `visible` and `opacity` are SEPARATE buffers written by different paths
+    // (hide/show vs the opacity verbs). The pick read only the first, so an
+    // element faded to alpha 0 rendered nothing yet stayed fully clickable: a
+    // click on apparent empty space, or on a body genuinely behind it, selected
+    // something invisible.
+    //
+    // Every case below follows the same shape, which is what makes it a
+    // SKIP-DON'T-ABORT proof rather than a suppression proof:
+    //   1. measure what the probe click resolves to with the element at its
+    //      default extent — `under`, whatever is genuinely drawn there;
+    //   2. enlarge the element so the click lands on IT;
+    //   3. fade it to 0 and require the click to resolve to exactly `under`
+    //      again. A -1 would mean the click was swallowed, which is the
+    //      symptom, so "not the faded element" is asserted separately from
+    //      "the thing behind it";
+    //   4. set a FAINT nonzero alpha and require the element back — the rule is
+    //      exactly zero, and a deliberately faint layer must stay clickable;
+    //   5. restore alpha 1 and require it back, with nothing else touched.
+    const rafs = () => d.evaluate(`(async () => {
+      for (let i = 0; i < 3; i++) await new Promise(r => requestAnimationFrame(r));
+    })()`);
+
+    // F1) POINT SPHERE — plus the PIXEL anchor: alpha 0 really does draw
+    // nothing, so the picker and the renderer are agreeing about the same fact.
+    const fp2 = await d.evaluate<{ x: number; y: number; depth: number }>(
+      `${V}.debug.projectPoint(${F})`);
+    const rFat2 = screenRadius(FAT, fp2.depth);
+    // Sweep a ring at half the enlarged radius (inside the drawn sphere, well
+    // outside its DEFAULT 12px reach) for a direction that has something ELSE
+    // drawn under it. Landing on a real element rather than empty space is what
+    // makes the fall-through assertion below a skip-don't-abort proof instead of
+    // a mere suppression proof; the first direction is kept as the fallback so
+    // the case still runs on a scene with nothing behind.
+    const ring = await d.evaluate<{ x: number; y: number; under: number }>(`(()=>{
+      const cx=${fp2.x}, cy=${fp2.y}, r=${rFat2 * 0.5};
+      let first=null;
+      for (let i=0;i<12;i++){
+        const a=i*Math.PI/6, x=cx+r*Math.cos(a), y=cy+r*Math.sin(a);
+        const u=${V}.debug.pick(x,y);
+        if (u === ${F}) continue;
+        if (first === null) first = {x,y,under:u};
+        if (u >= 0) return {x,y,under:u};
+      }
+      return first ?? {x:cx+r, y:cy, under:${V}.debug.pick(cx+r,cy)};
+    })()`);
+    const fx = ring.x, fy = ring.y;
+    const underPoint = ring.under;
+    check("S63: the fade probe click is outside the sphere's DEFAULT reach",
+      underPoint !== F, `under=${underPoint} F=${F}`);
+    check("S63: …and something ELSE is drawn under it (so fall-through is observable)",
+      underPoint >= 0, `under=${underPoint} — empty space; only suppression is testable here`);
+    await cmd(`colorpoints #${F} red`);
+    check("S63: (setup) enlarging the sphere makes the probe click land on it",
+      (await cmd(`pointsize #${F} ${FAT}`)).status === "ok" && (await pick(fx, fy)) === F);
+    await rafs();
+    const litPixels = await d.samplePatch({
+      centerExpr: `({x:${fx},y:${fy}})`, half: 1, classify: "r > g + 60 && r > b + 60",
+    });
+    check("S63: PIXELS — the opaque sphere covers the probe click (4/4 red)",
+      litPixels.count === 4, `${litPixels.count}/4`);
+    const fade = await cmd(`pointopacity #${F} 0`);
+    check("S63: pointopacity 0 accepted", fade.status === "ok", fade.message);
+    await rafs();
+    const darkPixels = await d.samplePatch({
+      centerExpr: `({x:${fx},y:${fy}})`, half: 1, classify: "r > g + 60 && r > b + 60",
+    });
+    check("S63: PIXELS — at alpha 0 the sphere draws ZERO pixels there",
+      darkPixels.count === 0, `${darkPixels.count}/4 still red`);
+    const throughPoint = await pick(fx, fy);
+    check("S63: …so it is NOT pickable (an element drawing nothing cannot be clicked)",
+      throughPoint !== F, `pick=${throughPoint} faded=${F}`);
+    check("S63: …and the click passes THROUGH to what is drawn behind (skip, not abort)",
+      throughPoint === underPoint, `pick=${throughPoint} want=${underPoint}`);
+    await cmd(`pointopacity #${F} 0.02`);
+    check("S63: a FAINT sphere (alpha 0.02) is drawn and STAYS pickable — exactly zero, not a threshold",
+      (await pick(fx, fy)) === F, `pick=${await pick(fx, fy)} want=${F}`);
+    await cmd(`pointopacity #${F} 1`);
+    check("S63: restoring opacity restores pickability (no separate state to clear)",
+      (await pick(fx, fy)) === F);
+    await d.screenshot(`${REPORT}/S63_zero_opacity.png`);
+    await cmd(`pointsize #${F} 3`);
+    await cmd(`colorpoints #${F} white`);
+
+    // Shared probe for the two BODY primitives: a click D px off the segment's
+    // centerline at its midpoint — inside the thickened half-width, and beyond
+    // legacy center reach of both endpoints.
+    const bodyProbe = (
+      seg: { ax: number; ay: number; bx: number; by: number; depth: number },
+      sz: number,
+    ): { x: number; y: number } => {
+      const L = Math.hypot(seg.bx - seg.ax, seg.by - seg.ay);
+      const half = screenRadius(sz, seg.depth);
+      const D = Math.min(half * 0.6, half - 4);
+      const px = -(seg.by - seg.ay) / L, py = (seg.bx - seg.ax) / L;
+      return { x: (seg.ax + seg.bx) / 2 + px * D, y: (seg.ay + seg.by) / 2 + py * D };
+    };
+
+    // F2) EDGE BODY — one `edgeOpacity` per edge, so the alpha is constant
+    // along the drawn tube and fading it removes the whole body.
+    if (edgeSeg) {
+      const ESZ = 200;
+      const q = bodyProbe(edgeSeg, ESZ);
+      const underEdge = await pick(q.x, q.y);
+      check("S63: the edge probe click is outside the DEFAULT edge's reach",
+        underEdge !== edgeSeg.a && underEdge !== edgeSeg.b,
+        `under=${underEdge} ends=[${edgeSeg.a},${edgeSeg.b}]`);
+      await cmd(`bondsize #${edgeSeg.a},#${edgeSeg.b} ${ESZ}`);
+      const onEdge = await pick(q.x, q.y);
+      check("S63: (setup) the thickened edge body covers the probe click",
+        onEdge === edgeSeg.a || onEdge === edgeSeg.b, `pick=${onEdge}`);
+      const eo = await cmd(`bondopacity #${edgeSeg.a},#${edgeSeg.b} 0`);
+      check("S63: bondopacity 0 accepted", eo.status === "ok", eo.message);
+      const throughEdge = await pick(q.x, q.y);
+      check("S63: a zero-opacity EDGE body is not pickable",
+        throughEdge !== edgeSeg.a && throughEdge !== edgeSeg.b, `pick=${throughEdge}`);
+      check("S63: …and that click passes THROUGH to what is behind it",
+        throughEdge === underEdge, `pick=${throughEdge} want=${underEdge}`);
+      await cmd(`bondopacity #${edgeSeg.a},#${edgeSeg.b} 0.05`);
+      check("S63: a FAINT edge body (alpha 0.05) still picks",
+        (await pick(q.x, q.y)) === onEdge, `pick=${await pick(q.x, q.y)} want=${onEdge}`);
+      await cmd(`bondopacity #${edgeSeg.a},#${edgeSeg.b} 1`);
+      check("S63: restoring edge opacity restores pickability",
+        (await pick(q.x, q.y)) === onEdge);
+      await cmd(`bondsize #${edgeSeg.a},#${edgeSeg.b} 3`);
+    }
+
+    // F3) POLYLINE BODY — `traceOpacity` is per-VERTEX and the drawn body
+    // interpolates between its two ends; fading BOTH ends removes it entirely.
+    // (The partial case — a body that vanishes only AT its faded end — is
+    // pinned in tests/picking.test.ts, where the hit parameter is exact.)
+    if (traceSeg) {
+      const TSZ = 200;
+      const q = bodyProbe(traceSeg, TSZ);
+      const underTrace = await pick(q.x, q.y);
+      check("S63: the polyline probe click is outside the DEFAULT body's reach",
+        underTrace !== traceSeg.a && underTrace !== traceSeg.b,
+        `under=${underTrace} ends=[${traceSeg.a},${traceSeg.b}]`);
+      await cmd(`tracesize #${traceSeg.a} ${TSZ}`);
+      await cmd(`tracesize #${traceSeg.b} ${TSZ}`);
+      const onTrace = await pick(q.x, q.y);
+      check("S63: (setup) the widened polyline body covers the probe click",
+        onTrace === traceSeg.a || onTrace === traceSeg.b, `pick=${onTrace}`);
+      const t0 = await cmd(`traceopacity #${traceSeg.a} 0`);
+      const t1 = await cmd(`traceopacity #${traceSeg.b} 0`);
+      check("S63: traceopacity 0 accepted", t0.status === "ok" && t1.status === "ok",
+        `${t0.message} / ${t1.message}`);
+      const throughTrace = await pick(q.x, q.y);
+      check("S63: a zero-opacity POLYLINE body is not pickable",
+        throughTrace !== traceSeg.a && throughTrace !== traceSeg.b, `pick=${throughTrace}`);
+      check("S63: …and that click passes THROUGH to what is behind it",
+        throughTrace === underTrace, `pick=${throughTrace} want=${underTrace}`);
+      await cmd(`traceopacity #${traceSeg.a} 0.05`);
+      await cmd(`traceopacity #${traceSeg.b} 0.05`);
+      check("S63: a FAINT polyline body (alpha 0.05) still picks",
+        (await pick(q.x, q.y)) === onTrace, `pick=${await pick(q.x, q.y)} want=${onTrace}`);
+      await cmd(`traceopacity #${traceSeg.a} 1`);
+      await cmd(`traceopacity #${traceSeg.b} 1`);
+      check("S63: restoring polyline opacity restores pickability",
+        (await pick(q.x, q.y)) === onTrace);
+      await cmd(`tracesize #${traceSeg.a} 1`);
+      await cmd(`tracesize #${traceSeg.b} 1`);
+    }
   });
 }
 

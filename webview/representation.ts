@@ -67,9 +67,11 @@ export interface RepresentationState {
    * orthogonality and same state-only-pending-geometry caveat. */
   traceSize: Float32Array;
   /** length N — per-point alpha (0..1). OPACITY ⊥ HIDE: 0 is
-   * invisible-but-present (still in the scene, still pickable); a hidden
-   * element is gone. Kept SEPARATE from the RGB color buffer so the two
-   * channels stay independent. */
+   * invisible-but-present (still in the scene, still in its buffer slot);
+   * a hidden element is gone. NOT mouse-pickable at exactly 0, though —
+   * the picker reads this buffer and skips zero-alpha candidates so a click
+   * falls through to what is drawn behind. Kept SEPARATE from the RGB color
+   * buffer so the two channels stay independent. */
   opacity: Float32Array;
   /** length E — per-EDGE alpha (bondopacity/bondopacityof both write it). */
   edgeOpacity: Float32Array;

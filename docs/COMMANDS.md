@@ -586,10 +586,18 @@ The axis values:
 - **`<opacity>`** is a number in **[0, 1]** (`0.5`, `0`, `1`). **Zero is a
   legal, literal alpha — it does NOT hide**: a zero-opacity element is
   *invisible-but-present* — still in the scene, still in its buffer slot,
-  still pickable, hide-state untouched (a hidden element is *gone*; the two
-  channels never touch each other — which is exactly what makes "fade an
-  element to fully transparent while keeping it selectable" expressible).
-  The message says `set N points to opacity 0`, never "hidden".
+  hide-state untouched (a hidden element is *gone*; the two
+  channels never touch each other). The message says
+  `set N points to opacity 0`, never "hidden".
+  **It is not MOUSE-pickable, though.** An element drawn at exactly zero
+  alpha renders zero pixels, and a click passes THROUGH it to whatever is
+  behind — otherwise clicking what looks like empty space selects something
+  you cannot see. Any alpha above zero, however faint, still picks: the rule
+  is `alpha == 0`, not a threshold, so a deliberately faded context layer at
+  `0.1` stays clickable. It also stays fully reachable **by address** —
+  `create_sele #N`, `pointopacity #N 1` — so nothing becomes unreachable,
+  only un-clickable. (Zero *size* is different and still picks; see the size
+  bullet above.)
   **Out-of-range clamps two-sidedly** — below 0 → 0, above 1 → 1 — and the
   message names the bound (`(clamped to 0)` / `(clamped to 1)`). A
   non-numeric token is an **error** and nothing is written.

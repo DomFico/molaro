@@ -496,8 +496,12 @@ function makeStyleUniforms(): StyleUniforms {
  * radii now (k × stored value): they scale with zoom instead of pinning to
  * screen pixels. Hidden points collapse and discard; exactly-zero alpha AND
  * exactly-zero radius discard, so invisible-but-present elements never
- * punch depth holes (both stay pickable — picking is CPU-side). Opacity
- * still blends NAIVELY (no depth sorting — the recorded follow-up).
+ * punch depth holes. Picking is CPU-side and MIRRORS the alpha half of that
+ * discard: an element at exactly zero alpha draws no pixels and is therefore
+ * not pickable either (picking.ts), while a zero-RADIUS element stays
+ * pickable — size 0 is a literal extent, not a hide, and the nearest-center
+ * fallback still reaches it. Opacity still blends NAIVELY (no depth sorting
+ * — the recorded follow-up).
  *
  * depthWrite is EXPLICIT on all three geometry materials (C2): if the
  * override ever lapsed, occlusion would silently revert to per-object
@@ -4135,12 +4139,18 @@ async function main(): Promise<void> {
   // extent covers the cursor — a sphere by its projected radius, a tube/ribbon
   // body by its projected half-width — so the hit test matches what is drawn
   // (see picking.ts). The STATIC connectivity is built once here; the half-width
-  // VALUES are refreshed from the live rep buffers before each pick, so every
-  // size command (pointsize/bondsize/tracesize) is reflected immediately.
+  // and ALPHA values are refreshed from the live rep buffers before each pick,
+  // so every size command (pointsize/bondsize/tracesize) and every opacity
+  // command (pointopacity/bondopacity/traceopacity, and any mod or channel
+  // binding writing those axes) is reflected immediately.
   //
   // Edges size uniformly per edge (edgeSize[e]); trace/ribbon segments per end
   // (traceSize[vertex]). The trace tube and the ribbon both draw traceSize as
   // their half-width, so one segment set serves whichever shape is active.
+  // Alpha rides the SAME split, and for the same reason: one `edgeOpacity[e]`
+  // is written into both of an edge's ends (fillEdgeColors does exactly that
+  // into iColorA.a/iColorB.a), while a trace/ribbon segment carries its two
+  // vertices' `traceOpacity` and the drawn body interpolates between them.
   const pickTraceSeg = traceSegments(header.polylines);
   const pickSegCount = header.edges.length + pickTraceSeg.count;
   const pickSegPointA = new Uint32Array(pickSegCount);
@@ -4169,20 +4179,29 @@ async function main(): Promise<void> {
   // Reused every pick (no per-click allocation).
   const pickSegHalfA = new Float32Array(pickSegCount);
   const pickSegHalfB = new Float32Array(pickSegCount);
+  const pickSegAlphaA = new Float32Array(pickSegCount);
+  const pickSegAlphaB = new Float32Array(pickSegCount);
   const pickSegments: PickSegments | null = pickSegCount > 0
     ? {
         count: pickSegCount, pointA: pickSegPointA, pointB: pickSegPointB,
         halfA: pickSegHalfA, halfB: pickSegHalfB,
+        alphaA: pickSegAlphaA, alphaB: pickSegAlphaB,
       }
     : null;
 
   const vp = new THREE.Matrix4();
-  // The half-width refresh below rewrites every segment's stored width from the
-  // live size buffers. It used to run on EVERY pick — 175 428 iterations on the
+  // The refresh below rewrites every segment's stored width AND alpha from the
+  // live rep buffers. It used to run on EVERY pick — 175 428 iterations on the
   // corpus membrane, and pickAt runs on every pointermove during a Ctrl-drag
   // paint — even in a scene where no size was ever changed. It is now gated on
-  // the registry's write epoch, so it runs once after a size command and never
+  // the registry's write epoch, so it runs once after a rep write and never
   // again until the next one. -1 forces the first pick to build it.
+  //
+  // The epoch is bumped by EVERY rep-buffer write (registry.repWrite), which is
+  // what lets alpha share this gate: the opacity verbs, a mod's opacity-axis
+  // write, the per-flip channel-binding applier and the undo restore all route
+  // through it, so the copied alphas cannot outlive a change to the buffers
+  // they were copied from.
   let pickHalfEpoch = -1;
   let pickHalfRefreshes = 0;   // test seam: how often that loop actually ran
   const pickAt = (clientX: number, clientY: number): number => {
@@ -4194,16 +4213,21 @@ async function main(): Promise<void> {
     if (pickSegments && pickHalfEpoch !== registry.repWriteEpoch) {
       pickHalfEpoch = registry.repWriteEpoch;
       pickHalfRefreshes++;
-      // refresh each segment's half-width VALUE from the live size buffers
+      // refresh each segment's half-width and ALPHA from the live rep buffers
       const es = rep.state.edgeSize;
       const ts = rep.state.traceSize;
+      const eo = rep.state.edgeOpacity;
+      const to = rep.state.traceOpacity;
       for (let s = 0; s < pickSegCount; s++) {
         const e = pickSegEdge[s];
         if (e >= 0) {
           pickSegHalfA[s] = pickSegHalfB[s] = es[e];
+          pickSegAlphaA[s] = pickSegAlphaB[s] = eo[e];
         } else {
           pickSegHalfA[s] = ts[pickSegVertA[s]];
           pickSegHalfB[s] = ts[pickSegVertB[s]];
+          pickSegAlphaA[s] = to[pickSegVertA[s]];
+          pickSegAlphaB[s] = to[pickSegVertB[s]];
         }
       }
     }
@@ -4219,6 +4243,9 @@ async function main(): Promise<void> {
       PICK_PIXEL_THRESHOLD,
       {
         pointSize: rep.state.size,
+        // the alpha the sphere pass draws with — read live, never mirrored,
+        // so restoring opacity restores pickability with nothing to re-sync
+        pointOpacity: rep.state.opacity,
         worldPerSize: sizing.uWorldPerSize.value,
         tanHalfFov: TAN_HALF_FOV,
         segments: pickSegments,
@@ -4769,8 +4796,8 @@ async function main(): Promise<void> {
         },
         /** what a click at client (x,y) would pick (-1 = empty space). */
         pick: (x: number, y: number): number => pickAt(x, y),
-        /** how many times pickAt has rebuilt its per-segment half-width table.
-         * That loop is one iteration per SEGMENT — 175 428 on the corpus
+        /** how many times pickAt has rebuilt its per-segment half-width + alpha
+         * table. That loop is one iteration per SEGMENT — 175 428 on the corpus
          * membrane — and it used to run on every pick, including the ones during
          * a Ctrl-drag paint, in scenes where no size had ever been written. It is
          * now gated on the registry's write epoch, and this counter is how that

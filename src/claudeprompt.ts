@@ -520,7 +520,11 @@ that). Three axes × four shapes:
 The target is OPTIONAL on all twelve (and on \`dashbonds\`/\`dashbondsof\`/\`style\`): a lone
 value means the whole system, so \`traceopacity 0.1\` == \`traceopacity all 0.1\`. \`bake\` and
 \`bind\` still require theirs.
-Color is a CSS name or \`#hex\`; size ≥ 0 (0 ≠ hidden); opacity 0–1. To color bonds you MUST
+Color is a CSS name or \`#hex\`; size ≥ 0 (0 ≠ hidden); opacity 0–1. **Opacity exactly 0 is
+still not "hidden" — the element stays in the scene and stays reachable by address — but it
+is no longer MOUSE-clickable**: it draws zero pixels, so a click falls through to whatever
+is behind it. Any alpha above 0 still picks, so a faded context layer at 0.1 stays
+clickable. Do not fade something to 0 expecting the user to click it. To color bonds you MUST
 use \`colorbonds\`/\`colorbondsof\` — \`colorpoints\` colors atoms, not bonds. The viewer's base
 look (default point size / opacity / color for anything unwritten) is in \`get_context\`; to
 put a write back to normal the reliable way is **undo (Ctrl+Z)**, which restores the exact

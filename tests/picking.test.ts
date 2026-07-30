@@ -12,7 +12,7 @@ import {
   pickPoint,
   selectionBounds,
 } from "../webview/picking.ts";
-import type { PickGeometry } from "../webview/picking.ts";
+import type { PickGeometry, PickSegments } from "../webview/picking.ts";
 
 /**
  * An orthographic-ish view-projection that maps world x,y directly to NDC and
@@ -84,7 +84,25 @@ const geom = (over: Partial<PickGeometry> & { pointSize: ArrayLike<number> }): P
   worldPerSize: 1,
   tanHalfFov: 100,
   segments: null,
+  // FULLY OPAQUE unless a case says otherwise. Every test written before the
+  // zero-alpha rule is a nothing-is-transparent scene, and each one must still
+  // resolve exactly as it did — that is the per-case half of the no-regression
+  // claim (the aggregate half is the byte-identical golden at the end of the
+  // pick section).
+  pointOpacity: new Float32Array(over.pointSize.length).fill(1),
   ...over,
+});
+
+/** Segment fixture whose per-end ALPHAS default to fully opaque — same reason
+ * as `geom` above. `alphaA`/`alphaB` are REQUIRED on PickSegments (a caller
+ * that forgets them must fail the typecheck, not silently read as opaque), so
+ * the default lives here in the test helper rather than in the picker. */
+const segs = (
+  o: Omit<PickSegments, "alphaA" | "alphaB"> & Partial<PickSegments>,
+): PickSegments => ({
+  alphaA: new Float32Array(o.count).fill(1),
+  alphaB: new Float32Array(o.count).fill(1),
+  ...o,
 });
 
 /**
@@ -117,7 +135,7 @@ test("pickElement: clicking a SEGMENT body resolves to the nearer endpoint", () 
   const visible = new Float32Array([1, 1]);
   const g = geom({
     pointSize: new Float32Array([1, 1]), // endpoints too small to cover the body
-    segments: { count: 1, pointA: [0], pointB: [1], halfA: [8], halfB: [8] }, // 8px half-width
+    segments: segs({ count: 1, pointA: [0], pointB: [1], halfA: [8], halfB: [8] }), // 8px half-width
   });
   // Click at NDC (0.1,0.03)=px(10,3): on the drawn tube (3px off the axis),
   // 40px from B's center and 60px from A's — no endpoint center is near.
@@ -133,7 +151,7 @@ test("pickElement: a body-click outside the half-width does NOT cover", () => {
   const visible = new Float32Array([1, 1]);
   const g = geom({
     pointSize: new Float32Array([1, 1]),
-    segments: { count: 1, pointA: [0], pointB: [1], halfA: [2], halfB: [2] }, // only 2px
+    segments: segs({ count: 1, pointA: [0], pointB: [1], halfA: [2], halfB: [2] }), // only 2px
   });
   // px(10,3): 3px off the axis > 2px half-width ⇒ tube misses; endpoints far ⇒ -1.
   const r = pickElement(positions, 2, visible, ORTHO, 0.1, 0.03, 200, 200, 5, g);
@@ -181,7 +199,7 @@ test("pickElement: hidden points and hidden-endpoint segments are skipped", () =
   // point 0 hidden; point 1 visible. Click dead-center on 0.
   const g = geom({
     pointSize: new Float32Array([30, 1]),
-    segments: { count: 1, pointA: [0], pointB: [1], halfA: [20], halfB: [20] },
+    segments: segs({ count: 1, pointA: [0], pointB: [1], halfA: [20], halfB: [20] }),
   });
   const r = pickElement(positions, 2, new Float32Array([0, 1]), ORTHO, 0, 0, 200, 200, 12, g);
   // the big hidden sphere (0) and the segment (endpoint 0 hidden ⇒ tube gone)
@@ -196,6 +214,324 @@ test("pickElement: a zero-size sphere is not covered but stays fallback-pickable
   // fallback still reaches it (parity with the renderer's zero-radius points
   // staying pickable).
   assert.equal(pickElement(positions, 1, new Float32Array([1]), ORTHO, 0, 0, 200, 200, 12, g).index, 0);
+});
+
+// -- ZERO ALPHA IS NOT PICKABLE ------------------------------------------------
+//
+// `visible` and `opacity` are SEPARATE length-N buffers written by different
+// paths (hide/show vs the opacity verbs and any mod or channel binding on the
+// opacity axis). The pick consulted only the first, so an element faded to
+// alpha 0 drew nothing yet stayed fully clickable: a click on apparent empty
+// space — or on a tube/ribbon genuinely behind it — selected an element the
+// user could not see. Every geometry fragment shader discards on `alpha <= 0`,
+// and these pin the picker to that same literal-zero rule, on all three
+// pickable primitives (point spheres, edge bodies, polyline bodies) and on both
+// of the point loop's routes (the size-aware cover test AND the nearest-center
+// fallback).
+//
+// Two properties every case below is written to hold:
+//   SKIP, DON'T ABORT — a rejected candidate must not swallow the click; the
+//     search keeps going and resolves to whatever is drawn behind.
+//   EXACTLY ZERO — 0.1 is faint but genuinely on screen and stays clickable, so
+//     no threshold may creep in above zero.
+
+test("pickElement: a zero-opacity sphere is skipped and the click reaches what is BEHIND it", () => {
+  // Two big spheres on the same screen ray: BACK z=4 (index 0), FRONT z=1
+  // (index 1). Both drawn radii clear the 12px threshold (BACK is 60/4=15px),
+  // so both are genuine cover candidates and FRONT wins on depth — that is the
+  // opaque baseline asserted first.
+  const positions = new Float32Array([0, 0, 4, 0, 0, 1]);
+  const visible = new Float32Array([1, 1]);
+  const opaque = geom({ pointSize: new Float32Array([60, 60]) });
+  assert.equal(
+    pickElement(positions, 2, visible, PERSP_DEPTH, 0, 0, 200, 200, 12, opaque).index, 1,
+    "baseline: the front sphere is on top",
+  );
+  // Fade the FRONT sphere to literal zero: it draws no pixels, so the click
+  // must pass THROUGH it and land on the back sphere. Returning -1 here would
+  // still swallow the click — the symptom itself — so the assertion is the
+  // BACK index, not "nothing".
+  const faded = geom({
+    pointSize: new Float32Array([60, 60]),
+    pointOpacity: new Float32Array([1, 0]),
+  });
+  assert.equal(
+    pickElement(positions, 2, visible, PERSP_DEPTH, 0, 0, 200, 200, 12, faded).index, 0,
+    "the click passes through the invisible front sphere to the visible one behind",
+  );
+});
+
+test("pickElement: a zero-opacity point is out of the nearest-center FALLBACK too", () => {
+  // Two DEFAULT-size dots, 5px apart, neither big enough to be a cover
+  // candidate — so this exercises the OTHER route into a pick, the legacy
+  // nearest-center fallback. Dot 0 sits exactly under the click.
+  const positions = new Float32Array([0, 0, 0, 0.05, 0, 0]);
+  const visible = new Float32Array([1, 1]);
+  const opaque = geom({ pointSize: new Float32Array([2, 2]) });
+  assert.equal(
+    pickElement(positions, 2, visible, ORTHO, 0, 0, 200, 200, 12, opaque).index, 0,
+    "baseline: the dot under the cursor wins by proximity",
+  );
+  const faded = geom({
+    pointSize: new Float32Array([2, 2]),
+    pointOpacity: new Float32Array([0, 1]),
+  });
+  assert.equal(
+    pickElement(positions, 2, visible, ORTHO, 0, 0, 200, 200, 12, faded).index, 1,
+    "the invisible dot is skipped by the fallback as well, so its neighbour picks",
+  );
+});
+
+test("pickElement: EXACTLY zero — any nonzero alpha, however faint, stays pickable", () => {
+  // The load-bearing half of the rule. A context layer is deliberately drawn at
+  // a low alpha: faint, but genuinely on screen and legitimately clickable. Any
+  // cutoff ABOVE zero silently kills it, so the same front-sphere scene is run
+  // across alphas that a threshold would swallow.
+  const positions = new Float32Array([0, 0, 4, 0, 0, 1]);
+  const visible = new Float32Array([1, 1]);
+  for (const alpha of [1e-7, 1e-3, 0.01, 0.1, 0.25, 0.49, 0.5]) {
+    const g = geom({
+      pointSize: new Float32Array([60, 60]),
+      pointOpacity: new Float32Array([1, alpha]),
+    });
+    assert.equal(
+      pickElement(positions, 2, visible, PERSP_DEPTH, 0, 0, 200, 200, 12, g).index, 1,
+      `alpha ${alpha} is drawn, so the front sphere must still pick`,
+    );
+  }
+});
+
+test("pickElement: a zero-alpha EDGE body is skipped and the click reaches the body behind it", () => {
+  // Two segments stacked on the same screen line, drawn the same 8px wide:
+  //   FRONT: points 0,1 at depth 1 (halfVal 8  → 8/1 = 8px)
+  //   BACK : points 2,3 at depth 4 (halfVal 32 → 32/4 = 8px)
+  // Both project to px (-50,0)–(50,0). Endpoint spheres are size 1 (never cover
+  // candidates) and every endpoint center is ≥ 40px from the click, so the
+  // result comes only from the segment bodies.
+  const positions = new Float32Array([
+    -0.5, 0, 1, 0.5, 0, 1, // FRONT pair
+    -2, 0, 4, 2, 0, 4,     // BACK pair (same NDC, four times the depth)
+  ]);
+  const visible = new Float32Array([1, 1, 1, 1]);
+  const base = {
+    count: 2, pointA: [0, 2], pointB: [1, 3], halfA: [8, 32], halfB: [8, 32],
+  };
+  const opaque = geom({
+    pointSize: new Float32Array([1, 1, 1, 1]),
+    segments: segs(base),
+  });
+  // Click px(10,3): 3px off both axes, t≈0.6 along each ⇒ the nearer endpoint
+  // is the B end of whichever body wins.
+  assert.equal(
+    pickElement(positions, 4, visible, PERSP_DEPTH, 0.1, 0.03, 200, 200, 12, opaque).index, 1,
+    "baseline: the front body is on top, resolving to its nearer endpoint",
+  );
+  // Fade the FRONT edge out (one edgeOpacity rides BOTH of an edge's ends, so
+  // its alpha is constant along the body).
+  const faded = geom({
+    pointSize: new Float32Array([1, 1, 1, 1]),
+    segments: segs({
+      ...base,
+      alphaA: new Float32Array([0, 1]),
+      alphaB: new Float32Array([0, 1]),
+    }),
+  });
+  assert.equal(
+    pickElement(positions, 4, visible, PERSP_DEPTH, 0.1, 0.03, 200, 200, 12, faded).index, 3,
+    "the invisible front body is skipped and the visible body behind it picks",
+  );
+});
+
+test("pickElement: a polyline body is unpickable only WHERE its per-vertex alpha reaches zero", () => {
+  // `traceOpacity` is per-POLYLINE-VERTEX and the drawn body interpolates
+  // between its two ends, so a segment running from a faded vertex to an opaque
+  // one draws a gradient: it vanishes only at the literal-zero end. The picker
+  // blends the same way at the hit parameter, so this cannot be expressed by a
+  // whole-segment skip.
+  //
+  // One segment, px(-50,0)→px(50,0) at depth 1, 8px half-width, alphaA=0
+  // (invisible end) → alphaB=1 (opaque end). basePixelThreshold is 1px so the
+  // nearest-center fallback cannot reach past the bodies and confuse the read.
+  const positions = new Float32Array([-0.5, 0, 1, 0.5, 0, 1]);
+  const visible = new Float32Array([1, 1]);
+  const g = geom({
+    pointSize: new Float32Array([1, 1]),
+    segments: segs({
+      count: 1, pointA: [0], pointB: [1], halfA: [8], halfB: [8],
+      alphaA: new Float32Array([0]), alphaB: new Float32Array([1]),
+    }),
+  });
+  const pick = (ndcX: number) =>
+    pickElement(positions, 2, visible, PERSP_DEPTH, ndcX, 0.03, 200, 200, 1, g).index;
+  // px(-50,3): perpendicular to the A end ⇒ t=0 ⇒ blended alpha is exactly 0.
+  assert.equal(pick(-0.5), -1, "the faded END of the body draws nothing and picks nothing");
+  // px(-49,3): ONE pixel along the body ⇒ t=0.01 ⇒ alpha 0.01. Barely drawn,
+  // but drawn — the exactly-zero rule again, on the interpolated value.
+  assert.equal(pick(-0.49), 0, "one pixel along, the body is faint but present and picks");
+  // px(10,3): t=0.6 ⇒ alpha 0.6; px(50,3): t=1 ⇒ alpha 1. Both resolve to B.
+  assert.equal(pick(0.1), 1, "mid-body, the gradient is well above zero");
+  assert.equal(pick(0.5), 1, "the opaque END picks normally");
+  // The all-opaque control: the same clicks with alphaA=1 pick the A end where
+  // the faded run returned -1, so the -1 above is the ALPHA and nothing else.
+  const control = geom({
+    pointSize: new Float32Array([1, 1]),
+    segments: segs({ count: 1, pointA: [0], pointB: [1], halfA: [8], halfB: [8] }),
+  });
+  assert.equal(
+    pickElement(positions, 2, visible, PERSP_DEPTH, -0.5, 0.03, 200, 200, 1, control).index, 0,
+    "control: with both ends opaque the same click picks the A end",
+  );
+});
+
+test("pickElement: restoring opacity restores pickability — no second mask to re-sync", () => {
+  // The picker READS the opacity buffer the renderer draws with, so there is no
+  // derived pickability state that could drift or need clearing. Writing the
+  // same buffer in place, with the SAME geometry object, flips the answer both
+  // ways.
+  const positions = new Float32Array([0, 0, 0]);
+  const opacity = new Float32Array([1]);
+  const g = geom({ pointSize: new Float32Array([2]), pointOpacity: opacity });
+  const pick = () =>
+    pickElement(positions, 1, new Float32Array([1]), ORTHO, 0, 0, 200, 200, 12, g).index;
+  assert.equal(pick(), 0, "opaque: picks");
+  opacity[0] = 0;
+  assert.equal(pick(), -1, "faded to zero: gone");
+  opacity[0] = 1;
+  assert.equal(pick(), 0, "restored: back, with nothing else touched");
+});
+
+// -- byte-identical when nothing is transparent (mechanical, not asserted) -----
+//
+// The per-case control arms above cover the small scenes. This covers the
+// WHOLE decision surface: a deterministic pseudo-random scene (40 points with
+// mixed sizes and some hidden, 30 segments with mixed half-widths, a
+// perspective view-projection so depth ordering is live) swept by a 25×25 click
+// grid, hashing every (index, distance) the picker returns.
+//
+// The two constants below were produced by RUNNING THE PRE-CHANGE pickElement
+// over exactly this scene and grid — they are a recording, not a restatement of
+// the new code. Reproducing them with fully-opaque buffers is the byte-identical
+// evidence.
+const GOLDEN_HITS = 286;
+const GOLDEN_HASH = 1668268646;
+
+function rng(seed: number): () => number {
+  let s = seed >>> 0;
+  return () => {
+    s ^= s << 13; s >>>= 0;
+    s ^= s >>> 17;
+    s ^= s << 5; s >>>= 0;
+    return s / 4294967296;
+  };
+}
+
+function fnv1a(s: string, h: number): number {
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+const GOLDEN_N = 40;
+const GOLDEN_E = 30;
+
+/** The recorded scene. Rebuilt from the seed each call so no test can mutate
+ * another's inputs. */
+function goldenScene() {
+  const r = rng(0x5eed1234);
+  const positions = new Float32Array(GOLDEN_N * 3);
+  const size = new Float32Array(GOLDEN_N);
+  const visible = new Float32Array(GOLDEN_N);
+  for (let p = 0; p < GOLDEN_N; p++) {
+    positions[p * 3] = (r() * 2 - 1) * 1.6;
+    positions[p * 3 + 1] = (r() * 2 - 1) * 1.6;
+    positions[p * 3 + 2] = 1 + r() * 3;
+    size[p] = r() < 0.35 ? 4 + r() * 60 : r() * 6;
+    visible[p] = r() < 0.12 ? 0 : 1;
+  }
+  const pointA = new Uint32Array(GOLDEN_E);
+  const pointB = new Uint32Array(GOLDEN_E);
+  const halfA = new Float32Array(GOLDEN_E);
+  const halfB = new Float32Array(GOLDEN_E);
+  for (let s = 0; s < GOLDEN_E; s++) {
+    pointA[s] = Math.floor(r() * GOLDEN_N);
+    pointB[s] = Math.floor(r() * GOLDEN_N);
+    halfA[s] = r() * 30;
+    halfB[s] = r() * 30;
+  }
+  return { positions, size, visible, pointA, pointB, halfA, halfB };
+}
+
+/** Sweep the grid and reduce every returned (index, distance) to one hash. */
+function goldenSweep(
+  pointOpacity: Float32Array,
+  segAlphaA: Float32Array,
+  segAlphaB: Float32Array,
+): { hits: number; hash: number } {
+  const sc = goldenScene();
+  const g: PickGeometry = {
+    pointSize: sc.size,
+    pointOpacity,
+    worldPerSize: 1,
+    tanHalfFov: 100,
+    segments: {
+      count: GOLDEN_E, pointA: sc.pointA, pointB: sc.pointB,
+      halfA: sc.halfA, halfB: sc.halfB, alphaA: segAlphaA, alphaB: segAlphaB,
+    },
+  };
+  let hash = 0x811c9dc5;
+  let hits = 0;
+  const G = 25;
+  for (let i = 0; i < G; i++) {
+    for (let j = 0; j < G; j++) {
+      const r = pickElement(
+        sc.positions, GOLDEN_N, sc.visible, PERSP_DEPTH,
+        -1 + (2 * i) / (G - 1), -1 + (2 * j) / (G - 1),
+        200, 200, 12, g,
+      );
+      if (r.index >= 0) hits++;
+      hash = fnv1a(`${r.index}:${r.distance.toFixed(9)};`, hash);
+    }
+  }
+  return { hits, hash };
+}
+
+const ones = (n: number) => new Float32Array(n).fill(1);
+
+test("pickElement: 625 picks over a mixed scene reproduce the PRE-CHANGE results exactly", () => {
+  const got = goldenSweep(ones(GOLDEN_N), ones(GOLDEN_E), ones(GOLDEN_E));
+  assert.equal(got.hits, GOLDEN_HITS, "hit count recorded before the zero-alpha rule");
+  assert.equal(got.hash, GOLDEN_HASH, "every index AND distance, unchanged");
+});
+
+test("pickElement: an all-FAINT scene resolves byte-identically to an all-opaque one", () => {
+  // The exactly-zero rule at scale: drop every alpha to a value a threshold
+  // would swallow and the entire 625-pick surface must be unmoved.
+  const faint = (n: number) => new Float32Array(n).fill(1e-6);
+  const got = goldenSweep(faint(GOLDEN_N), faint(GOLDEN_E), faint(GOLDEN_E));
+  assert.equal(got.hits, GOLDEN_HITS);
+  assert.equal(got.hash, GOLDEN_HASH, "1e-6 is drawn, so nothing may change");
+});
+
+test("pickElement: zeroing some alphas MOVES that surface (the guard is load-bearing)", () => {
+  // The counterweight to the two goldens above: they are green either way, so
+  // on their own they could not tell a working guard from a deleted one. Here
+  // every third point and every second segment go to literal zero — WITHOUT the
+  // rule this sweep returns the golden hash unchanged, so the inequality is the
+  // assertion that moves.
+  const po = ones(GOLDEN_N);
+  for (let p = 0; p < GOLDEN_N; p += 3) po[p] = 0;
+  const sa = ones(GOLDEN_E);
+  const sb = ones(GOLDEN_E);
+  for (let s = 0; s < GOLDEN_E; s += 2) { sa[s] = 0; sb[s] = 0; }
+  const got = goldenSweep(po, sa, sb);
+  assert.notEqual(got.hash, GOLDEN_HASH, "faded elements must change what is picked");
+  assert.ok(
+    got.hits < GOLDEN_HITS,
+    `fading elements can only remove hits, never add: ${got.hits} vs ${GOLDEN_HITS}`,
+  );
+  assert.ok(got.hits > 0, "…but not all of them — the sweep must still be picking things");
 });
 
 test("neighborSubgroups finds nearby subgroups, excludes self", () => {
@@ -384,7 +720,7 @@ test("neighborSubgroups: the index is LOAD-BEARING — the double loop fails thi
 test("two picks in a row do not share state across a frame flip", () => {
   const g = geom({
     pointSize: new Float32Array([30, 30]),
-    segments: { count: 1, pointA: [0], pointB: [1], halfA: [1], halfB: [1] },
+    segments: segs({ count: 1, pointA: [0], pointB: [1], halfA: [1], halfB: [1] }),
   });
   const frame0 = new Float32Array([-0.5, 0, 0, 0.9, 0, 0]);
   const frame1 = new Float32Array([0.9, 0, 0, -0.5, 0, 0]); // the two points swap

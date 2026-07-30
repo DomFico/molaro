@@ -331,10 +331,12 @@ assert about:
   literal value: it never hides, never touches `visible` or any selection
   state, and the message reports the action (`set N points to size 0` /
   `… to opacity 0`), never "hidden" (S18/S19 pin the visible buffer
-  byte-identical across zero writes, with the points still resolving and
-  pickable). A zero-OPACITY element is invisible-but-PRESENT — exactly what
-  makes "fade to fully transparent while keeping it selectable"
-  expressible; a hidden element is gone. Size clamps negatives to 0;
+  byte-identical across zero writes, with the points still RESOLVING —
+  the address grammar reaches them unchanged). A zero-OPACITY element is
+  invisible-but-PRESENT; a hidden element is gone. It is not MOUSE-pickable
+  at exactly 0, though: the picker skips zero-alpha candidates so a click
+  falls through to what is drawn behind. Reachable by address, not by
+  click — which is the honest reading of "invisible". Size clamps negatives to 0;
   opacity clamps two-sidedly to [0, 1] — both report the clamp; non-numeric
   tokens error.
 - **Opacity RENDERS today (unlike the widths) — via naive blending.** The

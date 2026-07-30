@@ -1105,7 +1105,8 @@ export function parseSize(token: string): { size: number; clamped: boolean } | n
 /** Parse an opacity token — a number CLAMPED to [0, 1] (the two-sided
  * version of size's negative clamp; clampedTo reports which bound fired).
  * null = not a number. OPACITY ⊥ HIDE: 0 is a literal, legal alpha — an
- * invisible-but-PRESENT element (still in the scene, still pickable); a
+ * invisible-but-PRESENT element (still in the scene, still addressable —
+ * though not mouse-pickable at exactly 0, which the picker enforces); a
  * hidden element is gone. The two channels never touch each other. */
 export function parseOpacity(token: string): { opacity: number; clampedTo: 0 | 1 | null } | null {
   const n = parseNumericToken(token);
@@ -1735,7 +1736,7 @@ function opacityMsg(n: number, noun: string, v: { opacity: number; clampedTo: 0 
  * same writer factory behind the ctx closures. Semantics mirror size:
  * opacity 0 is LITERAL — invisible-but-present, never a hide (the element
  * stays in the scene, stays pickable, hide-state untouched — exactly what
- * makes "fade to fully transparent while keeping it selectable"
+ * makes "fade to fully transparent while keeping it addressable"
  * expressible); out-of-range clamps to [0,1] two-sidedly with the bound
  * reported. bondopacityof's incident reach and broad-target boundary-edge
  * LWW follow the color/size precedent — documented, not special-cased.
