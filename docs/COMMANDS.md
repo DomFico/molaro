@@ -314,8 +314,20 @@ convention.
   Five are genuinely **per-atom** (`bfactor`, `occupancy`, `plddt`, `sasa`, `rmsf`) —
   which is what makes a bond carry a gradient along its length. The rest are residue
   properties broadcast to their atoms, so both halves of an intra-residue bond match
-  because they genuinely do. A scheme whose column is CONSTANT refuses rather than
-  painting a confident picture of nothing.
+  because they genuinely do — and on those, the half-bond split (licorice's whole
+  point) says nothing except at a residue boundary. A scheme whose column is
+  CONSTANT refuses rather than painting a confident picture of nothing.
+- **`rainbow` and `chain` are HUE schemes and match `cartoon` byte for byte.** They
+  use the same two constants, so a stick view and a trace view of the same chain
+  agree. `rainbow` runs blue → cyan → green → yellow → red (PyMOL's spectrum);
+  `chain` gives each group an evenly-spaced hue, and a lone group one fixed hue
+  rather than the degenerate end of a ramp.
+- **`rainbow`'s domain is the whole GROUP, not your target.** Colouring a region
+  gives you the SLICE of the spectrum that region occupies in its chain — measured
+  on a 214-residue chain, a 26-residue region gets 26 colours, all of them colours
+  the whole chain also shows. That is deliberate: it means the colour tells you
+  WHERE you are, and the same residue does not change colour depending on what else
+  you happened to select.
 
 ### `hide_res` / `show_res`
 

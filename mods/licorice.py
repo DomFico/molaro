@@ -63,6 +63,15 @@
 # `licorice ?colorby=plddt`; two mods inventing their own ramps is how a viewer
 # stops being readable.
 DIVERGING_RAMP = ((0x00, 0x53, 0xD6), (0xFF, 0xFF, 0xFF), (0xD6, 0x00, 0x00))
+# `rainbow` and `chain` are HUE schemes and must NOT use the ramp above. They did,
+# and the result was that `?colorby=rainbow` had no green, cyan or yellow in it at
+# all — a diverging blue/white/red ramp cannot express a spectrum, so the scheme
+# could not do the one thing its name promises. These two constants are cartoon's,
+# VERBATIM, because a trace and its sticks colouring the same chain by the same
+# scheme must agree; licorice having invented its own was the bug.
+RAINBOW_HUE_LO, RAINBOW_HUE_HI = 2.0 / 3.0, 0.0   # blue -> red via cyan/green/yellow
+LONE_CHAIN_HUE = 0.58     # a lone group has nothing to be told apart from
+HUE_SAT, HUE_LIGHT = 1.0, 0.5    # full-intensity hue, cartoon's (s, l)
 PLDDT_BANDS = ((90.0, "#0053d6"), (70.0, "#65cbf3"), (50.0, "#ffdb13"), (None, "#ff7d45"))
 SS_FIXED = {"H": "#ff0000", "E": "#ffff00", "C": "#00ff00"}
 # Continuous schemes are quantised into this many steps, one `colorpoints` command
@@ -313,6 +322,23 @@ def _clamp01(t):
     return 0.0 if t < 0.0 else (1.0 if t > 1.0 else float(t))
 
 
+def _hex_hls(h, s, ll):
+    """(hue, sat, light) -> hex. cartoon's helper, same call and same argument
+    order (colorsys is h, l, s), so the two mods produce identical bytes for
+    identical hues."""
+    import colorsys
+    r, g, b = colorsys.hls_to_rgb(h % 1.0, ll, s)
+    return "#{:02x}{:02x}{:02x}".format(
+        *(min(255, max(0, int(round(v * 255.0)))) for v in (r, g, b)))
+
+
+def _rainbow(t):
+    """Position in [0,1] -> the PyMOL rainbow hue. NOT a three-stop ramp."""
+    t = _clamp01(t)
+    return _hex_hls(RAINBOW_HUE_LO + (RAINBOW_HUE_HI - RAINBOW_HUE_LO) * t,
+                    HUE_SAT, HUE_LIGHT)
+
+
 def _three_stop(t, stops):
     """t in [0,1] -> hex on a three-stop ramp (0.5 = the middle stop)."""
     t = _clamp01(t)
@@ -436,21 +462,39 @@ def _colorby_commands(data, traj, top, idx, scheme):
         # address grammar shows — never chr(65 + chain.index), which is right only
         # by luck (the banked rule).
         groups = sorted({data.labels[i][1] for i in idx})
-        hue_of = {g: (k / max(1, len(groups))) for k, g in enumerate(groups)}
+        # EVENLY-SPACED HUES, cartoon's rule. A lone group takes the fixed hue
+        # rather than the degenerate 0/1 = red. This used to run the hue through
+        # the DIVERGING ramp, so two groups came out blue and red and three came
+        # out blue, white and red — "white" being a colour no chain should get.
+        hue_of = ({groups[0]: LONE_CHAIN_HUE} if len(groups) == 1
+                  else {g: k / float(len(groups)) for k, g in enumerate(groups)})
         values = [None] * top_atoms
         for i in idx:
             values[i] = hue_of[data.labels[i][1]]
-        colour_of = lambda h: _three_stop(h, DIVERGING_RAMP)
+        colour_of = lambda h: _hex_hls(h, HUE_SAT, HUE_LIGHT)
     elif scheme == "rainbow":
         # Position along the chain, per RESIDUE order within each group.
-        per_res, seen = {}, {}
-        order = [top.atom(i).residue.index for i in idx]
-        for g in {data.labels[i][1] for i in idx}:
-            rs = sorted({top.atom(i).residue.index for i in idx if data.labels[i][1] == g})
+        #
+        # THE DOMAIN IS THE WHOLE GROUP, NOT THE TARGET. It used to be the target,
+        # which meant `licorice <5-residue shell> ?colorby=rainbow` re-spread the
+        # full sweep across those five residues: pretty, but the colour said
+        # nothing about WHERE in the chain you were, and the same residue changed
+        # colour depending on what else you happened to select. Now a region's
+        # colours are the colours cartoon gives that region, so a stick view and a
+        # trace view of the same chain agree and a `?within` shell reads as the
+        # SLICE of the spectrum it actually is.
+        group_of_atom = {}
+        for i in range(top_atoms):
+            group_of_atom[i] = data.labels[i][1]
+        wanted = {data.labels[i][1] for i in idx}
+        per_res = {}
+        for g in wanted:
+            rs = sorted({top.atom(i).residue.index
+                         for i in range(top_atoms) if group_of_atom[i] == g})
             for k, r in enumerate(rs):
-                per_res[r] = k / max(1, len(rs) - 1) if len(rs) > 1 else 0.0
+                per_res[r] = k / float(len(rs) - 1) if len(rs) > 1 else 0.0
         values = _broadcast(top, per_res)
-        colour_of = lambda t: _three_stop(t, DIVERGING_RAMP)
+        colour_of = _rainbow
     elif scheme in ("bfactor", "occupancy"):
         which = "bfactor" if scheme == "bfactor" else "occupancy"
         values = _topology_column(data, top, which, scheme)
@@ -539,11 +583,6 @@ def _hex_rgb(r, g, b) -> str:
         n = int(round(float(v) * 255.0))
         return 0 if n < 0 else (255 if n > 255 else n)
     return "#{:02x}{:02x}{:02x}".format(q(r), q(g), q(b))
-
-
-def _hex_hls(h, s, ll) -> str:
-    r, g, b = colorsys.hls_to_rgb(h % 1.0, ll, s)   # colorsys is (h, l, s)
-    return _hex_rgb(r, g, b)
 
 
 def _parse_color(token):
@@ -1017,6 +1056,7 @@ def _polarity_classes(top, protein_residues, adj, h_count, xyz0):
 def _base_hue_or_refuse(base_rgb, scheme):
     """The hue of a supplied `?color`, or a refusal: an achromatic colour has no hue,
     and every scheme below builds its palette out of one — it would take 0 (red)."""
+    import colorsys    # local, like every other import in this file
     h, ll, s = colorsys.rgb_to_hls(*base_rgb)
     if s < 0.05 or ll <= 0.02 or ll >= 0.98:
         raise ValueError(
