@@ -3424,6 +3424,11 @@ export const HELP_TEXT = [
   "               registered shape (scene-level; one undo op) · shapes  list",
   "  background <color>          set the scene background (CSS name or #hex;",
   "               targetless — scene state, session-only; one undo op)",
+  "  note <text>  print one line and change NOTHING — no state, no undo",
+  "               stroke (targetless; the text is taken literally). How a",
+  "               `produces: commands` mod says something, e.g. a color",
+  "               legend; empty is an error, and there is no markup (the",
+  "               log colors a line by its status, so name colors in words)",
   "  ls [@name|<path>]   list selections / a selection's members / a node's contents",
   "  mods         list the recipe registry: name, axis, origin, and credit",
   "               (author · source, display-only; recipes, not verbs)",
@@ -3440,6 +3445,54 @@ export const HELP_TEXT = [
   'errors: a parse error = malformed syntax · "nothing matches" = valid syntax, empty result',
   "full reference: docs/COMMANDS.md",
 ].join("\n");
+
+/**
+ * `note <text>` — print one line and change NOTHING.
+ *
+ * The only verb in the registry that does not act on the scene, and it exists
+ * for one reason: a `produces: commands` mod can speak ONLY through the command
+ * list it returns, and every other verb moves state. So a mod that paints a set
+ * one color per CATEGORY produced a picture with nothing on screen to read it
+ * by — the legend had no channel. `note` is that channel.
+ *
+ * NO WRITE, AS STRUCTURE RATHER THAN AS DISCIPLINE: this is the only handler
+ * factory in the file that takes no `CommandContext`. It holds no reference to
+ * the viewer, so there is nothing it *could* write; it never calls
+ * beginStroke/endStroke and never reaches a recordOp, so it contributes no undo
+ * op and no stroke. A `note` sitting between two writes in a mod's command list
+ * therefore leaves the undo depth exactly as if it were absent, and one Ctrl+Z
+ * still reverses the mod's real writes as one unit. A legend is not an edit.
+ *
+ * THE TEXT IS LITERAL. Whatever follows the verb is the message: no address
+ * parsing, no target resolution, no reserved token, no `all`. (Dispatch has
+ * already trimmed the ends; interior runs survive, and the log renders
+ * `white-space: pre-wrap`, so padding a mod aligns its rows with is kept.)
+ * Tab completion is inert here for the same reason — see completeCommand: a
+ * free-text slot that offered tree addresses would be exactly the reserved-token
+ * surprise this verb promises not to spring.
+ *
+ * EMPTY IS AN ERROR, matching `background`'s discipline for a targetless verb
+ * whose one argument is required. That ruling earns its keep inside a macro:
+ * the executor pre-validates every string before running ANY, so a mod that
+ * built its legend line from an empty list fails loud and free — nothing ran —
+ * instead of printing a blank line that reads as a legend with nothing in it.
+ *
+ * NO MARKUP — ruled deliberately, not overlooked. The terminal sets each line
+ * with `textContent` and colors it by RESULT STATUS (one class for the whole
+ * line: term-ok / term-nomatch / term-err), so there is no per-span color to
+ * address and no markup that renders as anything but literal noise. A swatch is
+ * therefore not offered: printed in the terminal's own foreground it would be a
+ * legend that states the wrong color, which is worse than none. A mod names the
+ * color in words instead (`note red = alpha`) — honest text the surface can
+ * actually show.
+ */
+export function makeNoteHandler(): CommandHandler {
+  const usage = "note <text> (e.g. note red = alpha)";
+  return (args: string): CommandResult => {
+    if (args === "") return { status: "error", message: `note needs text — ${usage}` };
+    return { status: "ok", message: args };
+  };
+}
 
 /** `help` / `?` — the grammar summary; `help <verb>` describes one verb. */
 export function makeHelpHandler(registry: CommandRegistry): CommandHandler {
@@ -3640,6 +3693,11 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "background",
     makeBackgroundHandler(ctx),
     "set the scene background color (targetless — scene state, session-only; one undo op; repeating the current color records nothing): background <color>",
+  );
+  registry.register(
+    "note",
+    makeNoteHandler(),
+    "print one line of text and change NOTHING — no state, no undo stroke (targetless; the text is literal). The way a `produces: commands` mod explains itself, e.g. a color legend: note <text>",
   );
   registry.register(
     "ls",
@@ -4281,6 +4339,13 @@ export function completeCommand(
       return completeShapeSlots(ctx, argsStart, argsHead);
     case "background":
       return completeFirstWord(argsStart, argsHead, colorSlot());
+    case "note":
+      // FREE TEXT — inert on purpose, and listed here rather than left to the
+      // fall-through: the default slot is the TARGET completer, so `note alp⇥`
+      // would silently offer tree addresses and rewrite a legend line into a
+      // path. The verb promises the text is literal; completion has to promise
+      // it too.
+      return { start: argsStart + argsHead.length, candidates: [], applied: "" };
     case "rm":
       return completeRmSelector(argsStart, argsHead);
     case "help":

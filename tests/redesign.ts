@@ -12029,7 +12029,147 @@ async function S66(): Promise<void> {
   });
 }
 
-const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67, S68, S69, S70 };
+// =========== S71: note — a mod says something, and saying it is not an edit ====
+// A `produces: commands` mod can speak ONLY through the command list it returns,
+// and every other verb moves state — so a mod that paints one hue per category
+// drew a picture with nothing on screen to read it by. `note` is that channel:
+// it prints a line and changes nothing.
+//
+// WHICH ASSERTION IS LOAD-BEARING, stated plainly, because they are not equal:
+//   · the two PRINT checks are what go red without the verb (pre-validation
+//     refuses `note`, so the macro reports "Nothing ran" and no legend appears);
+//   · the NOTES-ONLY depth check is what goes red if `note` ever starts writing.
+//     A batch of nothing but notes leaves an EMPTY stroke, which the model
+//     discards (sets.ts endStroke: `if (ops.length === 0) return`) — so the undo
+//     depth must not move at all. Record one op and it moves to +1.
+//   · `depth0 + 1` on the INTERLEAVED run is the weaker of the three and is kept
+//     for one specific failure it does catch: an unbalanced endStroke inside the
+//     note would close the macro's stroke early and split it into two entries.
+//     It would NOT catch a note that merely recorded an op inside the open
+//     stroke — the notes-only check is there for that.
+// Fixtures live in a TEMP mods dir (E2E_MODS_DIR), so nothing here touches the
+// real mods (S29/S48's discipline).
+async function S71(): Promise<void> {
+  console.log("S71 — note: a produces:commands mod prints its own legend, and the legend is not an edit");
+  const modsDir = mkdtempSync(join(tmpdir(), "molaro-s71-mods-"));
+  try {
+    // A: notes INTERLEAVED with real writes — the legend rides along with the
+    //    paint it explains. Index-addressed so it needs no labels.
+    //    The double space after `red` is deliberate: it proves the text reaches
+    //    the DOM literally (the log renders white-space: pre-wrap), which is what
+    //    lets a mod align a multi-row legend.
+    writeFileSync(join(modsDir, "legend.py"), [
+      "# molaro-mod", "# name: legend", "# kind: analysis",
+      "# produces: commands", "",
+      "def compute(data, target_indices):",
+      "    return [",
+      "        'note red   = the first hundred points',",
+      "        'colorpoints #0-99 #ff0000',",
+      "        'note blue  = the next hundred',",
+      "        'colorpoints #100-199 #0000ff',",
+      "    ]", "",
+    ].join("\n"));
+    // B: notes ONLY — a mod that does nothing but speak.
+    writeFileSync(join(modsDir, "legend_only.py"), [
+      "# molaro-mod", "# name: legend_only", "# kind: analysis",
+      "# produces: commands", "",
+      "def compute(data, target_indices):",
+      "    return ['note this mod only speaks', 'note and writes nothing at all']", "",
+    ].join("\n"));
+    process.env.E2E_MODS_DIR = modsDir;
+
+    await withDriver(async (d) => {
+      const el = (id: string) => `document.getElementById(${JSON.stringify(id)})`;
+      const cmd = (text: string) =>
+        d.evaluate<{ status: string; message: string }>(`${V}.command(${JSON.stringify(text)})`);
+      const undoDepth = () => d.evaluate<number>(`${V}.model.undoDepth`);
+      const logText = () =>
+        d.evaluate<string>(
+          `[...document.querySelectorAll('#term-log .term-line')].map(l=>l.textContent).join('\\n')`);
+      const typeInto = async (text: string): Promise<void> => {
+        const r = await d.evaluate<{ x: number; y: number }>(`(()=>{
+          const b=${el("term-input")}.getBoundingClientRect(); return {x:b.left+b.width/2, y:b.top+b.height/2};
+        })()`);
+        await d.click(r.x, r.y); await d.insertText(text); await d.key("Enter", "Enter", 13);
+      };
+      /** color channels differing from the pristine snapshot */
+      const colorChanged = () => d.evaluate<number>(`(()=>{
+        const c=${V}.rep.state.color, s=window.__preC; let n=0;
+        for (let i=0;i<c.length;i++) if (Math.abs(c[i]-s[i])>1e-6) n++; return n;
+      })()`);
+
+      await d.evaluate(`${V}.setPlaying(false)`);
+      await d.evaluate(`void (window.__preC = Float32Array.from(${V}.rep.state.color))`);
+
+      // -- 0: typed straight into the terminal, outside any mod ---------------
+      // The plainest form of the property: a verb that writes nothing must not
+      // reach the undo stack even when it is the only thing that ran. Outside a
+      // stroke, a recorded op goes STRAIGHT onto the stack, so this depth is
+      // sharp — it moves the moment `note` records anything.
+      const depthTyped = await undoDepth();
+      await typeInto("note red = the first hundred points");
+      await sleep(300);
+      check("S71: a typed note prints its text verbatim in the terminal log",
+        (await logText()).includes("note red = the first hundred points\nred = the first hundred points"),
+        (await logText()).slice(-200));
+      check("S71: …and it reached the undo stack not at all",
+        (await undoDepth()) === depthTyped, `depth ${depthTyped} → ${await undoDepth()}`);
+      check("S71: …and it wrote no representation state",
+        (await colorChanged()) === 0, `${await colorChanged()} color channels moved`);
+      const empty = await cmd("note");
+      check("S71: an EMPTY note refuses like the other targetless verb",
+        empty.status === "error" && /note needs text/.test(empty.message), JSON.stringify(empty));
+
+      // -- A: interleaved with real writes — the legend rides along ------------
+      const depth0 = await undoDepth();
+      await typeInto("legend");
+      await d.waitFor(`${V}.rep.state.color[0] > 0.9 && ${V}.rep.state.color[1] < 0.1`, 20000);
+      await sleep(200);
+      const log = await logText();
+      check("S71: BOTH legend lines printed, with their interior padding intact",
+        log.includes("red   = the first hundred points") && log.includes("blue  = the next hundred"),
+        log.slice(-300));
+      check("S71: the mod's REAL writes landed (the points it explained are painted)",
+        (await colorChanged()) > 100, `${await colorChanged()} color channels moved`);
+      check("S71: the whole run is EXACTLY one undo stroke — the notes added none",
+        (await undoDepth()) === depth0 + 1, `depth ${depth0} → ${await undoDepth()}`);
+
+      // one Ctrl+Z still reverses the mod's writes as ONE unit
+      await d.evaluate(`document.getElementById('term-input').blur()`);
+      await d.ctrlZ();
+      await sleep(400);
+      check("S71: one Ctrl+Z reverses the entire mod — colors back to pristine",
+        (await colorChanged()) === 0 && (await undoDepth()) === depth0,
+        `residual=${await colorChanged()} depth=${await undoDepth()}`);
+
+      // -- B: THE SHARP ONE — a mod of only notes ------------------------------
+      // The batch opens a stroke and records nothing, so the model discards it.
+      // If `note` recorded even one op this depth becomes depth1 + 1.
+      const depth1 = await undoDepth();
+      await typeInto("legend_only");
+      await d.waitFor(
+        `[...document.querySelectorAll('#term-log .term-line')].some(l=>/and writes nothing at all/.test(l.textContent))`,
+        20000);
+      const log2 = await logText();
+      check("S71: a mod of ONLY notes still says both its lines",
+        log2.includes("this mod only speaks") && log2.includes("and writes nothing at all"),
+        log2.slice(-300));
+      check("S71: …and it is not reported as a mod that matched nothing",
+        !/legend_only → nothing matched/.test(log2), log2.slice(-300));
+      check("S71: …and the undo stack does not move AT ALL (the empty stroke is discarded)",
+        (await undoDepth()) === depth1, `depth ${depth1} → ${await undoDepth()}`);
+      check("S71: …and nothing was painted by it",
+        (await colorChanged()) === 0, `${await colorChanged()} color channels moved`);
+
+      await d.screenshot(`${REPORT}/S71_note.png`);
+    }, 1180, 780, "/terminal");
+  } finally {
+    delete process.env.E2E_MODS_DIR;
+    rmSync(modsDir, { recursive: true, force: true });
+  }
+}
+
+const all: Record<string, () => Promise<void>> = { S0, S1, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11, S12, S13, S14, S15, S16, S17, S18, S19, S20, S22, S23, S24, S25, S26, S27, S28, S29, S30, S31, S32, S33, S34, S35, S36, S37, S38, S39, S40, S41, S42, S43, S44, S45, S46, S47, S48, S49, S50, S51, S52, S53, S54, S55, S56, S57, S58, S59, S60, S61, S62, S63, S64, S65, S66, S67, S68, S69, S70, S71 };
 /** Scenarios that must run ALONE, never in a parallel pool, with the reason.
  * S29 VACATED this slot in the harness chapter (it once mutated the real
  * .molaro/mods; it now deletes only inside its own temp dir, E2E_MODS_DIR).
@@ -12076,6 +12216,9 @@ const TIER: Record<string, "fast" | "full"> = {
   S53: "full", S54: "full", S55: "full", S56: "fast", S57: "fast",
   S58: "fast", S59: "fast", S60: "fast", S61: "fast", S62: "fast",
   S63: "fast", S64: "full", S70: "full",
+  // S71 (note) is text + undo-depth only — no pixels — and it drives an async
+  // producer round-trip, so it rides the full lane.
+  S71: "full",
   // S66 opens a REAL dataset twice (once per inference mode) and pixel-asserts an
   // INFERRED bond. Two real mdtraj loads make it slow, so it rides the full lane
   // — but it is the only scenario in this file that would notice covalent-bond

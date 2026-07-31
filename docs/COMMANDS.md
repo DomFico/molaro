@@ -50,6 +50,7 @@ point types `anchor` and `t0`–`t3`).
 | `pointopacity <expr> <a>` | Fade those points (0–1; 0 is invisible-but-**present**, never a hide; clamps) | `pointopacity alpha 0.5` |
 | `bondopacity <expr> <a>` | Alpha for edges with **both** endpoints in the target | `bondopacity beta.group-0.subgroup-0 0` |
 | `bondopacityof <expr> <a>` | Alpha for edges **touching** the target (either endpoint — the incident reach) | `bondopacityof #124 0.3` |
+| `note <text>` | Print **one line** and change nothing — no state, **no undo stroke** (targetless; the text is literal, newlines included). How a `produces: commands` mod explains itself, e.g. a colour legend; empty is an error | `note red = acidic` |
 | `traceopacity <expr> <a>` | Alpha for polyline vertices whose **subgroup** contains a resolved point | `traceopacity alpha 0.7` |
 | `bake <expr> <channel> <axis> [<min> <max>] [?palette=<name>]` | Write a declared data channel (at the displayed frame) onto a representation axis — scalar channel → point `color`/`size`/`opacity`, edge `bondcolor`/`bondsize`/`bondopacity`/`bonddash` (**endpoint mean**, contained edges) and `bondcolorends` (**per-endpoint** color: each half of the edge reads its **own** endpoint — no mean), polyline `tracecolor`/`tracesize`/`traceopacity` (each vertex reads **its** point), normalized over min..max; a **color** axis may name the **palette** its values map through (trailing `?palette=<name>`, default `rainbow`; see `palettes`); **vector (3-wide) channel → `orientation`, raw** (one undo stroke) | `bake all energy color 0 2.5` |
 | `bind <expr> <channel> <axis> [<min> <max>] [?palette=<name>]` | Register a **channel→axis binding** (same gate as `bake`, same trailing `?palette=<name>` on a color axis): the axis **re-derives from the channel on every frame flip**; last-bind-wins per element within an axis; one undo stroke. Vector channel → `orientation` (raw; **drives the oriented shapes — the ribbon `shape traces ribbon` renders it**) or `offset` (raw, on **points**; **displaces the drawn positions — shown = raw + offset**; bind-only, `bake` refuses it) | `bind all energy color 0 2.5 ?palette=bluewhitered` |
@@ -322,6 +323,12 @@ convention.
   agree. `rainbow` runs blue → cyan → green → yellow → red (PyMOL's spectrum);
   `chain` gives each group an evenly-spaced hue, and a lone group one fixed hue
   rather than the degenerate end of a ramp.
+- **Every scheme prints a LEGEND** (a `note` line) naming what its colours mean —
+  categorical schemes list each class that actually appeared, in a conventional
+  order; continuous ones give the range and which end is which; `rainbow` says
+  what its ends mean rather than printing normalized fractions. This is also how
+  you see the `?color` collision resolver work: `?color=red` reports
+  `O = #ff00ff`, so the displacement is visible instead of mysterious.
 - **`rainbow`'s domain is the whole GROUP, not your target.** Colouring a region
   gives you the SLICE of the spectrum that region occupies in its chain — measured
   on a 214-residue chain, a 26-residue region gets 26 colours, all of them colours

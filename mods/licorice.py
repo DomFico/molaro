@@ -454,6 +454,10 @@ def _colorby_commands(data, traj, top, idx, scheme):
         lo, hi = absolute if absolute else (min(scored), max(scored))
         return values, ramp(lo, (hi - lo) or 1.0)
 
+    # Set by any scheme whose VALUE is an encoding rather than a name (chain
+    # stores a hue); the legend uses it to print what a reader recognises.
+    label_of = None
+
     if scheme == "flat":
         values = [1.0] * top_atoms
         colour_of = lambda v: FALLBACK
@@ -472,6 +476,8 @@ def _colorby_commands(data, traj, top, idx, scheme):
         for i in idx:
             values[i] = hue_of[data.labels[i][1]]
         colour_of = lambda h: _hex_hls(h, HUE_SAT, HUE_LIGHT)
+        # the legend must name the GROUP, not the hue that encodes it
+        label_of = {h: g for g, h in hue_of.items()}
     elif scheme == "rainbow":
         # Position along the chain, per RESIDUE order within each group.
         #
@@ -555,9 +561,12 @@ def _colorby_commands(data, traj, top, idx, scheme):
             xyz0 = np.asarray(traj.xyz[0], dtype=np.float64)
             classes = _polarity_classes(top, protein, adj, h_counts, xyz0)
             values = _broadcast(top, classes)
-            POLARITY_COLOR = {"charged": "#e6194b", "polar": "#4363d8",
-                              "hydrophobic": "#ffe119", "none": "#a0a0a0"}
-            colour_of = lambda c: POLARITY_COLOR.get(c, "#a0a0a0")
+            # The MODULE table, deliberately — a local one used to shadow it here
+            # with an unrelated palette that painted `hydrophobic` YELLOW. The
+            # module table's two middle colours ARE the hydrophobicity ramp's ends
+            # (#1e90ff / #ff4500), which is the whole reason they were chosen: the
+            # two schemes must not contradict each other on the same residue.
+            colour_of = lambda c: POLARITY_COLOR.get(c, POLARITY_COLOR["none"])
     else:
         raise ValueError(f"licorice: unknown ?colorby={scheme}.")
 
@@ -573,7 +582,65 @@ def _colorby_commands(data, traj, top, idx, scheme):
             f"licorice ?colorby={scheme}: none of the {len(idx)} targeted atoms "
             "could be scored, so nothing would be coloured.")
     cmds = [f"colorpoints {_ranges(sorted(v))} {c}" for c, v in sorted(buckets.items())]
-    return cmds, unscored
+    return _legend(scheme, values, idx, colour_of, label_of) + cmds, unscored
+
+
+# Schemes whose values are CLASSES rather than positions on a ramp. A legend for
+# these lists every class that actually appeared; for the rest it states the range
+# and which end is which, since a ramp has no finite set of entries to list.
+_CATEGORICAL = {"element", "ss", "charge", "polarity", "chain"}
+# What a class VALUE is called in the legend. `charge` scores as an int sign and
+# `ss` as a one-letter code, neither of which reads as anything on its own.
+_CLASS_LABEL = {
+    "charge": {1: "positive", 0: "neutral", -1: "negative"},
+    "ss": {"H": "helix", "E": "sheet", "C": "coil/loop"},
+}
+# The order a legend READS in, where the classes have a conventional one. Sorting
+# by value would put `ss` in the order coil, helix, sheet — alphabetical by code,
+# which is no order at all to a reader.
+_CLASS_ORDER = {
+    "charge": (1, 0, -1),
+    "ss": ("H", "E", "C"),
+    "polarity": ("charged", "polar", "hydrophobic", "none"),
+}
+# Schemes whose ramp position is an ORDINAL, not a measurement — printing
+# "0 -> 0.183" for these is noise, so the legend says what the ends MEAN.
+_ORDINAL_RAMP = {"rainbow": "first residue -> last, along each chain"}
+
+
+def _legend(scheme, values, idx, colour_of, label_of=None):
+    """`note` lines naming what the colours MEAN, or [] when there is nothing to
+    say. A categorical picture is unreadable without this — nothing on screen says
+    which colour is which class — and it was the one thing the mod could not do
+    until the `note` verb existed."""
+    seen = [values[i] for i in idx if i < len(values) and values[i] is not None]
+    # `flat` is one colour by definition — there is nothing to tell apart, so a
+    # legend for it would be a line saying so, which is noise.
+    if not seen or scheme in ("flat", "off"):
+        return []
+    if scheme in _CATEGORICAL:
+        labels = dict(_CLASS_LABEL.get(scheme, {}))
+        if label_of:
+            labels.update(label_of)
+        present = set(seen)
+        order = _CLASS_ORDER.get(scheme)
+        if order:
+            classes = [c for c in order if c in present]
+            classes += sorted((present - set(order)), key=str)
+        else:
+            try:
+                classes = sorted(present)
+            except TypeError:
+                classes = sorted(present, key=str)
+        entries = [f"{labels.get(c, c)} = {colour_of(c)}" for c in classes]
+        return [f"note {scheme}: " + ", ".join(str(e) for e in entries)]
+    lo, hi = min(seen), max(seen)
+    if scheme in _ORDINAL_RAMP:
+        return [f"note {scheme}: {_ORDINAL_RAMP[scheme]}  "
+                f"({colour_of(lo)} -> {colour_of(hi)})"]
+    if lo == hi:
+        return [f"note {scheme}: every scored atom is {lo:g}"]
+    return [f"note {scheme}: {lo:g} -> {hi:g}  ({colour_of(lo)} -> {colour_of(hi)})"]
 
 
 
@@ -1201,6 +1268,14 @@ def _stick_commands(target, elem_target, member_types, top, color, scale, cpk=Tr
         for t in sorted(member_types):
             cmds.append(f"colorpoints {elem_target(t)} "
                         f"{color if t.upper() == 'C' else palette[t]}")
+        # The default look had no legend at all, because it colours HERE rather
+        # than through the ?colorby bucket path. Only the types actually present
+        # are listed, so it stays short and describes THIS region.
+        legend = ", ".join(
+            f"{t} = {color if t.upper() == 'C' else palette[t]}"
+            for t in sorted(member_types))
+        if legend:
+            cmds.insert(0, f"note element: {legend}")
     cmds.append(f"bicolorbonds {target}")
     return cmds
 

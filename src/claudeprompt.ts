@@ -520,6 +520,10 @@ that). Three axes × four shapes:
 The target is OPTIONAL on all twelve (and on \`dashbonds\`/\`dashbondsof\`/\`style\`): a lone
 value means the whole system, so \`traceopacity 0.1\` == \`traceopacity all 0.1\`. \`bake\` and
 \`bind\` still require theirs.
+\`note <text>\` prints ONE line and changes nothing — no state, no undo stroke. It is how a
+\`produces: commands\` mod EXPLAINS itself: a categorical colouring is unreadable without a
+legend, because nothing on screen says which colour is which class. Emit one \`note\` naming
+the classes you used. The text is literal (newlines included); empty is an error.
 Color is a CSS name or \`#hex\`; size ≥ 0 (0 ≠ hidden); opacity 0–1. **Opacity exactly 0 is
 still not "hidden" — the element stays in the scene and stays reachable by address — but it
 is no longer MOUSE-clickable**: it draws zero pixels, so a click falls through to whatever

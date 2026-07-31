@@ -3145,6 +3145,151 @@ test("runCommandMacro: all valid → runs all in ONE stroke, reports per-command
   assert.match(r.message, /colorbonds alpha red → ran colorbonds alpha red/);
 });
 
+// -- note: the one verb that says something and writes nothing ----------------
+// A `produces: commands` mod can speak ONLY through the command list it returns,
+// and every other verb moves state — so a mod that colors one hue per category
+// drew a picture with no way to read it. `note` is that channel. The property
+// under test is that it is NOT an edit: it must cost zero writes and zero undo
+// stroke, so one Ctrl+Z still reverses a mod's real writes as one unit.
+
+test("note prints its text VERBATIM — literal, with no address parsing", () => {
+  const { registry } = makeRegistry();
+  assert.deepEqual(registry.runCommand("note red = c0"),
+    { status: "ok", message: "red = c0" });
+  // reserved tokens are just words here: `all`, `@name`, `#N`, `+` mean nothing
+  assert.deepEqual(registry.runCommand("note all"), { status: "ok", message: "all" });
+  assert.deepEqual(registry.runCommand("note @nope.c0 + #7 [x]"),
+    { status: "ok", message: "@nope.c0 + #7 [x]" });
+  // and a target that does NOT resolve is still not a nomatch — nothing was addressed
+  assert.equal(registry.runCommand("note zzz.does.not.exist").status, "ok");
+  // interior runs survive (the log renders pre-wrap, so a mod can align a table)
+  assert.equal(registry.runCommand("note a    b").message, "a    b");
+  // …including newlines, so ONE note can carry a whole multi-row legend block
+  // (the log is pre-wrap; the terminal prints a result's \n as a line break)
+  assert.equal(registry.runCommand("note red = c0\nblue = c1").message,
+    "red = c0\nblue = c1");
+});
+
+test("bare note is an error — a targetless verb whose one argument is required", () => {
+  const { registry } = makeRegistry();
+  const bare = registry.runCommand("note");
+  // NOT `assert.equal(bare.status, "error")` alone: an unregistered verb is an
+  // error too, so the status cannot tell the fix from its absence. The wording is
+  // what moves.
+  assert.match(bare.message, /^note needs text — note <text>/, bare.message);
+  assert.match(registry.runCommand("note      ").message, /^note needs text/,
+    "whitespace-only is empty too");
+});
+
+test("note is an ordinary registry verb — in the completion pool, described by help", () => {
+  const { registry } = makeRegistry();
+  assert.ok(registry.verbs().includes("note"), "note is in the verb pool");
+  assert.match(registry.runCommand("help note").message, /no undo stroke/);
+  assert.match(HELP_TEXT, /note <text>/, "and the grammar summary carries it");
+});
+
+test("note's text slot completes NOTHING — a legend line is never rewritten into a path", () => {
+  const { registry, ctx } = makeRegistry();
+  // CONTROL, so this is not a vacuous "empty equals empty": the same prefix in a
+  // real target slot DOES enumerate. If it stopped, this test would still pass on
+  // the note side while proving nothing.
+  const target = completeCommand(ctx, registry, "view c", 6);
+  assert.deepEqual(target.candidates, ["c0", "c1"],
+    "control precondition: `c` is a live prefix in a target slot");
+  const free = completeCommand(ctx, registry, "note c", 6);
+  assert.deepEqual(free.candidates, [], "no candidates offered for free text");
+  assert.equal(free.applied, "", "and nothing is inserted into the line");
+});
+
+test("note inside a macro changes the write trace by NOTHING — same ops, same strokes", () => {
+  // THE load-bearing property. Asserting "the note wrote nothing" on its own
+  // would be vacuous — an UNREGISTERED note also writes nothing (the macro
+  // pre-validation refuses and zero commands run). So this is DIFFERENTIAL:
+  // the same command list, with and without the notes interleaved, must produce
+  // an identical write trace and an identical stroke trace. Without the verb the
+  // noted run writes zero ops while the control writes two, and the deepEqual
+  // moves.
+  const run = (cmds: string[]) => {
+    const real = makeRegistry();
+    // the SECOND registry main.ts builds over a no-op-write context: every
+    // string is pre-validated through it before any of them executes, so this
+    // also pins that `note` survives that gate.
+    const validation = makeRegistry();
+    const out = runCommandMacro("legend", cmds, {
+      modNames: new Set<string>(),
+      validate: (c) => validation.registry.runCommand(c),
+      run: (c) => real.registry.runCommand(c),
+      beginStroke: () => real.ctx.beginStroke(),
+      endStroke: () => real.ctx.endStroke(),
+    });
+    return { out, real };
+  };
+  const control = run(["colorpoints c0 red", "colorpoints c1 blue"]);
+  const noted = run([
+    "note red = c0", "colorpoints c0 red",
+    "note blue = c1", "colorpoints c1 blue",
+  ]);
+  // preconditions: the control really wrote, and really opened a stroke —
+  // otherwise the comparisons below are two empty arrays agreeing with each other
+  assert.equal(control.out.status, "ok", control.out.message);
+  assert.equal(control.real.colorOps.length, 2, "control precondition: two real writes");
+  assert.ok(control.real.strokeEvents.length > 0, "control precondition: a stroke was opened");
+
+  assert.equal(noted.out.status, "ok", noted.out.message);
+  assert.deepEqual(noted.real.colorOps, control.real.colorOps,
+    "identical writes — the notes wrote nothing and displaced nothing");
+  assert.deepEqual(noted.real.strokeEvents, control.real.strokeEvents,
+    "identical stroke trace — a note opens no stroke of its own");
+  assert.equal(noted.real.strokeEvents.filter((e) => e === "begin").length, 1,
+    "still exactly ONE stroke over the whole batch → one Ctrl+Z");
+  // and the legend actually reached the output the terminal prints
+  assert.match(noted.out.message, /note red = c0 → red = c0/);
+  assert.match(noted.out.message, /note blue = c1 → blue = c1/);
+});
+
+test("a macro of ONLY notes writes nothing, opens the stroke EMPTY, and is not a nomatch", () => {
+  // The degenerate legend: a mod that only speaks. It must not report the loud
+  // "all commands nomatched, nothing was written" summary — the notes DID land —
+  // and it must leave the model with an empty stroke, which the model discards
+  // (sets.ts endStroke: `if (ops.length === 0) return`), so undo depth is untouched.
+  const real = makeRegistry();
+  const validation = makeRegistry();
+  const out = runCommandMacro("legend", ["note red = c0", "note blue = c1"], {
+    modNames: new Set<string>(),
+    validate: (c) => validation.registry.runCommand(c),
+    run: (c) => real.registry.runCommand(c),
+    beginStroke: () => real.ctx.beginStroke(),
+    endStroke: () => real.ctx.endStroke(),
+  });
+  assert.equal(out.status, "ok", out.message);
+  assert.doesNotMatch(out.message, /nothing was written/,
+    "notes are matches — a legend is not a mod that guessed labels");
+  assert.equal(real.colorOps.length + real.commits.length + real.refOps.length +
+    real.eachOps.length + real.bgOps.length + real.styleOps.length, 0, "zero writes");
+  assert.match(out.message, /red = c0/);
+  assert.match(out.message, /blue = c1/);
+});
+
+test("an EMPTY note inside a macro fails the batch CLOSED — nothing runs", () => {
+  // The consequence of ruling bare-note an error: a mod that built its legend
+  // line from an empty list is caught by pre-validation, before any of its real
+  // writes execute. Loud and free, instead of a blank line that reads as a legend
+  // with nothing in it.
+  const real = makeRegistry();
+  const validation = makeRegistry();
+  const out = runCommandMacro("legend", ["note", "colorpoints c0 red"], {
+    modNames: new Set<string>(),
+    validate: (c) => validation.registry.runCommand(c),
+    run: (c) => real.registry.runCommand(c),
+    beginStroke: () => real.ctx.beginStroke(),
+    endStroke: () => real.ctx.endStroke(),
+  });
+  assert.equal(out.status, "error");
+  assert.match(out.message, /command 1 is invalid \("note"\).*note needs text.*Nothing ran/s);
+  assert.equal(real.colorOps.length, 0, "the colorpoints AFTER it never ran");
+  assert.equal(real.strokeEvents.length, 0, "and no stroke was ever opened");
+});
+
 // ================== the code that RUNS is the code that was APPROVED ==========
 // write_mod is a GATED tool: the human is shown a mod's FULL source and approves
 // it. So the viewer must run the code it was last handed. It did not: installMods
