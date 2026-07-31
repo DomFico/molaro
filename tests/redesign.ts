@@ -1951,6 +1951,19 @@ async function S10(): Promise<void> {
       ["collapsed bulk", "solvent"],
     ];
     for (const [label, expr] of matrix) {
+      // WAIT FOR THE PREVIOUS ENTRY'S FLASH TO EXPIRE FIRST. The audit counts
+      // `.row-flash` in the same tick as its own `view`, and the matrix used to
+      // run back-to-back with no wait at all — so entry N's pulses were still on
+      // the DOM when entry N+1 counted them. That is the whole story of this
+      // scenario's long-standing flakiness, and it is the reverse of what it
+      // looked like: a FAST machine loops sooner than FLASH_HOLD_MS (480ms) and
+      // fails, while a loaded one is slow enough to pass. The signature was
+      // always `missing: 0, extra: N` — never a missed pulse of its own, only
+      // inherited ones. Polled on the DOM rather than slept, so it costs the real
+      // expiry and not a guessed constant, and the assertion below is untouched.
+      await d.waitFor(
+        `document.querySelectorAll('.tree-row.row-flash, .tree-row.row-flash-hold').length === 0`,
+        5000).catch(() => { /* leave it to the assertion to report */ });
       const r = await audit(expr);
       check(`S10 [${label}]: flashed == mounted ∩ resolved (${r.expected} rows)`,
         r.status === "ok" && r.expected > 0 && r.missing === 0 && r.extra === 0 &&
