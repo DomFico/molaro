@@ -18,9 +18,30 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-EXT="${MOLARO_EXT_DIR:-$HOME/.vscode/extensions/undefined_publisher.viewer-0.1.0}"
-if [ ! -d "$EXT" ]; then
-  echo "check-installed: no installed extension at $EXT" >&2
+# DISCOVER the install, do not hardcode it. Two things were wrong with the old
+# literal `$HOME/.vscode/extensions/undefined_publisher.viewer-0.1.0`:
+#   * Remote-SSH — the only mode that matters on a cluster — installs into
+#     ~/.vscode-server/extensions, so this script was unusable there without an
+#     override. Measured on a real cluster install.
+#   * it embeds `undefined_publisher`, so it breaks the moment a real publisher
+#     is set, which is the very next thing a marketplace release does.
+# Name and version come from package.json, the publisher is whatever is actually
+# on disk, and both extension roots are searched.
+EXT="${MOLARO_EXT_DIR:-}"
+if [ -z "$EXT" ]; then
+  name=$(node -p "require('./package.json').name" 2>/dev/null || echo viewer)
+  ver=$(node -p "require('./package.json').version" 2>/dev/null || echo 0.0.0)
+  for root in "$HOME/.vscode-server/extensions" "$HOME/.vscode/extensions"; do
+    [ -d "$root" ] || continue
+    # any publisher, exact name + version
+    for cand in "$root"/*."$name-$ver"; do
+      [ -d "$cand" ] && EXT="$cand" && break 2
+    done
+  done
+fi
+if [ -z "$EXT" ] || [ ! -d "$EXT" ]; then
+  echo "check-installed: no installed extension found (looked for *.${name:-viewer}-${ver:-?}" >&2
+  echo "  under ~/.vscode-server/extensions and ~/.vscode/extensions; set MOLARO_EXT_DIR to override)" >&2
   exit 2
 fi
 

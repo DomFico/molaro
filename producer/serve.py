@@ -795,8 +795,24 @@ def main() -> None:
         level=args.log_level.upper(),
         format="producer %(levelname)s %(message)s",
     )
-    stdout = sys.stdout.buffer  # capture the protocol channel...
-    sys.stdout = sys.stderr  # ...then make any stray print() harmless
+    # MOVE THE PROTOCOL OFF FILE DESCRIPTOR 1, do not merely rebind sys.stdout.
+    #
+    # `sys.stdout = sys.stderr` stops Python-level prints and nothing else. A C
+    # extension writes to fd 1 directly and goes straight around it — MEASURED:
+    # mdtraj vendors VMD's dcdplugin.c, which printfs "dcdplugin) detected
+    # standard 32-bit DCD file..." on every DCD open, landing INSIDE the length
+    # frame. The viewer then reported
+    #   framing error: message length 1885627236 exceeds sanity cap
+    # and 1885627236 little-endian is the ASCII bytes `dcdp`. Every .dcd failed.
+    #
+    # So: dup fd 1 somewhere private and point fd 1 at stderr. After this the
+    # protocol is unreachable by anything that writes to "stdout" — Python, C,
+    # or a subprocess that inherits our descriptors — and stray output is merely
+    # ugly instead of corrupting.
+    _protocol_fd = os.dup(1)
+    os.dup2(2, 1)
+    stdout = os.fdopen(_protocol_fd, "wb")
+    sys.stdout = sys.stderr  # ...and Python-level prints are harmless too
     stdin = sys.stdin.buffer
 
     # Coarse loading signal (single source; see src/hostmessages.ts note): the
@@ -811,7 +827,15 @@ def main() -> None:
     try:
         source = build_source(args)
     except Exception as exc:
-        log.error("failed to build data source: %s", exc)
+        # %r AND the traceback, never %s. An exception whose str() is empty —
+        # `NotImplementedError()` raised bare, which is exactly what mdtraj 1.10's
+        # Residue.is_nucleic does — logged as `failed to build data source: ` with
+        # nothing after the colon. MEASURED on a cluster install: a total failure
+        # with zero diagnostic signal, and the only way forward was to
+        # hand-reconstruct build_source to get a traceback. This is the one path
+        # where the user has no other signal, so it must name itself.
+        log.error("failed to build data source: %r", exc)
+        log.error("%s", traceback.format_exc())
         sys.exit(1)
     try:
         serve(source, stdin, stdout, edge_mods=args.edge_mods or [])

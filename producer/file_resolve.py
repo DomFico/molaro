@@ -105,9 +105,26 @@ def _find_companion(traj_path: str) -> Optional[str]:
     candidates = _topology_candidates(directory, traj_path)
     if not candidates:
         return None
-    if len(candidates) == 1:
+    # A SOLE CANDIDATE IS STILL CHECKED. This used to return immediately, on the
+    # reasoning that one candidate is unambiguous — but "unambiguous" is not
+    # "correct", and the failure is SILENT. MEASURED on a user's cluster: adding
+    # one symlink to a directory made it the sole candidate, and 30 trajectories
+    # that had previously raised a clear atom-count error instead loaded against
+    # a WRONG topology and rendered. A wrong picture with no error is strictly
+    # worse than no picture with one.
+    #
+    # The check costs a single frame read, which the multi-candidate path already
+    # pays. Returning None here hands the caller the same honest "no topology
+    # found" it would give for an empty directory, rather than a confident wrong
+    # answer — and step 1 (exact basename) still short-circuits before any of
+    # this, so the common case reads no frames at all.
+    matched = _match_by_atom_count(traj_path, candidates)
+    if matched is _UNKNOWN:
+        # Could not read the count. Fall back to the old behaviour rather than
+        # refuse a layout that may be perfectly good — the bug being fixed is a
+        # count that DISAGREED, not one that could not be taken.
         return candidates[0]
-    return _match_by_atom_count(traj_path, candidates)
+    return matched
 
 
 def _topology_candidates(directory: str, traj_path: str) -> List[str]:
@@ -130,6 +147,12 @@ def _topology_candidates(directory: str, traj_path: str) -> List[str]:
     return found
 
 
+# Returned when the trajectory's atom count could not be read at all. Distinct
+# from None (= read fine, nothing matched), because the two demand opposite
+# answers for a sole candidate: refuse a known mismatch, accept an unverifiable one.
+_UNKNOWN = "<atom count unreadable>"
+
+
 def _match_by_atom_count(traj_path: str, candidates: List[str]) -> Optional[str]:
     """Pick the candidate topology whose atom count matches the trajectory's.
     Reads a single trajectory frame (cheap even for huge trajectories)."""
@@ -141,7 +164,10 @@ def _match_by_atom_count(traj_path: str, candidates: List[str]) -> Optional[str]
         xyz = result[0] if isinstance(result, tuple) else result
         n_traj = int(xyz.shape[1])
     except Exception:
-        return None  # can't read atom count -> fall through to a clear error
+        # UNKNOWABLE, which is not the same as MISMATCHED — see the sole-candidate
+        # note above. Signalled distinctly so the caller can tell "this topology is
+        # wrong" from "I could not check".
+        return _UNKNOWN
 
     matches: List[str] = []
     for cand in candidates:
