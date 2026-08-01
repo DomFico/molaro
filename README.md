@@ -98,6 +98,10 @@ none of this — only analysis mods do.
   selection filters, `+` union), with worked examples and the parse-error vs
   nomatch debugging guide. Also the context a command-generation layer
   consumes.
+- [docs/MODS.md](docs/MODS.md) — **writing a mod**: the file header and its
+  closed sets, the `data` object, what to return for each of the seven
+  `produces` kinds, parameters, how to test one without the editor, and the
+  conventions the shipped mods follow.
 - [docs/COMMAND_LAYER.md](docs/COMMAND_LAYER.md) — the command layer's
   architecture note: layering and purity fences, the registry, tree-parity and
   flash-parity invariants, reserved syntax, deferrals, and test topology.
