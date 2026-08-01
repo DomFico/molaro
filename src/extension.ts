@@ -17,6 +17,7 @@
  *   vscode.commands.executeCommand("viewer.open", { nPoints: 250000, nFrames: 2500 })
  */
 import * as vscode from "vscode";
+import { collectChecks, renderReport } from "./diagnose.ts";
 import { randomBytes } from "node:crypto";
 import { buildWebviewCsp } from "./webviewcsp.ts";
 import { mkdirSync, readFileSync, readdirSync, unlinkSync, writeFileSync } from "node:fs";
@@ -114,6 +115,28 @@ export function activate(context: vscode.ExtensionContext): void {
   // stream, the buffers and the undo history all lived in the old process), so
   // this rebuilds the panel honestly: dispose the husk and reopen with the same
   // producer args, which is what the user would have done by hand.
+  // `Molaro: Diagnose` — the chain that has to hold, printed in order. Every row
+  // is a failure that actually happened on a real install and presented as a
+  // blank panel or an empty error.
+  context.subscriptions.push(
+    vscode.commands.registerCommand("viewer.diagnose", async () => {
+      const channel = vscode.window.createOutputChannel("Molaro Diagnostics");
+      context.subscriptions.push(channel);
+      channel.show(true);
+      channel.appendLine("running…");
+      const configured = vscode.workspace
+        .getConfiguration("molaro").get<string>("pythonPath")?.trim();
+      const checks = await collectChecks({
+        pythonPath: realPythonPath(),
+        pythonSource: configured ? "molaro.pythonPath"
+          : (process.env.VIEWER_PYTHON ? "VIEWER_PYTHON (legacy)" : "default python3"),
+        modsDir: modsDir(),
+      });
+      channel.clear();
+      channel.appendLine(renderReport(checks));
+    }),
+  );
+
   context.subscriptions.push(
     vscode.window.registerWebviewPanelSerializer("viewer", {
       async deserializeWebviewPanel(stale: vscode.WebviewPanel): Promise<void> {
