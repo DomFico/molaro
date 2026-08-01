@@ -842,9 +842,11 @@ higher cost.
 
 `npm run package` = clean `dist/` → full build (extension-host bundle + BOTH
 webview bundles, `main.js` and `terminal.js`) → `vsce package -o
-viewer-0.1.0.vsix` (name/version pinned — the install command references the
-filename). Install with `code --install-extension viewer-0.1.0.vsix --force`
-and reload the window. The extension id is `undefined_publisher.viewer`; do
+molaro-<version>-<target>.vsix` (the name and version come from
+package.json; `scripts/package-all.sh` derives the filename, so a rename cannot
+leave it behind). Install with
+`code --install-extension molaro-0.1.0-linux-x64.vsix --force` and reload the
+window. The extension id is `DominicFico.molaro`; do
 not add a `publisher` field casually — it changes the id and strands existing
 installs. `.vscodeignore` ships `dist/`, `producer/*.py`, `contract/*.py`
 (with `__init__.py` — `serve.py`'s import path) and excludes tests, reports,

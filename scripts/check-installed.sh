@@ -82,6 +82,6 @@ done
 if [ "$fail" -eq 0 ]; then
   echo "OK — the installed extension is the repo."
 else
-  echo "STALE — run: npm run package && code --install-extension viewer-0.1.0-linux-x64.vsix --force" >&2
+  echo "STALE — run: npm run package && code --install-extension ${name}-${ver}-linux-x64.vsix --force" >&2
 fi
 exit "$fail"

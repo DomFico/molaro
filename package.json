@@ -1,10 +1,32 @@
 {
-  "name": "viewer",
-  "displayName": "Point Viewer",
+  "name": "molaro",
+  "displayName": "Molaro",
   "version": "0.1.0",
+  "publisher": "DominicFico",
+  "description": "Stream and analyze molecular dynamics trajectories in VS Code, over SSH. GPU-rendered 3D viewer, a command grammar, and Python mods that run next to your data.",
+  "license": "MIT",
   "private": true,
   "type": "module",
-  "description": "Time-series 3D point dataset viewer. Increment 1: render frame 0 of a synthetic dataset in a CSP-safe webview.",
+  "categories": [
+    "Visualization",
+    "Data Science",
+    "AI"
+  ],
+  "keywords": [
+    "molecular dynamics",
+    "MD",
+    "trajectory",
+    "mdtraj",
+    "structural biology",
+    "protein",
+    "3D",
+    "PDB",
+    "DCD",
+    "XTC",
+    "HPC",
+    "remote"
+  ],
+  "icon": "media/icon.png",
   "engines": {
     "vscode": "^1.125.0"
   },
@@ -12,6 +34,11 @@
     "type": "git",
     "url": "https://github.com/DomFico/molaro.git"
   },
+  "homepage": "https://github.com/DomFico/molaro#readme",
+  "bugs": {
+    "url": "https://github.com/DomFico/molaro/issues"
+  },
+  "qna": "marketplace",
   "main": "./dist/extension.cjs",
   "contributes": {
     "configuration": {
@@ -102,7 +129,12 @@
     "build:webview": "esbuild webview/main.ts webview/terminal.ts webview/plot.ts --bundle --format=iife --minify --outdir=dist/webview",
     "typecheck": "tsc --noEmit",
     "fixtures": "python3 -m tests.make_fixtures && python3 tests/make_webview_fixture.py",
-    "test": "node --test tests/contract.test.ts tests/geometry.test.ts tests/shaders.test.ts tests/styles.test.ts tests/framing.test.ts tests/playback.test.ts tests/producer_protocol.test.ts tests/classification.test.ts tests/picking.test.ts tests/sets.test.ts tests/address.test.ts tests/channelmap.test.ts tests/bindings.test.ts tests/commands.test.ts tests/saverep.test.ts tests/recipes.test.ts tests/palettes.test.ts tests/claude.test.ts tests/plot.test.ts tests/claudelayout.test.ts tests/prompt.test.ts tests/claudebackend.test.ts tests/tool_surface.test.ts tests/get_context.test.ts tests/hostmessages.test.ts tests/prompt_examples.test.ts tests/webviewcsp.test.ts tests/channel_mirror.test.ts tests/modfile.test.ts tests/producededges.test.ts tests/shipped_mods.test.ts"
+    "test": "node --test tests/contract.test.ts tests/geometry.test.ts tests/shaders.test.ts tests/styles.test.ts tests/framing.test.ts tests/playback.test.ts tests/producer_protocol.test.ts tests/classification.test.ts tests/picking.test.ts tests/sets.test.ts tests/address.test.ts tests/channelmap.test.ts tests/bindings.test.ts tests/commands.test.ts tests/saverep.test.ts tests/recipes.test.ts tests/palettes.test.ts tests/claude.test.ts tests/plot.test.ts tests/claudelayout.test.ts tests/prompt.test.ts tests/claudebackend.test.ts tests/tool_surface.test.ts tests/get_context.test.ts tests/hostmessages.test.ts tests/prompt_examples.test.ts tests/webviewcsp.test.ts tests/channel_mirror.test.ts tests/modfile.test.ts tests/producededges.test.ts tests/shipped_mods.test.ts",
+    "vscode:prepublish": "npm run build"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.207",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^26.1.0",
@@ -111,9 +143,5 @@
     "esbuild": "^0.28.1",
     "three": "^0.185.1",
     "typescript": "^6.0.3"
-  },
-  "dependencies": {
-    "@anthropic-ai/claude-agent-sdk": "^0.3.207",
-    "zod": "^4.0.0"
   }
 }

@@ -21,7 +21,11 @@ VER="0.1.0"
 rm -rf dist
 npm run build
 
-pkg() { npx --yes @vscode/vsce package --target "$1" -o "viewer-${VER}-$1.vsix" >/dev/null 2>&1; }
+# NAME comes from package.json — it used to be the literal "viewer", which
+# silently emitted the wrong filename the moment the extension was renamed
+# for the marketplace.
+NAME=$(node -p "require('./package.json').name")
+pkg() { npx --yes @vscode/vsce package --target "$1" -o "${NAME}-${VER}-$1.vsix" >/dev/null 2>&1; }
 
 # linux-x64: WITH the native binary (assistant works) — default .vscodeignore
 pkg linux-x64
@@ -36,4 +40,4 @@ mv -f .vscodeignore.bak .vscodeignore
 trap - EXIT
 
 echo "--- platform-targeted VSIX sizes ---"
-for f in viewer-${VER}-*.vsix; do printf "%-40s %s\n" "$f" "$(du -h "$f" | cut -f1)"; done
+for f in ${NAME}-${VER}-*.vsix; do printf "%-40s %s\n" "$f" "$(du -h "$f" | cut -f1)"; done
