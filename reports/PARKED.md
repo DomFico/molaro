@@ -483,7 +483,24 @@ announces "bindable now" and then will not bind — the exact experience P9 was 
 end. Rare, load-dependent, and recoverable by re-running the mod, but it is the same bad
 experience.
 
-**Lean:** carry a generation/epoch tag on the produced-channel declaration and on each
+**RESOLVED 2026-08-01, mechanism measured — and it was NOT the belt.** My own hypothesis
+above (a chunk rejected by the validation bounds) is WRONG; a probe that forced that
+ordering never rejected a chunk. The real cause is simpler: `declareProducedChannel`
+calls `player.invalidateAll()` — emptying the cache — and then IMMEDIATELY announces
+"bindable now". For the window until a chunk is refetched there are no values for ANY
+frame, and a `bind` issued in that window fails with `no values in hand`. REPRODUCED
+DETERMINISTICALLY outside the harness (seek to an uncached chunk, run the mod, bind on
+the announcement: frame 120 of 300 reports `cached: false`, bind errors; with the fix,
+`cached: true`, bind succeeds). FIXED by waiting — bounded, 8 s — for the displayed
+frame's block before announcing, and saying so honestly if it does not arrive.
+
+**STILL OPEN, and the reason this entry stays:** the E2E harness cannot force the window.
+The S46 leg added alongside the fix asserts the invariant but passes with the fix
+reverted, so it is NOT a regression test and is labelled as such in the scenario. Forcing
+it in-scenario needs control over chunk-fetch latency the harness does not have. Until
+that exists, this fix rests on the standalone reproduction, not on a suite gate.
+
+**Superseded lean:** carry a generation/epoch tag on the produced-channel declaration and on each
 chunk, so the webview can tell "this chunk is newer than my header" from "this chunk is
 wrong" and RE-REQUEST rather than discard. That is a wire change, hence parked. A cheaper
 interim: on an upper-bound violation, re-request the chunk once instead of dropping it.

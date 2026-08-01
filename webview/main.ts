@@ -3237,6 +3237,28 @@ async function main(): Promise<void> {
    * A re-declaration (same name, producer already replaced the data) skips
    * the append but still invalidates so the new values flow.
    */
+  /** How long to wait for a freshly declared channel's values to land before
+   * announcing it. Generous: this is a message-truthfulness wait, not a
+   * correctness one — the channel IS declared either way, and the alternative
+   * to waiting is a line that claims something untrue. */
+  const CHANNEL_READY_TIMEOUT_MS = 8000;
+
+  /** Resolve once the DISPLAYED frame's chunk carries `name`'s block, or false
+   * on timeout. Polls the same reader `bind` uses, so "ready" here means exactly
+   * what `bind` will find — a separate notion of readiness could drift from it. */
+  const waitForChannelValues = (name: string, timeoutMs: number): Promise<boolean> =>
+    new Promise((resolve) => {
+      const started = Date.now();
+      const poll = (): void => {
+        const f = displayedFrame === -1 ? 0 : displayedFrame;
+        const block = player.getFrame(f)?.channels?.get(name);
+        if (block) { resolve(true); return; }
+        if (Date.now() - started >= timeoutMs) { resolve(false); return; }
+        setTimeout(poll, 60);
+      };
+      poll();
+    });
+
   const declareProducedChannel = (
     mod: AnalysisMod,
     delta: Channel,
@@ -3267,12 +3289,36 @@ async function main(): Promise<void> {
       `the old values, so it can no longer be replayed. Undo still works; redo starts again from here.`);
     player.invalidateAll(); // old-shape cached chunks → refetch new-shape (S2/S3)
     const width = channelComponents(delta) === 3 ? "vector" : "scalar";
-    asyncLine("ok",
-      `${mod.name} → declared ${width} channel "${delta.name}" — bindable now (no reload)`);
-    // the coherence warning is advisory (the channel DID declare), so it
-    // rides an "ok" line with a loud prefix rather than widening the status
-    // enum — it names a DATA problem, not a failure of the pipe
-    if (warning) asyncLine("ok", `⚠ ${warning}`);
+    // DO NOT SAY "bindable now" UNTIL IT IS. `invalidateAll` just emptied the
+    // cache, so for a window there are no values for ANY frame — and a `bind`
+    // issued in that window fails with `no values in hand for channel "X" at the
+    // current frame`. REPRODUCED DETERMINISTICALLY: seek to an uncached chunk,
+    // run the mod, and bind the instant this line appears — the displayed
+    // frame's chunk reports `cached: false` and the bind errors. Under a loaded
+    // machine that window widens, which is why it read as a flake (PARKED P11).
+    //
+    // The announcement is what a user acts on, so it must be TRUE when it is
+    // made. Wait — bounded — for the displayed frame's chunk to carry the block,
+    // then speak. If it does not arrive, say THAT instead of claiming success:
+    // a channel that declared but has no values yet is a real state, and naming
+    // it is what lets someone retry instead of concluding the feature is broken.
+    void (async () => {
+      const ready = await waitForChannelValues(delta.name, CHANNEL_READY_TIMEOUT_MS);
+      if (ready) {
+        asyncLine("ok",
+          `${mod.name} → declared ${width} channel "${delta.name}" — bindable now (no reload)`);
+      } else {
+        asyncLine("ok",
+          `${mod.name} → declared ${width} channel "${delta.name}" — the frame stream is ` +
+          `still catching up, so bind may need a moment (no reload)`);
+      }
+      // The coherence warning is advisory (the channel DID declare), so it rides
+      // an "ok" line with a loud prefix rather than widening the status enum — it
+      // names a DATA problem, not a failure of the pipe. It follows the
+      // declaration line so the two read in order.
+      if (warning) asyncLine("ok", `⚠ ${warning}`);
+    })();
+    return;
   };
 
   /**
@@ -4754,6 +4800,10 @@ async function main(): Promise<void> {
           for (let i = 0; i < block.length; i++) t += Math.abs(block[i]);
           return t;
         },
+        /** The frame `bind` reads — the displayed one, with the same -1 → 0
+         * substitution channelValues makes. A test seam: asserting a hardcoded
+         * frame index tests something stronger than the guarantee. */
+        displayedFrame: (): number => (displayedFrame === -1 ? 0 : displayedFrame),
         /** number of points currently green (pending-target footprint). */
         selCount: (): number => {
           let s = 0;

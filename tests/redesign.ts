@@ -8061,6 +8061,49 @@ async function S46(): Promise<void> {
       rebind.status === "ok", JSON.stringify(rebind));
     check("S46: still no missing-block hit after the whole lifecycle",
       (await missBlocks()) === 0, `missingBoundBlockHits=${await missBlocks()}`);
+
+    // -- (last) THE ANNOUNCEMENT MUST NOT OUTRUN THE VALUES (PARKED P11) --------
+    // `invalidateAll` empties the cache when a channel is declared, so for a
+    // window there are no values for ANY frame — and a `bind` issued in that
+    // window fails with "no values in hand". Runs LAST so it cannot shift the depth
+    // assertions above. Seek to an UNCACHED chunk first,
+    // then bind the instant the mod speaks: if the line is truthful, the
+    // displayed frame's chunk already carries the block.
+    //
+    // HONEST LABEL: this asserts the INVARIANT, and it does NOT currently force
+    // the race — it passes with the fix reverted, so it is not a regression test
+    // and must not be counted as one. The race WAS reproduced deterministically,
+    // but only outside the harness: seek to an uncached chunk, run the mod, and
+    // bind the instant the line appears — frame 120 of 300 reported
+    // `cached: false` and the bind errored, and with the fix it reports
+    // `cached: true` and succeeds. Forcing that window in-scenario needs control
+    // over chunk-fetch latency the harness does not have; a fixed frame index
+    // instead asserts more than the guarantee (the fix promises the DISPLAYED
+    // frame, which `seek` has not yet updated) and fails for the wrong reason.
+    // See reports/PARKED.md P11.
+    await d.evaluate(`void (window.__lines.length = 0)`);
+    // Force the window: jump to a chunk the prefetcher has NOT reached and run
+    // the mod while that fetch is still in flight. The sleep is deliberately too
+    // short to let it land — the point is to have the declaration land first.
+    await seekTo(0);
+    await sleep(500);
+    await d.evaluate(`${V}.player.seek(280)`);
+    await cmd("channel_flow all");
+    await d.waitFor(`window.__lines.some(l => /channel "flow_dir"/.test(l.message))`, 25000)
+      .catch(() => { /* the checks below go red */ });
+    // Read the frame `bind` will read — the DISPLAYED one — not a hardcoded
+    // index. `seek` is async, so the displayed frame at announcement time is
+    // whatever has landed; asserting a fixed number tests something stronger
+    // than the guarantee (and than `bind`) and fails for the wrong reason.
+    const atAnnounce = await d.evaluate<boolean>(`(() => {
+      const f = ${V}.debug.displayedFrame ? ${V}.debug.displayedFrame() : 0;
+      return !!(${V}.player.getFrame(f)?.channels?.get("flow_dir"));
+    })()`);
+    check("S46: when the mod says the channel is bindable, the VALUES ARE IN HAND",
+      atAnnounce, `displayed frame's chunk carries the block: ${atAnnounce}`);
+    const raceBind = await cmd("bind all flow_dir orientation");
+    check("S46: ...so a bind issued immediately SUCCEEDS",
+      raceBind.status === "ok", JSON.stringify(raceBind));
   }, 1180, 780, "/terminal");
 }
 
