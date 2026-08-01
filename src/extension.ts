@@ -107,6 +107,28 @@ export function activate(context: vscode.ExtensionContext): void {
   const producerLog = vscode.window.createOutputChannel("Point Viewer Producer");
   context.subscriptions.push(producerLog);
 
+  // WITHOUT THIS, A WINDOW RELOAD LEAVES A DEAD TAB. VS Code re-creates a webview
+  // panel it saw before, and with no serializer registered the panel comes back
+  // with no host behind it: no producer, no broker, no error — a viewer-shaped
+  // corpse that looks like a hang. Restoring the SESSION is not possible (the
+  // stream, the buffers and the undo history all lived in the old process), so
+  // this rebuilds the panel honestly: dispose the husk and reopen with the same
+  // producer args, which is what the user would have done by hand.
+  context.subscriptions.push(
+    vscode.window.registerWebviewPanelSerializer("viewer", {
+      async deserializeWebviewPanel(stale: vscode.WebviewPanel): Promise<void> {
+        const opts = context.workspaceState.get<PanelOpts>(LAST_PANEL_OPTS);
+        stale.dispose();
+        if (!opts) {
+          void vscode.window.showInformationMessage(
+            "Molaro: this viewer could not be restored after the reload — open the dataset again.");
+          return;
+        }
+        openPanel(context, producerLog, opts);
+      },
+    }),
+  );
+
   // viewer.open — synthetic (default) or a benchmark system / explicit topology.
   context.subscriptions.push(
     vscode.commands.registerCommand("viewer.open", (args?: OpenArgs) => {
@@ -119,7 +141,12 @@ export function activate(context: vscode.ExtensionContext): void {
       openPanel(context, producerLog, {
         producerArgs,
         title,
-        pythonPath: args?.pythonPath ?? (isReal ? realPythonPath() : undefined),
+        // THE SYNTHETIC SOURCE NEEDS THE INTERPRETER TOO. It used to be handed
+        // `undefined` on the reasoning that it reads no trajectory — but it still
+        // imports numpy, so it spawned a bare `python3` and the Quick Start's very
+        // first step failed on any machine whose default python lacks it. Measured
+        // on a cluster: CVMFS python 3.11.4, no numpy.
+        pythonPath: args?.pythonPath ?? realPythonPath(),
       });
     }),
   );
@@ -364,6 +391,9 @@ interface PanelOpts {
   pythonPath?: string;
 }
 
+/** workspaceState key holding the last panel's opts, for reload restore. */
+const LAST_PANEL_OPTS = "molaro.lastPanelOpts";
+
 /** The viewer panel the `viewer.openTerminal` command targets — the most
  * recently created or focused one. */
 interface ViewerSession {
@@ -376,6 +406,10 @@ function openPanel(
   producerLog: vscode.OutputChannel,
   opts: PanelOpts,
 ): void {
+  // Remember WHAT this panel was, so a window reload can rebuild it. A webview's
+  // own getState/setState survives, but the producer args live on the host side
+  // and the extension host restarts too — so they go in workspaceState.
+  void context.workspaceState.update(LAST_PANEL_OPTS, opts);
   const panel = vscode.window.createWebviewPanel(
     "viewer",
     opts.title,
@@ -877,7 +911,21 @@ function openPanel(
         }
       }
       try {
-        broker.send(msg.request as { type: "header" | "frames" | "run_mod" });
+        // STAMP THE MOD TIMEOUT HERE, the single point every mod run passes.
+        // `timeout_s` has been on the wire and honoured by the producer all along,
+        // and NOTHING EVER SENT IT — so the producer's 5 s floor was effectively
+        // hardcoded with no way to raise it. The webview builds this request and
+        // has no access to configuration, so the host is the only place it can be
+        // added. An explicit value still wins; 0 or negative falls through to the
+        // producer's own floor, because a hang guard should be raisable but not
+        // removable.
+        const req = msg.request as { type: "header" | "frames" | "run_mod"; timeout_s?: number };
+        if (req.type === "run_mod" && req.timeout_s === undefined) {
+          const secs = vscode.workspace
+            .getConfiguration("molaro").get<number>("modTimeoutSeconds");
+          if (typeof secs === "number" && secs > 0) req.timeout_s = secs;
+        }
+        broker.send(req);
       } catch (err) {
         void panel.webview.postMessage({
           type: "producerExit",
@@ -930,9 +978,31 @@ function openPanel(
   // deletion keeps its own gated reconcile path; the watcher only refreshes
   // what the scan finds. The dir is ensured first: a watcher on a not-yet-
   // existing directory would never fire.
-  mkdirSync(modsDir(), { recursive: true });
+  // NEVER LET A BAD SETTING TAKE THE VIEWER DOWN. This threw, and because
+  // openPanel creates the panel BEFORE it gets here and starts the broker AFTER,
+  // the failure produced a tab that appeared, stayed blank forever, spawned no
+  // producer, and reported a permission error that read like a broken filesystem.
+  // MEASURED on a cluster: a user-scoped `molaro.modsDir` holding a LAPTOP path
+  // reached a remote window (VS Code applies user settings to remote hosts), so
+  // the mkdir was for a directory whose parent is root-owned and does not exist.
+  // A mods folder is a convenience; it must not be able to stop you seeing data.
+  let modsRoot = modsDir();
+  try {
+    mkdirSync(modsRoot, { recursive: true });
+  } catch (err) {
+    const fallback = join(homedir(), ".molaro", "mods");
+    producerLog.appendLine(
+      `molaro: cannot use mods directory ${modsRoot} (${(err as Error).message}). ` +
+      `Falling back to ${fallback}. Check the "molaro.modsDir" setting — if it came ` +
+      `from another machine, note that path settings are machine-scoped for exactly ` +
+      `this reason.`);
+    vscode.window.showWarningMessage(
+      `Molaro: mods directory "${modsRoot}" is unusable — using ${fallback} instead.`);
+    modsRoot = fallback;
+    try { mkdirSync(modsRoot, { recursive: true }); } catch { /* watcher just won't fire */ }
+  }
   const modsWatcher = vscode.workspace.createFileSystemWatcher(
-    new vscode.RelativePattern(vscode.Uri.file(modsDir()), "*.py"),
+    new vscode.RelativePattern(vscode.Uri.file(modsRoot), "*.py"),
   );
   let modsReloadTimer: ReturnType<typeof setTimeout> | null = null;
   const scheduleModsReload = (): void => {
@@ -970,6 +1040,26 @@ export function deactivate(): void {}
  * open-arg; the synthetic source ignores this and uses plain python3.
  */
 function realPythonPath(): string {
+  // A SETTING FIRST, and the environment only as a legacy fallback.
+  //
+  // `VIEWER_PYTHON` is unreachable on a remote host in the common case, and the
+  // reason is not obvious: VS Code's CLI keeps a LONG-LIVED daemon that survives
+  // disconnects and spawns every server as its child, so servers inherit the
+  // DAEMON's environment — not your shell's, and not a fresh login's. MEASURED on
+  // a cluster: a daemon two days old, and "Kill VS Code Server on Host" does not
+  // touch it. `~/.vscode-server/server-env-setup` is widely cited and is not read
+  // by the CLI-based server at all.
+  //
+  // A setting crosses the remote boundary through VS Code's own configuration and
+  // applies on extension-host reload, independent of process lineage. So: never
+  // configure a remote extension through the environment.
+  const configured = vscode.workspace
+    .getConfiguration("molaro").get<string>("pythonPath")?.trim();
+  if (configured) {
+    if (configured === "~") return homedir();
+    if (configured.startsWith("~/")) return join(homedir(), configured.slice(2));
+    return configured;
+  }
   return process.env.VIEWER_PYTHON ?? "python3";
 }
 

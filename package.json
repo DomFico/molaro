@@ -52,7 +52,8 @@
         "molaro.modsDir": {
           "type": "string",
           "default": "",
-          "description": "Directory where mods (*.py) are stored, loaded from, and saved to. A leading ~ expands to your home directory. Empty (the default) means the global ~/.molaro/mods, shared across all workspaces. The directory is created on first use."
+          "description": "Directory where mods (*.py) are stored, loaded from, and saved to. A leading ~ expands to your home directory. Empty (the default) means the global ~/.molaro/mods, shared across all workspaces. The directory is created on first use.",
+          "scope": "machine"
         },
         "molaro.assistant.useStub": {
           "type": "boolean",
@@ -87,6 +88,18 @@
             "Draw only the bonds the topology declares."
           ],
           "markdownDescription": "Whether to INFER the covalent bonds a topology does not declare. Many real files leave connectivity out: a PDB with no `CONECT` records shows every ligand and lipid as loose dust (the 222 227-atom membrane system: 482 DMPC lipids, 56 876 atoms, fully unbonded), and mdtraj's residue templates never bond nucleic `O3'-P`, so **every** nucleic backbone arrives unlinked. `full` (the default) fills those in from Cordero covalent radii, scoped to within one residue, to the named backbone linkage between sequence-adjacent residues (protein `C-N`, nucleic `O3'-P`), and to S/Se crosslinks (disulfide, thioether) \u2014 additively, so no bond the file declares is ever removed and no coordinate is touched. `nonsolvent` does the same but skips solvent residues: on the membrane that is 67 058 fewer inferred bonds and about half the inference cost, at the price of unbonded water. `off` draws only declared bonds, reproducing the pre-inference edge list exactly. `Header.provenance` names the per-scope counts whenever inference added anything, the status line appends the inferred count to the edge count, and its hover carries the producer's full sentence \u2014 including what inference does NOT reach (metal-organic bonds, glycosidic and isopeptide links, head-to-tail cyclic peptides). Cost, MEASURED on the 222 227-atom membrane, cold open: `off` 4.79 s / 50 488 edges / 5.17 MB header; `nonsolvent` 5.16 s / 106 882 edges / 6.07 MB; `full` 5.45 s / 173 940 edges / 7.28 MB \u2014 inference itself is 0.60 s of that. The 41% larger header also costs the webview: `JSON.parse` of it goes 20 ms \u2192 36 ms (the added payload is 123 452 two-element arrays, which cost far more per byte than the scalar arrays that dominate the rest), and retained memory about +45 MB. Click-picking scans every edge, so it goes 2.6 ms \u2192 7.7 ms per pick on that system; `nonsolvent` or `off` is the lever if a paint gesture feels heavy there. Takes effect when a viewer panel is (re)opened."
+        },
+        "molaro.pythonPath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Python interpreter for the data producer. Needs `numpy`, and `mdtraj >= 1.11` for real trajectories (**1.10 is not supported** \u2014 its `Residue.is_nucleic` raises instead of answering). `~` is expanded. Empty falls back to the `VIEWER_PYTHON` environment variable, then `python3`.\n\n**On a remote host, use this setting, not the environment.** VS Code's CLI keeps a long-lived daemon that spawns every server as its child, so extension hosts inherit the daemon's environment rather than your shell's \u2014 an export in `.bashrc` may never be seen."
+        },
+        "molaro.modTimeoutSeconds": {
+          "type": "number",
+          "default": 30,
+          "minimum": 0,
+          "markdownDescription": "Wall-clock budget for a single mod run, in seconds. The producer's own floor is 5 s; `0` falls back to it rather than disabling the guard, because this is a hang guard and should be raisable but not removable.\n\nRaise it on a shared or busy machine: a mod's cost is wall clock, so someone else's I/O storm can push a 2 s computation past a 5 s cap. Lowering `#molaro.viewer.maxFrames#` cuts the cost itself."
         }
       }
     },
