@@ -450,3 +450,40 @@ change (the values already live producer-side; the header field is what was defe
 **Not urgent, and there is a correct spelling today**: the address grammar unions with
 `+`, so `smooth @a + @b` expresses "both" exactly. Documented in the mod, since the
 override is genuinely surprising and was found the hard way.
+
+## P11 — S46's produced-channel bind is LOAD-SENSITIVE (a residual of P9)
+
+**Measured across four full-suite runs on 2026-07-31/08-01: RED in 2, GREEN in 2, and
+GREEN 4/4 when run isolated.** The failure is always the same and is P9's symptom:
+
+```
+the produced channel binds to orientation with no reload
+  -> error: no values in hand for channel "flow_dir" at the current frame
+```
+
+followed by five dependent checks (bindings empty, buffer all-zero, no animation).
+
+**It is NOT a regression from the 2026-08-01 producer work.** It first appeared in the
+run that predates the `serve.py` fd-level stdout change, and `write_framed` flushes
+unconditionally after every message, so swapping `sys.stdout.buffer` for an `os.fdopen`
+of a dup'd descriptor cannot shift when bytes reach the pipe. Ruled out by inspection,
+not assumed.
+
+**The likely mechanism** — untested, so treat it as a hypothesis: P9's fix bounds a
+chunk's blocks BELOW by the request epoch and ABOVE by what is declared at RECEIPT. A
+new-shape chunk that arrives before the webview has mirrored the declaration violates
+the upper bound and is discarded, and the chunk is then never cached. P9's own write-up
+names the related limit ("the belt's lower bound is the REQUEST epoch, not the
+producer's actual set... a concurrent transport would need a generation tag on the
+wire"). Under a loaded box the declaration handling and the chunk arrival can reorder
+in the webview's async message handling even though the WIRE is FIFO.
+
+**Why it matters more than a normal flake:** the symptom a user sees is a channel that
+announces "bindable now" and then will not bind — the exact experience P9 was fixed to
+end. Rare, load-dependent, and recoverable by re-running the mod, but it is the same bad
+experience.
+
+**Lean:** carry a generation/epoch tag on the produced-channel declaration and on each
+chunk, so the webview can tell "this chunk is newer than my header" from "this chunk is
+wrong" and RE-REQUEST rather than discard. That is a wire change, hence parked. A cheaper
+interim: on an upper-bound violation, re-request the chunk once instead of dropping it.
