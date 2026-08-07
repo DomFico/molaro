@@ -9,7 +9,7 @@ reports/**
 # the marketplace icon MUST ship; everything else in media/ is test fixtures.
 # NOTE: no trailing comments in this file — the whole line is the pattern.
 media/**
-!media/icon.png
+!media/molaro_logo.png
 
 # Lane working artifacts — one-off probes, gate logs, capture scaffolds. NOT a
 # runtime path and never imported by dist/. This rule closes a real ship defect,

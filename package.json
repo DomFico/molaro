@@ -1,7 +1,7 @@
 {
   "name": "molaro",
   "displayName": "Molaro",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "publisher": "DominicFico",
   "description": "Stream and analyze molecular dynamics trajectories in VS Code, over SSH. GPU-rendered 3D viewer, a command grammar, and Python mods that run next to your data.",
   "license": "MIT",
@@ -26,7 +26,7 @@
     "HPC",
     "remote"
   ],
-  "icon": "media/icon.png",
+  "icon": "media/molaro_logo.png",
   "engines": {
     "vscode": "^1.125.0"
   },
