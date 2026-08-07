@@ -16,7 +16,7 @@ cd "$(dirname "$0")/.."
 # entry (renaming it in-place does NOT work — vsce packages every node_modules
 # file not matched by .vscodeignore, including a renamed dir).
 NATIVE_IGNORE="node_modules/@anthropic-ai/claude-agent-sdk-linux-x64/**"
-VER="0.1.0"
+VER=$(node -p "require('./package.json').version")
 
 rm -rf dist
 npm run build
