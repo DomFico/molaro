@@ -5,6 +5,7 @@
 # 85 MB package that is dead weight — and a silently broken assistant — on every
 # other platform, we build:
 #   - linux-x64 WITH the native binary  → the assistant works (~85 MB)
+#   - a universal fallback WITHOUT it   → core features work on any desktop
 #   - every other target WITHOUT it     → small; the viewer/terminal/grammar/plot/
 #     selections/hand-written mods all work, and the assistant reports itself
 #     unavailable through the verified error → auth-status: disconnected path.
@@ -26,6 +27,7 @@ npm run build
 # for the marketplace.
 NAME=$(node -p "require('./package.json').name")
 pkg() { npx --yes @vscode/vsce package --target "$1" -o "${NAME}-${VER}-$1.vsix" >/dev/null 2>&1; }
+pkg_universal() { npx --yes @vscode/vsce package -o "${NAME}-${VER}.vsix" >/dev/null 2>&1; }
 
 # linux-x64: WITH the native binary (assistant works) — default .vscodeignore
 pkg linux-x64
@@ -35,9 +37,10 @@ pkg linux-x64
 cp .vscodeignore .vscodeignore.bak
 trap 'mv -f .vscodeignore.bak .vscodeignore 2>/dev/null || true' EXIT
 printf '\n# platform-targeted build: exclude the linux-x64 native binary\n%s\n' "$NATIVE_IGNORE" >> .vscodeignore
+pkg_universal
 for t in darwin-x64 darwin-arm64 win32-x64; do pkg "$t"; done
 mv -f .vscodeignore.bak .vscodeignore
 trap - EXIT
 
-echo "--- platform-targeted VSIX sizes ---"
-for f in ${NAME}-${VER}-*.vsix; do printf "%-40s %s\n" "$f" "$(du -h "$f" | cut -f1)"; done
+echo "--- VSIX sizes ---"
+for f in ${NAME}-${VER}.vsix ${NAME}-${VER}-*.vsix; do printf "%-40s %s\n" "$f" "$(du -h "$f" | cut -f1)"; done
