@@ -30,19 +30,10 @@ labels, and numeric channels; the renderer only consumes that contract.
 
 ## See Molaro in action
 
-### Live-updating mods
-
-Run custom Python mods against the loaded trajectory and apply their results
-immediately as channels, bindings, plots, geometry, or viewer commands.
-
-![A custom smoothing mod updating a molecular representation live in Molaro](media/demos/live-mods.gif)
-
-### Fast structure navigation
-
-Move from a large solvated system to precise chains and residues with the
-hierarchy, named selections, and camera framing.
-
-![Navigating from a large molecular system to focused residue selections in Molaro](media/demos/structure-navigation.gif)
+| Live-updating mods | Fast structure navigation |
+| --- | --- |
+| [![Autoplaying live-updating mods demo](media/demos/live-mods.gif)](https://raw.githubusercontent.com/DomFico/molaro/main/media/demos/live-mods.mp4) | [![Autoplaying structure navigation demo](media/demos/structure-navigation.gif)](https://raw.githubusercontent.com/DomFico/molaro/main/media/demos/structure-navigation.mp4) |
+| Run custom Python mods and apply their results immediately as channels, bindings, plots, geometry, or viewer commands. Click for the full video. | Move from a large solvated system to precise chains and residues with the hierarchy, named selections, and camera framing. Click for the full video. |
 
 ### Custom representations
 
