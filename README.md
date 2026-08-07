@@ -60,17 +60,18 @@ interpreter, required packages, protocol output, and mods directory.
 
 ## Install
 
-Molaro is packaged as a platform-specific VSIX. Install the package matching
-your machine from the command line or through VS Code's **Install from VSIX...**
-action:
+Molaro is packaged as a universal fallback VSIX and as platform-specific
+packages. Install the universal package from the command line or use VS Code's
+**Install from VSIX...** action:
 
 ```bash
-code --install-extension molaro-0.1.1-linux-x64.vsix
+code --install-extension molaro-0.1.1.vsix
 ```
 
-Packages are built for Linux x64, macOS x64, macOS arm64, and Windows x64. The
-Claude Agent SDK runtime is included only in the Linux x64 package; the viewer,
-terminal, plots, and hand-written mods remain available in the other packages.
+Targeted packages are also built for Linux x64, macOS x64, macOS arm64, and
+Windows x64. The Claude Agent SDK runtime is included only in the Linux x64
+package; the universal and other targeted packages retain the viewer, terminal,
+plots, and hand-written mods.
 
 To build all packages from source:
 
