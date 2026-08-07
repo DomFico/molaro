@@ -110,7 +110,7 @@
       },
       {
         "command": "viewer.openFile",
-        "title": "Open in Point Viewer"
+        "title": "Launch Molaro"
       },
       {
         "command": "viewer.openTerminal",
