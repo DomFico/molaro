@@ -8,8 +8,8 @@
   "private": true,
   "type": "module",
   "categories": [
-    "Visualization",
     "Data Science",
+    "Visualization",
     "AI"
   ],
   "keywords": [
@@ -24,7 +24,16 @@
     "DCD",
     "XTC",
     "HPC",
-    "remote"
+    "remote",
+    "computational chemistry",
+    "biology",
+    "chemistry",
+    "AmberTools",
+    "Gromacs",
+    "bioinformatics",
+    "cheminformatics",
+    "molecule",
+    "macromolecule"
   ],
   "icon": "media/molaro_logo.png",
   "engines": {
