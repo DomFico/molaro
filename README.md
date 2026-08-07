@@ -28,6 +28,29 @@ Molaro's renderer is deliberately data-neutral. Molecular files are translated
 by the producer into a typed contract of positions, connectivity, hierarchy,
 labels, and numeric channels; the renderer only consumes that contract.
 
+## See Molaro in action
+
+### Live-updating mods
+
+Run custom Python mods against the loaded trajectory and apply their results
+immediately as channels, bindings, plots, geometry, or viewer commands.
+
+![A custom smoothing mod updating a molecular representation live in Molaro](media/demos/live-mods.gif)
+
+### Fast structure navigation
+
+Move from a large solvated system to precise chains and residues with the
+hierarchy, named selections, and camera framing.
+
+![Navigating from a large molecular system to focused residue selections in Molaro](media/demos/structure-navigation.gif)
+
+### Custom representations
+
+Combine ribbons, atom-and-bond styles, colors, opacity, and selections in a
+single scene.
+
+![Two molecular structures using custom ribbon and atom representations in Molaro](media/demos/custom-representations.png)
+
 ## Requirements
 
 - VS Code 1.125 or newer.
