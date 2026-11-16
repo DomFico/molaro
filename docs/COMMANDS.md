@@ -279,7 +279,7 @@ Results are always de-duplicated.
 
 ## The mods that ship with the extension
 
-Seven live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
+Eight live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
 the same name in your own dir SHADOWS a shipped one, which is how you customise one
 without losing the original.
 
@@ -290,8 +290,9 @@ without losing the original.
 | `hide_res` / `show_res` | fade points AND their incident bonds in one stroke, creating no selection |
 | `live_sasa` / `live_ss` | colour that follows the trajectory |
 | `smooth` | a temporal moving average over positions — jitter out, motion in |
+| `align` | superpose every frame onto a reference (`?ref=first\|average\|mean\|last\|<k>\|off`, `?fit=backbone\|CA\|…`) — tumbling and drift out |
 
-Four more (`ribbon_dir`, `sasa_field`, `smoothing`, `ss_field`) are **machinery**: they supply a
+Five more (`aligning`, `ribbon_dir`, `sasa_field`, `smoothing`, `ss_field`) are **machinery**: they supply a
 channel their consumer declares with `# requires-channel:` and run automatically. The
 `mods` listing hides them and prints how many were hidden — `help <name>` still
 describes them.
@@ -367,11 +368,19 @@ The underlying positions are never touched: `smooth` writes a channel and binds 
 the **offset** axis, so `shown = raw + offset`. Unbind and the original motion is back,
 byte for byte.
 
-**Re-running REPLACES, it does not add.** `smooth @a` then `smooth @b` leaves only
-`@b` smoothed, because `smoothing` is one channel and a provider run rewrites the
-whole column. To smooth both, name both in ONE command — `smooth @a + @b`. This is
-the one place the grid's usual "each command adds a bit more" intuition does not hold,
-and the mod says so when it runs.
+**It accumulates by region.** Each point's window is remembered: `smooth @a` then `smooth @b`
+leaves both smoothed; re-running on the same region replaces its window, so
+`smooth @a ?smoothing=0` stops @a alone.
+
+**`align` and `smooth` compose, in either order.** Both write the same combined picture,
+shown = smooth(align(raw)) — the average is taken over the ALIGNED positions, the only order in
+which averaging a tumbling molecule means anything. The pure parts (alignment transforms, each
+point's window) are remembered on the dataset handle; whichever provider ran last holds the
+current combination, and both macros bind that one (a provider whose target and parameters are
+unchanged is not re-run, so its own channel can be one step stale). `align ?ref=off` and
+`smooth all ?smoothing=0` each remove their half; `unbind all offset` shows raw. Cartoon ribbons
+orient from the shown positions: after `align`/`smooth` the macro says when to run `ribbon_dir`
+to re-orient them.
 
 `smooth` is the macro half of a two-mod pair: `smoothing` (hidden machinery) computes
 the channel, `smooth` binds it. Two mods rather than one because a `produces: channel`

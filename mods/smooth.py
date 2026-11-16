@@ -8,7 +8,7 @@
 # param: keep boolean false
 # author: Example Author
 # source: https://github.com/DomFico/molaro
-# description: One command to make a region's motion read smoothly instead of jittery — a temporal moving average over the positions. `smooth <region> ?smoothing=N` replaces each targeted point's shown position with the mean of its own positions over N frames — the same number VMD's trajectory-smoothing control shows. 5 averages 5 frames; higher is smoother; 0 is off. An even N rounds down to the nearest odd, because a centred average over an even count cannot be symmetric. Runs the `smoothing` provider on the region, then binds it to the offset axis. IT ACCUMULATES BY REGION: `smooth @a` then `smooth @b` leaves BOTH smoothed, because a region you do not name keeps the smoothing it already had. Re-running on the SAME region replaces that region's smoothing (so `smooth @a ?smoothing=0` stops @a alone, and `smooth all ?smoothing=0` stops everything). Undoable in one step.
+# description: One command to make a region's motion read smoothly instead of jittery — a temporal moving average over the positions. `smooth <region> ?smoothing=N` replaces each targeted point's shown position with the mean of its own positions over N frames — the same number VMD's trajectory-smoothing control shows. 5 averages 5 frames; higher is smoother; 0 is off. An even N rounds down to the nearest odd, because a centred average over an even count cannot be symmetric. Runs the `smoothing` provider on the region, then binds it to the offset axis. COMBINES WITH `align` in either order: the average is taken over the aligned positions, so a tumbling trajectory smooths cleanly. IT ACCUMULATES BY REGION: `smooth @a` then `smooth @b` leaves BOTH smoothed, because a region you do not name keeps the smoothing it already had. Re-running on the SAME region replaces that region's smoothing (so `smooth @a ?smoothing=0` stops @a alone, and `smooth all ?smoothing=0` stops everything). Undoable in one step.
 
 # THE MACRO half of the two-mod smoothing pair (like cartoon over ribbon_dir).
 #
@@ -53,14 +53,35 @@
 # declaration. Re-running `smooth` recomputes the channel in place and re-binds.
 
 
+_MOTION_CHANNELS = ("aligning", "smoothing")
+
+
+def _current_motion_channel(data, own):
+    st = getattr(data, "_molaro_motion", None)
+    if not isinstance(st, dict):
+        return own, None
+    cur = [c for c in _MOTION_CHANNELS
+           if st["computed"].get(c) == st["version"] and data.channel(c) is not None]
+    return (own if own in cur else (cur[0] if cur else own)), st
+
+
 def compute(data, target_indices, params):
     # `?within`/`?keep` are DECLARED here so the invocation accepts them and the
-    # sequencer forwards them to `smoothing` — which is where they act. This mod
-    # never reads them: it binds `all`, and the provider's mask is what scopes the
-    # effect. Doing the expansion here computed the right set and discarded it.
-
-    # A `produces: commands` mod: bind the (already-computed) smoothing channel
-    # to the offset axis. `smoothing` is guaranteed present — its provider ran
-    # first via requires-channel — and is zero outside the smoothed region, so
-    # `all` is the correct, economical target.
-    return ["bind all smoothing offset"]
+    # sequencer forwards them to `smoothing` — which is where they act.
+    #
+    # WHICH CHANNEL. `smoothing` and `aligning` both write the full combination
+    # smooth(align(raw)) from shared state; the state's version says which was
+    # computed last. The viewer skips the provider when target and parameters are
+    # unchanged, so a repeat `smooth` after an `align` must bind `aligning`'s
+    # (current) channel, not its own stale one — or the alignment would vanish.
+    ch, st = _current_motion_channel(data, "smoothing")
+    cmds = [f"bind all {ch} offset"]
+    if st is not None:
+        n_s = int((st["smooth_half"] > 0).sum())
+        n_a = int((st["align_layer"] >= 0).sum())
+        cmds.append(f"note smooth: {n_s} points smoothed" +
+                    (f", on top of the alignment of {n_a} points." if n_a else "."))
+        if data.channel("ribbon_dir") is not None and st["computed"].get("ribbon_dir") != st["version"]:
+            cmds.append("note cartoon ribbons were oriented for the previous motion — run `ribbon_dir` to "
+                        "re-orient them (tube style needs nothing).")
+    return cmds

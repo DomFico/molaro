@@ -29,6 +29,8 @@ const MODS_DIR = join(import.meta.dirname, "..", "mods");
 
 /** The exact shipped roster. Adding one is an edit HERE first. */
 const EXPECTED = [
+  "align",
+  "aligning",
   "cartoon",
   "hide_res",
   "licorice",
@@ -129,18 +131,18 @@ test("the mods listing hides machinery, names how many, and keeps the rest", () 
 
   assert.deepEqual(
     machinery.map((m) => m.name).sort(),
-    ["ribbon_dir", "sasa_field", "smoothing", "ss_field"],
-    "the three channel providers are the machinery",
+    ["aligning", "ribbon_dir", "sasa_field", "smoothing", "ss_field"],
+    "the channel providers are the machinery",
   );
   assert.deepEqual(
     shown.map((m) => m.name).sort(),
-    ["cartoon", "hide_res", "licorice", "live_sasa", "live_ss", "show_res", "smooth"],
+    ["align", "cartoon", "hide_res", "licorice", "live_sasa", "live_ss", "show_res", "smooth"],
     "what remains listed is exactly the mods a person invokes",
   );
 
   // Guards the guard: if `requires-channel` were ever dropped from the consumers,
   // NOTHING would be classed as machinery and this would pass by listing all six.
-  assert.equal(machinery.length, 4, "machinery must be detected, not vacuously empty");
+  assert.equal(machinery.length, 5, "machinery must be detected, not vacuously empty");
 });
 
 test("a channel mod NOBODY requires is NOT hidden", () => {

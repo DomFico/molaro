@@ -8,61 +8,107 @@
 # param: keep boolean false
 # author: Example Author
 # source: https://github.com/DomFico/molaro
-# description: The offset half of `smooth` — a per-point-per-frame DISPLACEMENT that, bound to the offset axis, replaces each point's shown position with a temporal MOVING AVERAGE of its own positions over `smoothing` frames (VMD's trajectory-smoothing number: 5 averages 5 frames, 0 is off) (shown = raw + offset = windowed mean). Higher = smoother. Runs automatically when you invoke `smooth`; you rarely call it by hand.
+# description: The offset half of `smooth` — remembers a temporal MOVING AVERAGE over `smoothing` frames for the targeted points (VMD's trajectory-smoothing number: 5 averages 5 frames, 0 is off) and writes the COMBINED displacement for the offset axis: any `align` first, then the average over the aligned positions (shown = smooth(align(raw))). Runs automatically when you invoke `smooth`; you rarely call it by hand.
 
 # THE PROVIDER half of the two-mod smoothing pair (like ribbon_dir under
-# cartoon). It produces a `per_point_per_frame` VECTOR channel; `smooth` (a
-# `produces: commands` macro) declares `# requires-channel: smoothing`, so
-# running `smooth <region>` runs THIS first and then binds the result to the
-# offset axis — one invocation, not two.
+# cartoon). `smooth` declares `# requires-channel: smoothing`, so `smooth
+# <region>` runs THIS first and then binds the result to the offset axis.
 #
-# WHY A CHANNEL AT ALL. The offset axis draws `shown = raw + offset`, taking the
-# offset from a 3-wide channel bound to it. To move a point onto its own
-# windowed-mean position we supply, per point per frame, the vector FROM the raw
-# position TO that mean: offset = windowed_mean(position) - position. With
-# nothing bound the offset buffer is zero and every point sits at its raw
-# position (no smoothing) — which is why smoothing must be a channel, and why
-# one mod cannot both compute it and bind it (a mod produces one thing).
+# WHY IT NOW KNOWS ABOUT `align`. The offset axis is last-bind-wins per point, and
+# this mod used to average RAW positions. After `align`, binding it threw the
+# alignment away AND averaged a tumbling molecule over many orientations — a
+# jumble. Now the pure parts (each point's window, and the alignment transforms
+# `aligning` computed) are remembered on the dataset handle (the MOTION STATE
+# block, identical in aligning.py), and every run writes the full combination
+# smooth(align(raw)) - raw. Smoothing after alignment is the order that means
+# something: an average of positions is only meaningful in a frame where the
+# molecule is not tumbling.
 #
-# THE MATH IS PURE SIGNAL PROCESSING — a boxcar (uniform) moving average over
-# the time axis of a position signal. It says nothing about what the points are.
+# THE MATH is a boxcar (uniform) moving average over the time axis, CENTRED with
+# half-width (smoothing-1)//2, the window CLAMPED at the ends (a shrinking,
+# never wrapped or padded window), done as a prefix-sum difference in float64.
 #
-# WHOLE-SYSTEM CHANNEL, TARGETED EFFORT. A channel's length is always the whole
-# system (n_frames * n_points * 3); `target_indices` only chooses WHICH points
-# are worth smoothing. A point outside the target keeps whatever offset it
-# already had — zero on a first run, so binding the channel over `all` displaces
-# exactly the targeted region and leaves everything else where it was; and on a
-# LATER run, the offset an earlier `smooth` gave it, so smoothing a second region
-# no longer stops the first. An empty target (a bare `smooth`) smooths every
-# point and so rewrites the whole column.
+# IT ACCUMULATES BY REGION. Each point's window is remembered: `smooth @a` then
+# `smooth @b` leaves both smoothed; re-running on the same region REPLACES its
+# window (not additive — two averages summed is not an average), so
+# `smooth @a ?smoothing=0` stops @a alone. An empty target means every point.
 #
-# EDGE POLICY. The window is CENTERED with half-width `window`: frame t averages
-# frames [t-window, t+window]. Near the ends that range is CLAMPED to
-# [0, n_frames-1] and the average is taken over the frames that exist — a valid
-# partial (shrinking) window at t < window and t > n_frames-1-window, never a
-# wrap and never a pad. window = 0 is the identity (each frame averages only
-# itself, so every offset is zero).
-#
-# VECTORIZED. The windowed mean is a prefix-sum (cumsum) difference, O(T*N) with
-# no Python per-frame loop, so a full trajectory stays well under the run_mod
-# timeout even at scale. The offset is returned as a numpy array (not a boxed
-# Python list) to keep the full-size N*T*3 block cheap in memory.
+# `smoothing` is HOW MANY FRAMES ARE AVERAGED, not the half-width: an even count
+# rounds DOWN to the nearest odd (4 -> 3) so the window stays symmetric; 0 and 1
+# both mean off.
 
 import numpy as np
 
+# ==== MOTION STATE — shared by aligning.py and smoothing.py; KEEP IDENTICAL ====
+# State lives on the resident dataset handle, so it lasts exactly as long as the
+# channels it explains (a new dataset is a new handle: no state, no channels).
+#   align_layers: list of (R (t,3,3), cx (t,3), cy (3,)) rigid transforms
+#   align_layer:  (n,) int, which layer moves each point, -1 = not aligned
+#   smooth_half:  (n,) int, half-width of each point's centred moving average
+#   version:      bumped by every provider run; computed[ch] = version it saw
+_MOTION_SCHEMA = 2
+
+
+def _motion_state(data, t, n):
+    st = getattr(data, "_molaro_motion", None)
+    if not isinstance(st, dict) or st.get("schema") != _MOTION_SCHEMA or st.get("shape") != (t, n):
+        st = {"schema": _MOTION_SCHEMA, "shape": (t, n), "version": 0, "computed": {},
+              "align_layers": [], "align_layer": np.full(n, -1, dtype=np.int64),
+              "smooth_half": np.zeros(n, dtype=np.int64), "align_report": None}
+    return st
+
+
+def _motion_commit(data, st, channel):
+    st["version"] = int(st["version"]) + 1
+    st["computed"][channel] = st["version"]
+    data._molaro_motion = st
+
+
+def _motion_prune(st):
+    used = sorted(set(int(k) for k in np.unique(st["align_layer"]) if k >= 0))
+    remap = np.full(len(st["align_layers"]) + 1, -1, dtype=np.int64)
+    for new, old in enumerate(used):
+        remap[old] = new
+    st["align_layers"] = [st["align_layers"][k] for k in used]
+    st["align_layer"] = remap[st["align_layer"]]
+
+
+def _motion_compose(pos, st):
+    """(t, n, 3) float32 offset = smooth(align(raw)) - raw, from the motion state.
+
+    Point-chunked (smoothing needs each point's whole time axis), float64 inside.
+    """
+    t, n, _ = pos.shape
+    out = np.zeros((t, n, 3), dtype="<f4")
+    layer, half = st["align_layer"], st["smooth_half"]
+    active = np.flatnonzero((layer >= 0) | (half > 0))
+    step = max(1, int(2e7 // max(1, t * 3)))
+    frames = np.arange(t)
+    for a in range(0, active.size, step):
+        idx = active[a:a + step]
+        raw = pos[:, idx, :].astype(np.float64)
+        p = raw.copy()
+        for k, (R, cx, cy) in enumerate(st["align_layers"]):
+            m = layer[idx] == k
+            if m.any():
+                p[:, m, :] = np.einsum("tfi,tij->tfj", raw[:, m, :] - cx[:, None, :], R) + cy
+        for w in np.unique(half[idx]):
+            if w <= 0:
+                continue
+            m = half[idx] == w
+            csum = np.concatenate([np.zeros((1, int(m.sum()), 3)), np.cumsum(p[:, m, :], axis=0)], axis=0)
+            lo = np.maximum(frames - w, 0)
+            hi = np.minimum(frames + w, t - 1)
+            p[:, m, :] = (csum[hi + 1] - csum[lo]) / (hi - lo + 1)[:, None, None]
+        out[:, idx, :] = (p - raw).astype("<f4")
+    return out
+# ==== end MOTION STATE ====
+
 
 def compute(data, target_indices, params):
-    # `?within=<d>` re-targets to the NEIGHBOURHOOD of what you named, whole
-    # subgroups at a time; `?keep=true` brings the target itself along. Distance is
-    # in the SCENE'S COORDINATE UNITS (producer/source.py `neighborhood` — one
-    # implementation, one unit, shared with the built-in create_sele/hide flags).
-    #
-    # IT LIVES IN THE PROVIDER, not in `smooth`. The sequencer runs this mod FIRST
-    # and `smooth` afterwards, and `smooth` only emits `bind all` — it never uses
-    # its own target. So an expansion done there computed the right neighbourhood
-    # and then threw it away: the channel had already been built from the
-    # un-expanded target and everything moved. The mask below is what actually
-    # scopes the effect, so the expansion has to happen before it.
+    # `?within=<d>` re-targets to the NEIGHBOURHOOD of what you named (whole
+    # subgroups, scene units); `?keep=true` keeps the target itself. It lives in
+    # the PROVIDER because the macro only binds `all` and never uses its target.
     _p = params or {}
     try:
         _within = float(_p.get("within", 0.0))
@@ -77,74 +123,22 @@ def compute(data, target_indices, params):
         target_indices = data.neighborhood(target_indices, _within, _keep)
 
     header = data.give_header()
-    n, t = header.n_points, header.n_frames
+    n, t = int(header.n_points), int(header.n_frames)
 
-    # `window` is the level. It arrives from `smooth`'s own `?window=` (forwarded
-    # to this provider) or falls back to the declared default. Half-width in
-    # frames; clamp negatives to 0 (identity) so a stray value never raises.
-    # `smoothing` is HOW MANY FRAMES ARE AVERAGED — the number VMD's trajectory
-    # smoothing slider shows — not the half-width. Internally the mean needs a
-    # half-width, so n frames becomes ±(n-1)//2, i.e. an even n rounds DOWN to the
-    # nearest odd (4 -> 3 frames). A centred average over an even count would have
-    # to lean one frame to the past or the future; rounding down is the choice that
-    # keeps it symmetric, and it is stated rather than silently applied.
-    # 0 and 1 both mean OFF (a 1-frame average is the identity).
-    # NOT named `n` — that is the point count a few lines down, and reusing it
-    # reshaped the position buffer to zero atoms.
-    frames_avg = int(round(params["smoothing"]))
-    if frames_avg < 0:
-        frames_avg = 0
+    # NOT named `n` — that is the point count.
+    frames_avg = max(0, int(round(_p.get("smoothing", 5))))
     window = max(0, (frames_avg - 1) // 2)
 
-    # Positions over EVERY frame, source-agnostic: give_frames is the neutral
-    # protocol both the synthetic and the real source answer, so this reads raw
-    # positions the same way regardless of what backs the dataset. frame-major
-    # (t, n, 3) little-endian float32; reduce in float64 (a long cumsum in
-    # float32 cancels catastrophically).
-    chunk = data.give_frames(0, t)
-    pos = np.frombuffer(chunk.positions, dtype="<f4").reshape(t, n, 3).astype(np.float64)
-
-    # Centered moving average with a clamped (shrinking) window at the ends,
-    # done as a prefix-sum difference. csum[k] = sum of frames [0, k); the sum
-    # over the inclusive window [lo, hi] is csum[hi+1] - csum[lo].
-    csum = np.concatenate([np.zeros((1, n, 3)), np.cumsum(pos, axis=0)], axis=0)
-    frames = np.arange(t)
-    lo = np.maximum(frames - window, 0)
-    hi = np.minimum(frames + window, t - 1)
-    counts = (hi - lo + 1).astype(np.float64)
-    smoothed = (csum[hi + 1] - csum[lo]) / counts[:, None, None]
-
-    # The displacement that carries each point from raw onto its windowed mean.
-    offset = smoothed - pos  # (t, n, 3); shown = raw + offset = smoothed
-
-    # OUTSIDE THE TARGET, KEEP WHAT IS ALREADY THERE. A channel is one column and
-    # a provider run rewrites the whole column, so this mod used to ZERO every
-    # point it was not asked about — which meant `smooth @a` then `smooth @b`
-    # ended with @a standing still and only @b moving (measured on adk: A alone
-    # 19 points, B afterwards 12 with A stopped). It could not do otherwise: a
-    # mod could not READ a channel, so there was nothing to preserve onto.
-    # `data.channel` is that read, and this is the whole fix — start from the
-    # column as it stands and overwrite only the rows this target names.
-    #
-    # NOT ADDITIVE, deliberately. Re-running on the SAME target must land on the
-    # same picture rather than double-displacing, and an offset is a POSITION,
-    # not an increment: two 5-frame averages summed is not a 5-frame average. So
-    # targeted rows are REPLACED (idempotent) and untargeted rows are LEFT — which
-    # also makes `smooth @a ?smoothing=0` the way to stop @a alone.
-    #
-    # An empty target means the whole system, so every row is written and there is
-    # nothing to preserve — byte-identical to before for that case.
+    old = _motion_state(data, t, n)
+    st = dict(old, computed=dict(old["computed"]), align_layers=list(old["align_layers"]),
+              align_layer=old["align_layer"].copy(), smooth_half=old["smooth_half"].copy())
     if target_indices:
-        prior = data.channel("smoothing")
-        # np.array, never asarray: the view is READ-ONLY and asarray would hand
-        # it straight back whenever the dtypes happened to match.
-        base = (np.zeros((t, n, 3), dtype=np.float64) if prior is None
-                else np.array(prior, dtype=np.float64))
-        keep = np.zeros(n, dtype=bool)
-        keep[np.asarray(target_indices, dtype=int)] = True
-        base[:, keep, :] = offset[:, keep, :]
-        offset = base
+        st["smooth_half"][np.asarray(target_indices, dtype=int)] = window
+    else:
+        st["smooth_half"][:] = window
 
-    # Return the ndarray directly (components=3). install_channel accepts a numpy
-    # array and stores it without boxing an N*T*3 Python list.
-    return {"values": np.ascontiguousarray(offset, dtype="<f4"), "components": 3}
+    pos = np.frombuffer(data.give_frames(0, t).positions, dtype="<f4").reshape(t, n, 3)
+    out = _motion_compose(pos, st)
+    _motion_commit(data, st, "smoothing")
+    # ndarray, components=3: install_channel stores it without boxing a list.
+    return {"values": out, "components": 3}
