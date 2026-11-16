@@ -161,7 +161,7 @@ the viewer — and you get the timing to compare against `molaro.modTimeoutSecon
 
 ## 6. Conventions worth copying
 
-From the eleven shipped mods, and each earned:
+From the thirteen shipped mods, and each earned:
 
 - **Fail closed with a sentence naming the fix.** Never return zeros for "I could not
   compute this" — a confident wrong picture is worse than an error.

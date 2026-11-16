@@ -288,6 +288,22 @@ def compute(data, target_indices, params=None):
         needed.update(res_ring[i])
     needed = np.asarray(sorted(needed), dtype=np.intp)
     xyz = traj.xyz[:, needed, :].astype(np.float64)
+    # FOLLOW THE SHOWN MOTION. `align`/`smooth` displace the drawn positions
+    # through the offset axis (shown = raw + offset); a facing computed from RAW
+    # positions would then be in the wrong orientation on every rotated frame — the
+    # ribbon twists. Read the CURRENT combined motion channel (the motion state's
+    # version says which of `aligning`/`smoothing` holds it) and orient against
+    # what is on screen. Recording the version lets `align`/`smooth` tell when
+    # these ribbons are out of date.
+    _st = getattr(data, "_molaro_motion", None)
+    if isinstance(_st, dict):
+        for _ch in ("aligning", "smoothing"):
+            if _st["computed"].get(_ch) == _st["version"]:
+                _off = data.channel(_ch)
+                if _off is not None:
+                    xyz += np.asarray(_off[:, needed, :], dtype=np.float64)
+                break
+        _st["computed"]["ribbon_dir"] = _st["version"]
     # global atom index -> its column in `xyz`
     loc = np.full(n_points, -1, dtype=np.intp)
     loc[needed] = np.arange(needed.size, dtype=np.intp)

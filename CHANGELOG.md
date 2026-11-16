@@ -2,6 +2,25 @@
 
 All notable changes to Molaro. This project follows [semantic versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Mods
+
+- **`align`** (new, with its provider `aligning`): superpose every frame onto a
+  reference — `?ref=first|average|mean|last|<frame>|off`, where `average` is the real
+  frame closest to the average structure and `mean` the average structure itself.
+  `?fit=backbone|CA|heavy|protein|<selection>` narrows the fit atoms within the target,
+  `?apply=all|target` chooses what moves, `?mode=center` removes translation only, and
+  `?weights=mass` mass-weights the fit. Prints the reference used and the fit RMSD.
+- **`align` and `smooth` compose, in either order.** `smoothing` used to average RAW
+  positions and replace any other offset on the points it bound, so smoothing an aligned
+  trajectory dropped the alignment and averaged a tumbling molecule into a jumble. Both
+  providers now write one combined picture, shown = smooth(align(raw)), from motion state
+  remembered on the dataset handle, and both macros bind whichever channel is current.
+  With no alignment, `smoothing` is byte-identical to before.
+- **`ribbon_dir` orients from the shown positions**, so cartoon ribbons follow `align` /
+  `smooth` instead of twisting; the macros say when to run `ribbon_dir` to refresh them.
+
 ## [0.1.0] — first public release
 
 Molaro streams large molecular dynamics trajectories into a GPU-rendered VS Code
