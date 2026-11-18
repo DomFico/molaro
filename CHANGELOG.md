@@ -4,6 +4,8 @@ All notable changes to Molaro. This project follows [semantic versioning](https:
 
 ## [Unreleased]
 
+## [0.1.3] — 2026-11-18
+
 ### Added
 
 - **`ghost <frames> [opacity x]`** — draws the current representation again at other frames,
