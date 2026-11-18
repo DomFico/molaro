@@ -280,7 +280,7 @@ Results are always de-duplicated.
 
 ## The mods that ship with the extension
 
-Eleven live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
+Twelve live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
 the same name in your own dir SHADOWS a shipped one, which is how you customise one
 without losing the original.
 
@@ -294,6 +294,7 @@ without losing the original.
 | `hbonds` | hydrogen bonds as dashed lines that form and break per frame — bare: the backbone (DSSP) network; with a selection: every H-bond involving it. `?min`, `?live`, `?color`, `?dash`, `?group` |
 | `contacts` | atom contacts within a cutoff as lines that form and break per frame — `?atoms=heavy\|CA\|CA,CB…`, `?level=atom\|residue`, `?seqsep`, `?min`, `?live`, style and `?group` |
 | `align` | superpose every frame onto a reference (`?ref=first\|average\|mean\|last\|<k>\|off`, `?fit=backbone\|CA\|…`) — tumbling and drift out |
+| `toon` | comic / cel-shaded look in one step: flat shading bands + hard highlight (the `toon` style) and black ink outlines — `?width`, `?ink`, `?detail=low\|medium\|high`, `?outline=false`, `?off=true` |
 | `ensemble` | faint "ghost" copies of the current representation at the frames that differ most (RMSD), so motion reads as a blur — `?n`, `?opacity`, `?pick=spread\|extremes\|even`, `?fit`. Drives the built-in `ghost` verb |
 
 Five more (`aligning`, `ribbon_dir`, `sasa_field`, `smoothing`, `ss_field`) are **machinery**: they supply a
@@ -408,6 +409,23 @@ ribbon orientation, live colours and per-frame H-bond/contact visibility all app
 that frame. A ghost never writes depth: it is hidden behind the solid copy and blends
 over it where it sticks out. The `ensemble` mod picks the frames for you; run `align`
 first if the molecule drifts.
+
+### `outline` and the `toon` style — the comic look
+
+`toon` does both halves at once; each half is also its own command.
+
+- **`toon` style** — `stylepoints|stylebonds|styletrace <target> toon` snaps the
+  lighting into three flat bands with a hard white highlight (`matte` returns to the
+  default look). Per element, so toon ribbons can sit next to normal sticks.
+- **`outline on ?width=1.5 ?color=#1a1a1a ?detail=low|medium|high`** — black ink around
+  every shape (drawn outside the silhouette) and wherever one shape sits in front of
+  another. `?detail` sets how big a depth step must be to get a line: `low` = only big
+  overlaps, `high` = also small ones. `outline off` removes it. Scene-wide; undoable.
+
+Lines are measured in screen pixels and scale with `screenshot`, so an image at
+`?scale=5` looks like the screen. Ghosts are translucent and get no ink. Dark ink on the
+default dark background is subtle — the look is strongest on a light background or in a
+transparent `screenshot`; `?color=white` inks in white on dark.
 
 ### `screenshot` — a high-resolution image of the view
 

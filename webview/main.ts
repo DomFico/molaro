@@ -91,6 +91,7 @@ import {
 import { listStyles, styleIndex, stylesAsUniformArray } from "./styles.ts";
 import { ProducedEdgeLayer, PRODUCED_EDGE_INITIAL_CAPACITY } from "./producededges.ts";
 import { GHOST_ALPHA, GHOST_USAGE, makeGhostHandler, type GhostState } from "./ghosts.ts";
+import { OUTLINE_DETAIL, OUTLINE_USAGE, OutlinePass, parseOutlineArgs } from "./outline.ts";
 import { autoShotName, finishPixels, parseScreenshotArgs, shotResultLine, shotSize, SHOT_USAGE, type ShotOptions } from "./screenshot.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
@@ -4646,8 +4647,25 @@ async function main(): Promise<void> {
       rep.dirty = false;
     }
   };
+  // --- outlines (outline.ts — off by default; the silo) -----------------------
+  const outline = new OutlinePass();
+  /** device px per CSS px of line width; the screenshot multiplies in its scale */
+  let outlinePxScale = (): number => renderer.getPixelRatio();
+  const drawSolid = (): void => {
+    if (outline.enabled) {
+      // the canvas path composites the viewer background; a screenshot (which
+      // lifts scene.background) keeps transparency
+      let bg: [number, number, number] | null = null;
+      if (scene.background) {
+        const hex = backgroundColor.getHex(); // sRGB
+        bg = [((hex >> 16) & 255) / 255, ((hex >> 8) & 255) / 255, (hex & 255) / 255];
+      }
+      outline.render(renderer, scene, camera, outlinePxScale(), bg);
+    }
+    else renderer.render(scene, camera);
+  };
   const renderWithGhosts = (): void => {
-    renderer.render(scene, camera);
+    drawSolid();
     const g = ghostState;
     if (g === null || displayedFrame < 0) return;
     const home = player.getFrame(displayedFrame);
@@ -4732,6 +4750,8 @@ async function main(): Promise<void> {
         camera.updateProjectionMatrix();
       }
       sizing.uPxPerWorld.value = h / (2 * TAN_HALF_FOV); // impostors sized for the TARGET's pixels
+      const lineScale = renderer.getPixelRatio() * (h / view.y);
+      outlinePxScale = () => lineScale; // ink scales with the image, so it looks as on screen
       scene.background = null;
       renderer.setClearColor(0x000000, 0);
       renderer.setRenderTarget(rt);
@@ -4742,6 +4762,7 @@ async function main(): Promise<void> {
       renderer.setClearColor(prev.clear, prev.clearAlpha);
       scene.background = prev.background;
       sizing.uPxPerWorld.value = prev.pxPerWorld;
+      outlinePxScale = () => renderer.getPixelRatio();
       if (camera.aspect !== prev.aspect) {
         camera.aspect = prev.aspect;
         camera.updateProjectionMatrix();
@@ -4785,6 +4806,40 @@ async function main(): Promise<void> {
     const p = parseScreenshotArgs(args);
     return p.ok ? { status: "ok", message: "screenshot" } : { status: "error", message: p.message };
   }, shotHelp);
+  const setOutline = (next: { enabled: boolean; opts: typeof outline.opts }): void => {
+    const prev = { enabled: outline.enabled, opts: { ...outline.opts } };
+    const apply = (st: typeof prev): void => {
+      outline.enabled = st.enabled;
+      outline.opts = { ...st.opts };
+      if (!st.enabled) outline.dispose();
+    };
+    apply(next);
+    model.recordOp(() => { apply(prev); return []; }, () => { apply(next); return []; });
+  };
+  const outlineHandler = (write: boolean) => (args: string): CommandResult => {
+    const p = parseOutlineArgs(args);
+    if (p.kind === "error") return { status: "error", message: p.message };
+    if (p.kind === "show") {
+      return { status: "ok", message: outline.enabled
+        ? `outline: on, width ${outline.opts.width}` : "outline: off" };
+    }
+    if (p.kind === "off") {
+      if (!outline.enabled) return { status: "ok", message: "outline: already off" }; // a macro's "off" must not fail
+      if (write) setOutline({ enabled: false, opts: outline.opts });
+      return { status: "ok", message: "outline → off" };
+    }
+    const rgb = parseColor(p.color);
+    if (rgb === null) return { status: "error", message: `outline: "${p.color}" is not a colour — ${OUTLINE_USAGE}` };
+    if (write) {
+      setOutline({ enabled: true, opts: {
+        width: p.width, color: rgb, crease: OUTLINE_DETAIL[p.detail] * sizing.uWorldPerSize.value,
+      } });
+    }
+    return { status: "ok", message: `outline → on (width ${p.width}, ${p.detail} detail, ${p.color})` };
+  };
+  const outlineHelp = `comic-style ink lines around shapes and at depth jumps — ${OUTLINE_USAGE}`;
+  commands.register("outline", outlineHandler(true), outlineHelp);
+  validationCommands.register("outline", outlineHandler(false), outlineHelp);
   const ghostHelp = `faint copies of the current representation at other frames — ${GHOST_USAGE}`;
   commands.register("ghost", makeGhostHandler({ nFrames: () => nFrames, get: () => ghostState, set: setGhosts }), ghostHelp);
   validationCommands.register("ghost", makeGhostHandler({ nFrames: () => nFrames, get: () => ghostState }), ghostHelp);

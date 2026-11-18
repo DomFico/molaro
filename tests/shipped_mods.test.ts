@@ -45,6 +45,7 @@ const EXPECTED = [
   "smooth",
   "smoothing",
   "ss_field",
+  "toon",
 ] as const;
 
 function shippedFiles(): string[] {
@@ -139,7 +140,7 @@ test("the mods listing hides machinery, names how many, and keeps the rest", () 
   );
   assert.deepEqual(
     shown.map((m) => m.name).sort(),
-    ["align", "cartoon", "contacts", "ensemble", "hbonds", "hide_res", "licorice", "live_sasa", "live_ss", "show_res", "smooth"],
+    ["align", "cartoon", "contacts", "ensemble", "hbonds", "hide_res", "licorice", "live_sasa", "live_ss", "show_res", "smooth", "toon"],
     "what remains listed is exactly the mods a person invokes",
   );
 

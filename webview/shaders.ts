@@ -87,6 +87,14 @@ vec4 styleParams(float id) {
 export const IMPOSTOR_SHADE_CHUNK = `
 varying vec4 vStyleParams;
 vec3 impostorShade(vec3 color, float nz) {
+  if (vStyleParams.w < 0.0) {
+    // TOON (styles.ts \`bands\`): a negative power packs the band count. The
+    // lighting snaps to flat bands and the highlight to a hard spot.
+    float n = -vStyleParams.w;
+    float q = ceil(clamp(nz, 0.0, 1.0) * n - 0.15) / n;
+    float hard = vStyleParams.z * step(0.95, nz);
+    return color * (vStyleParams.x + vStyleParams.y * q) + vec3(hard);
+  }
   float lambert = vStyleParams.x + vStyleParams.y * nz;
   float spec = vStyleParams.z * pow(max(nz, 0.0), vStyleParams.w);
   return color * lambert + vec3(spec);

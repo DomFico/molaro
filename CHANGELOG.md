@@ -9,6 +9,8 @@ All notable changes to Molaro. This project follows [semantic versioning](https:
 - **`ghost <frames> [opacity x]`** — draws the current representation again at other frames,
   translucent, around the solid copy (align, smooth, cartoon orientation and live colours apply
   per ghost). `ghost off` clears; undoable.
+- **`toon`** (new mod), **`outline`**, and a **`toon` shading style** — cel shading (flat
+  bands + hard highlight) and depth-based ink outlines, scene-wide, scaling with `screenshot`.
 - **`screenshot [file]`** — a high-resolution image of the current view, transparent by
   default: `?bg=transparent|current|<colour>`, `?scale=3`, `?width`/`?height`,
   `?format=png|jpg|webp`, `?dpi=300` (stored in the PNG). Rendered off-screen at full

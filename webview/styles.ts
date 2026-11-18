@@ -34,6 +34,10 @@ export interface Style {
   specStrength: number;
   /** Specular exponent — higher = tighter highlight. */
   specPower: number;
+  /** TOON: snap the lighting to this many flat bands and the highlight to a
+   * hard spot (cel shading). Packed as a NEGATIVE power — the shading chunk
+   * branches on the sign, so every non-toon style is untouched. */
+  bands?: number;
 }
 
 /** The default — BYTE-IDENTICAL to the constants the shading chunk carried
@@ -97,7 +101,7 @@ export function stylesAsUniformArray(): Float32Array {
     out[i * 4] = s.lambertFloor;
     out[i * 4 + 1] = s.lambertScale;
     out[i * 4 + 2] = s.specStrength;
-    out[i * 4 + 3] = s.specPower;
+    out[i * 4 + 3] = s.bands !== undefined && s.bands > 0 ? -s.bands : s.specPower;
     i++;
   }
   return out;
@@ -122,5 +126,17 @@ export function listStyles(): Style[] {
 // (webview/saverep.ts), so a matte scene stays clean in a saved rep; and every
 // pixel baseline that samples a lit surface MOVED when this flipped, which is a
 // look change, not a regression.
+/** Cel shading: three flat bands (shadow / mid / lit) and a hard white spot.
+ * Pair it with `outline on` for the comic look (the `toon` mod does both). */
+export const TOON_STYLE: Style = {
+  name: "toon",
+  lambertFloor: 0.5,
+  lambertScale: 0.55,
+  specStrength: 0.22,
+  specPower: 48,
+  bands: 3,
+};
+
 registerStyle(MATTE_STYLE);
 registerStyle(STANDARD_STYLE);
+registerStyle(TOON_STYLE);
