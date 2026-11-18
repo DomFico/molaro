@@ -271,7 +271,10 @@ test("every GEOMETRY vertex shader embeds THE shared alpha-split chunk exactly o
 test("the chunk is a PARTITION: every instance belongs to exactly one half", () => {
   // opaque half keeps alpha >= 1, translucent half keeps alpha < 1 — complementary
   // predicates over one boundary, so nothing is drawn twice and nothing is dropped.
-  assert.match(ALPHA_PASS_CHUNK, /uAlphaPass < 0\.5 \? alpha >= 1\.0 : alpha < 1\.0/);
+  // (the ghost fade scales alpha first — `a = alpha * uGhostAlpha`, 1.0 outside a
+  // ghost draw — and both halves classify that SAME value)
+  assert.match(ALPHA_PASS_CHUNK, /float a = alpha \* uGhostAlpha;/);
+  assert.match(ALPHA_PASS_CHUNK, /uAlphaPass < 0\.5 \? a >= 1\.0 : a < 1\.0/);
   assert.match(ALPHA_PASS_CHUNK, /uniform float uAlphaPass/);
 });
 

@@ -22,9 +22,11 @@ import { readFileSync, readdirSync, unlinkSync } from "node:fs";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { homedir, tmpdir } from "node:os";
 
 import { ProducerBroker } from "../src/broker.ts";
 import { saveModFile } from "../src/modfile.ts";
+import { saveScreenshot } from "../src/screenshotfile.ts";
 import { HUD_BODY, HUD_CSS } from "../webview/hud.ts";
 import { PLOT_BODY, PLOT_CSS } from "../webview/plothud.ts";
 import { parseModFile, type AnalysisMod } from "../webview/recipes.ts";
@@ -267,6 +269,15 @@ const harnessHtml = (
         },
         postMessage(msg) {
           if (!msg) return;
+          // screenshot: the host's file write, emulated by /save-screenshot
+          // (writes under E2E_SHOT_DIR, or the OS temp dir — never the repo)
+          if (msg.type === "save-screenshot") {
+            fetch("/save-screenshot", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(msg) })
+              .then((r) => r.json())
+              .then((out) => window.dispatchEvent(new MessageEvent("message", { data: { type: "save-screenshot-result", ...out } })))
+              .catch(() => window.dispatchEvent(new MessageEvent("message", { data: { type: "save-screenshot-result", error: "bridge save failed" } })));
+            return;
+          }
           // HOST LOOPBACK: the real extension host relays these verbatim
           // between the viewer and terminal panels; in the single-page
           // harness both live in one document, so re-dispatch as an incoming
@@ -395,6 +406,25 @@ const server = http.createServer((req, res) => {
       }
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({ deleted, failed }));
+    });
+  } else if (req.method === "POST" && req.url === "/save-screenshot") {
+    const body: Buffer[] = [];
+    req.on("data", (d: Buffer) => body.push(d));
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      try {
+        const m = JSON.parse(Buffer.concat(body).toString("utf-8")) as {
+          id?: number; path?: string; autoName?: string; ext?: string; data?: string; dpi?: number; w?: number; h?: number;
+        };
+        const baseDir = process.env.E2E_SHOT_DIR ?? join(tmpdir(), "molaro-e2e-shots");
+        const r = saveScreenshot({
+          requested: m.path, autoName: m.autoName ?? "molaro.png", ext: m.ext ?? "png", baseDir,
+          home: homedir(), data: Buffer.from(m.data ?? "", "base64"), dpi: m.dpi ?? 0,
+        });
+        res.end(JSON.stringify({ id: m.id, ...r, w: m.w, h: m.h }));
+      } catch (err) {
+        res.end(JSON.stringify({ error: err instanceof Error ? err.message : String(err) }));
+      }
     });
   } else if (req.method === "POST" && req.url === "/save-mod") {
     // save_rep's host mod-file write, emulated node-side: write via the SAME

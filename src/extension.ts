@@ -27,6 +27,7 @@ import { join } from "node:path";
 import { ProducerBroker } from "./broker.ts";
 import { parseModFile, resolveParameters, serializeMod, type AnalysisMod, type Mod } from "../webview/recipes.ts";
 import { replacementNote, saveModFile, type ModWriteResult } from "./modfile.ts";
+import { saveScreenshot } from "./screenshotfile.ts";
 import { parseClaudeCommand, type ClaudeCommand } from "../webview/claudemodel.ts";
 import { createClaudeStub } from "../webview/claudestub.ts";
 import { DEFAULT_COLOR, DEFAULT_OPACITY, DEFAULT_SIZE } from "../webview/representation.ts";
@@ -919,6 +920,28 @@ function openPanel(
           type: "save-mod-result",
           name,
           error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      return;
+    }
+    if (msg?.type === "save-screenshot") {
+      // `screenshot`: the webview rendered + encoded the image; the host owns
+      // the filesystem. Relative names land in <workspace>/molaro_screenshots
+      // (or ~/molaro_screenshots with no folder open). Never overwrites.
+      const m = msg as unknown as {
+        id?: number; path?: string; autoName?: string; ext?: string; data?: string; dpi?: number; w?: number; h?: number;
+      };
+      const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath;
+      const baseDir = join(folder ?? homedir(), "molaro_screenshots");
+      try {
+        const r = saveScreenshot({
+          requested: m.path, autoName: m.autoName ?? "molaro.png", ext: m.ext ?? "png",
+          baseDir, home: homedir(), data: Buffer.from(m.data ?? "", "base64"), dpi: m.dpi ?? 0,
+        });
+        void panel.webview.postMessage({ type: "save-screenshot-result", id: m.id, ...r, w: m.w, h: m.h });
+      } catch (err) {
+        void panel.webview.postMessage({
+          type: "save-screenshot-result", id: m.id, error: err instanceof Error ? err.message : String(err),
         });
       }
       return;

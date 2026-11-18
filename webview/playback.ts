@@ -46,6 +46,9 @@ interface CacheEntry<P> {
 export class StreamingPlayer<P> {
   private readonly cache = new Map<number, CacheEntry<P>>();
   private readonly inFlight = new Set<number>();
+  /** Chunks holding PINNED frames (ghosts.ts): prefetched after the playback
+   * window and never evicted. Empty = the original policy, unchanged. */
+  private pinned = new Set<number>();
   private cacheBytesTotal = 0;
   private useCounter = 0;
 
@@ -198,6 +201,13 @@ export class StreamingPlayer<P> {
     this.ensurePrefetch();
   }
 
+  /** Keep these frames' chunks cached (fetched now, never evicted) — the
+   * ghost frames drawn alongside the playhead. [] releases them. */
+  setPinnedFrames(frames: readonly number[]): void {
+    this.pinned = new Set(frames.map((f) => this.chunkOf(f)));
+    this.ensurePrefetch();
+  }
+
   /** Cached payload covering `frame` (touches LRU), or null if not cached. */
   getFrame(frame: number): P | null {
     const entry = this.cache.get(this.chunkOf(frame));
@@ -237,7 +247,7 @@ export class StreamingPlayer<P> {
   }
 
   private ensurePrefetch(): void {
-    for (const idx of this.windowChunks()) {
+    for (const idx of [...this.windowChunks(), ...this.pinned]) {
       if (this.inFlight.size >= this.cfg.maxInFlight) break;
       if (this.cache.has(idx) || this.inFlight.has(idx)) continue;
       this.inFlight.add(idx);
@@ -248,6 +258,7 @@ export class StreamingPlayer<P> {
   private evict(): void {
     if (this.cacheBytesTotal <= this.cfg.maxCacheBytes) return;
     const protectedChunks = this.windowChunks();
+    for (const idx of this.pinned) protectedChunks.add(idx);
     const candidates = [...this.cache.entries()]
       .filter(([idx]) => !protectedChunks.has(idx))
       .sort((a, b) => a[1].lastUsed - b[1].lastUsed);

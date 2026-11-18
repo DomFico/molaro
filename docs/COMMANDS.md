@@ -280,7 +280,7 @@ Results are always de-duplicated.
 
 ## The mods that ship with the extension
 
-Ten live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
+Twelve live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
 the same name in your own dir SHADOWS a shipped one, which is how you customise one
 without losing the original.
 
@@ -294,6 +294,8 @@ without losing the original.
 | `hbonds` | hydrogen bonds as dashed lines that form and break per frame — bare: the backbone (DSSP) network; with a selection: every H-bond involving it. `?min`, `?live`, `?color`, `?dash`, `?group` |
 | `contacts` | atom contacts within a cutoff as lines that form and break per frame — `?atoms=heavy\|CA\|CA,CB…`, `?level=atom\|residue`, `?seqsep`, `?min`, `?live`, style and `?group` |
 | `align` | superpose every frame onto a reference (`?ref=first\|average\|mean\|last\|<k>\|off`, `?fit=backbone\|CA\|…`) — tumbling and drift out |
+| `toon` | comic / cel-shaded look in one step: flat shading bands + hard highlight (the `toon` style) and black ink outlines — `?width`, `?ink`, `?detail=low\|medium\|high`, `?outline=false`, `?off=true` |
+| `ensemble` | faint "ghost" copies of the current representation at the frames that differ most (RMSD), so motion reads as a blur — `?n`, `?opacity`, `?pick=spread\|extremes\|even`, `?fit`. Drives the built-in `ghost` verb |
 
 Five more (`aligning`, `ribbon_dir`, `sasa_field`, `smoothing`, `ss_field`) are **machinery**: they supply a
 channel their consumer declares with `# requires-channel:` and run automatically. The
@@ -394,6 +396,55 @@ the channel, `smooth` binds it. Two mods rather than one because a `produces: ch
 mod cannot also issue commands. `?within`/`?keep` live on the **provider**, where the
 expansion happens before the numbers are computed — putting them only on the macro
 made them silently inert, which is exactly the bug this pairing avoids.
+
+### `ghost` — faint copies at other frames
+
+`ghost <frames> [opacity <0-1>]` draws the CURRENT representation again at each listed
+frame, translucent, behind and around the solid copy. Frames are integers and ranges
+(`0-90:10` = every 10th). `ghost` alone lists them; `ghost off` removes them; Ctrl+Z
+undoes either. At most 32 ghosts (each redraws the scene).
+
+Each ghost is staged exactly like the playhead: `align`/`smooth` offsets, the cartoon
+ribbon orientation, live colours and per-frame H-bond/contact visibility all apply at
+that frame. A ghost never writes depth: it is hidden behind the solid copy and blends
+over it where it sticks out. The `ensemble` mod picks the frames for you; run `align`
+first if the molecule drifts.
+
+### `outline` and the `toon` style — the comic look
+
+`toon` does both halves at once; each half is also its own command.
+
+- **`toon` style** — `stylepoints|stylebonds|styletrace <target> toon` snaps the
+  lighting into three flat bands with a hard white highlight (`matte` returns to the
+  default look). Per element, so toon ribbons can sit next to normal sticks.
+- **`outline on ?width=1.5 ?color=#1a1a1a ?detail=low|medium|high`** — black ink around
+  every shape (drawn outside the silhouette) and wherever one shape sits in front of
+  another. `?detail` sets how big a depth step must be to get a line: `low` = only big
+  overlaps, `high` = also small ones. `outline off` removes it. Scene-wide; undoable.
+
+Lines are measured in screen pixels and scale with `screenshot`, so an image at
+`?scale=5` looks like the screen. Ghosts are translucent and get no ink. Dark ink on the
+default dark background is subtle — the look is strongest on a light background or in a
+transparent `screenshot`; `?color=white` inks in white on dark.
+
+### `screenshot` — a high-resolution image of the view
+
+`screenshot [file] ?bg=… ?scale=… ?width=… ?height=… ?format=… ?dpi=…`
+
+| option | default | meaning |
+|---|---|---|
+| `file` | auto: `<system>_frame<k>_<date-time>.png` | relative names go to `<workspace>/molaro_screenshots/` (`~/molaro_screenshots/` with no folder open); `~/…` and absolute paths are used as given; a folder gets an auto name; an existing file is never overwritten (`_1`, `_2`, …) |
+| `?bg` | `transparent` | `transparent` (alias `none`), `current` (the viewer's background), or any colour (`white`, `#f4f4f4`) |
+| `?scale` | `3` | multiple of the view's on-screen pixels |
+| `?width` / `?height` | — | exact pixels; one keeps the view's shape, both set it (the camera widens or narrows) |
+| `?format` | from the file name, else `png` | `png`, `jpg` (needs a `?bg`), `webp` |
+| `?dpi` | `300` | print resolution recorded in a PNG (3000 px at 300 dpi = 10 in) |
+
+The image is drawn off-screen at full resolution — not an upscaled copy of the window —
+with ghosts included and the selection highlight left out. A transparent PNG keeps soft
+edges and ghosts as true partial transparency, so it drops cleanly onto any slide colour.
+There is no SVG: the picture is rendered as pixels on the GPU, so an SVG would only wrap
+a PNG. For print, use a PNG at a high `?scale` (or `?width=6000`).
 
 ## Creating selections: `create_sele`
 
