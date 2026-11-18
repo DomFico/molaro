@@ -409,6 +409,25 @@ that frame. A ghost never writes depth: it is hidden behind the solid copy and b
 over it where it sticks out. The `ensemble` mod picks the frames for you; run `align`
 first if the molecule drifts.
 
+### `screenshot` — a high-resolution image of the view
+
+`screenshot [file] ?bg=… ?scale=… ?width=… ?height=… ?format=… ?dpi=…`
+
+| option | default | meaning |
+|---|---|---|
+| `file` | auto: `<system>_frame<k>_<date-time>.png` | relative names go to `<workspace>/molaro_screenshots/` (`~/molaro_screenshots/` with no folder open); `~/…` and absolute paths are used as given; a folder gets an auto name; an existing file is never overwritten (`_1`, `_2`, …) |
+| `?bg` | `transparent` | `transparent` (alias `none`), `current` (the viewer's background), or any colour (`white`, `#f4f4f4`) |
+| `?scale` | `3` | multiple of the view's on-screen pixels |
+| `?width` / `?height` | — | exact pixels; one keeps the view's shape, both set it (the camera widens or narrows) |
+| `?format` | from the file name, else `png` | `png`, `jpg` (needs a `?bg`), `webp` |
+| `?dpi` | `300` | print resolution recorded in a PNG (3000 px at 300 dpi = 10 in) |
+
+The image is drawn off-screen at full resolution — not an upscaled copy of the window —
+with ghosts included and the selection highlight left out. A transparent PNG keeps soft
+edges and ghosts as true partial transparency, so it drops cleanly onto any slide colour.
+There is no SVG: the picture is rendered as pixels on the GPU, so an SVG would only wrap
+a PNG. For print, use a PNG at a high `?scale` (or `?width=6000`).
+
 ## Creating selections: `create_sele`
 
 ```

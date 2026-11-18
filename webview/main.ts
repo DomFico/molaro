@@ -50,7 +50,7 @@ import { buildTree } from "./classification.ts";
 import { flashRow, mountTree, type TreeHandle } from "./tree.ts";
 import { mountCommitted, type CommittedActions } from "./committed.ts";
 import { mountBrackets, BRACKET_GUTTER_PX } from "./brackets.ts";
-import { applyScalarsToAxis, createCommandRegistry, makeRunComplete, runCommandMacro, type CommandResult } from "./commands.ts";
+import { applyScalarsToAxis, createCommandRegistry, makeRunComplete, parseColor, runCommandMacro, type CommandResult } from "./commands.ts";
 import { BindingRegistry, type Binding } from "./bindings.ts";
 import { AXIS_DOMAIN, BIND_DASH_MAX, BIND_SIZE_MAX, mapScalar, OFFSET_AXIS, ORIENTATION_AXIS, SCALAR_AXES, VECTOR_AXES, type BindAxis } from "./channelmap.ts";
 import { bindTypedResult } from "./claudebind.ts";
@@ -91,6 +91,7 @@ import {
 import { listStyles, styleIndex, stylesAsUniformArray } from "./styles.ts";
 import { ProducedEdgeLayer, PRODUCED_EDGE_INITIAL_CAPACITY } from "./producededges.ts";
 import { GHOST_ALPHA, GHOST_USAGE, makeGhostHandler, type GhostState } from "./ghosts.ts";
+import { autoShotName, finishPixels, parseScreenshotArgs, shotResultLine, shotSize, SHOT_USAGE, type ShotOptions } from "./screenshot.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
 const PLAYBACK_FPS = 30;
@@ -1752,6 +1753,10 @@ async function main(): Promise<void> {
       });
       return;
     }
+    if (msg?.type === "save-screenshot-result") {
+      finishScreenshot(msg as unknown as { file?: string; bytes?: number; w?: number; h?: number; error?: string });
+      return;
+    }
     if (msg?.type === "save-mod-result") {
       // save_rep's host round-trip completed — report the write (the mod was
       // registered separately by the host's modsLoaded re-push, exactly like
@@ -1770,6 +1775,9 @@ async function main(): Promise<void> {
   // save_rep wiring — late-bound below (needs asyncLine). NOT undoable (the
   // filesystem is outside the undo model, the rm precedent).
   let finishSaveRep: (r: { name?: string; file?: string; backup?: string | null; error?: string }) => void =
+    () => {};
+  // screenshot wiring — late-bound below (needs asyncLine). Not undoable.
+  let finishScreenshot: (r: { file?: string; bytes?: number; w?: number; h?: number; error?: string }) => void =
     () => {};
   // late-bound once the player exists (the listener is live before boot ends)
   let seekFrame: (frame: number) => void = () => {};
@@ -4688,6 +4696,95 @@ async function main(): Promise<void> {
     apply(next);
     model.recordOp(() => { apply(prev); return []; }, () => { apply(next); return []; });
   };
+  // --- screenshot (screenshot.ts; the file write is src/screenshotfile.ts) -----
+  // The CURRENT view (ghosts included, selection pulse / focus flash excluded)
+  // drawn into an offscreen multisampled target at the requested size; the
+  // visible canvas is never resized. Always cleared TRANSPARENT; a background
+  // colour is composited on the CPU (finishPixels), exactly, in sRGB.
+  let shotSeq = 0;
+  const captureShot = (o: ShotOptions): CommandResult => {
+    if (displayedFrame < 0) return { status: "error", message: "screenshot: nothing is drawn yet" };
+    let bg: [number, number, number] | null = null;
+    if (o.background === "current") {
+      const hex = backgroundColor.getHex(); // sRGB
+      bg = [(hex >> 16) & 255, (hex >> 8) & 255, hex & 255];
+    } else if (o.background !== "transparent") {
+      const rgb = parseColor(o.background);
+      if (rgb === null) return { status: "error", message: `screenshot: "${o.background}" is not a colour — ${SHOT_USAGE}` };
+      bg = [Math.round(rgb[0] * 255), Math.round(rgb[1] * 255), Math.round(rgb[2] * 255)];
+    }
+    const gl = renderer.getContext();
+    const view = renderer.getDrawingBufferSize(new THREE.Vector2());
+    const maxSide = Math.min(renderer.capabilities.maxTextureSize, gl.getParameter(gl.MAX_RENDERBUFFER_SIZE) as number, 16384);
+    const { w, h, clamped } = shotSize(view.x, view.y, o, maxSide);
+    const rt = new THREE.WebGLRenderTarget(w, h, { samples: Math.min(4, renderer.capabilities.maxSamples) });
+    const px = new Uint8Array(w * h * 4);
+    const overlays = [...pendingPass.objects, ...flashPass.objects];
+    const wasVisible = overlays.map((ob) => ob.visible);
+    const prev = {
+      target: renderer.getRenderTarget(), pxPerWorld: sizing.uPxPerWorld.value, aspect: camera.aspect,
+      background: scene.background, clear: renderer.getClearColor(new THREE.Color()), clearAlpha: renderer.getClearAlpha(),
+    };
+    try {
+      for (const ob of overlays) ob.visible = false;
+      if (o.width !== undefined && o.height !== undefined) {
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
+      sizing.uPxPerWorld.value = h / (2 * TAN_HALF_FOV); // impostors sized for the TARGET's pixels
+      scene.background = null;
+      renderer.setClearColor(0x000000, 0);
+      renderer.setRenderTarget(rt);
+      renderWithGhosts();
+      renderer.readRenderTargetPixels(rt, 0, 0, w, h, px);
+    } finally {
+      renderer.setRenderTarget(prev.target);
+      renderer.setClearColor(prev.clear, prev.clearAlpha);
+      scene.background = prev.background;
+      sizing.uPxPerWorld.value = prev.pxPerWorld;
+      if (camera.aspect !== prev.aspect) {
+        camera.aspect = prev.aspect;
+        camera.updateProjectionMatrix();
+      }
+      overlays.forEach((ob, i) => (ob.visible = wasVisible[i]));
+      rt.dispose();
+    }
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx2d = canvas.getContext("2d");
+    if (!ctx2d) return { status: "error", message: "screenshot: no 2D canvas to encode with" };
+    ctx2d.putImageData(new ImageData(finishPixels(px, w, h, bg), w, h), 0, 0);
+    const id = ++shotSeq;
+    const mime = o.format === "jpg" ? "image/jpeg" : `image/${o.format}`;
+    const autoName = autoShotName(header.name, displayedFrame, new Date(), o.format);
+    canvas.toBlob((blob) => {
+      if (!blob) { asyncLine("error", `screenshot failed: the browser could not encode ${o.format}`); return; }
+      void blob.arrayBuffer().then((buf) => {
+        const bytes = new Uint8Array(buf);
+        let bin = "";
+        for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+        host.postMessage({
+          type: "save-screenshot", id, path: o.path, autoName, ext: o.format, data: btoa(bin), dpi: o.dpi, w, h,
+        });
+      });
+    }, mime, 0.95);
+    const note = clamped ? ` (reduced to fit the GPU limit of ${maxSide}px)` : "";
+    return { status: "ok", message: `screenshot: rendering ${w}×${h} ${o.format}${bg === null ? ", transparent" : ""}${note}…` };
+  };
+  finishScreenshot = (r) => {
+    const line = shotResultLine(r);
+    asyncLine(line.status, line.message);
+  };
+  const shotHelp = `save a high-resolution image of the current view (transparent by default) — ${SHOT_USAGE}`;
+  commands.register("screenshot", (args) => {
+    const p = parseScreenshotArgs(args);
+    return p.ok ? captureShot(p.opts) : { status: "error", message: p.message };
+  }, shotHelp);
+  validationCommands.register("screenshot", (args) => {
+    const p = parseScreenshotArgs(args);
+    return p.ok ? { status: "ok", message: "screenshot" } : { status: "error", message: p.message };
+  }, shotHelp);
   const ghostHelp = `faint copies of the current representation at other frames — ${GHOST_USAGE}`;
   commands.register("ghost", makeGhostHandler({ nFrames: () => nFrames, get: () => ghostState, set: setGhosts }), ghostHelp);
   validationCommands.register("ghost", makeGhostHandler({ nFrames: () => nFrames, get: () => ghostState }), ghostHelp);
