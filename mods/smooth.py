@@ -81,7 +81,35 @@ def compute(data, target_indices, params):
         n_a = int((st["align_layer"] >= 0).sum())
         cmds.append(f"note smooth: {n_s} points smoothed" +
                     (f", on top of the alignment of {n_a} points." if n_a else "."))
+        stale = []
         if data.channel("ribbon_dir") is not None and st["computed"].get("ribbon_dir") != st["version"]:
-            cmds.append("note cartoon ribbons were oriented for the previous motion — run `ribbon_dir` to "
-                        "re-orient them (tube style needs nothing).")
+            stale.append("ribbon_dir")
+        stale += _stale_follow_layers(data, st)
+        if stale:
+            # recompute them in place with their last target and options
+            cmds.append("refresh " + " ".join(stale))
     return cmds
+
+
+# LIVE LAYERS THAT FOLLOW `smooth` (sasa_field, ss_field, and edge groups such as
+# %hbonds / %contacts) filter their per-frame values over each point's smoothing
+# window and record, on the dataset handle, the windows they were computed for
+# (`data._molaro_follow`: channel name or "%group" -> window bytes). The viewer
+# does not re-run them when smoothing changes, so this lists the stale ones for a
+# `refresh` command.
+
+
+def _stale_follow_layers(data, st):
+    import numpy as np
+    rec = getattr(data, "_molaro_follow", None)
+    rec = rec if isinstance(rec, dict) else {}
+    cur = np.asarray(st["smooth_half"], dtype=np.int64)
+    zero = np.zeros_like(cur).tobytes()
+    out = []
+    for name in ("sasa_field", "ss_field"):
+        if data.channel(name) is not None and rec.get(name, zero) != cur.tobytes():
+            out.append(name)
+    for key in sorted(k for k in rec if k.startswith("%")):
+        if rec[key] != cur.tobytes():
+            out.append(key)
+    return out

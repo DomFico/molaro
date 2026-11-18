@@ -72,6 +72,7 @@ import {
   parseModFile,
   parseParamLine,
   resolveEdgeGroup,
+  edgeStyleCommands,
   resolveModSelector,
   resolveParameters,
   serializeMod,
@@ -399,6 +400,40 @@ def compute(data, target_indices):
     return [0.0]
 `, "workspace");
   assert.ok(!wrongKind.ok && /edge-group is only valid/.test(wrongKind.error), JSON.stringify(wrongKind));
+});
+
+test("edge-overlay: parses on edges mods only, true/false only, and round-trips", () => {
+  const head = (produces: string, extra: string) =>
+    `# molaro-mod\n# name: hb\n# kind: analysis\n# produces: ${produces}\n${extra}def compute(data, target_indices):\n    return []\n`;
+  const ok = parseModFile(head("edges", "# edge-overlay: true\n"), "workspace");
+  assert.ok(ok.ok && ok.mod.edgeOverlay === true, JSON.stringify(ok));
+  const off = parseModFile(head("edges", "# edge-overlay: false\n"), "workspace");
+  assert.ok(off.ok && off.mod.edgeOverlay === undefined);
+  const bad = parseModFile(head("edges", "# edge-overlay: yes\n"), "workspace");
+  assert.ok(!bad.ok && /edge-overlay must be true or false/.test(bad.error));
+  const wrong = parseModFile(head("commands", "# edge-overlay: true\n"), "workspace");
+  assert.ok(!wrong.ok && /only valid on produces: edges/.test(wrong.error));
+});
+
+test("edgeStyleCommands: declared color/size/dash/opacity become styling verbs over %group; undeclared → nothing", () => {
+  const P = (name: string, type: string) => ({ name, type }) as never;
+  const styled = { params: [P("color", "color"), P("size", "number"), P("dash", "number"), P("opacity", "number")] };
+  assert.deepEqual(
+    edgeStyleCommands(styled, { color: "yellow", size: 0.2, dash: 0.6, opacity: 0.8 }, "hbonds"),
+    ["colorbonds %hbonds yellow", "bondsize %hbonds 0.2", "dashbonds %hbonds 0.6", "bondopacity %hbonds 0.8"],
+  );
+  // dash 0 is a real value (solid), not "absent"
+  assert.deepEqual(edgeStyleCommands(styled, { dash: 0 }, "g"), ["dashbonds %g 0"]);
+  // color "auto" / empty leaves colour alone; hex passes through
+  assert.deepEqual(edgeStyleCommands(styled, { color: "auto" }, "g"), []);
+  assert.deepEqual(edgeStyleCommands(styled, { color: "" }, "g"), []);
+  assert.deepEqual(edgeStyleCommands(styled, { color: "#ff8800" }, "g"), ["colorbonds %g #ff8800"]);
+  // OPT-IN BY DECLARATION: a mod that does not declare the names gets nothing,
+  // even if a same-named value arrives — existing edges mods are unaffected.
+  assert.deepEqual(edgeStyleCommands({ params: [] }, { color: "red", dash: 1 }, "g"), []);
+  assert.deepEqual(edgeStyleCommands({}, { color: "red" }, "g"), []);
+  // wrong types are ignored, never coerced
+  assert.deepEqual(edgeStyleCommands(styled, { size: "big" as never, dash: true as never }, "g"), []);
 });
 
 test("resolveEdgeGroup: a run-time ?group overrides header/name, is token-validated, and falls back", () => {

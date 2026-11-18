@@ -40,6 +40,60 @@ SS_SCALAR = {"H": 1.0, "E": 0.5}     # everything else (C, and DSSP's NA) -> 0.0
 UNSCORED = 0.0
 
 
+# ==== SMOOTH FOLLOW — shared by hbonds.py, sasa_field.py, ss_field.py; KEEP IDENTICAL ====
+# A live layer whose VALUES change per frame (a mask, an area, a class) follows
+# `smooth` by filtering those values over the same per-point window `smooth`
+# applies to positions — never by measuring the smoothed (unphysical) positions.
+# `_follow_record` remembers which windows a layer was computed for, so `smooth`
+# can say when it is out of date.
+def _follow_half(data, n):
+    st = getattr(data, "_molaro_motion", None)
+    if isinstance(st, dict) and st.get("shape", (None, None))[1] == n:
+        return np.asarray(st["smooth_half"], dtype=np.int64)
+    return np.zeros(n, dtype=np.int64)
+
+
+def _follow_record(data, name, half):
+    rec = getattr(data, "_molaro_follow", None)
+    if not isinstance(rec, dict):
+        rec = {}
+    rec[name] = np.asarray(half, dtype=np.int64).tobytes()
+    data._molaro_follow = rec
+
+
+def _window_mean(x, w):
+    """Centred moving mean of x (t, k) over half-width w per column (k,), clamped."""
+    t = x.shape[0]
+    out = np.array(x, dtype=np.float64)
+    frames = np.arange(t)
+    for hw in np.unique(w):
+        if hw <= 0:
+            continue
+        cols = np.flatnonzero(w == hw)
+        csum = np.concatenate([np.zeros((1, cols.size)), np.cumsum(x[:, cols], axis=0)], axis=0)
+        lo = np.maximum(frames - hw, 0)
+        hi = np.minimum(frames + hw, t - 1)
+        out[:, cols] = (csum[hi + 1] - csum[lo]) / (hi - lo + 1)[:, None]
+    return out
+# ==== end SMOOTH FOLLOW ====
+
+
+def _window_mode(x, w):
+    """Most common value of x (t, k) in each column's centred window of half-width
+    w (k,) — ties go to the frame's own value. For a CLASS field (coil/sheet/helix
+    as 0/0.5/1) a mean would invent in-between values that are no class at all."""
+    out = np.array(x, dtype=np.float64)
+    cols = np.flatnonzero(w > 0)
+    if cols.size == 0:
+        return out
+    sub = out[:, cols]
+    classes = np.unique(sub)
+    score = np.stack([_window_mean((sub == c).astype(np.float64), w[cols]) + 1e-6 * (sub == c)
+                      for c in classes])
+    out[:, cols] = classes[np.argmax(score, axis=0)]
+    return out
+
+
 def compute(data, target_indices, params=None):
     traj = data.trajectory
     if traj is None:
@@ -88,6 +142,14 @@ def compute(data, target_indices, params=None):
     # atoms is refused. WHERE the values apply is decided later by the bind.
     atom_res = np.fromiter((a.residue.index for a in top.atoms),
                            dtype=np.int64, count=top.n_atoms)
-    values = np.ascontiguousarray(field[:, atom_res], dtype="<f4")
+    values = field[:, atom_res]
+    # FOLLOW `smooth`: each point takes the most common class over the same window
+    # `smooth` applies to its position (classified on the raw frames, as DSSP
+    # must be), so the colour does not flicker faster than the motion.
+    half = _follow_half(data, values.shape[1])
+    if half.any():
+        values = _window_mode(values, half)
+    _follow_record(data, "ss_field", half)
+    values = np.ascontiguousarray(values, dtype="<f4")
     # min/max are the FIXED class scale, so the bind's range never has to be fitted.
     return {"values": values, "components": 1, "min": 0.0, "max": 1.0}

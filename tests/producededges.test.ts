@@ -246,3 +246,44 @@ test("a grow mid-life keeps every group's ids and contents (the undo-slot stabil
   assert.equal(layer.pairs[0], 0);
   assert.equal(layer.pairs[1], 1);
 });
+
+test("snapshot/restore: a re-declaration undoes exactly (same count, in place)", () => {
+  const layer = new ProducedEdgeLayer();
+  layer.setGroup("g", [[0, 1], [2, 3]], sizeOf, new Float32Array([1, 0, 0, 1]));
+  layer.setActive("g", false); // the first run was undone
+  const before = layer.snapshot("g")!;
+  layer.setGroup("g", [[4, 5], [6, 7]], sizeOf); // re-run: reactivates, replaces
+  layer.setOverlay("g", true);
+  const after = layer.snapshot("g")!;
+  assert.equal(layer.group("g")!.active, true);
+  layer.restore("g", before, sizeOf); // undo
+  const g = layer.group("g")!;
+  assert.equal(g.active, false, "undo of the re-run removes the edges again");
+  assert.deepEqual([...layer.pairs.slice(0, 4)], [0, 1, 2, 3], "old pairs back");
+  assert.deepEqual([...g.mask!], [1, 0, 0, 1], "old mask back");
+  assert.ok(!g.overlay);
+  assert.equal(layer.sizeA[0], sizeOf(0));
+  layer.restore("g", after, sizeOf); // redo
+  assert.equal(layer.group("g")!.active, true);
+  assert.equal(layer.group("g")!.overlay, true);
+  assert.equal(layer.group("g")!.mask, undefined);
+  assert.deepEqual([...layer.pairs.slice(0, 4)], [4, 5, 6, 7]);
+});
+
+test("snapshot/restore: a count-changing re-declaration re-points at the old span on undo", () => {
+  const layer = new ProducedEdgeLayer();
+  layer.setGroup("g", [[0, 1], [2, 3]], sizeOf);
+  const before = layer.snapshot("g")!;
+  layer.setGroup("g", [[6, 7], [8, 9], [0, 2]], sizeOf);
+  const after = layer.snapshot("g")!;
+  layer.restore("g", before, sizeOf);
+  assert.deepEqual(layer.groupIds("g"), [0, 1]);
+  const mask = new Float32Array(layer.capacity);
+  layer.fillVisibleMask(new Float32Array(16).fill(1), mask);
+  assert.deepEqual([...mask.slice(0, 5)], [1, 1, 0, 0, 0], "the newer span goes dark");
+  layer.restore("g", after, sizeOf);
+  assert.deepEqual(layer.groupIds("g"), [2, 3, 4]);
+  assert.equal(layer.snapshot("missing"), null);
+  layer.restore("g", null, sizeOf);
+  assert.equal(layer.hasGroup("g"), false);
+});
