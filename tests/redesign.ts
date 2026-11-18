@@ -10641,23 +10641,35 @@ async function S58(): Promise<void> {
         return !!g && g.active && v.produced.pass.instanceCount() === ${spanC};
       })()`));
 
-    // -- (e) a RE-declaration drops the walked-back redo future ----------------
-    await d.ctrlZ(); // walk gC's declaration back again → it sits in redo
+    // -- (e) a RE-declaration is ONE undoable op that restores the old group --
+    await d.ctrlZ(); // walk gC's declaration back again → gC exists, inactive
     await sleep(120);
-    check("S58: (arrange) the declaration op is in the redo future",
-      await d.evaluate<boolean>(`${V}.model.canRedo`));
+    const depthE = await d.evaluate<number>(`${V}.model.undoDepth`);
     await d.evaluate(`${V}.produced.declare("gC", [[12, 3012], [13, 3013], [14, 3014]])`);
-    check("S58: re-declaring the group DROPS redo, with the produced-edge reason",
-      await d.evaluate<boolean>(`(()=>{
-        const v = ${V};
-        return !v.model.canRedo && /edge group "gC" was re-declared/.test(v.model.redoBlockedReason ?? "");
-      })()`));
+    check("S58: re-declaring the group pushes exactly ONE undo op",
+      (await d.evaluate<number>(`${V}.model.undoDepth`)) === depthE + 1);
     check("S58: ...the re-declared group appended at FRESH ids (count changed → old span retired)",
       await d.evaluate<boolean>(`(()=>{
         const v = ${V};
         const g = v.produced.groups().find(g => g.name === "gC");
         return !!g && g.active && g.count === 3 && g.baseId === ${8 + GB_COUNT + 2} &&
           v.produced.pass.instanceCount() === ${8 + GB_COUNT + 2 + 3};
+      })()`));
+    await d.ctrlZ();
+    await sleep(120);
+    check("S58: undo of the re-declaration restores the group as it stood (old span, INACTIVE)",
+      await d.evaluate<boolean>(`(()=>{
+        const v = ${V};
+        const g = v.produced.groups().find(g => g.name === "gC");
+        return !!g && !g.active && g.count === 2 && v.produced.pass.instanceCount() === ${8 + GB_COUNT};
+      })()`));
+    await d.evaluate(`${V}.model.redo()`);
+    await sleep(120);
+    check("S58: redo restores the re-declared group",
+      await d.evaluate<boolean>(`(()=>{
+        const v = ${V};
+        const g = v.produced.groups().find(g => g.name === "gC");
+        return !!g && g.active && g.count === 3 && v.produced.pass.instanceCount() === ${8 + GB_COUNT + 2 + 3};
       })()`));
 
     // -- (f) the non-selectable-domain guard -----------------------------------

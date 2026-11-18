@@ -50,6 +50,7 @@ point types `anchor` and `t0`–`t3`).
 | `pointopacity <expr> <a>` | Fade those points (0–1; 0 is invisible-but-**present**, never a hide; clamps) | `pointopacity alpha 0.5` |
 | `bondopacity <expr> <a>` | Alpha for edges with **both** endpoints in the target | `bondopacity beta.group-0.subgroup-0 0` |
 | `bondopacityof <expr> <a>` | Alpha for edges **touching** the target (either endpoint — the incident reach) | `bondopacityof #124 0.3` |
+| `refresh <channel>` / `refresh %group` | Re-run the mod that produced a channel or edge group, with its last target and options — for layers made stale by `align` / `smooth` (which emit it themselves) | `refresh ribbon_dir %hbonds` |
 | `note <text>` | Print **one line** and change nothing — no state, **no undo stroke** (targetless; the text is literal, newlines included). How a `produces: commands` mod explains itself, e.g. a colour legend; empty is an error | `note red = acidic` |
 | `traceopacity <expr> <a>` | Alpha for polyline vertices whose **subgroup** contains a resolved point | `traceopacity alpha 0.7` |
 | `bake <expr> <channel> <axis> [<min> <max>] [?palette=<name>]` | Write a declared data channel (at the displayed frame) onto a representation axis — scalar channel → point `color`/`size`/`opacity`, edge `bondcolor`/`bondsize`/`bondopacity`/`bonddash` (**endpoint mean**, contained edges) and `bondcolorends` (**per-endpoint** color: each half of the edge reads its **own** endpoint — no mean), polyline `tracecolor`/`tracesize`/`traceopacity` (each vertex reads **its** point), normalized over min..max; a **color** axis may name the **palette** its values map through (trailing `?palette=<name>`, default `rainbow`; see `palettes`); **vector (3-wide) channel → `orientation`, raw** (one undo stroke) | `bake all energy color 0 2.5` |
@@ -279,7 +280,7 @@ Results are always de-duplicated.
 
 ## The mods that ship with the extension
 
-Eight live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
+Ten live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
 the same name in your own dir SHADOWS a shipped one, which is how you customise one
 without losing the original.
 
@@ -290,6 +291,8 @@ without losing the original.
 | `hide_res` / `show_res` | fade points AND their incident bonds in one stroke, creating no selection |
 | `live_sasa` / `live_ss` | colour that follows the trajectory |
 | `smooth` | a temporal moving average over positions — jitter out, motion in |
+| `hbonds` | hydrogen bonds as dashed lines that form and break per frame — bare: the backbone (DSSP) network; with a selection: every H-bond involving it. `?min`, `?live`, `?color`, `?dash`, `?group` |
+| `contacts` | atom contacts within a cutoff as lines that form and break per frame — `?atoms=heavy\|CA\|CA,CB…`, `?level=atom\|residue`, `?seqsep`, `?min`, `?live`, style and `?group` |
 | `align` | superpose every frame onto a reference (`?ref=first\|average\|mean\|last\|<k>\|off`, `?fit=backbone\|CA\|…`) — tumbling and drift out |
 
 Five more (`aligning`, `ribbon_dir`, `sasa_field`, `smoothing`, `ss_field`) are **machinery**: they supply a
@@ -378,7 +381,11 @@ which averaging a tumbling molecule means anything. The pure parts (alignment tr
 point's window) are remembered on the dataset handle; whichever provider ran last holds the
 current combination, and both macros bind that one (a provider whose target and parameters are
 unchanged is not re-run, so its own channel can be one step stale). `align ?ref=off` and
-`smooth all ?smoothing=0` each remove their half; `unbind all offset` shows raw. Cartoon ribbons
+`smooth all ?smoothing=0` each remove their half; `unbind all offset` shows raw. The live layers `sasa_field`,
+`ss_field` and `hbonds` follow `smooth` by filtering their per-frame VALUES over the same
+window (measured on the raw frames); `smooth` re-runs any that are stale (`refresh`). H-bond and contact lines are **overlays**:
+`licorice`, `hide_res` and other atom-targeted bond commands leave them alone; style them by
+`%hbonds` / `%contacts`. Cartoon ribbons
 orient from the shown positions: after `align`/`smooth` the macro says when to run `ribbon_dir`
 to re-orient them.
 

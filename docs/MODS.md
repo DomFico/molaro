@@ -37,6 +37,7 @@ means the viewer **ignores the file silently**, which is why §5 starts with a p
 | `# axis:` | for `per-point-scalar` | `color`, `size` or `opacity` |
 | `# channel:` | for `channel` | the channel's name — the single source, never returned from `compute` |
 | `# edge-group:` | for `edges` | default group name for authored edges |
+| `# edge-overlay:` | no | `true` makes the group an ANNOTATION LAYER (H-bonds, contacts): point-targeted bond verbs (`licorice`, `hide_res`, `colorbonds <atoms>`) do not reach it — only `%group` does |
 | `# requires-channel:` | no | one channel name; its provider runs FIRST, automatically |
 | `# param:` | no | `<name> <type> <default…>` — see §4 |
 | `# description:` | recommended | shown by `mods` and `help <name>`; write it for a stranger |
@@ -122,6 +123,23 @@ Invoked as `mymod <target> ?window=7 ?style=tube`.
 - A parameter forwards to a `# requires-channel:` provider **only if the provider also
   declares that name.**
 
+**Reserved names on an `edges` mod.** `group` (a string) picks the `%group` the run authors
+into, overriding `# edge-group:`. `color`, `size`, `dash` and `opacity`, when DECLARED,
+are applied to that group right after it is drawn, as `colorbonds` / `bondsize` /
+`dashbonds` / `bondopacity %<group> <value>` in the same undo stroke. So `hbonds ?color=red
+?dash=0` styles its own lines; a `color` of `auto` leaves the colour alone. A mod that
+declares none of them is unaffected. The return itself stays data only (pairs and mask).
+
+**Bare invocation.** A `commands`, `channel` or `edges` mod may be run with no target; it
+then receives an empty `target_indices` (the whole system) and decides what bare means
+(`hbonds` alone = the backbone network; `contacts` alone = residue-level).
+
+**Layers derived from motion.** A channel or edge group computed from positions goes stale
+when `align` / `smooth` change the motion. `refresh <channel>` / `refresh %group` re-runs
+its producer with the same target and parameters; `align` and `smooth` emit it themselves
+for exactly the layers they made stale. A mod opts in by recording what it was computed
+for (see the SMOOTH FOLLOW block in `hbonds.py`).
+
 **A neighbourhood flag on a macro is inert.** The sequencer runs the provider *first*,
 with the target as typed — so `?within` must be declared on the **provider**, not on the
 `commands` mod that binds it.
@@ -161,7 +179,7 @@ the viewer — and you get the timing to compare against `molaro.modTimeoutSecon
 
 ## 6. Conventions worth copying
 
-From the thirteen shipped mods, and each earned:
+From the fifteen shipped mods, and each earned:
 
 - **Fail closed with a sentence naming the fix.** Never return zeros for "I could not
   compute this" — a confident wrong picture is worse than an error.

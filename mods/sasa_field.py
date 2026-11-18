@@ -55,6 +55,44 @@ SASA_BUDGET_S = 3.0
 SASA_PROBE_FRAMES = 8
 
 
+# ==== SMOOTH FOLLOW — shared by hbonds.py, sasa_field.py, ss_field.py; KEEP IDENTICAL ====
+# A live layer whose VALUES change per frame (a mask, an area, a class) follows
+# `smooth` by filtering those values over the same per-point window `smooth`
+# applies to positions — never by measuring the smoothed (unphysical) positions.
+# `_follow_record` remembers which windows a layer was computed for, so `smooth`
+# can say when it is out of date.
+def _follow_half(data, n):
+    st = getattr(data, "_molaro_motion", None)
+    if isinstance(st, dict) and st.get("shape", (None, None))[1] == n:
+        return np.asarray(st["smooth_half"], dtype=np.int64)
+    return np.zeros(n, dtype=np.int64)
+
+
+def _follow_record(data, name, half):
+    rec = getattr(data, "_molaro_follow", None)
+    if not isinstance(rec, dict):
+        rec = {}
+    rec[name] = np.asarray(half, dtype=np.int64).tobytes()
+    data._molaro_follow = rec
+
+
+def _window_mean(x, w):
+    """Centred moving mean of x (t, k) over half-width w per column (k,), clamped."""
+    t = x.shape[0]
+    out = np.array(x, dtype=np.float64)
+    frames = np.arange(t)
+    for hw in np.unique(w):
+        if hw <= 0:
+            continue
+        cols = np.flatnonzero(w == hw)
+        csum = np.concatenate([np.zeros((1, cols.size)), np.cumsum(x[:, cols], axis=0)], axis=0)
+        lo = np.maximum(frames - hw, 0)
+        hi = np.minimum(frames + hw, t - 1)
+        out[:, cols] = (csum[hi + 1] - csum[lo]) / (hi - lo + 1)[:, None]
+    return out
+# ==== end SMOOTH FOLLOW ====
+
+
 def compute(data, target_indices, params=None):
     traj = data.trajectory
     if traj is None:
@@ -126,5 +164,16 @@ def compute(data, target_indices, params=None):
     # atoms is refused. WHERE the values apply is decided later by the bind.
     atom_res = np.fromiter((a.residue.index for a in top.atoms),
                            dtype=np.int64, count=top.n_atoms)
-    values = np.ascontiguousarray(field[:, atom_res], dtype="<f4")
+    values = field[:, atom_res]
+    # FOLLOW `smooth`: average each point's area over the same window `smooth`
+    # applies to its position, so the colour does not flicker faster than the
+    # motion. The AREA is still measured on the raw frames — the smoothed
+    # positions are an average, and averaging positions packs side chains
+    # unphysically, so measuring them would be wrong. The normalization above is
+    # unchanged and a mean of values in [0,1] stays in [0,1].
+    half = _follow_half(data, values.shape[1])
+    if half.any():
+        values = _window_mean(values, half)
+    _follow_record(data, "sasa_field", half)
+    values = np.ascontiguousarray(values, dtype="<f4")
     return {"values": values, "components": 1, "min": 0.0, "max": 1.0}

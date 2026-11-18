@@ -57,7 +57,7 @@ import { bindTypedResult } from "./claudebind.ts";
 import { PLOT_RESULT_KINDS } from "./claudemodel.ts";
 import { parseTypedResult } from "./claudemodel.ts";
 import { colormapFor, paletteResolutionCount, unknownPaletteHitCount } from "./palettes.ts";
-import { getRecipe, listRecipes, registerRecipe, resolveChannelDependency, resolveEdgeGroup, resolveParameters, unregisterRecipe, validateModValues, type AnalysisMod, type ParamValue } from "./recipes.ts";
+import { edgeStyleCommands, getRecipe, listRecipes, registerRecipe, resolveChannelDependency, resolveEdgeGroup, resolveParameters, unregisterRecipe, validateModValues, type AnalysisMod, type ParamValue } from "./recipes.ts";
 import {
   installModList,
   isFileAlreadyGone,
@@ -3259,6 +3259,12 @@ async function main(): Promise<void> {
       poll();
     });
 
+  /** The last successful run behind each derived layer — `channel:<name>` and
+   * `%<group>` — so `refresh` can replay it with the same target and parameters
+   * (looked up by mod NAME, so a hot-reloaded mod refreshes with its new code). */
+  const lastProducerRun = new Map<string, {
+    mod: string; points: number[]; expr: string; params?: Record<string, ParamValue>;
+  }>();
   const declareProducedChannel = (
     mod: AnalysisMod,
     delta: Channel,
@@ -3335,12 +3341,15 @@ async function main(): Promise<void> {
    *     re-activates. Capacity and ids never shrink, so every recorded
    *     appearance op keeps valid slots either way. The closures capture the
    *     group NAME, never ids — a later re-declaration may move the group.
-   *   - a RE-declared group (the recompute-and-see loop) replaces in place and
-   *     records NOTHING — like channel data, replaced pairs are not undoable —
-   *     but it DROPS the walked-back redo future: walked-back ops may
-   *     reference produced state computed over the old pairs, and replaying
-   *     them over the new ones would be the silent-wrongness this system
-   *     refuses (the declareProducedChannel precedent, verbatim).
+   *   - a RE-declared group (re-running the mod, `refresh`, or running it again
+   *     after its declaration was undone — the group still exists, inactive)
+   *     records ONE op too: undo restores the group exactly as it stood before
+   *     (its span, pairs, mask, overlay and ACTIVE flag — so re-running a mod
+   *     whose earlier run was undone, then undoing, removes the edges again);
+   *     redo restores the re-declared state. (Like any new op, it clears the
+   *     walked-back redo future through pushUndo.) (It used
+   *     to record nothing, which left Ctrl+Z reverting only the style verbs of
+   *     a re-run — the lines lost their colour but stayed.)
    */
   const declareProducedEdges = (
     mod: AnalysisMod,
@@ -3356,14 +3365,23 @@ async function main(): Promise<void> {
     // group; absent = a static group (the pre-2C declaration, unchanged).
     visibility?: Float32Array,
   ): void => {
-    const existed = producedLayer.hasGroup(group);
-    producedLayer.setGroup(group, edges, (p) => rep.state.size[p], visibility);
+    const endSize = (p: number): number => rep.state.size[p];
+    const before = producedLayer.snapshot(group);
+    producedLayer.setGroup(group, edges, endSize, visibility);
+    // `# edge-overlay: true` — an annotation layer point-targeted bond verbs skip
+    producedLayer.setOverlay(group, mod.edgeOverlay === true);
     producedPass.sync();
-    if (existed) {
-      model.dropRedo(
-        `edge group "${group}" was re-declared by "${mod.name}", and produced edges are replaced ` +
-        `in place rather than undone — anything walked back may have referenced the old edges, so ` +
-        `it can no longer be replayed. Undo still works; redo starts again from here.`);
+    if (before !== null) {
+      const after = producedLayer.snapshot(group);
+      model.recordOp(() => {
+        producedLayer.restore(group, before, endSize);
+        producedPass.sync();
+        return [];
+      }, () => {
+        producedLayer.restore(group, after, endSize);
+        producedPass.sync();
+        return [];
+      });
     } else {
       model.recordOp(() => {
         producedLayer.setActive(group, false);
@@ -3529,6 +3547,7 @@ async function main(): Promise<void> {
           // with no reload — the conversational property. Declaring is not
           // binding; the user binds it to an axis afterwards.
           declareProducedChannel(mod, checked.channel, points, checked.warning, params);
+          lastProducerRun.set(`channel:${checked.channel.name}`, { mod: mod.name, points: [...points], expr, params });
           return true;
         } else if ("edges" in checked) {
           // produces: edges — MID-SESSION LIVE AUTHORING (this ends the former
@@ -3550,7 +3569,24 @@ async function main(): Promise<void> {
               `requesting "${group}" — nothing authored`);
             return false;
           }
-          declareProducedEdges(mod, checked.edges, group, points.length, checked.visibility);
+          // Declare the group and apply its requested APPEARANCE (the reserved
+          // color/size/dash/opacity params — edgeStyleCommands) inside ONE
+          // reentrant stroke, so one Ctrl+Z removes the styled group as a unit.
+          lastProducerRun.set(`%${group}`, { mod: mod.name, points: [...points], expr, params });
+          const style = edgeStyleCommands(mod, params, group);
+          if (style.length === 0) {
+            declareProducedEdges(mod, checked.edges, group, points.length, checked.visibility);
+            return true;
+          }
+          model.beginStroke();
+          try {
+            declareProducedEdges(mod, checked.edges, group, points.length, checked.visibility);
+            // an EMPTY group styles nothing ("nomatch") — that is not a failure
+            // of the run, which did author what it found
+            runCommandMod(mod, style);
+          } finally {
+            model.endStroke();
+          }
           return true;
         }
         return true;
@@ -3960,6 +3996,24 @@ async function main(): Promise<void> {
     opacityEdges,
     opacityTrace,
     runAnalysisMod,
+    refreshProducer: (token: string) => {
+      const key = token.startsWith("%") ? token : `channel:${token}`;
+      const last = lastProducerRun.get(key);
+      if (!last) {
+        const live = token.startsWith("%")
+          ? producedLayer.hasGroup(token.slice(1))
+          : header.channels.some((c) => c.name === token);
+        return live
+          ? { status: "error" as const, message: `${token} was not produced by a mod this session — nothing to re-run` }
+          : { status: "nomatch" as const, message: `nothing to refresh: no ${token.startsWith("%") ? "edge group" : "channel"} "${token}"` };
+      }
+      const mod = getRecipe(last.mod);
+      if (!mod || mod.kind !== "analysis") {
+        return { status: "error" as const, message: `${token}: its mod "${last.mod}" is no longer registered` };
+      }
+      void runModOnce(mod, last.points, last.expr, last.params);
+      return { status: "ok" as const, message: `refreshing ${token} (re-running ${last.mod} on its last target)…` };
+    },
     armRmDeletion: (names: string[]) => {
       pendingRm = names; // single slot — a newer rm replaces it
     },
@@ -4029,6 +4083,7 @@ async function main(): Promise<void> {
       groups: () => producedLayer.groups(),
       groupIds: (name: string) => producedLayer.groupIds(name),
       activePairs: () => producedLayer.activePairs(),
+      pointReachPairs: () => producedLayer.pointReachPairs(),
       colorEdges: producedColorEdges,
       colorEdgesEnds: producedColorEdgesEnds,
       sizeEdges: producedSizeEdges,
@@ -4057,6 +4112,9 @@ async function main(): Promise<void> {
   // every string in a macro can be validated BEFORE any of them runs.
   const validationContext: typeof commandContext = {
     ...commandContext,
+    // validating a macro's `refresh` line must not RUN the producer — otherwise
+    // every refresh a macro emits runs twice (once to validate, once for real)
+    refreshProducer: (token: string) => ({ status: "ok" as const, message: `refresh ${token}` }),
     focusPoints: () => {},
     frameVisible: () => {},
     flashPointRows: () => {},
@@ -4118,6 +4176,7 @@ async function main(): Promise<void> {
       groups: () => producedLayer.groups(),
       groupIds: (name: string) => producedLayer.groupIds(name),
       activePairs: () => producedLayer.activePairs(),
+      pointReachPairs: () => producedLayer.pointReachPairs(),
       colorEdges: () => 0, colorEdgesEnds: () => 0, sizeEdges: () => 0,
       opacityEdges: () => 0, dashEdges: () => 0, styleEdges: () => 0,
     },

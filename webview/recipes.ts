@@ -150,6 +150,12 @@ export interface AnalysisMod extends ModCommon {
    * ECHOED back. A re-run of the same mod re-declares the SAME group (the
    * recompute-and-see loop), never accumulates new ones. */
   edgeGroup?: string;
+  /** Optional iff produces = edges (`# edge-overlay: true`): the authored group is an
+   * ANNOTATION LAYER (H-bonds, contacts) rather than more molecule. Point-targeted
+   * bond verbs — `colorbonds <atoms>`, `bicolorbonds`, `bondsize`, `bondopacityof`
+   * (what `licorice` and `hide_res` emit) — do not reach it; only a `%group` target
+   * styles it. Without the flag a produced group is reached exactly as before. */
+  edgeOverlay?: boolean;
   /** Python source defining `compute(data, target_indices)` — or
    * `compute(data, target_indices, params)` when the mod declares parameters.
    * Executed in the producer against the resident dataset handle. Returns a flat
@@ -258,6 +264,43 @@ export function resolveEdgeGroup(
   return { ok: true, group: mod.edgeGroup ?? mod.name };
 }
 
+/**
+ * The APPEARANCE a `produces: edges` run asks for, as ordinary styling commands
+ * over its group. Reserved parameter names, the `?group` precedent: an edges mod
+ * that DECLARES `color` / `size` / `dash` / `opacity` gets the resolved values
+ * applied to `%<group>` right after the group is declared — so `hbonds ?color=red
+ * ?dash=0` is one command, not "author, then style".
+ *
+ * Why here and not on the wire: the producer's edges reply carries DATA only (an
+ * edge is [i, j], never appearance). Appearance stays viewer-owned and is spelled
+ * as the same `colorbonds` / `bondsize` / `dashbonds` / `bondopacity` verbs a person
+ * would type, so validation, undo and the truthful counts all come from them.
+ *
+ * Opt-in by declaration: a mod that declares none of these names gets [] — every
+ * existing edges mod is byte-identical. `color` = "auto" (or empty) means "leave
+ * the colour alone". Pure.
+ */
+export function edgeStyleCommands(
+  mod: Pick<AnalysisMod, "params">,
+  params: Record<string, ParamValue> | undefined,
+  group: string,
+): string[] {
+  const declared = new Set((mod.params ?? []).map((p) => p.name));
+  const get = (k: string): ParamValue | undefined => (declared.has(k) ? params?.[k] : undefined);
+  const out: string[] = [];
+  const color = get("color");
+  if (typeof color === "string" && color.trim() !== "" && color.trim() !== "auto") {
+    out.push(`colorbonds %${group} ${color.trim()}`);
+  }
+  const size = get("size");
+  if (typeof size === "number") out.push(`bondsize %${group} ${size}`);
+  const dash = get("dash");
+  if (typeof dash === "number") out.push(`dashbonds %${group} ${dash}`);
+  const opacity = get("opacity");
+  if (typeof opacity === "number") out.push(`bondopacity %${group} ${opacity}`);
+  return out;
+}
+
 export type ModParseResult =
   | { ok: true; mod: AnalysisMod }
   | { ok: false; error: string };
@@ -326,6 +369,16 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
   } else if (edgeGroup !== undefined) {
     return { ok: false, error: "edge-group is only valid on produces: edges mods" };
   }
+  const edgeOverlayRaw = meta["edge-overlay"];
+  if (edgeOverlayRaw !== undefined) {
+    if (produces !== "edges") {
+      return { ok: false, error: "edge-overlay is only valid on produces: edges mods" };
+    }
+    if (edgeOverlayRaw !== "true" && edgeOverlayRaw !== "false") {
+      return { ok: false, error: `edge-overlay must be true or false (got "${edgeOverlayRaw}")` };
+    }
+  }
+  const edgeOverlay = edgeOverlayRaw === "true";
   // P-3: an optional required channel (any produces kind may require one). Just
   // token-validated here; whether a PROVIDER exists (and is one level deep) is a
   // property of the whole registry, resolved by resolveChannelDependency.
@@ -359,6 +412,7 @@ export function parseModFile(text: string, origin: RecipeOrigin): ModParseResult
     ...(produces === "per-point-scalar" ? { axis: axis as ModAxis } : {}),
     ...(produces === "channel" ? { channel } : {}),
     ...(produces === "edges" && edgeGroup !== undefined ? { edgeGroup } : {}),
+    ...(produces === "edges" && edgeOverlay ? { edgeOverlay: true } : {}),
     ...(requiresChannel !== undefined ? { requiresChannel } : {}),
     code,
     ...(params.length ? { params } : {}),
@@ -385,6 +439,7 @@ export function serializeMod(mod: Mod): string {
     ...(mod.axis ? [`# axis: ${mod.axis}`] : []),
     ...(mod.channel ? [`# channel: ${mod.channel}`] : []),
     ...(mod.edgeGroup ? [`# edge-group: ${mod.edgeGroup}`] : []),
+    ...(mod.edgeOverlay ? [`# edge-overlay: true`] : []),
     ...(mod.requiresChannel ? [`# requires-channel: ${mod.requiresChannel}`] : []),
     ...(mod.params ?? []).map((p) =>
       // A VALUE-LIST type (`choice`/`hint`) serializes its LIST (the default is

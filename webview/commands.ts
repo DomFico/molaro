@@ -373,6 +373,11 @@ export interface CommandContext {
     expr: string,
     params?: Record<string, ParamValue>,
   ): void;
+  /** `refresh <channel>` / `refresh %group`: re-run the mod that last produced
+   * that channel or produced-edge group, with the SAME target and parameters.
+   * Absent on the validation context, so validating a macro's `refresh` line
+   * runs nothing. */
+  refreshProducer?(token: string): CommandResult;
   /** rm: stash the workspace mod names awaiting the terminal's y answer
    * (a single slot — a newer rm replaces it). On confirmation the wiring
    * deletes files HOST-side FIRST, then unregisters only what succeeded,
@@ -409,6 +414,8 @@ export interface CommandContext {
     /** Every ACTIVE group's edges with endpoint POINT indices — the
      * point-target matching surface (inactive/retired slots excluded). */
     activePairs(): { id: number; a: number; b: number }[];
+    /** activePairs minus OVERLAY groups — what a point-targeted bond verb reaches. */
+    pointReachPairs?(): { id: number; a: number; b: number }[];
     colorEdges(ids: readonly number[], rgb: [number, number, number]): number;
     /** bicolorbonds' produced arm: per-edge A/B triples (colorEdgesEnds'
      * exact value shape), alpha untouched, one composed stroke. */
@@ -1273,7 +1280,11 @@ function producedEdgesMatching(
 ): number[] {
   const inSet = new Set(points);
   const ids: number[] = [];
-  for (const { id, a, b } of ctx.producedEdges.activePairs()) {
+  // OVERLAY groups (H-bonds, contacts — `# edge-overlay: true`) are annotation,
+  // not molecule: a point target never reaches them; only `%group` does. A
+  // context without the method (older test fixtures) reaches every active pair.
+  const pairs = ctx.producedEdges.pointReachPairs?.() ?? ctx.producedEdges.activePairs();
+  for (const { id, a, b } of pairs) {
     if (both ? inSet.has(a) && inSet.has(b) : inSet.has(a) || inSet.has(b)) ids.push(id);
   }
   return ids;
@@ -2741,10 +2752,13 @@ export function makeAnalysisModHandler(ctx: CommandContext, mod: AnalysisMod): C
     if ("status" in parsed) return parsed;
     const { expr, params } = parsed;
     if (expr === "") {
-      // A commands mod MAY ignore target_indices, so bare invocation is allowed
-      // (empty target_indices = the whole system per the mod contract). The
-      // per-point/per-frame kinds need a target to bind their result to.
-      if (mod.produces === "commands") {
+      // Bare invocation = the WHOLE SYSTEM (empty target_indices, per the mod
+      // contract) for the kinds whose result does not need a target to land on:
+      // a commands macro, a channel (always whole-system — the bind decides where
+      // it applies), and an edges group (the mod decides what bare means, e.g.
+      // `hbonds` = the backbone network). The per-point/per-frame kinds need a
+      // target to bind their result to.
+      if (mod.produces === "commands" || mod.produces === "channel" || mod.produces === "edges") {
         ctx.runAnalysisMod(mod, [], "", params);
         return { status: "ok", message: `running ${mod.name}…` };
       }
@@ -3424,6 +3438,9 @@ export const HELP_TEXT = [
   "               registered shape (scene-level; one undo op) · shapes  list",
   "  background <color>          set the scene background (CSS name or #hex;",
   "               targetless — scene state, session-only; one undo op)",
+  "  refresh <channel> | refresh %group   recompute a derived layer with its",
+  "               last target and options (align/smooth emit it for what",
+  "               they made stale)",
   "  note <text>  print one line and change NOTHING — no state, no undo",
   "               stroke (targetless; the text is taken literally). How a",
   "               `produces: commands` mod says something, e.g. a color",
@@ -3486,6 +3503,31 @@ export const HELP_TEXT = [
  * color in words instead (`note red = alpha`) — honest text the surface can
  * actually show.
  */
+/** `refresh <channel>` / `refresh %group` — recompute a derived layer in place.
+ * A channel or produced-edge group is computed ONCE from the motion that was
+ * current then; when `align` / `smooth` change that motion, the layer is stale
+ * (a ribbon facing raw coordinates, an H-bond mask for the old window). The
+ * viewer re-runs a provider only when its own target or parameters change, so
+ * this is the explicit re-run: same mod, same target, same parameters. Those
+ * macros emit it themselves for exactly the layers they made stale. */
+export function makeRefreshHandler(ctx: CommandContext): CommandHandler {
+  const usage = "refresh <channel> | refresh %group (e.g. refresh ribbon_dir, refresh %hbonds)";
+  return (args: string): CommandResult => {
+    const tokens = args.trim().split(/\s+/).filter((t) => t !== "");
+    if (tokens.length === 0) return { status: "error", message: `refresh needs a channel or %group — ${usage}` };
+    if (!ctx.refreshProducer) return { status: "ok", message: `refresh ${tokens.join(" ")}` };
+    const lines: string[] = [];
+    let worst: CommandResult["status"] = "ok";
+    for (const t of tokens) {
+      const r = ctx.refreshProducer(t);
+      lines.push(r.message);
+      if (r.status === "error") worst = "error";
+      else if (r.status === "nomatch" && worst === "ok") worst = "nomatch";
+    }
+    return { status: worst, message: lines.join("; ") };
+  };
+}
+
 export function makeNoteHandler(): CommandHandler {
   const usage = "note <text> (e.g. note red = alpha)";
   return (args: string): CommandResult => {
@@ -3693,6 +3735,11 @@ export function createCommandRegistry(ctx: CommandContext): CommandRegistry {
     "background",
     makeBackgroundHandler(ctx),
     "set the scene background color (targetless — scene state, session-only; one undo op; repeating the current color records nothing): background <color>",
+  );
+  registry.register(
+    "refresh",
+    makeRefreshHandler(ctx),
+    "recompute a derived layer with its last target and options — after `align`/`smooth` change the motion (they emit it themselves for the layers they made stale): refresh <channel> | refresh %group",
   );
   registry.register(
     "note",
@@ -4339,6 +4386,8 @@ export function completeCommand(
       return completeShapeSlots(ctx, argsStart, argsHead);
     case "background":
       return completeFirstWord(argsStart, argsHead, colorSlot());
+    case "refresh":
+      return { start: argsStart + argsHead.length, candidates: [], applied: "" };
     case "note":
       // FREE TEXT — inert on purpose, and listed here rather than left to the
       // fall-through: the default slot is the TARGET completer, so `note alp⇥`

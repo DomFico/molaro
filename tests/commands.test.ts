@@ -99,6 +99,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
   const colorEachOps: { points: number[]; rgb: number[] }[] = [];
   const eachOps: { kind: "size" | "opacity"; points: number[]; values: number[] }[] = [];
   const modRuns: { name: string; points: number[]; expr: string }[] = [];
+  const refreshCalls: string[] = [];
   const modRunCode: string[] = [];
   const rmArms: string[][] = [];
   const saveRepCalls: { name: string; source: string }[] = [];
@@ -128,7 +129,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
   // without a renderer. Empty by default: the legacy scenes' byte-identity
   // tests run over exactly this default.
   const produced = {
-    groups: [] as { name: string; baseId: number; count: number; active: boolean }[],
+    groups: [] as { name: string; baseId: number; count: number; active: boolean; overlay?: boolean }[],
     pairs: new Map<number, [number, number]>(),
   };
   const producedOps: { kind: string; ids: number[]; value?: unknown; a?: number[]; b?: number[] }[] = [];
@@ -461,6 +462,12 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
       elemEachOps.push({ axis: "bonddash", ids: [...edgeIds], values: [...values] });
       return edgeIds.length;
     },
+    refreshProducer: (token: string) => {
+      refreshCalls.push(token);
+      return token === "%gone"
+        ? { status: "nomatch" as const, message: `nothing to refresh: no edge group "${token}"` }
+        : { status: "ok" as const, message: `refreshing ${token}…` };
+    },
     runAnalysisMod: (mod, points, expr, params) => {
       // params only appears on the pushed object when present, so existing
       // deepEqual assertions (which never pass params) stay unchanged.
@@ -501,6 +508,18 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
       groupIds: (name) => {
         const g = produced.groups.find((x) => x.name === name);
         return g ? Array.from({ length: g.count }, (_, i) => g.baseId + i) : null;
+      },
+      pointReachPairs: () => {
+        const out: { id: number; a: number; b: number }[] = [];
+        for (const g of produced.groups) {
+          if (!g.active || g.overlay) continue;
+          for (let i = 0; i < g.count; i++) {
+            const id = g.baseId + i;
+            const [a, b] = produced.pairs.get(id) ?? [0, 0];
+            out.push({ id, a, b });
+          }
+        }
+        return out;
       },
       activePairs: () => {
         const out: { id: number; a: number; b: number }[] = [];
@@ -550,7 +569,7 @@ function makeRegistry(fixture?: { traceVertices?: number[] }) {
     registry: createCommandRegistry(ctx),
     ctx,
     calls, commits, hiddenState, refOps, memberOps,
-    colorOps, colorEachOps, eachOps, edgeOps, endsOps, traceOps, sizeOps, dashOps, opacityOps, modRuns, modRunCode, rmArms, sels,
+    colorOps, colorEachOps, eachOps, edgeOps, endsOps, traceOps, sizeOps, dashOps, opacityOps, modRuns, refreshCalls, modRunCode, rmArms, sels,
     bindCalls, bindingReg, orientationOps, offsetOps, elemEachOps, styleOps, shapeOps, shapeActive, bgOps,
     saveRepCalls,
     produced, producedOps, strokeEvents, neighborhoodCalls,
@@ -4141,4 +4160,44 @@ test("completeCommand: help completes a registered verb name (mod verbs included
     // one argument only
     assert.deepEqual(comp("help view ").candidates, []);
   } finally { done(); }
+});
+
+
+// -- annotation overlays, refresh, and bare invocation of edges/channel mods ---------
+
+test("overlay group: point-targeted bond verbs never reach it; %group still does", () => {
+  const fx = makeProducedFixture();
+  // %hb becomes an ANNOTATION overlay (H-bonds): licorice / hide_res emit point-
+  // targeted verbs over the atoms, and those must leave the H-bond lines alone
+  fx.produced.groups.find((g) => g.name === "hb")!.overlay = true;
+  const inc = fx.registry.runCommand("colorbondsof c0 red");
+  assert.equal(inc.message, "colored 2 edges + 1 produced edges red", "only the non-overlay %far is reached");
+  assert.deepEqual(fx.producedOps.at(-1)?.ids, [2]);
+  fx.producedOps.length = 0;
+  fx.registry.runCommand("bondopacityof all 0");          // what hide_res emits
+  assert.deepEqual(fx.producedOps.at(-1)?.ids, [2], "hide_res's fade does not reach the overlay");
+  fx.producedOps.length = 0;
+  assert.equal(fx.registry.runCommand("colorbonds %hb yellow").message, "colored 2 produced edges yellow");
+  assert.deepEqual(fx.producedOps, [{ kind: "color", ids: [0, 1], value: [1, 1, 0] }]);
+});
+
+test("refresh: re-runs each named producer; a missing one is an honest nomatch", () => {
+  const fx = makeRegistry();
+  const r = fx.registry.runCommand("refresh ribbon_dir %hbonds");
+  assert.equal(r.status, "ok");
+  assert.deepEqual(fx.refreshCalls, ["ribbon_dir", "%hbonds"]);
+  assert.equal(fx.registry.runCommand("refresh %gone").status, "nomatch");
+  assert.equal(fx.registry.runCommand("refresh").status, "error");
+});
+
+test("bare invocation: edges and channel mods run on the whole system (empty target)", () => {
+  const { registry, ctx, modRuns } = makeRegistry();
+  const code = "def compute(data, target_indices):\n    return []";
+  for (const produces of ["edges", "channel", "commands"] as const) {
+    const mod = { name: `m_${produces}`, kind: "analysis" as const, produces, code, origin: "workspace" as const,
+      ...(produces === "channel" ? { channel: "m_channel" } : {}) };
+    registry.register(mod.name, makeAnalysisModHandler(ctx, mod as never), "test mod");
+    assert.equal(registry.runCommand(mod.name).status, "ok", produces);
+  }
+  assert.deepEqual(modRuns.map((m) => [m.name, m.points]), [["m_edges", []], ["m_channel", []], ["m_commands", []]]);
 });

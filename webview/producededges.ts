@@ -48,6 +48,16 @@ export interface ProducedGroup {
    * group (every frame; the pre-2C behavior, byte-identical). The mask rides
    * the group: undo/redo/retire semantics are unchanged. */
   mask?: Float32Array;
+  /** An ANNOTATION LAYER (the authoring mod's `# edge-overlay: true`): reached
+   * only by a `%group` target, never by a point-targeted bond verb — see
+   * pointReachPairs. Absent/false = reached like any edge (the original rule). */
+  overlay?: boolean;
+}
+
+/** A group as it stood at one moment — see ProducedEdgeLayer.snapshot. */
+export interface ProducedSnapshot {
+  record: ProducedGroup;
+  pairs: Int32Array;
 }
 
 /** First real allocation (the doubling floor). Small on purpose: the E2E
@@ -214,6 +224,40 @@ export class ProducedEdgeLayer {
     return { baseId, count, grew };
   }
 
+  /**
+   * The undo unit of a RE-declaration: the group's record (span, active,
+   * mask, overlay) plus the endpoint pairs of its span. Restoring it re-points
+   * the name at that span and writes those pairs back, so a re-declaration
+   * undoes exactly — an in-place replace gets its old pairs back, and a
+   * count-changing one re-points at the old (retired, never re-issued) span.
+   * Appearance is NOT captured: it is the style verbs' own undo ops (and
+   * survives a declaration by design). `null` = the name was unknown.
+   */
+  snapshot(name: string): ProducedSnapshot | null {
+    const g = this.byName.get(name);
+    if (!g) return null;
+    return {
+      record: { ...g },
+      pairs: this.pairs.slice(g.baseId * 2, (g.baseId + g.count) * 2),
+    };
+  }
+
+  /** Put a snapshot back (null = forget the name, as before it was declared).
+   * Endpoint sizes re-seed from the CURRENT point sizes, as setGroup does. */
+  restore(name: string, snap: ProducedSnapshot | null, endSizeOf: (point: number) => number): void {
+    if (snap === null) {
+      this.byName.delete(name);
+      return;
+    }
+    const { baseId, count } = snap.record;
+    this.pairs.set(snap.pairs, baseId * 2);
+    for (let id = baseId; id < baseId + count; id++) {
+      this.sizeA[id] = endSizeOf(this.pairs[id * 2]);
+      this.sizeB[id] = endSizeOf(this.pairs[id * 2 + 1]);
+    }
+    this.byName.set(name, { ...snap.record });
+  }
+
   /** Activate/deactivate a whole group (the declaration's undo unit —
    * contents and ids stay put). Returns false for an unknown name. */
   setActive(name: string, active: boolean): boolean {
@@ -306,6 +350,29 @@ export class ProducedEdgeLayer {
     const out: { id: number; a: number; b: number }[] = [];
     for (const g of this.byName.values()) {
       if (!g.active) continue;
+      for (let i = 0; i < g.count; i++) {
+        const id = g.baseId + i;
+        out.push({ id, a: this.pairs[id * 2], b: this.pairs[id * 2 + 1] });
+      }
+    }
+    return out;
+  }
+
+  /** Mark a group as an annotation overlay (or not). Kept on the group, so it
+   * survives a re-declaration of the same name. */
+  setOverlay(name: string, overlay: boolean): void {
+    const g = this.byName.get(name);
+    if (g) g.overlay = overlay;
+  }
+
+  /** activePairs WITHOUT overlay groups — what a POINT-targeted bond verb
+   * (`colorbonds <atoms>`, `bondopacityof <atoms>`, …) may reach. An overlay
+   * (H-bonds, contacts) is annotation, not molecule: restyling or fading the
+   * atoms it connects must not restyle or fade it. `%group` still reaches it. */
+  pointReachPairs(): { id: number; a: number; b: number }[] {
+    const out: { id: number; a: number; b: number }[] = [];
+    for (const g of this.byName.values()) {
+      if (!g.active || g.overlay) continue;
       for (let i = 0; i < g.count; i++) {
         const id = g.baseId + i;
         out.push({ id, a: this.pairs[id * 2], b: this.pairs[id * 2 + 1] });

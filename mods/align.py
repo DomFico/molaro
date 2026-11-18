@@ -35,12 +35,15 @@ def _current_motion_channel(data, own):
 
 
 def _ribbon_note(data, st):
+    """`refresh ribbon_dir` when cartoon ribbons were oriented for an older motion.
+    Alignment rotates the frames, and a ribbon's facing is computed from the shown
+    positions, so it must be recomputed. (Live SASA / SS / H-bonds do not depend
+    on a rigid fit — they need nothing after `align`.)"""
     if st is None or data.channel("ribbon_dir") is None:
         return []
     if st["computed"].get("ribbon_dir") == st["version"]:
         return []
-    return ["note cartoon ribbons were oriented for the previous motion — run `ribbon_dir` to re-orient "
-            "them (tube style needs nothing)."]
+    return ["refresh ribbon_dir"]
 
 
 def compute(data, target_indices, params):
