@@ -280,7 +280,7 @@ Results are always de-duplicated.
 
 ## The mods that ship with the extension
 
-Ten live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
+Eleven live in `<repo>/mods/` and install with the package (origin `built-in`). A mod of
 the same name in your own dir SHADOWS a shipped one, which is how you customise one
 without losing the original.
 
@@ -294,6 +294,7 @@ without losing the original.
 | `hbonds` | hydrogen bonds as dashed lines that form and break per frame — bare: the backbone (DSSP) network; with a selection: every H-bond involving it. `?min`, `?live`, `?color`, `?dash`, `?group` |
 | `contacts` | atom contacts within a cutoff as lines that form and break per frame — `?atoms=heavy\|CA\|CA,CB…`, `?level=atom\|residue`, `?seqsep`, `?min`, `?live`, style and `?group` |
 | `align` | superpose every frame onto a reference (`?ref=first\|average\|mean\|last\|<k>\|off`, `?fit=backbone\|CA\|…`) — tumbling and drift out |
+| `ensemble` | faint "ghost" copies of the current representation at the frames that differ most (RMSD), so motion reads as a blur — `?n`, `?opacity`, `?pick=spread\|extremes\|even`, `?fit`. Drives the built-in `ghost` verb |
 
 Five more (`aligning`, `ribbon_dir`, `sasa_field`, `smoothing`, `ss_field`) are **machinery**: they supply a
 channel their consumer declares with `# requires-channel:` and run automatically. The
@@ -394,6 +395,19 @@ the channel, `smooth` binds it. Two mods rather than one because a `produces: ch
 mod cannot also issue commands. `?within`/`?keep` live on the **provider**, where the
 expansion happens before the numbers are computed — putting them only on the macro
 made them silently inert, which is exactly the bug this pairing avoids.
+
+### `ghost` — faint copies at other frames
+
+`ghost <frames> [opacity <0-1>]` draws the CURRENT representation again at each listed
+frame, translucent, behind and around the solid copy. Frames are integers and ranges
+(`0-90:10` = every 10th). `ghost` alone lists them; `ghost off` removes them; Ctrl+Z
+undoes either. At most 32 ghosts (each redraws the scene).
+
+Each ghost is staged exactly like the playhead: `align`/`smooth` offsets, the cartoon
+ribbon orientation, live colours and per-frame H-bond/contact visibility all apply at
+that frame. A ghost never writes depth: it is hidden behind the solid copy and blends
+over it where it sticks out. The `ensemble` mod picks the frames for you; run `align`
+first if the molecule drifts.
 
 ## Creating selections: `create_sele`
 

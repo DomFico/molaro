@@ -90,6 +90,7 @@ import {
 } from "./shaders.ts";
 import { listStyles, styleIndex, stylesAsUniformArray } from "./styles.ts";
 import { ProducedEdgeLayer, PRODUCED_EDGE_INITIAL_CAPACITY } from "./producededges.ts";
+import { GHOST_ALPHA, GHOST_USAGE, makeGhostHandler, type GhostState } from "./ghosts.ts";
 
 // Playback + backpressure tuning (see playback.ts for the policy).
 const PLAYBACK_FPS = 30;
@@ -535,7 +536,7 @@ function makeGeometryMaterials(
       uWorldPerSize: sizing.uWorldPerSize,
       uPxPerWorld: sizing.uPxPerWorld,
       uProjZ: sizing.uProjZ,
-      uAlphaPass: { value: 0 }, // this material IS the opaque half
+      uAlphaPass: { value: 0 }, uGhostAlpha: GHOST_ALPHA, // this material IS the opaque half
       ...style,
     },
     vertexShader: s.vertex,
@@ -556,7 +557,7 @@ function makeGeometryMaterials(
     defines,
     uniforms: {
       uWorldPerSize: sizing.uWorldPerSize, uProjZ: sizing.uProjZ,
-      uAlphaPass: { value: 0 }, ...style,
+      uAlphaPass: { value: 0 }, uGhostAlpha: GHOST_ALPHA, ...style,
     },
     vertexShader: et.vertex,
     fragmentShader: et.fragment,
@@ -575,7 +576,7 @@ function makeGeometryMaterials(
     defines,
     uniforms: {
       uWorldPerSize: sizing.uWorldPerSize, uProjZ: sizing.uProjZ,
-      uAlphaPass: { value: 0 }, ...style,
+      uAlphaPass: { value: 0 }, uGhostAlpha: GHOST_ALPHA, ...style,
     },
     vertexShader: tt.vertex,
     fragmentShader: tt.fragment,
@@ -1526,7 +1527,7 @@ const traceRibbonsGenerator: ShapeGenerator<RibbonPass> = {
       uniforms: {
         uWorldPerSize: env.sizing.uWorldPerSize,
         uStyles: env.styleUniforms.uStyles,
-        uAlphaPass: { value: 0 },
+        uAlphaPass: { value: 0 }, uGhostAlpha: GHOST_ALPHA,
       },
       vertexShader: sh.vertex,
       fragmentShader: sh.fragment,
@@ -4620,6 +4621,77 @@ async function main(): Promise<void> {
   };
   seekFrame = (frame: number) => player.seek(frame);
 
+  // --- ghost frames (ghosts.ts — the silo; see its header) --------------------
+  let ghostState: GhostState | null = null;
+  /** last ghost draw's cost (test seam / profiling) */
+  const ghostTiming = { stageMs: 0, totalMs: 0 };
+  /** Stage frame f exactly as a playhead flip does, minus the bookkeeping
+   * (displayedFrame, the frameChanged message, the reveal). */
+  const stageFrame = (f: number, chunk: FrameChunk): void => {
+    applyBindings(chunk, f, "position");
+    setPositionsFor(chunk, f);
+    positionAttr.needsUpdate = true;
+    registry.frameFlip();
+    applyBindings(chunk, f, "style");
+    if (rep.dirty) {
+      for (const a of repAttrs) a.needsUpdate = true;
+      rep.dirty = false;
+    }
+  };
+  const renderWithGhosts = (): void => {
+    renderer.render(scene, camera);
+    const g = ghostState;
+    if (g === null || displayedFrame < 0) return;
+    const home = player.getFrame(displayedFrame);
+    if (!home) return;
+    // the selection pulse and focus flash belong to the solid copy only
+    const overlays = [...pendingPass.objects, ...flashPass.objects];
+    const wasVisible = overlays.map((o) => o.visible);
+    for (const o of overlays) o.visible = false;
+    const autoClear = renderer.autoClear;
+    // Draw OVER the solid copy, keeping its depth. A Color background makes
+    // three clear on EVERY render regardless of autoClear, so it is lifted too.
+    const background = scene.background;
+    renderer.autoClear = false;
+    scene.background = null;
+    GHOST_ALPHA.value = g.opacity;
+    let drew = false;
+    const t0 = performance.now();
+    let tStage = 0;
+    try {
+      for (const f of g.frames) {
+        if (f === displayedFrame) continue;
+        const chunk = player.getFrame(f);
+        if (!chunk) continue; // still arriving (pinned) — drawn once cached
+        const s0 = performance.now();
+        stageFrame(f, chunk);
+        tStage += performance.now() - s0;
+        renderer.render(scene, camera);
+        drew = true;
+      }
+    } finally {
+      GHOST_ALPHA.value = 1;
+      renderer.autoClear = autoClear;
+      scene.background = background;
+      overlays.forEach((o, i) => (o.visible = wasVisible[i]));
+      if (drew) stageFrame(displayedFrame, home);
+      ghostTiming.stageMs = tStage;
+      ghostTiming.totalMs = performance.now() - t0;
+    }
+  };
+  const setGhosts = (next: GhostState | null): void => {
+    const apply = (s: GhostState | null): void => {
+      ghostState = s;
+      player.setPinnedFrames(s?.frames ?? []);
+    };
+    const prev = ghostState;
+    apply(next);
+    model.recordOp(() => { apply(prev); return []; }, () => { apply(next); return []; });
+  };
+  const ghostHelp = `faint copies of the current representation at other frames — ${GHOST_USAGE}`;
+  commands.register("ghost", makeGhostHandler({ nFrames: () => nFrames, get: () => ghostState, set: setGhosts }), ghostHelp);
+  validationCommands.register("ghost", makeGhostHandler({ nFrames: () => nFrames, get: () => ghostState }), ghostHelp);
+
   renderer.setAnimationLoop(() => {
     const now = performance.now();
     player.tick(now);
@@ -4677,7 +4749,7 @@ async function main(): Promise<void> {
     } else {
       controls.update(); // applies rotation inertia decay when idle
     }
-    renderer.render(scene, camera);
+    renderWithGhosts(); // = renderer.render(scene, camera) while no ghosts are set
   });
 
   // The stride rides the frame count itself, not the end of the line: this line
@@ -4712,6 +4784,7 @@ async function main(): Promise<void> {
     // driver read model/camera/player state and drive actions directly.
     (window as unknown as { __viewer?: unknown }).__viewer = {
       attrBudgetOver,
+      ghostTiming: () => ghostTiming,
       camera,
       controls,
       player,

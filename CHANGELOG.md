@@ -4,6 +4,14 @@ All notable changes to Molaro. This project follows [semantic versioning](https:
 
 ## [Unreleased]
 
+### Added
+
+- **`ghost <frames> [opacity x]`** — draws the current representation again at other frames,
+  translucent, around the solid copy (align, smooth, cartoon orientation and live colours apply
+  per ghost). `ghost off` clears; undoable.
+- **`ensemble`** (new mod) — picks the ghost frames: `?pick=spread` (frames as far apart as
+  possible by RMSD, default), `extremes`, `even`; `?n`, `?opacity`, `?fit`.
+
 ## [0.1.2] — 2026-11-17
 
 ### Fixed

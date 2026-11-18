@@ -123,7 +123,18 @@ vec3 impostorShade(vec3 color, float nz) {
  */
 export const ALPHA_PASS_CHUNK = `
 uniform float uAlphaPass;  // 0 = the opaque half, 1 = the translucent half
-bool inAlphaPass(float alpha) { return uAlphaPass < 0.5 ? alpha >= 1.0 : alpha < 1.0; }
+uniform float uGhostAlpha; // 1 except while a ghost frame draws (ghosts.ts)
+bool inAlphaPass(float alpha) {
+  float a = alpha * uGhostAlpha;
+  return uAlphaPass < 0.5 ? a >= 1.0 : a < 1.0;
+}
+`;
+
+/** The fragment half of the ghost fade: every geometry pass multiplies its
+ * final alpha by uGhostAlpha. It is 1.0 outside a ghost draw, and x * 1.0 is
+ * exact, so the normal picture is unchanged. */
+export const GHOST_FRAG_CHUNK = `
+uniform float uGhostAlpha;
 `;
 
 /** Base points pass: ray-traced sphere impostors reading aColor/aSize/
@@ -154,6 +165,7 @@ export function pointShaders(): { vertex: string; fragment: string } {
     fragment: `
       uniform vec2 uProjZ;
       ${IMPOSTOR_SHADE_CHUNK}
+      ${GHOST_FRAG_CHUNK}
       varying vec3 vColor; varying float vVisible; varying float vOpacity;
       varying float vRadius; varying float vViewDepth;
       void main() {
@@ -171,7 +183,7 @@ export function pointShaders(): { vertex: string; fragment: string } {
         float zView = -(vViewDepth - vRadius * nz);
         gl_FragDepth = 0.5 * ((uProjZ.x * zView + uProjZ.y) / -zView) + 0.5;
       #endif
-        gl_FragColor = vec4(impostorShade(vColor, nz), vOpacity);
+        gl_FragColor = vec4(impostorShade(vColor, nz), vOpacity * uGhostAlpha);
       }`,
   };
 }
@@ -275,6 +287,7 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
     fragment: `
       uniform vec2 uProjZ;
       ${IMPOSTOR_SHADE_CHUNK}
+      ${GHOST_FRAG_CHUNK}
       varying vec4 vColorA; varying vec4 vColorB; varying float vU;
       varying float vRadius;
       varying float vT; varying float vLen;
@@ -327,7 +340,7 @@ export function edgeTubeShaders(): { vertex: string; fragment: string } {
         float zView = -(depthBase - vRadius * nz);
         gl_FragDepth = 0.5 * ((uProjZ.x * zView + uProjZ.y) / -zView) + 0.5;
       #endif
-        gl_FragColor = vec4(impostorShade(col.rgb, nz), col.a);
+        gl_FragColor = vec4(impostorShade(col.rgb, nz), col.a * uGhostAlpha);
       }`,
   };
 }
@@ -402,6 +415,7 @@ export function traceTubeShaders(): { vertex: string; fragment: string } {
     fragment: `
       uniform vec2 uProjZ;
       ${IMPOSTOR_SHADE_CHUNK}
+      ${GHOST_FRAG_CHUNK}
       varying vec4 vColor; varying float vU;
       varying float vRadius; varying float vDepth;
       void main() {
@@ -414,7 +428,7 @@ export function traceTubeShaders(): { vertex: string; fragment: string } {
         float zView = -(vDepth - vRadius * nz);
         gl_FragDepth = 0.5 * ((uProjZ.x * zView + uProjZ.y) / -zView) + 0.5;
       #endif
-        gl_FragColor = vec4(impostorShade(vColor.rgb, nz), vColor.a);
+        gl_FragColor = vec4(impostorShade(vColor.rgb, nz), vColor.a * uGhostAlpha);
       }`,
   };
 }
@@ -1019,13 +1033,14 @@ export function ribbonShaders(): { vertex: string; fragment: string } {
       }`,
     fragment: `
       ${IMPOSTOR_SHADE_CHUNK}
+      ${GHOST_FRAG_CHUNK}
       varying vec4 vColor;
       varying vec3 vNormal;
       void main() {
         if (vColor.a <= 0.0) discard;
         // TWO-SIDED: the plane's headlight response is |view-space z|
         float nz = abs(normalize(vNormal).z);
-        gl_FragColor = vec4(impostorShade(vColor.rgb, nz), vColor.a);
+        gl_FragColor = vec4(impostorShade(vColor.rgb, nz), vColor.a * uGhostAlpha);
       }`,
   };
 }
